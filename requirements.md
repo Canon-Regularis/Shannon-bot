@@ -1,0 +1,410 @@
+# Shannon Bot Technical Requirements
+
+## Goal
+
+Build a Discord bot that syncs GitHub repository activity into Discord.
+
+Both GitHub and Discord are considered sources of truth for this project (duplex communication).
+
+---
+
+## Core Stack
+
+* Python
+* PostgreSQL
+* Discord API
+* GitHub API
+* GitHub Webhooks
+* FastAPI
+
+---
+
+## Required Integrations
+
+The bot must integrate with:
+
+* GitHub repositories
+* GitHub pull requests
+* GitHub issues
+* GitHub Projects
+* Discord channels
+* Discord forum posts or threads
+* Discord roles and user pings
+
+---
+
+## Main Flow
+
+1. A PR, issue, or project item is created or updated on GitHub.
+2. GitHub sends a webhook event to the bot.
+3. The bot reads the event.
+4. The bot stores or updates the record in PostgreSQL.
+5. The bot creates or updates the matching Discord post/thread.
+6. The bot pings the relevant users or roles.
+
+---
+
+## Required Bot Commands
+
+```text
+/register <github_repo_link>
+```
+
+Registers a GitHub repository with the Discord server.
+There can only be one repository registered with a Discord server.
+
+```text
+/pr <pr_link>
+```
+
+Fetches a GitHub pull request and creates or updates its Discord thread.
+
+```text
+/issue <issue_link>
+```
+
+Fetches a GitHub issue and creates or updates its Discord thread.
+
+```text
+/SET_BACKLOG
+```
+
+Marks an item as `BACKLOG`, on the Github side + the channel.
+
+```text
+/SET_NOT_REVIEWED
+```
+
+Marks an item as `NOT REVIEWED`, on the Github side + the channel.
+
+```text
+/SET_IN_REVIEW
+```
+
+Marks an item as `IN REVIEW`,  on the Github side + the channel.
+
+```text
+/SET_READY_FOR_MERGE
+```
+
+Marks an item as `READY_FOR_MERGE`, on the Github side + the channel.
+
+```text
+/SET_HIGH_PRIORITY
+```
+
+Marks an item as high priority, on the Github side.
+
+```text
+/SET_MED_PRIORITY
+```
+
+Marks an item as medium priority, on the Github side.
+
+```text
+/SET_LOW_PRIORITY
+```
+
+Marks an item as low priority, on the Github side.
+
+```text
+/SET_DONE
+```
+
+Marks an item as `DONE`, on the Github side + the channel
+
+---
+
+## Required Statuses
+
+The bot must support these statuses (existing as tags in the relevant repository):
+
+```text
+NOT_REVIEWED
+IN_REVIEW
+READY_FOR_MERGE
+BACKLOG
+DONE
+```
+
+---
+
+## Required Priorities
+
+The bot must support these priorities:
+
+```text
+HIGH
+MEDIUM
+LOW
+```
+
+---
+
+## Discord Output Format
+
+For every synced PR / issue, the bot must generate a Discord message (in the relevant thread) with:
+
+```text
+PR / issue Name:
+Type: PR / issue
+GitHub Link:
+Author:
+Assignees:
+Reviewers:
+Status:
+Priority:
+Tags:
+Last Updated:
+```
+
+For every synced ticket, the bost must generate a Discord message (in the relevant thread) with:
+
+```text
+Ticket Name:
+GitHub Link:
+Status:
+```
+
+---
+
+## GitHub Webhook Events Required
+
+The bot must handle:
+
+```text
+pull_request.opened
+pull_request.edited
+pull_request.closed
+pull_request.reopened
+pull_request.review_requested
+pull_request.labeled
+pull_request.assigned
+issues.opened
+issues.edited
+issues.closed
+issues.reopened
+issues.labeled
+issues.assigned
+project_card.created
+project_card.moved
+project_card.updated
+issue_comment.created
+pull_request_review.submitted
+```
+
+---
+
+## Required Database Tables
+
+### repositories
+
+Stores linked GitHub repositories.
+
+```text
+id
+github_repo_id
+repo_name
+repo_url
+discord_guild_id
+created_at
+updated_at
+```
+
+### channel_mappings
+
+Stores which Discord channels are used for PRs, issues, and tickets.
+
+```text
+id
+repository_id
+object_type
+discord_channel_id
+created_at
+updated_at
+```
+
+### tracked_items
+
+Stores synced PRs, issues, and tickets.
+
+```text
+id
+repository_id
+github_object_id
+github_object_type
+github_url
+discord_message_id
+discord_thread_id
+status
+priority
+created_at
+updated_at
+```
+
+### item_assignments
+
+Stores assignees, reviewers, authors, and project managers.
+
+```text
+id
+tracked_item_id
+github_username
+discord_user_id
+role_type
+created_at
+updated_at
+```
+
+### webhook_events
+
+Stores processed webhook events.
+
+```text
+id
+github_delivery_id
+event_type
+payload_hash
+processed_at
+status
+```
+
+---
+
+## Required Behaviour
+
+When a GitHub PR is created:
+
+* Create a Discord PR thread.
+* Add PR metadata.
+* Set default status to `NOT_REVIEWED`.
+* Ping reviewers if assigned.
+
+When a GitHub issue is created:
+
+* Create a Discord issue thread.
+* Add issue metadata.
+* Set priority if GitHub labels contain priority data.
+* Ping assignees if assigned.
+
+When a PR or issue changes:
+
+* Update the existing Discord thread.
+* Do not create a duplicate thread.
+
+When a reviewer is assigned:
+
+* Update the Discord thread.
+* Ping the reviewer.
+
+When a status changes:
+
+* Update GitHub first.
+* Then update Discord.
+
+When a priority changes:
+
+* Update GitHub labels or GitHub Project fields first.
+* Then update Discord.
+
+---
+
+## Permissions
+
+### Developers
+
+Can:
+
+```text
+/pr_link
+/issue_link
+```
+
+### Reviewers
+
+Can:
+
+```text
+/SET_BACKLOG
+/SET_NOT_REVIEWED
+/SET_IN_REVIEW
+/SET_READY_FOR_MERGE
+/SET_HIGH_PRIORITY
+/SET_MED_PRIORITY
+/SET_LOW_PRIORITY
+/SET_DONE
+```
+
+### Project Managers
+
+Can:
+
+```text
+/register <github_repo_link>
+/pr <pr_link>
+/issue <issue_link>
+/SET_BACKLOG
+/SET_NOT_REVIEWED
+/SET_IN_REVIEW
+/SET_READY_FOR_MERGE
+/SET_HIGH_PRIORITY
+/SET_MED_PRIORITY
+/SET_LOW_PRIORITY
+/SET_DONE
+```
+
+### Admins
+
+Can:
+
+```text
+/register <github_repo_link>
+```
+
+### Important Detail
+
+If `/pr <pr_link>` / `issue <issue_link` is duplicated in a channel, then the channel should be overwritten with the new link. 
+
+If `/SET_BACKLOG` is duplicated, then no action should be taken; however, if `/SET_BACKLOG` is followed by `/SET_NOT_REVIEWED`, 
+then we should remove the status effect of `/SET_BACKLOG`, and follow it by applying the `/SET_NOT_REVIEWED` effect. 
+
+Once `/SET_DONE` is performed, the thread should then be locked - this should only be available once a PR is set 
+to be ready for merging, later on we should also discuss the relevant framework we can add for issues (for now, 
+simply assume that once an issue is closed, the `/SET_DONE` effect is performed and the thread is locked.
+
+At a later date, we will also discuss the register functionality in further detail - for now, it should be
+assumed that once we register a github repository in a discord server, it is bound indefinitely to that
+server.
+
+---
+
+## MVP Requirements
+
+### MVP 1
+
+* Register a GitHub repository.
+* Receive GitHub PR webhook events.
+* Create Discord PR threads.
+* Update Discord PR threads when PRs change.
+
+### MVP 2
+
+* Receive GitHub issue webhook events.
+* Create Discord issue threads.
+* Update Discord issue threads when issues change.
+
+### MVP 3
+
+* Add status commands.
+* Add priority commands.
+* Sync status and priority changes back to GitHub.
+
+### MVP 4
+
+* Sync GitHub Projects status into Discord.
+* Mirror project board movement into Discord.
+
+### MVP 5
+
+* System-wide feature re-planning.
+* System-wide refactorisation.
