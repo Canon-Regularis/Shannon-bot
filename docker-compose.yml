@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: shannon
+      POSTGRES_PASSWORD: shannon
+      POSTGRES_DB: shannon
+    # Host port is 5433 so this never fights a natively installed PostgreSQL on 5432.
+    ports:
+      - "5433:5432"
+    volumes:
+      - shannon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shannon"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Runs to completion before the app starts, so the schema is never applied by two replicas
+  # racing each other at boot.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      SHANNON_DATABASE_URL: postgresql+asyncpg://shannon:shannon@db:5432/shannon
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the compose network the database is reached by service name on 5432. The 5433
+      # mapping above is for reaching it from the host.
+      SHANNON_DATABASE_URL: postgresql+asyncpg://shannon:shannon@db:5432/shannon
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  shannon-pgdata:
