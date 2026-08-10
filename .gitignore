@@ -6,8 +6,18 @@ venv/
 dist/
 build/
 
+# Every .env variant is ignored, with only the placeholder template tracked. A bare `.env`
+# rule would miss .env.production and friends.
 .env
-.env.local
+.env.*
+!.env.example
+
+# Credential material that should never be committed even by accident.
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
 
 .pytest_cache/
 .ruff_cache/

@@ -1,17 +1,19 @@
 services:
   db:
     image: postgres:17-alpine
+    # Defaults are throwaway local credentials. Override them in .env for anything that is not
+    # a laptop, so no real password is ever written into a tracked file.
     environment:
-      POSTGRES_USER: shannon
-      POSTGRES_PASSWORD: shannon
-      POSTGRES_DB: shannon
+      POSTGRES_USER: ${POSTGRES_USER:-shannon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shannon}
+      POSTGRES_DB: ${POSTGRES_DB:-shannon}
     # Host port is 5433 so this never fights a natively installed PostgreSQL on 5432.
     ports:
       - "5433:5432"
     volumes:
       - shannon-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U shannon"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-shannon}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -22,7 +24,7 @@ services:
     build: .
     command: ["alembic", "upgrade", "head"]
     environment:
-      SHANNON_DATABASE_URL: postgresql+asyncpg://shannon:shannon@db:5432/shannon
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
     depends_on:
       db:
         condition: service_healthy
@@ -36,7 +38,7 @@ services:
     environment:
       # Inside the compose network the database is reached by service name on 5432. The 5433
       # mapping above is for reaching it from the host.
-      SHANNON_DATABASE_URL: postgresql+asyncpg://shannon:shannon@db:5432/shannon
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
     ports:
       - "8000:8000"
     depends_on:

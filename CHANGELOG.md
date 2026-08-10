@@ -201,6 +201,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     reaching PostgreSQL from outside the compose network.
   - `.dockerignore` keeps the build context to what the image needs, and keeps `.env` out of it.
 
+### Security
+
+- **Credentials are `SecretStr`** rather than plain strings. Printing, logging or serialising the
+  settings object now shows asterisks. Before this, `repr(settings)` returned the Discord bot
+  token, the GitHub token, the webhook secret and the database password in full, so a single
+  careless `logger.debug` of the configuration, or any traceback that happened to render the
+  object, would have put all four into the logs. Covered by `tests/unit/test_config_secrecy.py`,
+  which asserts the masking through `repr`, `str`, `model_dump`, JSON and an actual log call.
+- **Removed the `test_database_url` setting.** It was never read by the application, the test
+  harness takes `SHANNON_TEST_DATABASE_URL` straight from the environment, and it put a database
+  password into every settings repr.
+- **Database credentials in `docker-compose.yml` are variables** with throwaway local defaults,
+  so a real password can be set in `.env` without editing a tracked file.
+- **`.gitignore` covers every `.env` variant**, not just `.env` and `.env.local`. A bare `.env`
+  rule would have missed `.env.production`. Key material (`*.pem`, `*.key`, `*.p12`, `*.pfx`,
+  `secrets/`) is ignored too, in both git and the Docker build context. Anything copied into an
+  image stays in that layer even if a later step deletes it.
+- Audited: no credential-shaped string appears in any tracked file or anywhere in the git
+  history, and `.env.example` holds placeholders only, which a test now enforces.
+
 ### Changed
 
 - **MVP 1 cleanup** (closes #25)

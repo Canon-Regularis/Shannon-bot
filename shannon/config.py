@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from shannon.domain.enums import CommandRole
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SHANNON_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Credentials are SecretStr so that printing, logging or serialising this object shows
+    # asterisks. A plain str would put the bot token in the logs on the first careless
+    # logger.debug of the settings.
+    database_url: SecretStr = SecretStr(
+        "postgresql+asyncpg://shannon:shannon@localhost:5433/shannon"
+    )
+    discord_token: SecretStr = SecretStr("")
+    github_token: SecretStr = SecretStr("")
+    github_webhook_secret: SecretStr = SecretStr("")
+
+    role_admin: str = "Admin"
+    role_project_manager: str = "Project Manager"
+    role_reviewer: str = "Reviewer"
+    role_developer: str = "Developer"
+
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    log_level: str = "INFO"
+
+    github_api_url: str = "https://api.github.com"
+    github_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @field_validator("log_level")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return value.upper()
+
+    def role_display_names(self, role: CommandRole) -> tuple[str, ...]:
+        """Configured Discord role names for a permission tier, as typed."""
+        raw = {
+            CommandRole.ADMIN: self.role_admin,
+            CommandRole.PROJECT_MANAGER: self.role_project_manager,
+            CommandRole.REVIEWER: self.role_reviewer,
+            CommandRole.DEVELOPER: self.role_developer,
+        }[role]
+        return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+    def role_names(self, role: CommandRole) -> frozenset[str]:
+        """The same names lowercased, for matching against a member's roles."""
+        return frozenset(name.lower() for name in self.role_display_names(role))
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
