@@ -4,6 +4,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from shannon.domain.enums import ObjectType
 from shannon.domain.models import CommentSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import COMMENT_ACTIONS
@@ -50,4 +51,6 @@ def parse_comment_event(action: str, payload: Mapping[str, Any]) -> CommentSnaps
         body=body if isinstance(body, str) else "",
         author=mapping.actor(comment.get("user")),
         created_at=mapping.parse_timestamp(comment.get("created_at")),
+        # The `pull_request` key is how GitHub distinguishes the two here.
+        object_type=ObjectType.PR if mapping.is_pull_request(item) else ObjectType.ISSUE,
     )

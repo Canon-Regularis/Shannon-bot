@@ -321,3 +321,45 @@ class TestReviewMirroring:
         )
         assert item is not None
         assert item.status is Status.NOT_REVIEWED
+
+
+class TestNoteTargeting:
+    async def test_a_comment_is_matched_on_kind_as_well_as_number(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """Numbers are unique per repository on GitHub, so this can only bite on bad data.
+
+        Pinning the kind means a comment can never be handed the other sort of item.
+        """
+        from shannon.db.stores.repositories import RepositoryStore
+        from shannon.db.stores.tracked_items import TrackedItemStore
+
+        repository = await RepositoryStore(db_session).get_by_github_id(payloads.REPO_ID)
+        assert repository is not None
+        items = TrackedItemStore(db_session)
+
+        issue = await items.get_by_number(
+            repository_id=repository.id, number=12, object_type=ObjectType.ISSUE
+        )
+        pull = await items.get_by_number(
+            repository_id=repository.id, number=7, object_type=ObjectType.PR
+        )
+
+        assert issue is not None and issue.github_object_type is ObjectType.ISSUE
+        assert pull is not None and pull.github_object_type is ObjectType.PR
+        assert issue.id != pull.id
+
+    async def test_asking_for_the_wrong_kind_finds_nothing(
+        self, tracked: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        from shannon.db.stores.repositories import RepositoryStore
+        from shannon.db.stores.tracked_items import TrackedItemStore
+
+        repository = await RepositoryStore(db_session).get_by_github_id(payloads.REPO_ID)
+        assert repository is not None
+
+        wrong = await TrackedItemStore(db_session).get_by_number(
+            repository_id=repository.id, number=12, object_type=ObjectType.PR
+        )
+
+        assert wrong is None

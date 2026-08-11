@@ -149,6 +149,9 @@ class CommentSnapshot:
     body: str
     author: Actor | None = None
     created_at: datetime | None = None
+    # GitHub marks a pull request inside a comment payload, so the kind is known and worth
+    # carrying rather than being rediscovered downstream.
+    object_type: ObjectType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +171,9 @@ class ReviewSnapshot:
     author: Actor | None = None
     created_at: datetime | None = None
 
+    # Only pull requests have reviews.
+    object_type: ObjectType = field(default=ObjectType.PR, init=False)
+
     @property
     def verdict(self) -> str:
         return (self.state or "").lower()
@@ -178,11 +184,13 @@ class ItemNote(Protocol):
     """Something posted into a tracked item's thread that is not its metadata.
 
     Comments and reviews both satisfy this, which is what lets one mirror handle both.
+    `object_type` is None when the event does not say which kind of item it belongs to.
     """
 
     repository: RepositorySnapshot
     item_number: int
     author: Actor | None
+    object_type: ObjectType | None
 
 
 @runtime_checkable

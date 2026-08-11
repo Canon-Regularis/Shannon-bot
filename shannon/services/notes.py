@@ -49,7 +49,9 @@ class ItemNoteMirror:
             # By number, not by id. A pull request reports its issue id in comment payloads,
             # which never matches the pull request id stored against the tracked item.
             item = await TrackedItemStore(session).get_by_number(
-                repository_id=repository.id, number=snapshot.item_number
+                repository_id=repository.id,
+                number=snapshot.item_number,
+                object_type=snapshot.object_type,
             )
             if item is None or item.discord_thread_id is None:
                 logger.debug(
