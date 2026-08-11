@@ -13,6 +13,8 @@ class FakeThread:
     name: str
     messages: dict[int, str] = field(default_factory=dict)
     metadata_message_id: int | None = None
+    locked: bool = False
+    archived: bool = False
 
 
 class FakeThreadGateway:
@@ -27,6 +29,7 @@ class FakeThreadGateway:
         self.created: list[FakeThread] = []
         self.posts: list[tuple[int, str]] = []
         self.renames: list[tuple[int, str]] = []
+        self.locks: list[tuple[int, bool]] = []
         self._next_id = 1000
 
     def _allocate(self) -> int:
@@ -53,6 +56,10 @@ class FakeThreadGateway:
         thread = self.threads.get(thread_id)
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
+        # Locked is fine: the bot holds Manage Threads. Archived is not, because Discord
+        # rejects writes to an archived thread until it is unarchived.
+        if thread.archived:
+            raise ThreadNotFoundError(f"Thread {thread_id} is archived")
 
         wanted = truncate_thread_name(name)
         if thread.name != wanted:
@@ -65,10 +72,23 @@ class FakeThreadGateway:
         thread.metadata_message_id = message_id
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
+    async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
+        if thread.locked == locked:
+            return
+        thread.locked = locked
+        self.locks.append((thread_id, locked))
+
     async def post(self, *, thread_id: int, content: str) -> int | None:
         thread = self.threads.get(thread_id)
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
+        # Locked is fine: the bot holds Manage Threads. Archived is not, because Discord
+        # rejects writes to an archived thread until it is unarchived.
+        if thread.archived:
+            raise ThreadNotFoundError(f"Thread {thread_id} is archived")
         message_id = self._allocate()
         thread.messages[message_id] = content
         self.posts.append((thread_id, content))

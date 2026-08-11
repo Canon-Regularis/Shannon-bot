@@ -39,6 +39,8 @@ class ThreadGateway(Protocol):
 
     async def post(self, *, thread_id: int, content: str) -> int | None: ...
 
+    async def set_locked(self, *, thread_id: int, locked: bool) -> None: ...
+
 
 def truncate_thread_name(name: str) -> str:
     name = name.strip() or "Untitled"
@@ -103,6 +105,20 @@ class DiscordThreadGateway:
         except discord.HTTPException as exc:
             raise DiscordGatewayError(f"Discord refused to post to the thread: {exc}") from exc
         return message.id
+
+    async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+        thread = await self._thread(thread_id)
+        if thread.locked == locked:
+            return
+
+        try:
+            # Locked but deliberately not archived. Archiving hides the thread and makes every
+            # later edit fail, and a closed issue still receives label and assignment events
+            # that have to reach its metadata. The bot needs Manage Threads to write here.
+            await thread.edit(locked=locked)
+        except discord.HTTPException as exc:
+            verb = "lock" if locked else "unlock"
+            raise DiscordGatewayError(f"Discord refused to {verb} the thread: {exc}") from exc
 
     async def _edit_or_post(
         self, thread: discord.Thread, message_id: int | None, content: str
