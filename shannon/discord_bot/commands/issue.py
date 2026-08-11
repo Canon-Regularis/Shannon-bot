@@ -19,32 +19,32 @@ from shannon.services.manual_sync import ManualSync, SyncFailedError
 logger = logging.getLogger(__name__)
 
 
-def build_pr_command(service: ManualSync, gate: PermissionGate) -> app_commands.Command:
-    @app_commands.command(name="pr", description="Sync a GitHub pull request into Discord")
-    @app_commands.describe(pr_link="Link to the GitHub pull request")
+def build_issue_command(service: ManualSync, gate: PermissionGate) -> app_commands.Command:
+    @app_commands.command(name="issue", description="Sync a GitHub issue into Discord")
+    @app_commands.describe(issue_link="Link to the GitHub issue")
     @app_commands.guild_only()
-    async def pr(interaction: discord.Interaction, pr_link: str) -> None:
+    async def issue(interaction: discord.Interaction, issue_link: str) -> None:
         if interaction.guild_id is None:
             await reply(interaction, "Run this inside a server channel.")
             return
         if not gate.allows(interaction.user, SYNC_ROLES):
-            await reply(interaction, gate.denial("pr", SYNC_ROLES))
+            await reply(interaction, gate.denial("issue", SYNC_ROLES))
             return
 
         await defer(interaction)
         try:
-            outcome = await service.sync_link(guild_id=interaction.guild_id, link=pr_link)
+            outcome = await service.sync_link(guild_id=interaction.guild_id, link=issue_link)
         except UnparseableLinkError as error:
             await reply(interaction, f"That link did not work. {error.message}")
         except (NotRegisteredError, RepositoryMismatchError, SyncFailedError) as error:
             await reply(interaction, error.message)
         except GitHubNotFoundError:
-            await reply(interaction, "GitHub has no pull request at that link.")
+            await reply(interaction, "GitHub has no issue at that link.")
         except GitHubError as error:
-            logger.warning("/pr failed against GitHub: %s", error.message)
+            logger.warning("/issue failed against GitHub: %s", error.message)
             await reply(interaction, f"GitHub could not be reached. {error.message}")
         except DiscordGatewayError as error:
-            logger.warning("/pr failed against Discord: %s", error.message)
+            logger.warning("/issue failed against Discord: %s", error.message)
             await reply(interaction, f"Discord refused the update. {error.message}")
         else:
             verb = "Opened" if outcome.created else "Updated"
@@ -54,4 +54,4 @@ def build_pr_command(service: ManualSync, gate: PermissionGate) -> app_commands.
                 f"<#{outcome.thread_id}>",
             )
 
-    return pr
+    return issue
