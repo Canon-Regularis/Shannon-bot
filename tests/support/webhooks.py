@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any
+
+from httpx import ASGITransport, AsyncClient, Response
+
+from shannon.api.app import create_app
+from shannon.config import Settings
+from shannon.github.webhooks.events import EventRouter, WebhookOutcome
+from shannon.github.webhooks.signature import sign
+
+SECRET = "test-webhook-secret"
+
+
+class RecordingHandler:
+    """Stands in for the sync service so route tests stay about HTTP."""
+
+    def __init__(self, outcome: WebhookOutcome = WebhookOutcome.PROCESSED) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    async def __call__(self, action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        self.calls.append((action, payload))
+        return self.outcome
+
+
+def build_client(
+    handler: RecordingHandler | None,
+    *,
+    secret: str = SECRET,
+    settings: Settings | None = None,
+    delivery_guard: Any = None,
+) -> AsyncClient:
+    event_router = EventRouter()
+    if handler is not None:
+        event_router.register("pull_request", handler)
+    app = create_app(
+        settings=settings or Settings(github_webhook_secret=secret),
+        event_router=event_router,
+        delivery_guard=delivery_guard,
+    )
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def post(
+    client: AsyncClient,
+    event: str,
+    payload: Any = None,
+    *,
+    body: bytes | None = None,
+    delivery: str = "delivery-1",
+    signature: str | object | None = ...,
+    secret: str = SECRET,
+) -> Response:
+    """Post a webhook, signing the body the way GitHub does unless told otherwise."""
+    raw = body if body is not None else json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if event:
+        headers["X-GitHub-Event"] = event
+    if delivery:
+        headers["X-GitHub-Delivery"] = delivery
+
+    header_signature = sign(raw, secret) if signature is ... else signature
+    if header_signature is not None:
+        headers["X-Hub-Signature-256"] = str(header_signature)
+
+    return await client.post("/webhooks/github", content=raw, headers=headers)
