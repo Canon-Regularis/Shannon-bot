@@ -6,7 +6,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.models import ChannelMapping, Repository, TrackedItem
+from shannon.domain.enums import ObjectType
+from shannon.services.channels import ChannelMappingService
 from shannon.services.item_sync import ItemSyncService, SyncOutcome
 from shannon.services.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
@@ -77,3 +79,32 @@ async def test_a_burst_of_deliveries_still_leaves_one_item(
     assert failures == [], f"a concurrent delivery raised: {failures}"
     assert all(r.outcome is SyncOutcome.SYNCED for r in results)
     assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 1
+
+
+async def test_two_people_running_set_channel_at_once_leave_one_mapping(
+    registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+) -> None:
+    """Both find nothing mapped, and a read-then-write would have both insert."""
+    service = ChannelMappingService(db_sessionmaker)
+
+    results = await asyncio.gather(
+        *(
+            service.assign(
+                guild_id=registered.discord_guild_id,
+                object_type=ObjectType.PR,
+                channel_id=channel,
+            )
+            for channel in (100, 200, 300)
+        ),
+        return_exceptions=True,
+    )
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert failures == [], f"a concurrent /set_channel raised: {failures}"
+    mappings = (
+        await db_session.scalars(
+            select(ChannelMapping).where(ChannelMapping.object_type == ObjectType.PR)
+        )
+    ).all()
+    assert len(mappings) == 1
+    assert mappings[0].discord_channel_id in (100, 200, 300)
