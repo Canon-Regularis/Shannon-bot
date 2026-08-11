@@ -33,6 +33,20 @@ class ActorRole(StrEnum):
     PROJECT_MANAGER = "PROJECT_MANAGER"
 
 
+class DeliveryStatus(StrEnum):
+    """How far a webhook delivery has got.
+
+    PENDING and PROCESSING are the live states; the rest are terminal. FAILED means the
+    attempts ran out, and the row is kept with its reason so someone can see what happened.
+    """
+
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    IGNORED = "IGNORED"
+    FAILED = "FAILED"
+
+
 class CommandRole(StrEnum):
     """Permission tiers a Discord member can hold."""
 

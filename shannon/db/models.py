@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -9,9 +10,11 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shannon.db.base import Base, TimestampMixin
@@ -152,9 +155,17 @@ class ItemAssignment(TimestampMixin, Base):
 
 
 class WebhookEvent(Base):
+    """A delivery GitHub handed us, and how far we have got with it.
+
+    This is a queue rather than a log. GitHub never redelivers a failed webhook and gives up on
+    one that takes more than ten seconds, so the body is kept here and the work happens behind
+    the response. Without that, a slow Discord call loses the event outright.
+    """
+
     __tablename__ = "webhook_events"
     __table_args__ = (
         UniqueConstraint("github_delivery_id", name="uq_webhook_events_github_delivery_id"),
+        Index("ix_webhook_events_status_next_attempt", "status", "next_attempt_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -165,6 +176,19 @@ class WebhookEvent(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # Nullable so the migration applies to a live table with nothing to backfill. Rows written
+    # before this existed have no body, and the lease requires one, so they are never picked up.
+    # none_as_null, or SQLAlchemy would store Python None as the JSON value `null`, which is a
+    # thing IS NOT NULL happily matches. The lease query leans on that check to skip rows that
+    # have no body to act on.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(nullable=False, server_default="0", default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Held by whichever worker is on this row. A worker that dies leaves the lease to expire
+    # rather than stranding the delivery in PROCESSING forever.
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class UserLink(TimestampMixin, Base):
