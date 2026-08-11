@@ -8,18 +8,34 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
+from shannon.discord_bot.commands.issue import build_issue_command
 from shannon.discord_bot.commands.link import build_link_command
 from shannon.discord_bot.commands.pr import build_pr_command
 from shannon.discord_bot.commands.register import build_register_command
+from shannon.discord_bot.commands.set_channel import build_set_channel_command
+from shannon.discord_bot.formatting import (
+    format_assignee_ping,
+    format_comment,
+    format_review,
+    format_reviewer_ping,
+)
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.threads import ThreadGateway
+from shannon.domain.enums import ActorRole
 from shannon.github.client import GitHubClient, HttpGitHubClient
+from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.events import EventRouter
+from shannon.github.webhooks.issues import parse_issue_event
+from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.github.webhooks.reviews import parse_review_event
+from shannon.services.channels import ChannelMappingService
 from shannon.services.idempotency import WebhookIdempotencyGuard
+from shannon.services.item_sync import ItemSyncService, build_item_handler
 from shannon.services.linking import UserLinkingService
-from shannon.services.manual_sync import ManualPullRequestSync
-from shannon.services.notifications import ReviewerNotifier
-from shannon.services.pr_sync import PullRequestSyncService, build_pull_request_handler
+from shannon.services.manual_sync import ManualSync, build_issue_sync, build_pull_request_sync
+from shannon.services.notes import ItemNoteMirror, build_note_handler
+from shannon.services.notifications import ActorNotifier
+from shannon.services.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
 
 logger = logging.getLogger(__name__)
@@ -42,14 +58,21 @@ class Container:
     delivery_guard: WebhookIdempotencyGuard
     registration: RepositoryRegistrationService
     linking: UserLinkingService
-    pr_sync: PullRequestSyncService
-    manual_sync: ManualPullRequestSync
+    channels: ChannelMappingService
+    pr_sync: ItemSyncService
+    issue_sync: ItemSyncService
+    comments: ItemNoteMirror
+    reviews: ItemNoteMirror
+    manual_sync: ManualSync
+    manual_issue_sync: ManualSync
     event_router: EventRouter
 
     def commands(self) -> tuple[app_commands.Command, ...]:
         return (
             build_register_command(self.registration, self.gate),
+            build_set_channel_command(self.channels, self.gate),
             build_pr_command(self.manual_sync, self.gate),
+            build_issue_command(self.manual_issue_sync, self.gate),
             build_link_command(self.linking, self.gate),
         )
 
@@ -82,11 +105,27 @@ def build_container(
         timeout=settings.github_timeout_seconds,
     )
 
-    notifier = ReviewerNotifier(sessionmaker, threads)
-    pr_sync = PullRequestSyncService(sessionmaker, threads, notifier)
+    pr_sync = ItemSyncService(
+        sessionmaker,
+        threads,
+        PullRequestPolicy(),
+        ActorNotifier(sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping),
+    )
+    issue_sync = ItemSyncService(
+        sessionmaker,
+        threads,
+        IssuePolicy(),
+        ActorNotifier(sessionmaker, threads, role=ActorRole.ASSIGNEE, render=format_assignee_ping),
+    )
+
+    comments = ItemNoteMirror(sessionmaker, threads, render=format_comment)
+    reviews = ItemNoteMirror(sessionmaker, threads, render=format_review)
 
     event_router = EventRouter()
-    event_router.register("pull_request", build_pull_request_handler(pr_sync))
+    event_router.register("pull_request", build_item_handler(pr_sync, parse_pull_request_event))
+    event_router.register("issues", build_item_handler(issue_sync, parse_issue_event))
+    event_router.register("issue_comment", build_note_handler(comments, parse_comment_event))
+    event_router.register("pull_request_review", build_note_handler(reviews, parse_review_event))
 
     return Container(
         settings=settings,
@@ -98,7 +137,12 @@ def build_container(
         delivery_guard=WebhookIdempotencyGuard(sessionmaker),
         registration=RepositoryRegistrationService(sessionmaker, github),
         linking=UserLinkingService(sessionmaker),
+        channels=ChannelMappingService(sessionmaker),
         pr_sync=pr_sync,
-        manual_sync=ManualPullRequestSync(sessionmaker, github, pr_sync),
+        issue_sync=issue_sync,
+        comments=comments,
+        reviews=reviews,
+        manual_sync=build_pull_request_sync(sessionmaker, github, pr_sync),
+        manual_issue_sync=build_issue_sync(sessionmaker, github, issue_sync),
         event_router=event_router,
     )
