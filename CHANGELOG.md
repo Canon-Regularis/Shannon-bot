@@ -4,7 +4,9 @@ All notable changes to Shannon Bot. Entries are grouped by the GitHub issue they
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## MVP 1 — pull request sync
+
+Issues #2 to #26.
 
 ### Added
 
@@ -182,9 +184,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Documentation
 
-- **Local development guide** (closes #24). `docs/local-development.md` covers setup, every
-  setting, the Discord application, the GitHub webhook, the commands, which events are handled,
-  how to run the tests, running in Docker, and troubleshooting.
+- **Local development guide** (closes #24). Setup, every setting, the Discord application, the
+  GitHub webhook, the commands, which events are handled, how to run the tests, running in
+  Docker, and troubleshooting. This changelog is the documentation; there is no `docs/`
+  directory.
 - The runnable entrypoint landed here too, since documenting how to run something requires it
   to be runnable: `shannon/container.py` wires the application in one place and
   `shannon/main.py` serves the webhook endpoint and the bot from a single process.
@@ -240,9 +243,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Verified
 
-- **MVP 1 acceptance** (closes #26). Every item on the issue #26 checklist walked and recorded
-  in `docs/mvp-1-acceptance.md`, along with the deliberate departures from the issue text and
-  the known limits.
+- **MVP 1 acceptance** (closes #26). Every item on the issue #26 checklist walked, along with
+  the deliberate departures from the issue text and the known limits.
 - 301 tests pass with a database, 201 pass and 100 skip without one, so a fresh clone gets a
   green run with no Docker.
 - The migration was applied to an empty database, rolled back to base, and applied again. The
@@ -282,3 +284,152 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Alembic in the same process as the application silenced every application logger. Only
   visible once something ran migrations in-process, which the new migration tests do.
 - `alembic.ini` used the deprecated `version_path_separator` key, now `path_separator`.
+
+---
+
+## MVP 2 — GitHub issue sync
+
+Issues #27 to #53. No migration: `tracked_items.github_object_type`,
+`channel_mappings.object_type` and `tracked_items.priority` already carried `ISSUE` and priority
+values, so MVP 1's schema absorbed MVP 2 unchanged. That is the payback for choosing `VARCHAR`
+plus `CHECK` over native PostgreSQL enums.
+
+### Changed
+
+- **One sync service for both kinds of item** (closes #32, #52)
+  - `ItemSyncService` holds the orchestration that is the same for pull requests and issues:
+    find the repository, find the channel, create or update the tracked item, store the people,
+    resolve mentions, write the thread, ping whoever is owed a ping.
+  - A `SyncPolicy` holds the handful of decisions that differ. `PullRequestPolicy` and
+    `IssuePolicy` differ in seven places: which roles are stored, how status moves, where
+    priority comes from, whether the thread locks, who gets pinged, how the metadata is
+    rendered, and the object type. MVP 4's project tickets become a third policy rather than a
+    third copy of the orchestration.
+  - All 351 MVP 1 tests passed against the generalised service without being changed, which is
+    the evidence the refactor was faithful.
+  - The two webhook handler modules were near-identical and collapsed into
+    `build_item_handler(service, parse)`; `pr_sync.py` and `issue_sync.py` were deleted.
+  - `ReviewerNotifier` became `ActorNotifier` with the role and the wording injected. Pinging a
+    reviewer and pinging an assignee were the same mechanism with different words.
+  - `pull_request_thread_name` and `issue_thread_name` had identical bodies and are now one
+    `thread_name`.
+
+### Added
+
+- **Issue priority from labels** (closes #37). `priority: high`, `HIGH_PRIORITY`, a bare
+  `HIGH`, and synonyms like `urgent` and `minor` all resolve. Several priority labels at once
+  resolve to the highest, so a mislabelled item is escalated rather than buried. No priority
+  label means `UNSET`.
+- **Issue URL parser** (closes #28). The mirror of the pull request parser, sharing its path
+  splitting. A pull request link pasted into `/issue` is rejected by name, and the reverse
+  still holds.
+- **Issue fetching** (closes #30). `get_issue` on the GitHub client. It rejects a number that
+  turns out to be a pull request: GitHub serves pull requests from the issues endpoint, marked
+  only by a `pull_request` key, and without the check `/issue` pointed at a pull request would
+  track it a second time under the wrong type.
+- **Issue webhook parsing** (closes #31, #27). `issues` events are routed and parsed into the
+  same snapshot shape the REST client produces. Six actions are handled: opened, edited,
+  closed, reopened, labeled, assigned.
+- **Issue metadata formatter** (closes #36). The same block as pull requests minus the
+  reviewers line, because GitHub issues have no reviewers and an always-empty field is noise.
+- **Issue threads** (closes #33, #34, #35, #38). Issues are stored in `tracked_items` under
+  `github_object_type = ISSUE`, so an issue and a pull request sharing a number stay separate
+  rows. Author and assignees are stored; reviewers never are. Threads are created in the
+  issue channel, updated in place, and renamed only when the title actually changed.
+- **Assignee pinging** (closes #39). Each assignee is pinged once, on the same
+  `notified_at` mechanism as reviewers. Reassignment pings the new person and not the old one.
+- **Close and reopen** (closes #40). Closing sets status to `DONE` and locks the thread;
+  reopening unlocks it and sets status back to `NOT_REVIEWED`. Reopening only resets a status of
+  `DONE` rather than forcing `NOT_REVIEWED` on every sync, so MVP 3's status commands will not
+  be overwritten by the next webhook.
+- **Comment mirroring** (closes #41). `issue_comment.created` is posted into the thread of
+  whatever it was left on, with the commenter, a quoted and truncated body, the timestamp and
+  the link. Comments on pull requests are mirrored too, not only issues.
+- **Review mirroring** (no issue; `requirements.md` lists the event). A submitted
+  `pull_request_review` is posted into the pull request's thread, saying whether it approved,
+  requested changes or left a review, with the body quoted the same way a comment's is. An
+  approval with no body still posts, because the verdict is the point. Reviews do not move the
+  workflow status; approving is not `/SET_READY_FOR_MERGE`, which arrives in MVP 3.
+  - GitHub reports the verdict lowercased on webhooks and uppercased on the REST API, so it is
+    normalised on the way in and nothing downstream has to know.
+  - Finding the thread is identical work for a comment and a review, so `ItemNoteMirror` does
+    it once and only the rendering is injected. `CommentMirror` was folded into it.
+- **`/issue <issue_link>`** (closes #29, #42). Same permissions as `/pr`: developer, reviewer or
+  project manager. The manual sync service is now shared, parameterised by the link parser and
+  the fetch, so `/pr` and `/issue` cannot drift apart.
+- **`/set_channel <type> <channel>`** (no issue). Issues need a channel of their own and
+  `/register` only ever mapped pull requests. Needs admin or project manager. Only text and
+  forum channels are accepted, because nothing else can hold a thread.
+- **Issues fall back to the pull request channel** when nothing has been mapped for them, so a
+  guild that ran `/register` and nothing else still sees its issues. `/set_channel` moves them
+  out when a server wants them separate. The fallback lives in
+  `ChannelMappingStore.resolve`, kept distinct from `get`, which still answers only what was
+  actually configured, because `/set_channel` needs the literal answer.
+- **Assignee, label and reviewer removals are mirrored** (`unassigned`, `unlabeled`,
+  `review_request_removed`), alongside the additions they undo. Handling only one half left a
+  thread claiming someone was still assigned until some later event happened to correct it.
+
+### Security
+
+- **Mass mentions are suppressed** on everything the bot sends. GitHub comment bodies are
+  mirrored into Discord, so a comment containing `@everyone` would otherwise ping the whole
+  server. Only the user mentions the bot builds itself resolve.
+
+### Fixed
+
+- **Locking no longer archives the thread.** Archiving hides a thread and makes every later
+  edit fail, and a closed issue still receives label and assignment events that have to reach
+  its metadata. Caught by a test asserting a second close still updates.
+- **A removed reviewer is no longer put straight back.** `review_request_removed` names the
+  person removed in the same `requested_reviewer` field a request uses, and the fold that makes
+  `review_requested` work would have undone the removal. The fold now only runs for
+  `review_requested`.
+
+### Tests
+
+- 520 passing, up from 351. Without a database, 355 pass and 165 skip, so a fresh clone still
+  goes green with no Docker.
+- Issue URL parsing (#43), webhook parsing (#44) against a recorded GitHub payload, sync
+  service (#45), webhook to thread creation (#46) and update (#47), close and reopen (#48),
+  comment mirroring (#49), and the `/issue` command (#50).
+- Comment matching is covered for pull requests specifically, because that is the case the
+  number lookup exists for.
+
+### Departures from the issue text
+
+Three, each deliberate.
+
+- **`/set_channel` exists at all.** No issue asks for it. Issues need somewhere to post and
+  `/register` only ever mapped pull requests, so without it the requirements' own table of
+  per-type channels could not be filled in.
+- **More webhook actions than the issues list.** Issue #27 names six issue actions and issue #9
+  named seven pull request actions, none of them removals. Handling only the additions left a
+  thread claiming someone was still assigned, or still carrying a label that had been taken
+  off, until some later event happened to correct it. `unassigned`, `unlabeled` and
+  `review_request_removed` are handled for that reason.
+- **Comments are mirrored for pull requests as well as issues.** Issue #41 speaks only of
+  tracked issues, but GitHub sends one event type for both and the lookup is identical, so
+  restricting it would have meant deliberately dropping pull request comments.
+
+### Known limits
+
+- **Issues land in the pull request channel until `/set_channel issue` is run.** That is the
+  fallback working rather than a failure, but a server that wants them separate has to say so.
+- **Review edits and dismissals are not mirrored**, matching how comment edits are treated: the
+  thread records what was said when it was said.
+- **Inline review comments are not mirrored.** `pull_request_review_comment` is a separate
+  event and appears nowhere in the requirements. A review that only carries inline notes posts
+  as "left a review" with no body.
+- **Comment edits and deletions are not mirrored**, so a comment in Discord records what was
+  said when it was said.
+
+### Verified
+
+- **MVP 2 acceptance** (closes #53). `/issue` works, issue webhooks create and update threads,
+  duplicate deliveries do not duplicate anything, assignee pinging works where links exist,
+  priority is read from labels, closing locks and reopening unlocks, comments sync, PostgreSQL
+  state is correct, and MVP 1 pull request sync still works.
+- `alembic upgrade head` is a no-op and `alembic heads` still reports `0001`, confirming MVP 2
+  added no revision. The migration-versus-models test still passes.
+- `ruff check` and `ruff format --check` clean.
+- No MVP 3 or MVP 4 functionality: no status or priority commands, no GitHub Projects sync.
