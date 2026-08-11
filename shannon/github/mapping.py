@@ -4,7 +4,13 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
+from shannon.domain.models import (
+    Actor,
+    IssueSnapshot,
+    Label,
+    PullRequestSnapshot,
+    RepositorySnapshot,
+)
 
 Payload = Mapping[str, Any]
 
@@ -83,6 +89,54 @@ def _owner_login(payload: Payload) -> str | None:
     if isinstance(full_name, str) and "/" in full_name:
         return full_name.split("/", 1)[0]
     return None
+
+
+def issue(
+    payload: Any, repo: RepositorySnapshot, *, action: str | None = None
+) -> IssueSnapshot | None:
+    """Build a snapshot from an issue object.
+
+    The same shape comes back from `GET /repos/{owner}/{repo}/issues/{number}` and rides inside
+    `issues` webhook payloads.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+
+    object_id = payload.get("id")
+    number = payload.get("number")
+    if not isinstance(object_id, int) or not isinstance(number, int):
+        return None
+
+    html_url = payload.get("html_url")
+    if not isinstance(html_url, str) or not html_url:
+        html_url = f"{repo.html_url}/issues/{number}"
+
+    title = payload.get("title")
+    state = payload.get("state")
+    return IssueSnapshot(
+        repository=repo,
+        github_object_id=object_id,
+        number=number,
+        title=title if isinstance(title, str) else "",
+        html_url=html_url,
+        state=state if isinstance(state, str) else "open",
+        author=actor(payload.get("user")),
+        assignees=actors(payload.get("assignees")),
+        labels=labels(payload.get("labels")),
+        updated_at=parse_timestamp(payload.get("updated_at")),
+        closed_at=parse_timestamp(payload.get("closed_at")),
+        action=action,
+    )
+
+
+def is_pull_request(payload: Any) -> bool:
+    """Whether an issue-shaped payload is really a pull request.
+
+    GitHub serves pull requests from the issues endpoint too, and marks them only with this
+    key. Without the check, `/issue` pointed at a pull request number would track it a second
+    time under the wrong type.
+    """
+    return isinstance(payload, Mapping) and payload.get("pull_request") is not None
 
 
 def pull_request(

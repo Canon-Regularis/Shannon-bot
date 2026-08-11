@@ -5,7 +5,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from shannon.domain.models import PullRequestSnapshot, RepositorySnapshot
+from shannon.domain.models import IssueSnapshot, PullRequestSnapshot, RepositorySnapshot
 from shannon.github import mapping
 from shannon.github.errors import (
     GitHubAuthError,
@@ -30,6 +30,8 @@ class GitHubClient(Protocol):
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
+
+    async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
 
 
 class HttpGitHubClient:
@@ -78,6 +80,26 @@ class HttpGitHubClient:
         if snapshot is None:
             raise GitHubUnavailableError(
                 f"GitHub returned an unusable pull request for {owner}/{name}#{number}"
+            )
+        return snapshot
+
+    async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot:
+        payload = await self._get(f"/repos/{owner}/{name}/issues/{number}")
+
+        # GitHub serves pull requests from this endpoint as well, so a number that turns out to
+        # be a pull request is reported as no such issue rather than tracked as one.
+        if mapping.is_pull_request(payload):
+            raise GitHubNotFoundError(f"{owner}/{name}#{number} is a pull request, not an issue")
+
+        # Unlike the pull request endpoint, this one carries no repository object, only a URL.
+        repo = mapping.repository(payload.get("repository")) or await self.get_repository(
+            owner, name
+        )
+
+        snapshot = mapping.issue(payload, repo)
+        if snapshot is None:
+            raise GitHubUnavailableError(
+                f"GitHub returned an unusable issue for {owner}/{name}#{number}"
             )
         return snapshot
 
