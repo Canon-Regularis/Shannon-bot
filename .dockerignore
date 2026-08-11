@@ -1,0 +1,36 @@
+.git/
+.gitignore
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests are not run from the runtime image, and secrets must never reach the build context.
+# Anything copied in stays in that layer even if a later step deletes it.
+tests/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+docs/
+CHANGELOG.md
+requirements.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+.idea/
+.vscode/
