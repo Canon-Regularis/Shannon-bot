@@ -1,0 +1,140 @@
+{
+  "action": "opened",
+  "number": 7,
+  "pull_request": {
+    "url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/pulls/7",
+    "id": 4661345307,
+    "node_id": "PR_kwDOStV8Dc6abcdef",
+    "html_url": "https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+    "diff_url": "https://github.com/Canon-Regularis/Shannon-bot/pull/7.diff",
+    "number": 7,
+    "state": "open",
+    "locked": false,
+    "title": "Implement FastAPI GitHub webhook endpoint",
+    "user": {
+      "login": "Canon-Regularis",
+      "id": 80922799,
+      "node_id": "MDQ6VXNlcjgwOTIyNzk5",
+      "avatar_url": "https://avatars.githubusercontent.com/u/80922799?v=4",
+      "html_url": "https://github.com/Canon-Regularis",
+      "type": "User",
+      "site_admin": false
+    },
+    "body": "Closes #3",
+    "created_at": "2026-08-10T11:04:33Z",
+    "updated_at": "2026-08-10T12:00:00Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": null,
+    "assignee": {
+      "login": "hubot",
+      "id": 100,
+      "type": "User"
+    },
+    "assignees": [
+      {
+        "login": "hubot",
+        "id": 100,
+        "type": "User"
+      }
+    ],
+    "requested_reviewers": [
+      {
+        "login": "monalisa",
+        "id": 200,
+        "type": "User"
+      }
+    ],
+    "requested_teams": [],
+    "labels": [
+      {
+        "id": 9001,
+        "node_id": "LA_kwDOStV8Dc8AAAAB",
+        "url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/labels/backend",
+        "name": "backend",
+        "color": "0e8a16",
+        "default": false,
+        "description": "Server side work"
+      },
+      {
+        "id": 9002,
+        "name": "high priority",
+        "color": "b60205",
+        "default": false,
+        "description": null
+      }
+    ],
+    "milestone": null,
+    "draft": false,
+    "head": {
+      "label": "Canon-Regularis:feature/webhooks",
+      "ref": "feature/webhooks",
+      "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+      "repo": {
+        "id": 1255504909,
+        "name": "Shannon-bot",
+        "full_name": "Canon-Regularis/Shannon-bot",
+        "html_url": "https://github.com/Canon-Regularis/Shannon-bot",
+        "owner": {
+          "login": "Canon-Regularis",
+          "id": 80922799,
+          "type": "User"
+        }
+      }
+    },
+    "base": {
+      "label": "Canon-Regularis:main",
+      "ref": "main",
+      "sha": "2523529f3bc463742d0d3207e34d9b1c109b9a0a",
+      "repo": {
+        "id": 1255504909,
+        "name": "Shannon-bot",
+        "full_name": "Canon-Regularis/Shannon-bot",
+        "html_url": "https://github.com/Canon-Regularis/Shannon-bot",
+        "private": false,
+        "owner": {
+          "login": "Canon-Regularis",
+          "id": 80922799,
+          "type": "User"
+        }
+      }
+    },
+    "merged": false,
+    "mergeable": null,
+    "comments": 0,
+    "review_comments": 0,
+    "commits": 3,
+    "additions": 412,
+    "deletions": 0,
+    "changed_files": 9
+  },
+  "repository": {
+    "id": 1255504909,
+    "node_id": "R_kgDOStV8DQ",
+    "name": "Shannon-bot",
+    "full_name": "Canon-Regularis/Shannon-bot",
+    "private": false,
+    "owner": {
+      "login": "Canon-Regularis",
+      "id": 80922799,
+      "node_id": "MDQ6VXNlcjgwOTIyNzk5",
+      "html_url": "https://github.com/Canon-Regularis",
+      "type": "User",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/Canon-Regularis/Shannon-bot",
+    "description": "A Discord bot that syncs GitHub repository activity into Discord",
+    "fork": false,
+    "created_at": "2026-06-15T01:00:00Z",
+    "updated_at": "2026-08-10T12:00:00Z",
+    "pushed_at": "2026-08-10T11:59:00Z",
+    "default_branch": "main",
+    "visibility": "public"
+  },
+  "sender": {
+    "login": "Canon-Regularis",
+    "id": 80922799,
+    "type": "User",
+    "site_admin": false
+  }
+}
