@@ -1,0 +1,103 @@
+{
+  "action": "opened",
+  "issue": {
+    "url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/issues/12",
+    "repository_url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot",
+    "labels_url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/issues/12/labels{/name}",
+    "comments_url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/issues/12/comments",
+    "html_url": "https://github.com/Canon-Regularis/Shannon-bot/issues/12",
+    "id": 4661345308,
+    "node_id": "I_kwDOStV8Dc8AAAABFdaCUB",
+    "number": 12,
+    "title": "Threads are not locked when an issue closes",
+    "user": {
+      "login": "Canon-Regularis",
+      "id": 80922799,
+      "node_id": "MDQ6VXNlcjgwOTIyNzk5",
+      "avatar_url": "https://avatars.githubusercontent.com/u/80922799?v=4",
+      "html_url": "https://github.com/Canon-Regularis",
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [
+      {
+        "id": 9001,
+        "node_id": "LA_kwDOStV8Dc8AAAAB",
+        "url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/labels/bug",
+        "name": "bug",
+        "color": "d73a4a",
+        "default": true,
+        "description": "Something is not working"
+      },
+      {
+        "id": 9002,
+        "name": "priority: high",
+        "color": "b60205",
+        "default": false,
+        "description": null
+      }
+    ],
+    "state": "open",
+    "state_reason": null,
+    "locked": false,
+    "assignee": {
+      "login": "hubot",
+      "id": 100,
+      "type": "User"
+    },
+    "assignees": [
+      {
+        "login": "hubot",
+        "id": 100,
+        "type": "User"
+      },
+      {
+        "login": "monalisa",
+        "id": 200,
+        "type": "User"
+      }
+    ],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2026-08-11T09:00:00Z",
+    "updated_at": "2026-08-11T09:30:00Z",
+    "closed_at": null,
+    "author_association": "OWNER",
+    "active_lock_reason": null,
+    "body": "Closing an issue leaves its Discord thread open.",
+    "reactions": {
+      "url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/issues/12/reactions",
+      "total_count": 0
+    },
+    "timeline_url": "https://api.github.com/repos/Canon-Regularis/Shannon-bot/issues/12/timeline",
+    "performed_via_github_app": null
+  },
+  "repository": {
+    "id": 1255504909,
+    "node_id": "R_kgDOStV8DQ",
+    "name": "Shannon-bot",
+    "full_name": "Canon-Regularis/Shannon-bot",
+    "private": false,
+    "owner": {
+      "login": "Canon-Regularis",
+      "id": 80922799,
+      "html_url": "https://github.com/Canon-Regularis",
+      "type": "User",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/Canon-Regularis/Shannon-bot",
+    "description": "A Discord bot that syncs GitHub repository activity into Discord",
+    "fork": false,
+    "created_at": "2026-06-15T01:00:00Z",
+    "updated_at": "2026-08-11T09:00:00Z",
+    "default_branch": "main",
+    "visibility": "public",
+    "has_issues": true
+  },
+  "sender": {
+    "login": "Canon-Regularis",
+    "id": 80922799,
+    "type": "User",
+    "site_admin": false
+  }
+}
