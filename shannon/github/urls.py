@@ -16,6 +16,9 @@ _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _PULL_SEGMENT = "pull"
 _ISSUE_SEGMENT = "issues"
 
+# The article is carried along with the noun so the error messages read like English.
+_KINDS = {_PULL_SEGMENT: "a pull request", _ISSUE_SEGMENT: "an issue"}
+
 
 def parse_repository_url(link: str) -> RepositoryRef:
     """Pull owner and repository out of a GitHub link.
@@ -34,18 +37,31 @@ def parse_pull_request_url(link: str) -> RepositoryRef:
     `/pull/7#discussion_r1`. Issue links are rejected by name rather than as generic junk,
     because pasting one into `/pr` is a normal mistake.
     """
+    return _parse_object_url(link, _PULL_SEGMENT)
+
+
+def parse_issue_url(link: str) -> RepositoryRef:
+    """Pull owner, repository and issue number out of a GitHub issue link.
+
+    The mirror of the pull request parser, and it rejects pull request links by name for the
+    same reason.
+    """
+    return _parse_object_url(link, _ISSUE_SEGMENT)
+
+
+def _parse_object_url(link: str, wanted: str) -> RepositoryRef:
     owner, repo, segments = _split_repository_path(link)
 
     if len(segments) < 4:
-        raise UnparseableLinkError(f"{link!r} does not point at a pull request")
+        raise UnparseableLinkError(f"{link!r} does not point at {_KINDS[wanted]}")
 
     kind = segments[2]
-    if kind == _ISSUE_SEGMENT:
-        raise UnparseableLinkError(f"{link!r} is an issue link, not a pull request link")
-    if kind != _PULL_SEGMENT:
-        raise UnparseableLinkError(f"{link!r} does not point at a pull request")
+    if kind == wanted:
+        return RepositoryRef(owner=owner, name=repo, number=_parse_number(segments[3], link))
 
-    return RepositoryRef(owner=owner, name=repo, number=_parse_number(segments[3], link))
+    if kind in _KINDS:
+        raise UnparseableLinkError(f"{link!r} is {_KINDS[kind]} link, not {_KINDS[wanted]} link")
+    raise UnparseableLinkError(f"{link!r} does not point at {_KINDS[wanted]}")
 
 
 def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
