@@ -78,7 +78,9 @@ async def _dispatch_once(
     payload: dict[str, Any],
     body: bytes,
 ) -> WebhookOutcome:
-    if delivery_guard is None:
+    # Nothing to protect against a repeat of an event we would ignore anyway, and recording one
+    # would grow the delivery table for no reason.
+    if delivery_guard is None or not event_router.will_act_on(event, action):
         return await event_router.dispatch(event, action, payload)
 
     if not await delivery_guard.claim(delivery_id, event, body):

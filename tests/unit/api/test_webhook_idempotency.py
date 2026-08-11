@@ -54,12 +54,41 @@ async def test_processed_delivery_is_recorded_as_processed(
     assert guard.completed == {"delivery-a": DeliveryStatus.PROCESSED}
 
 
-async def test_ignored_delivery_is_recorded_as_ignored(guard: InMemoryDeliveryGuard) -> None:
+async def test_a_handled_but_ignored_delivery_is_recorded_as_ignored(
+    guard: InMemoryDeliveryGuard,
+) -> None:
+    """A supported event whose repository is not registered still reached a handler."""
     handler = RecordingHandler(outcome=WebhookOutcome.IGNORED)
     async with build_client(handler, delivery_guard=guard) as client:
-        await post(client, "pull_request", {"action": "synchronize"}, delivery="delivery-a")
+        await post(client, "pull_request", PR_OPENED, delivery="delivery-a")
 
     assert guard.completed == {"delivery-a": DeliveryStatus.IGNORED}
+
+
+async def test_an_unsupported_action_is_never_recorded(guard: InMemoryDeliveryGuard) -> None:
+    """Nothing to protect against a repeat of something that would be dropped anyway."""
+    async with build_client(RecordingHandler(), delivery_guard=guard) as client:
+        response = await post(
+            client, "pull_request", {"action": "synchronize"}, delivery="delivery-a"
+        )
+
+    assert response.json()["status"] == "ignored"
+    assert guard.claimed == set()
+    assert guard.completed == {}
+
+
+async def test_an_unsupported_event_is_never_recorded(guard: InMemoryDeliveryGuard) -> None:
+    async with build_client(RecordingHandler(), delivery_guard=guard) as client:
+        await post(client, "project_card", {"action": "created"}, delivery="delivery-a")
+
+    assert guard.claimed == set()
+
+
+async def test_a_ping_is_never_recorded(guard: InMemoryDeliveryGuard) -> None:
+    async with build_client(RecordingHandler(), delivery_guard=guard) as client:
+        await post(client, "ping", {"zen": "Keep it logically awesome."}, delivery="delivery-a")
+
+    assert guard.claimed == set()
 
 
 async def test_unsigned_duplicate_never_reaches_the_guard(guard: InMemoryDeliveryGuard) -> None:

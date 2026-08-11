@@ -96,6 +96,15 @@ class EventRouter:
     def handles(self, event: str) -> bool:
         return event in self._handlers
 
+    def will_act_on(self, event: str, action: str | None) -> bool:
+        """Whether dispatching this could actually do anything.
+
+        The route asks before recording a delivery. A repository sends pushes, stars and forks
+        constantly, and logging every one of them would grow the delivery table without ever
+        protecting anything.
+        """
+        return is_supported(event, action) and event in self._handlers
+
     async def dispatch(
         self, event: str, action: str | None, payload: Mapping[str, Any]
     ) -> WebhookOutcome:
