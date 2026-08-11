@@ -74,11 +74,18 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
     if "://" not in raw:
         raw = f"https://{raw}"
 
-    parsed = urlparse(raw)
+    try:
+        parsed = urlparse(raw)
+        host = parsed.hostname or ""
+    except ValueError as exc:
+        # An unbalanced square bracket looks like a malformed IPv6 host and urlparse raises
+        # rather than returning anything. Someone typing `/pr [` deserves the same reply as any
+        # other bad link, not a command that falls over.
+        raise UnparseableLinkError(f"{link!r} is not a usable link") from exc
+
     if parsed.scheme not in {"http", "https"}:
         raise UnparseableLinkError(f"{link!r} is not an http or https link")
 
-    host = parsed.hostname or ""
     if host.lower().removeprefix("www.") != GITHUB_HOST:
         raise UnparseableLinkError(f"{link!r} is not a {GITHUB_HOST} link")
 
