@@ -11,6 +11,8 @@ from shannon.github.webhooks.events import PULL_REQUEST_ACTIONS
 
 logger = logging.getLogger(__name__)
 
+REVIEW_REQUESTED = "review_requested"
+
 
 def parse_pull_request_event(action: str, payload: Mapping[str, Any]) -> PullRequestSnapshot | None:
     """Turn a `pull_request` webhook body into the same snapshot the REST client produces.
@@ -32,7 +34,9 @@ def parse_pull_request_event(action: str, payload: Mapping[str, Any]) -> PullReq
         logger.warning("pull_request.%s arrived without a usable pull request", action)
         return None
 
-    return _with_event_reviewer(snapshot, payload)
+    if action == REVIEW_REQUESTED:
+        return _with_event_reviewer(snapshot, payload)
+    return snapshot
 
 
 def _with_event_reviewer(
@@ -42,6 +46,10 @@ def _with_event_reviewer(
 
     GitHub puts the person just added at the top level of the event, and their appearance in
     `pull_request.requested_reviewers` is not guaranteed for team requests.
+
+    Only ever called for `review_requested`. `review_request_removed` carries the same field
+    holding the person who was just taken off, and folding that in would put them straight
+    back.
     """
     requested = mapping.actor(payload.get("requested_reviewer"))
     if requested is None or any(r.login == requested.login for r in snapshot.reviewers):

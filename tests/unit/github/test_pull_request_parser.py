@@ -49,9 +49,46 @@ def test_a_real_github_payload_parses() -> None:
     assert snapshot.updated_at.year == 2026
 
 
-@pytest.mark.parametrize("action", ["synchronize", "ready_for_review", "unlabeled", "", "opened "])
+@pytest.mark.parametrize("action", ["synchronize", "ready_for_review", "milestoned", "", "opened "])
 def test_unsupported_actions_are_ignored(action: str) -> None:
     assert parse_pull_request_event(action, payloads.pull_request_event("opened")) is None
+
+
+@pytest.mark.parametrize("action", ["unassigned", "unlabeled"])
+def test_removals_are_handled_alongside_the_additions_they_undo(action: str) -> None:
+    payload = payloads.pull_request_event(action, assignees=[], labels=[])
+
+    snapshot = parse_pull_request_event(action, payload)
+
+    assert snapshot is not None
+    assert snapshot.assignees == ()
+    assert snapshot.labels == ()
+
+
+def test_a_removed_reviewer_is_not_put_straight_back() -> None:
+    """`review_request_removed` names the person removed in the same field a request uses.
+
+    Folding that in the way `review_requested` does would undo the removal.
+    """
+    payload = payloads.pull_request_event("review_request_removed", requested_reviewers=[])
+    payload["requested_reviewer"] = payloads.user("monalisa", 200)
+
+    snapshot = parse_pull_request_event("review_request_removed", payload)
+
+    assert snapshot is not None
+    assert snapshot.reviewers == ()
+
+
+def test_a_removed_reviewer_leaves_the_others_alone() -> None:
+    payload = payloads.pull_request_event(
+        "review_request_removed", requested_reviewers=[payloads.user("hubot", 100)]
+    )
+    payload["requested_reviewer"] = payloads.user("monalisa", 200)
+
+    snapshot = parse_pull_request_event("review_request_removed", payload)
+
+    assert snapshot is not None
+    assert [r.login for r in snapshot.reviewers] == ["hubot"]
 
 
 def test_a_payload_without_a_repository_is_ignored() -> None:
