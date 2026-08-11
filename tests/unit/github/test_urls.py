@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import pytest
+
+from shannon.domain.errors import UnparseableLinkError
+from shannon.github.urls import parse_pull_request_url
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+        "http://github.com/Canon-Regularis/Shannon-bot/pull/7",
+        "https://www.github.com/Canon-Regularis/Shannon-bot/pull/7",
+        "github.com/Canon-Regularis/Shannon-bot/pull/7",
+        "https://github.com/Canon-Regularis/Shannon-bot/pull/7/",
+        "https://github.com/Canon-Regularis/Shannon-bot/pull/7/files",
+        "https://github.com/Canon-Regularis/Shannon-bot/pull/7#discussion_r1",
+        "https://github.com/Canon-Regularis/Shannon-bot/pull/7?w=1",
+        "  https://github.com/Canon-Regularis/Shannon-bot/pull/7  ",
+        "<https://github.com/Canon-Regularis/Shannon-bot/pull/7>",
+    ],
+)
+def test_valid_links_parse(link: str) -> None:
+    ref = parse_pull_request_url(link)
+
+    assert ref.owner == "Canon-Regularis"
+    assert ref.name == "Shannon-bot"
+    assert ref.number == 7
+    assert ref.full_name == "Canon-Regularis/Shannon-bot"
+
+
+def test_repository_names_with_dots_and_underscores_parse() -> None:
+    ref = parse_pull_request_url("https://github.com/some-owner/my_repo.v2/pull/42")
+
+    assert ref.name == "my_repo.v2"
+    assert ref.number == 42
+
+
+def test_large_pull_request_numbers_parse() -> None:
+    assert parse_pull_request_url("https://github.com/a/b/pull/999999").number == 999999
+
+
+def test_issue_link_is_rejected_by_name() -> None:
+    with pytest.raises(UnparseableLinkError, match="is an issue link"):
+        parse_pull_request_url("https://github.com/Canon-Regularis/Shannon-bot/issues/7")
+
+
+@pytest.mark.parametrize(
+    ("link", "message"),
+    [
+        ("", "No link was given"),
+        ("   ", "No link was given"),
+        ("https://gitlab.com/owner/repo/pull/7", "is not a github.com link"),
+        ("https://github.example.com/owner/repo/pull/7", "is not a github.com link"),
+        ("ftp://github.com/owner/repo/pull/7", "is not an http or https link"),
+        ("https://github.com/owner", "does not contain an owner and repository"),
+        ("https://github.com/owner/repo", "does not point at a pull request"),
+        ("https://github.com/owner/repo/pull", "does not point at a pull request"),
+        ("https://github.com/owner/repo/pull/", "does not point at a pull request"),
+        ("https://github.com/owner/repo/commit/abc123", "does not point at a pull request"),
+        ("https://github.com/owner/repo/pull/abc", "has no valid number"),
+        ("https://github.com/owner/repo/pull/0", "has no valid number"),
+        ("https://github.com/owner/repo/pull/-1", "has no valid number"),
+        ("https://github.com/-bad/repo/pull/1", "is not a valid GitHub owner"),
+        ("not a link at all", "is not a github.com link"),
+    ],
+)
+def test_invalid_links_are_rejected(link: str, message: str) -> None:
+    with pytest.raises(UnparseableLinkError, match=message):
+        parse_pull_request_url(link)
+
+
+def test_git_suffix_is_stripped() -> None:
+    ref = parse_pull_request_url("https://github.com/owner/repo.git/pull/7")
+
+    assert ref.name == "repo"
+
+
+def test_owner_longer_than_github_allows_is_rejected() -> None:
+    with pytest.raises(UnparseableLinkError, match="is not a valid GitHub owner"):
+        parse_pull_request_url(f"https://github.com/{'a' * 40}/repo/pull/1")
