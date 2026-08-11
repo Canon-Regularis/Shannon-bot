@@ -47,57 +47,13 @@ class RepositorySnapshot:
         return f"{self.owner}/{self.name}"
 
 
-@dataclass(frozen=True, slots=True)
-class PullRequestSnapshot:
-    """Everything the sync path needs about a PR, independent of where it was read from.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ItemSnapshot:
+    """What every GitHub object the bot mirrors has in common.
 
-    Both the REST client and the webhook parser produce this, so downstream code never
-    branches on the source of the data.
-    """
-
-    repository: RepositorySnapshot
-    github_object_id: int
-    number: int
-    title: str
-    html_url: str
-    state: str
-    author: Actor | None = None
-    assignees: tuple[Actor, ...] = ()
-    reviewers: tuple[Actor, ...] = ()
-    labels: tuple[Label, ...] = ()
-    merged: bool = False
-    updated_at: datetime | None = None
-    action: str | None = None
-
-    object_type: ObjectType = field(default=ObjectType.PR, init=False)
-
-    @property
-    def label_names(self) -> tuple[str, ...]:
-        return tuple(label.name for label in self.labels)
-
-    @property
-    def display_state(self) -> str:
-        """Where the pull request stands: open, closed, or merged.
-
-        GitHub only reports open or closed and carries merging as a separate flag, so the
-        three-way answer is derived once here rather than in every caller.
-        """
-        if self.merged:
-            return "merged"
-        return (self.state or "open").lower()
-
-    @property
-    def priority(self) -> Priority:
-        """MVP 2 does not read priority off pull request labels; MVP 3 owns that."""
-        return Priority.UNSET
-
-
-@dataclass(frozen=True, slots=True)
-class IssueSnapshot:
-    """Everything the sync path needs about an issue, independent of where it was read from.
-
-    The REST client and the webhook parser both produce this, the same arrangement the pull
-    request side uses.
+    The REST client and the webhook parsers both produce these, so downstream code never
+    branches on where the data came from. Keyword-only so that a subclass can add its own
+    fields without having to care where they land in the ordering.
     """
 
     repository: RepositorySnapshot
@@ -110,10 +66,7 @@ class IssueSnapshot:
     assignees: tuple[Actor, ...] = ()
     labels: tuple[Label, ...] = ()
     updated_at: datetime | None = None
-    closed_at: datetime | None = None
     action: str | None = None
-
-    object_type: ObjectType = field(default=ObjectType.ISSUE, init=False)
 
     @property
     def label_names(self) -> tuple[str, ...]:
@@ -125,7 +78,39 @@ class IssueSnapshot:
 
     @property
     def closed(self) -> bool:
-        return self.display_state == "closed"
+        """Anything that is not open. A merged pull request counts, because it is closed too."""
+        return self.display_state != "open"
+
+    @property
+    def priority(self) -> Priority:
+        """Where the item's priority comes from, when it has one at all."""
+        return Priority.UNSET
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PullRequestSnapshot(ItemSnapshot):
+    reviewers: tuple[Actor, ...] = ()
+    merged: bool = False
+
+    object_type: ObjectType = field(default=ObjectType.PR, init=False)
+
+    @property
+    def display_state(self) -> str:
+        """Open, closed, or merged.
+
+        GitHub reports only open or closed and carries merging as a separate flag, so the
+        three-way answer is derived once here rather than in every caller.
+        """
+        if self.merged:
+            return "merged"
+        return super().display_state
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class IssueSnapshot(ItemSnapshot):
+    closed_at: datetime | None = None
+
+    object_type: ObjectType = field(default=ObjectType.ISSUE, init=False)
 
     @property
     def priority(self) -> Priority:
