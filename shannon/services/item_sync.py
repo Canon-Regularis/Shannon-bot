@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,15 +13,16 @@ from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.formatting import format_pull_request, pull_request_thread_name
 from shannon.discord_bot.threads import ThreadGateway
-from shannon.domain.enums import ActorRole, ObjectType, Status
-from shannon.domain.models import PullRequestSnapshot
+from shannon.domain.enums import ActorRole, Priority, Status
+from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.notifications import ReviewerNotifier
+from shannon.services.notifications import ActorNotifier
+from shannon.services.policies import SyncPolicy
 
 logger = logging.getLogger(__name__)
+
+SnapshotParser = Callable[[str, Mapping[str, Any]], TrackedSnapshot | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,51 +31,60 @@ class SyncResult:
     thread_id: int
     message_id: int | None
     created: bool
-    notified_reviewers: tuple[str, ...] = ()
+    notified: tuple[str, ...] = ()
 
 
-class PullRequestSyncService:
-    """The one path a pull request takes into Discord.
+class ItemSyncService:
+    """The one path a GitHub object takes into Discord.
 
-    Both the webhook pipeline and `/pr` call `sync`, so a manually synced PR and a webhook
-    synced PR cannot drift apart.
+    Pull requests and issues share this, and so do the webhook pipeline and the manual
+    commands. What differs between object types lives in the policy, which is the only way two
+    kinds of item can stay consistent without two copies of this.
     """
 
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
         threads: ThreadGateway,
-        notifier: ReviewerNotifier | None = None,
+        policy: SyncPolicy,
+        notifier: ActorNotifier | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
+        self._policy = policy
         self._notifier = notifier
 
-    async def sync(self, snapshot: PullRequestSnapshot) -> SyncResult | None:
-        """Bring Discord in line with a pull request snapshot.
+    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult | None:
+        """Bring Discord in line with a snapshot.
 
-        Returns None when the repository is not registered anywhere, which is the normal
-        outcome for a webhook from a repository this bot was never pointed at.
+        Returns None when the repository is not registered, or has no channel mapped for this
+        kind of item. Both are normal for a webhook the bot was never set up to care about.
         """
         state = await self._record(snapshot)
         if state is None:
             return None
 
-        # Discord is called outside the transaction. A slow or failing gateway would otherwise
-        # hold a database transaction open, and a rollback would throw away work that Discord
-        # had already done.
+        # Discord is called outside the transaction. Holding one open across a network call
+        # would let a slow gateway block the database, and a rollback would throw away work
+        # Discord had already done.
+        wants_locked = self._policy.locked(snapshot)
+
+        # Unlocking comes first, because a locked thread rejects edits and posts. Locking comes
+        # last for the same reason.
+        if wants_locked is False and state.thread_id is not None:
+            await self._threads.set_locked(thread_id=state.thread_id, locked=False)
+
+        name = self._policy.thread_name(snapshot)
         if state.thread_id is None:
             handle = await self._threads.create(
-                channel_id=state.channel_id,
-                name=pull_request_thread_name(snapshot),
-                content=state.metadata,
+                channel_id=state.channel_id, name=name, content=state.metadata
             )
             created = True
         else:
             handle = await self._threads.update(
                 thread_id=state.thread_id,
                 message_id=state.message_id,
-                name=pull_request_thread_name(snapshot),
+                name=name,
                 content=state.metadata,
             )
             created = False
@@ -89,15 +99,20 @@ class PullRequestSyncService:
                 guild_id=state.guild_id,
             )
 
+        if wants_locked is True:
+            await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
+
         return SyncResult(
             tracked_item_id=state.tracked_item_id,
             thread_id=handle.thread_id,
             message_id=handle.message_id,
             created=created,
-            notified_reviewers=notified,
+            notified=notified,
         )
 
-    async def _record(self, snapshot: PullRequestSnapshot) -> _SyncState | None:
+    async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | None:
+        object_type = self._policy.object_type
+
         async with self._sessionmaker() as session, session.begin():
             repository = await RepositoryStore(session).get_by_github_id(
                 snapshot.repository.github_repo_id
@@ -108,38 +123,42 @@ class PullRequestSyncService:
                 )
                 return None
 
-            channel = await ChannelMappingStore(session).get(repository.id, ObjectType.PR)
+            channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
             if channel is None:
                 logger.warning(
-                    "%s has no pull request channel mapping", snapshot.repository.full_name
+                    "%s has no channel mapped for %s, run /set_channel",
+                    snapshot.repository.full_name,
+                    object_type.value,
                 )
                 return None
 
             items = TrackedItemStore(session)
             item = await items.get(
                 repository_id=repository.id,
-                object_type=ObjectType.PR,
+                object_type=object_type,
                 github_object_id=snapshot.github_object_id,
             )
             if item is None:
                 item = await items.create(
                     repository_id=repository.id,
-                    object_type=ObjectType.PR,
+                    object_type=object_type,
                     github_object_id=snapshot.github_object_id,
                     github_object_number=snapshot.number,
                     github_url=snapshot.html_url,
                     title=snapshot.title,
                     github_state=snapshot.display_state,
                     status=Status.NOT_REVIEWED,
+                    priority=self._policy.priority_for(snapshot, Priority.UNSET),
                     github_updated_at=snapshot.updated_at,
                 )
-            else:
-                _apply(item, snapshot)
+            self._apply(item, snapshot)
 
-            await self._store_people(session, item.id, snapshot)
+            roles = self._policy.assignments(snapshot)
+            await self._store_people(session, item.id, roles)
+
+            logins = [actor.login for actors in roles.values() for actor in actors]
             mentions = await UserLinkStore(session).resolve_many(
-                guild_id=repository.discord_guild_id,
-                github_usernames=_everyone(snapshot),
+                guild_id=repository.discord_guild_id, github_usernames=logins
             )
 
             return _SyncState(
@@ -148,30 +167,30 @@ class PullRequestSyncService:
                 channel_id=channel.discord_channel_id,
                 thread_id=item.discord_thread_id,
                 message_id=item.discord_message_id,
-                metadata=format_pull_request(
+                metadata=self._policy.render(
                     snapshot, status=item.status, priority=item.priority, mentions=mentions
                 ),
             )
 
+    def _apply(self, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
+        item.title = snapshot.title
+        item.github_url = snapshot.html_url
+        item.github_object_number = snapshot.number
+        item.github_state = snapshot.display_state
+        item.status = self._policy.status_for(snapshot, item.status)
+        item.priority = self._policy.priority_for(snapshot, item.priority)
+        if snapshot.updated_at is not None:
+            item.github_updated_at = snapshot.updated_at
+
     async def _store_people(
-        self, session: AsyncSession, tracked_item_id: int, snapshot: PullRequestSnapshot
+        self,
+        session: AsyncSession,
+        tracked_item_id: int,
+        roles: Mapping[ActorRole, Sequence[Actor]],
     ) -> None:
         assignments = ItemAssignmentStore(session)
-        await assignments.replace(
-            tracked_item_id=tracked_item_id,
-            role=ActorRole.AUTHOR,
-            actors=[snapshot.author] if snapshot.author else [],
-        )
-        await assignments.replace(
-            tracked_item_id=tracked_item_id,
-            role=ActorRole.ASSIGNEE,
-            actors=snapshot.assignees,
-        )
-        await assignments.replace(
-            tracked_item_id=tracked_item_id,
-            role=ActorRole.REVIEWER,
-            actors=snapshot.reviewers,
-        )
+        for role, actors in roles.items():
+            await assignments.replace(tracked_item_id=tracked_item_id, role=role, actors=actors)
 
     async def _persist_thread(
         self, tracked_item_id: int, thread_id: int, message_id: int | None
@@ -184,6 +203,23 @@ class PullRequestSyncService:
             await items.set_discord_ids(item, thread_id=thread_id, message_id=message_id)
 
 
+def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> EventHandler:
+    """Adapt a webhook event to the sync service.
+
+    Only the parser differs between object types, so both kinds of event share this rather
+    than each having its own near-identical handler module.
+    """
+
+    async def handle(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        snapshot = parse(action, payload)
+        if snapshot is None:
+            return WebhookOutcome.IGNORED
+        result = await service.sync(snapshot)
+        return WebhookOutcome.PROCESSED if result is not None else WebhookOutcome.IGNORED
+
+    return handle
+
+
 @dataclass(frozen=True, slots=True)
 class _SyncState:
     """What the database step hands to the Discord step."""
@@ -194,32 +230,3 @@ class _SyncState:
     thread_id: int | None
     message_id: int | None
     metadata: str
-
-
-def _everyone(snapshot: PullRequestSnapshot) -> list[str]:
-    actors = [*snapshot.assignees, *snapshot.reviewers]
-    if snapshot.author is not None:
-        actors.append(snapshot.author)
-    return [actor.login for actor in actors]
-
-
-def _apply(item: TrackedItem, snapshot: PullRequestSnapshot) -> None:
-    item.title = snapshot.title
-    item.github_url = snapshot.html_url
-    item.github_object_number = snapshot.number
-    item.github_state = snapshot.display_state
-    if snapshot.updated_at is not None:
-        item.github_updated_at = snapshot.updated_at
-
-
-def build_pull_request_handler(service: PullRequestSyncService) -> EventHandler:
-    """Adapt the sync service to the webhook router's handler shape."""
-
-    async def handle(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
-        snapshot = parse_pull_request_event(action, payload)
-        if snapshot is None:
-            return WebhookOutcome.IGNORED
-        result = await service.sync(snapshot)
-        return WebhookOutcome.PROCESSED if result is not None else WebhookOutcome.IGNORED
-
-    return handle

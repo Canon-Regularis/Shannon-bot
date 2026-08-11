@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment, Repository
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ActorRole
-from shannon.services.pr_sync import PullRequestSyncService
+from shannon.services.item_sync import ItemSyncService
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -16,21 +16,21 @@ pytestmark = pytest.mark.integration
 
 async def test_a_requested_reviewer_is_pinged_once(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
     result = await notifying_sync_service.sync(pr_event("opened"))
 
     assert result is not None
-    assert result.notified_reviewers == ("monalisa",)
+    assert result.notified == ("monalisa",)
     assert len(threads.posts) == 1
     assert "monalisa" in threads.posts[0][1]
 
 
 async def test_a_second_webhook_does_not_ping_again(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -38,13 +38,13 @@ async def test_a_second_webhook_does_not_ping_again(
     result = await notifying_sync_service.sync(pr_event("edited", title="Renamed"))
 
     assert result is not None
-    assert result.notified_reviewers == ()
+    assert result.notified == ()
     assert len(threads.posts) == 1
 
 
 async def test_a_newly_added_reviewer_is_pinged_but_the_first_is_not(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -58,7 +58,7 @@ async def test_a_newly_added_reviewer_is_pinged_but_the_first_is_not(
     )
 
     assert result is not None
-    assert result.notified_reviewers == ("hubot",)
+    assert result.notified == ("hubot",)
     assert len(threads.posts) == 2
     assert "hubot" in threads.posts[1][1]
     assert "monalisa" not in threads.posts[1][1]
@@ -66,7 +66,7 @@ async def test_a_newly_added_reviewer_is_pinged_but_the_first_is_not(
 
 async def test_a_linked_reviewer_is_pinged_by_mention(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     db_session: AsyncSession,
     pr_event,
@@ -83,7 +83,7 @@ async def test_a_linked_reviewer_is_pinged_by_mention(
 
 async def test_an_unlinked_reviewer_is_named_in_plain_text(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -95,7 +95,7 @@ async def test_an_unlinked_reviewer_is_named_in_plain_text(
 
 async def test_a_linked_reviewer_appears_as_a_mention_in_the_metadata(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     db_session: AsyncSession,
     pr_event,
@@ -113,7 +113,7 @@ async def test_a_linked_reviewer_appears_as_a_mention_in_the_metadata(
 
 async def test_notification_stamps_the_assignment_row(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -134,7 +134,7 @@ async def test_notification_stamps_the_assignment_row(
 
 async def test_a_removed_and_re_requested_reviewer_is_pinged_again(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -146,18 +146,18 @@ async def test_a_removed_and_re_requested_reviewer_is_pinged_again(
     )
 
     assert result is not None
-    assert result.notified_reviewers == ("monalisa",)
+    assert result.notified == ("monalisa",)
     assert len(threads.posts) == 2
 
 
 async def test_a_pull_request_with_no_reviewers_pings_nobody(
     registered: Repository,
-    notifying_sync_service: PullRequestSyncService,
+    notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
     result = await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]))
 
     assert result is not None
-    assert result.notified_reviewers == ()
+    assert result.notified == ()
     assert threads.posts == []

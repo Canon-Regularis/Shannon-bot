@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
-from shannon.services.pr_sync import PullRequestSyncService, build_pull_request_handler
+from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.services.item_sync import ItemSyncService, build_item_handler
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -26,7 +27,7 @@ async def logins(session: AsyncSession, role: ActorRole) -> list[str]:
 
 async def test_a_new_pull_request_creates_one_tracked_item(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -47,7 +48,7 @@ async def test_a_new_pull_request_creates_one_tracked_item(
 
 async def test_a_new_pull_request_starts_not_reviewed_and_unset(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -61,7 +62,7 @@ async def test_a_new_pull_request_starts_not_reviewed_and_unset(
 
 async def test_the_thread_ids_are_written_back(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -75,7 +76,7 @@ async def test_the_thread_ids_are_written_back(
 
 async def test_an_existing_pull_request_updates_rather_than_duplicates(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -93,7 +94,7 @@ async def test_an_existing_pull_request_updates_rather_than_duplicates(
 
 async def test_the_discord_thread_id_survives_an_update(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     threads: FakeThreadGateway,
 ) -> None:
@@ -108,7 +109,7 @@ async def test_the_discord_thread_id_survives_an_update(
 
 async def test_the_same_payload_twice_changes_nothing(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
     threads: FakeThreadGateway,
@@ -124,7 +125,7 @@ async def test_the_same_payload_twice_changes_nothing(
 
 async def test_author_assignees_and_reviewers_are_all_stored(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -137,7 +138,7 @@ async def test_author_assignees_and_reviewers_are_all_stored(
 
 async def test_reassignment_replaces_the_previous_assignees(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -150,7 +151,7 @@ async def test_reassignment_replaces_the_previous_assignees(
 
 async def test_removing_every_assignee_leaves_none_behind(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -163,7 +164,7 @@ async def test_removing_every_assignee_leaves_none_behind(
 
 async def test_a_new_reviewer_is_added_without_dropping_the_first(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -181,7 +182,7 @@ async def test_a_new_reviewer_is_added_without_dropping_the_first(
 
 async def test_logins_are_stored_lowercased(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -192,7 +193,7 @@ async def test_logins_are_stored_lowercased(
 
 async def test_a_login_that_only_changes_case_is_not_re_added(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -204,7 +205,7 @@ async def test_a_login_that_only_changes_case_is_not_re_added(
 
 async def test_a_label_change_reaches_the_thread(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     threads: FakeThreadGateway,
 ) -> None:
@@ -221,7 +222,7 @@ async def test_a_label_change_reaches_the_thread(
 
 async def test_a_closed_pull_request_updates_the_stored_state(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -234,7 +235,7 @@ async def test_a_closed_pull_request_updates_the_stored_state(
 
 
 async def test_an_unregistered_repository_is_ignored(
-    sync_service: PullRequestSyncService, pr_event, db_session: AsyncSession
+    sync_service: ItemSyncService, pr_event, db_session: AsyncSession
 ) -> None:
     result = await sync_service.sync(pr_event("opened"))
 
@@ -243,7 +244,7 @@ async def test_an_unregistered_repository_is_ignored(
 
 
 async def test_a_repository_without_a_channel_mapping_is_ignored(
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     pr_event,
     db_session: AsyncSession,
 ) -> None:
@@ -262,9 +263,9 @@ async def test_a_repository_without_a_channel_mapping_is_ignored(
 
 
 async def test_the_webhook_handler_reports_processed_for_real_work(
-    registered: Repository, sync_service: PullRequestSyncService
+    registered: Repository, sync_service: ItemSyncService
 ) -> None:
-    handler = build_pull_request_handler(sync_service)
+    handler = build_item_handler(sync_service, parse_pull_request_event)
 
     outcome = await handler("opened", payloads.pull_request_event("opened"))
 
@@ -272,9 +273,9 @@ async def test_the_webhook_handler_reports_processed_for_real_work(
 
 
 async def test_the_webhook_handler_ignores_an_out_of_scope_action(
-    registered: Repository, sync_service: PullRequestSyncService
+    registered: Repository, sync_service: ItemSyncService
 ) -> None:
-    handler = build_pull_request_handler(sync_service)
+    handler = build_item_handler(sync_service, parse_pull_request_event)
 
     outcome = await handler("synchronize", payloads.pull_request_event("synchronize"))
 
@@ -282,10 +283,44 @@ async def test_the_webhook_handler_ignores_an_out_of_scope_action(
 
 
 async def test_the_webhook_handler_ignores_an_unregistered_repository(
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
 ) -> None:
-    handler = build_pull_request_handler(sync_service)
+    handler = build_item_handler(sync_service, parse_pull_request_event)
 
     outcome = await handler("opened", payloads.pull_request_event("opened"))
 
     assert outcome == "ignored"
+
+
+async def test_removing_a_reviewer_clears_them_from_the_thread(
+    registered: Repository,
+    sync_service: ItemSyncService,
+    pr_event,
+    db_session: AsyncSession,
+    threads: FakeThreadGateway,
+) -> None:
+    """The removed reviewer is named in the payload, and must not be put straight back."""
+    result = await sync_service.sync(pr_event("opened"))
+    assert result is not None
+
+    payload = payloads.pull_request_event("review_request_removed", requested_reviewers=[])
+    payload["requested_reviewer"] = payloads.user("monalisa", 200)
+    snapshot = parse_pull_request_event("review_request_removed", payload)
+    assert snapshot is not None
+    await sync_service.sync(snapshot)
+
+    assert await logins(db_session, ActorRole.REVIEWER) == []
+    assert "**Reviewers:** None" in threads.metadata_of(result.thread_id)
+
+
+async def test_removing_an_assignee_clears_them_from_the_thread(
+    registered: Repository,
+    sync_service: ItemSyncService,
+    pr_event,
+    db_session: AsyncSession,
+) -> None:
+    await sync_service.sync(pr_event("opened"))
+
+    await sync_service.sync(pr_event("unassigned", assignees=[]))
+
+    assert await logins(db_session, ActorRole.ASSIGNEE) == []

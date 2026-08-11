@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Status
-from shannon.services.pr_sync import PullRequestSyncService
+from shannon.services.item_sync import ItemSyncService
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration
@@ -16,7 +16,7 @@ MERGED = {"state": "closed", "merged": True, "merged_at": "2026-08-10T13:00:00Z"
 
 async def test_a_new_pull_request_shows_as_open(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -28,7 +28,7 @@ async def test_a_new_pull_request_shows_as_open(
 
 async def test_closing_updates_the_existing_thread(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -44,7 +44,7 @@ async def test_closing_updates_the_existing_thread(
 
 async def test_a_merged_pull_request_says_merged(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -57,7 +57,7 @@ async def test_a_merged_pull_request_says_merged(
 
 async def test_reopening_goes_back_to_open(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
@@ -72,7 +72,7 @@ async def test_reopening_goes_back_to_open(
 
 async def test_the_state_is_persisted(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -86,7 +86,7 @@ async def test_the_state_is_persisted(
 
 async def test_closing_does_not_touch_the_workflow_status(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -101,12 +101,12 @@ async def test_closing_does_not_touch_the_workflow_status(
 
 async def test_a_closed_thread_is_left_unlocked(
     registered: Repository,
-    sync_service: PullRequestSyncService,
+    sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    """MVP 1 does not lock anything. Locking arrives with /SET_DONE in MVP 3."""
+    """Issues lock when they close. Pull requests do not, until /SET_DONE arrives in MVP 3."""
     await sync_service.sync(pr_event("opened"))
     await sync_service.sync(pr_event("closed", state="closed"))
 
-    assert not hasattr(threads, "locked")
+    assert threads.locks == []
