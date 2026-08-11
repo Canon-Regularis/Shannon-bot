@@ -1,10 +1,12 @@
 # Changelog
 
-All notable changes to Shannon Bot. Entries are grouped by the GitHub issue they close.
+What has been built into Shannon Bot, and why. Each section is a stage of the plan, and most
+entries name the GitHub issue they close. Between stages there are checkpoints, where the work
+was going back over what already existed rather than adding anything new.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## MVP 1 — pull request sync
+## MVP 1: pull request sync
 
 Issues #2 to #26.
 
@@ -287,7 +289,7 @@ Issues #2 to #26.
 
 ---
 
-## MVP 2 — GitHub issue sync
+## MVP 2: GitHub issue sync
 
 Issues #27 to #53. No migration: `tracked_items.github_object_type`,
 `channel_mappings.object_type` and `tracked_items.priority` already carried `ISSUE` and priority
@@ -433,3 +435,56 @@ Three, each deliberate.
   added no revision. The migration-versus-models test still passes.
 - `ruff check` and `ruff format --check` clean.
 - No MVP 3 or MVP 4 functionality: no status or priority commands, no GitHub Projects sync.
+
+---
+
+## Checkpoint after MVP 2
+
+Pull requests and issues both sync now, so this was a good moment to stop adding features and
+go back over everything already built. Five things turned out to be broken. One of them was
+bad enough to undo work in front of people.
+
+### Fixed
+
+- **A webhook arriving late could undo what a newer one had already done.** GitHub does not
+  promise to deliver events in order, and a retry can turn up long after the event that
+  replaced it. Acting on one of those put an old title back. Worse, a late `closed` shut an
+  issue that had just been reopened, relocked its thread and set the status back to `DONE` in
+  front of whoever had reopened it. Anything describing an item as it was before what we
+  already have is now ignored.
+
+  Three things deliberately do not count as late. An item with no thread yet, because skipping
+  it would mean it never gets one. A missing timestamp on either side, because that proves
+  nothing either way. And two events sharing a timestamp, because a burst of changes inside one
+  second all carry the same one and all of them are real.
+
+- **A comment could have landed on the wrong item.** Comments and reviews are matched by number
+  rather than id, and nothing checked whether the match was an issue or a pull request.
+  Numbers are unique per repository on GitHub, so it would have taken odd data to actually go
+  wrong, but the payload says which kind it is and there was no reason not to use it.
+
+- **A bad Discord token failed quietly.** The connection died with nothing in the log while the
+  webhook endpoint carried on answering normally, so everything looked healthy and nothing
+  reached Discord. It now says why it stopped.
+
+- **An `assert` was doing real work in `ManualSync`.** Assertions disappear when Python runs
+  with `-O`, and this one was the only thing stopping a missing item number getting through. It
+  raises properly now.
+
+- **Events we ignore were being written to the database.** Repositories emit pushes, stars and
+  forks all day, and every one of them added a row to the delivery log. There is nothing to
+  protect against a repeat of something we would drop anyway, so only events that can actually
+  do something get recorded.
+
+### Changed
+
+- **A sync now says what it did.** `sync` used to return nothing to mean three separate
+  things, and the `/pr` and `/issue` commands had to guess which. An unregistered repository
+  and a late delivery would have produced the same, wrong, message. They have names now.
+- The database step hands back either work to do or the answer itself, so the object passed
+  between the two halves no longer carries fields that mean nothing in half the cases.
+- Dropped a return value nobody read and an argument that was always passed, on the assignment
+  store.
+- The rule about late deliveries lives on its own now, with quick tests of its own covering
+  timezone offsets and missing offsets. Reaching those through the database tests would have
+  been slow and roundabout.
