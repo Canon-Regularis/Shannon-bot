@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.errors import UnparseableLinkError
-from shannon.github.urls import parse_pull_request_url
+from shannon.github.urls import parse_issue_url, parse_pull_request_url
 
 
 @pytest.mark.parametrize(
@@ -80,3 +80,62 @@ def test_git_suffix_is_stripped() -> None:
 def test_owner_longer_than_github_allows_is_rejected() -> None:
     with pytest.raises(UnparseableLinkError, match="is not a valid GitHub owner"):
         parse_pull_request_url(f"https://github.com/{'a' * 40}/repo/pull/1")
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://github.com/Canon-Regularis/Shannon-bot/issues/12",
+        "http://github.com/Canon-Regularis/Shannon-bot/issues/12",
+        "https://www.github.com/Canon-Regularis/Shannon-bot/issues/12",
+        "github.com/Canon-Regularis/Shannon-bot/issues/12",
+        "https://github.com/Canon-Regularis/Shannon-bot/issues/12/",
+        "https://github.com/Canon-Regularis/Shannon-bot/issues/12#issuecomment-1",
+        "https://github.com/Canon-Regularis/Shannon-bot/issues/12?foo=1",
+        "  https://github.com/Canon-Regularis/Shannon-bot/issues/12  ",
+        "<https://github.com/Canon-Regularis/Shannon-bot/issues/12>",
+    ],
+)
+def test_valid_issue_links_parse(link: str) -> None:
+    ref = parse_issue_url(link)
+
+    assert ref.owner == "Canon-Regularis"
+    assert ref.name == "Shannon-bot"
+    assert ref.number == 12
+
+
+def test_a_pull_request_link_is_rejected_by_name() -> None:
+    with pytest.raises(UnparseableLinkError, match="is a pull request link"):
+        parse_issue_url("https://github.com/Canon-Regularis/Shannon-bot/pull/7")
+
+
+@pytest.mark.parametrize(
+    ("link", "message"),
+    [
+        ("", "No link was given"),
+        ("https://gitlab.com/owner/repo/issues/12", "is not a github.com link"),
+        ("ftp://github.com/owner/repo/issues/12", "is not an http or https link"),
+        ("https://github.com/owner", "does not contain an owner and repository"),
+        ("https://github.com/owner/repo", "does not point at an issue"),
+        ("https://github.com/owner/repo/issues", "does not point at an issue"),
+        ("https://github.com/owner/repo/issues/", "does not point at an issue"),
+        ("https://github.com/owner/repo/discussions/3", "does not point at an issue"),
+        ("https://github.com/owner/repo/issues/abc", "has no valid number"),
+        ("https://github.com/owner/repo/issues/0", "has no valid number"),
+        ("https://github.com/-bad/repo/issues/1", "is not a valid GitHub owner"),
+    ],
+)
+def test_invalid_issue_links_are_rejected(link: str, message: str) -> None:
+    with pytest.raises(UnparseableLinkError, match=message):
+        parse_issue_url(link)
+
+
+def test_the_two_parsers_reject_each_other_symmetrically() -> None:
+    """Pasting the wrong kind of link into either command says so rather than failing vaguely."""
+    issue_link = "https://github.com/o/r/issues/12"
+    pull_link = "https://github.com/o/r/pull/12"
+
+    with pytest.raises(UnparseableLinkError, match="is an issue link, not a pull request link"):
+        parse_pull_request_url(issue_link)
+    with pytest.raises(UnparseableLinkError, match="is a pull request link, not an issue link"):
+        parse_issue_url(pull_link)
