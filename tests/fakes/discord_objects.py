@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+class FakeResponse:
+    def __init__(self) -> None:
+        self.deferred = False
+        self.messages: list[str] = []
+
+    def is_done(self) -> bool:
+        return self.deferred or bool(self.messages)
+
+    async def defer(self, **_: Any) -> None:
+        self.deferred = True
+
+    async def send_message(self, content: str, **_: Any) -> None:
+        self.messages.append(content)
+
+
+class FakeFollowup:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, content: str, **_: Any) -> None:
+        self.messages.append(content)
+
+
+@dataclass
+class FakeRole:
+    name: str
+    id: int = 0
+
+
+@dataclass
+class FakeGuildPermissions:
+    administrator: bool = False
+
+
+@dataclass
+class FakeMember:
+    id: int = 1
+    name: str = "tester"
+    roles: list[FakeRole] = field(default_factory=list)
+    guild_permissions: FakeGuildPermissions = field(default_factory=FakeGuildPermissions)
+    global_name: str | None = None
+    nick: str | None = None
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class FakeInteraction:
+    """Enough of discord.Interaction for command callbacks to run without Discord."""
+
+    def __init__(
+        self,
+        *,
+        guild_id: int | None = 1,
+        channel_id: int | None = 10,
+        user: FakeMember | None = None,
+    ) -> None:
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.user = user or FakeMember()
+        self.response = FakeResponse()
+        self.followup = FakeFollowup()
+
+    @property
+    def replies(self) -> list[str]:
+        return self.response.messages + self.followup.messages
+
+    @property
+    def reply(self) -> str:
+        assert len(self.replies) == 1, f"expected one reply, got {self.replies}"
+        return self.replies[0]
