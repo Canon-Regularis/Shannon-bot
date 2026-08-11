@@ -488,3 +488,25 @@ bad enough to undo work in front of people.
 - The rule about late deliveries lives on its own now, with quick tests of its own covering
   timezone offsets and missing offsets. Reaching those through the database tests would have
   been slow and roundabout.
+
+### Second look
+
+Another pass over the whole repository, this time over the parts the first one had not read
+closely.
+
+- **A timestamp without an offset would have rendered wrong.** `datetime.timestamp()` reads a
+  naive value as local time, so a Discord timestamp would have been out by whatever offset the
+  host happened to run in, and silently different between machines. GitHub sends offsets, so
+  nothing was visibly broken, but the parser now settles the question at the boundary and
+  everything downstream gets an aware value. `domain/time.py` holds the one rule, shared with
+  the late-delivery check that needed the same thing.
+- **A merged pull request said it was not closed.** Merging closes a pull request on GitHub,
+  and `closed` answered on the displayed state, which reads `merged`. Nothing asked the
+  question yet, so nothing was wrong in practice, but it was waiting for whoever asked first.
+- Pull requests and issues now share one snapshot type for the ten fields they have in common,
+  rather than declaring them twice. Same for the code that reads those fields out of a GitHub
+  payload, which was two near-identical blocks that could have drifted into validating
+  slightly differently.
+- The message formatters were three pairs of nearly the same function: the two metadata
+  blocks, the two ping messages, and comments against reviews. Each pair is now one function
+  with the wording passed in, so the two kinds of thread cannot drift apart by accident.
