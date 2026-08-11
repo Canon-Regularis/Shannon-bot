@@ -554,3 +554,27 @@ handful.
   against itself, and of two different instants exactly one is stale against the other. Every
   rendered block fits inside Discord's limit, and a thread name is never empty whatever the
   title.
+
+### Fifth look
+
+Reading had run dry and the generated inputs had been tried, so this one looked at what the
+database is actually asked to do. Both findings were invisible at the scale anything had been
+tested at, and both get worse as a repository fills up.
+
+- **Every fetch of a tracked item quietly loaded its assignments.** The relationship was set to
+  load eagerly, and nothing ever read it: assignments are always fetched through the store, one
+  role at a time. It was two wasted round trips on the hottest path in the project, on every
+  webhook. Reaching for the relationship now raises instead, so anyone who wants it in future
+  finds out rather than paying for it silently. A repeat sync went from ten statements to
+  eight.
+- **Finding an item by number scanned the whole repository.** Comments and reviews look items
+  up that way, because GitHub reports a pull request's issue id in those payloads. The unique
+  constraint leads with the repository, so the planner was matching on that and then filtering
+  every row for the number. Fine with a handful of items, linear in the repository once there
+  are thousands. Migration `0002` adds the index, and the plan now matches on both columns with
+  nothing left to filter.
+- Both are pinned by tests that read the query log and the query plan, rather than trusting
+  that they stay fixed.
+
+MVP 2 needed no migration at all. This is the first one since the original schema, and it adds
+an index rather than changing anything that is stored.
