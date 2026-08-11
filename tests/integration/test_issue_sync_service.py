@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.github.webhooks.issues import parse_issue_event
-from shannon.services.item_sync import ItemSyncService, build_item_handler
+from shannon.services.item_sync import ItemSyncService, SyncOutcome, build_item_handler
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -199,7 +199,7 @@ async def test_an_issue_and_a_pull_request_can_share_a_number(
 async def test_an_unregistered_repository_is_ignored(
     issue_service: ItemSyncService, issue_event, db_session: AsyncSession
 ) -> None:
-    assert await issue_service.sync(issue_event("opened")) is None
+    assert (await issue_service.sync(issue_event("opened"))).outcome is SyncOutcome.NOT_TRACKED
     assert await count(db_session, TrackedItem) == 0
 
 
@@ -249,7 +249,7 @@ async def test_a_repository_with_no_channels_at_all_is_ignored(
     )
     await db_session.commit()
 
-    assert await issue_service.sync(issue_event("opened")) is None
+    assert (await issue_service.sync(issue_event("opened"))).outcome is SyncOutcome.NOT_TRACKED
     assert threads.created == []
 
 

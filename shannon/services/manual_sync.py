@@ -7,11 +7,16 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.repositories import RepositoryStore
-from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError, ShannonError
+from shannon.domain.errors import (
+    NotRegisteredError,
+    RepositoryMismatchError,
+    ShannonError,
+    UnparseableLinkError,
+)
 from shannon.domain.models import RepositoryRef, TrackedSnapshot
 from shannon.github.client import GitHubClient
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.item_sync import ItemSyncService
+from shannon.services.item_sync import ItemSyncService, SyncOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +83,21 @@ class ManualSync:
                 f"This server is registered to {repository.repo_name}, not {ref.full_name}."
             )
 
-        assert ref.number is not None  # the link parsers guarantee it
-        snapshot = await self._fetch(self._github, ref.owner, ref.name, ref.number)
+        if ref.number is None:
+            # The link parsers guarantee a number, so this is a contract breach rather than
+            # user error. Not an assert: those vanish under `python -O`.
+            raise UnparseableLinkError(f"{link!r} has no {self._noun} number")
 
+        snapshot = await self._fetch(self._github, ref.owner, ref.name, ref.number)
         result = await self._sync.sync(snapshot)
-        if result is None:
+
+        if result.outcome is SyncOutcome.NOT_TRACKED:
             raise SyncFailedError(
                 f"The repository is registered but has no {self._noun} channel mapped. "
                 "Run /set_channel first."
             )
+        if result.thread_id is None:
+            raise SyncFailedError(f"That {self._noun} could not be mirrored into Discord.")
 
         logger.info("manual sync of %s#%s by guild %s", ref.full_name, ref.number, guild_id)
         return ManualSyncOutcome(

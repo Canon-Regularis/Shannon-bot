@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.item_sync import ItemSyncService, build_item_handler
+from shannon.services.item_sync import ItemSyncService, SyncOutcome, build_item_handler
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -239,7 +239,7 @@ async def test_an_unregistered_repository_is_ignored(
 ) -> None:
     result = await sync_service.sync(pr_event("opened"))
 
-    assert result is None
+    assert result.outcome is SyncOutcome.NOT_TRACKED
     assert await count(db_session, TrackedItem) == 0
 
 
@@ -258,7 +258,7 @@ async def test_a_repository_without_a_channel_mapping_is_ignored(
     )
     await db_session.commit()
 
-    assert await sync_service.sync(pr_event("opened")) is None
+    assert (await sync_service.sync(pr_event("opened"))).outcome is SyncOutcome.NOT_TRACKED
     assert await count(db_session, TrackedItem) == 0
 
 

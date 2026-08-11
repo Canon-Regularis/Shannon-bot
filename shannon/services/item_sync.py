@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,19 +20,37 @@ from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.notifications import ActorNotifier
 from shannon.services.policies import SyncPolicy
+from shannon.services.staleness import is_stale
 
 logger = logging.getLogger(__name__)
 
 SnapshotParser = Callable[[str, Mapping[str, Any]], TrackedSnapshot | None]
 
 
+class SyncOutcome(StrEnum):
+    SYNCED = "synced"
+    NOT_TRACKED = "not_tracked"
+    STALE = "stale"
+
+
 @dataclass(frozen=True, slots=True)
 class SyncResult:
-    tracked_item_id: int
-    thread_id: int
-    message_id: int | None
-    created: bool
+    """What a sync did.
+
+    The outcome is explicit rather than signalled by returning nothing, because callers give
+    different answers for a repository nobody registered and an event that arrived late.
+    """
+
+    outcome: SyncOutcome
+    tracked_item_id: int | None = None
+    thread_id: int | None = None
+    message_id: int | None = None
+    created: bool = False
     notified: tuple[str, ...] = ()
+
+    @property
+    def synced(self) -> bool:
+        return self.outcome is SyncOutcome.SYNCED
 
 
 class ItemSyncService:
@@ -54,15 +73,13 @@ class ItemSyncService:
         self._policy = policy
         self._notifier = notifier
 
-    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult | None:
-        """Bring Discord in line with a snapshot.
-
-        Returns None when the repository is not registered, or has no channel mapped for this
-        kind of item. Both are normal for a webhook the bot was never set up to care about.
-        """
-        state = await self._record(snapshot)
-        if state is None:
-            return None
+    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult:
+        """Bring Discord in line with a snapshot."""
+        decision = await self._record(snapshot)
+        # The database step either hands over work to do or answers on its own.
+        if isinstance(decision, SyncResult):
+            return decision
+        state = decision
 
         # Discord is called outside the transaction. Holding one open across a network call
         # would let a slow gateway block the database, and a rollback would throw away work
@@ -74,21 +91,7 @@ class ItemSyncService:
         if wants_locked is False and state.thread_id is not None:
             await self._threads.set_locked(thread_id=state.thread_id, locked=False)
 
-        name = self._policy.thread_name(snapshot)
-        if state.thread_id is None:
-            handle = await self._threads.create(
-                channel_id=state.channel_id, name=name, content=state.metadata
-            )
-            created = True
-        else:
-            handle = await self._threads.update(
-                thread_id=state.thread_id,
-                message_id=state.message_id,
-                name=name,
-                content=state.metadata,
-            )
-            created = False
-
+        handle, created = await self._write_thread(state, self._policy.thread_name(snapshot))
         await self._persist_thread(state.tracked_item_id, handle.thread_id, handle.message_id)
 
         notified: tuple[str, ...] = ()
@@ -103,6 +106,7 @@ class ItemSyncService:
             await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
 
         return SyncResult(
+            outcome=SyncOutcome.SYNCED,
             tracked_item_id=state.tracked_item_id,
             thread_id=handle.thread_id,
             message_id=handle.message_id,
@@ -110,7 +114,22 @@ class ItemSyncService:
             notified=notified,
         )
 
-    async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | None:
+    async def _write_thread(self, state: _SyncState, name: str):
+        if state.thread_id is None:
+            handle = await self._threads.create(
+                channel_id=state.channel_id, name=name, content=state.metadata
+            )
+            return handle, True
+
+        handle = await self._threads.update(
+            thread_id=state.thread_id,
+            message_id=state.message_id,
+            name=name,
+            content=state.metadata,
+        )
+        return handle, False
+
+    async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | SyncResult:
         object_type = self._policy.object_type
 
         async with self._sessionmaker() as session, session.begin():
@@ -121,7 +140,7 @@ class ItemSyncService:
                 logger.debug(
                     "%s is not registered to any guild, ignoring", snapshot.repository.full_name
                 )
-                return None
+                return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
             channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
             if channel is None:
@@ -130,7 +149,7 @@ class ItemSyncService:
                     snapshot.repository.full_name,
                     object_type.value,
                 )
-                return None
+                return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
             items = TrackedItemStore(session)
             item = await items.get(
@@ -138,6 +157,26 @@ class ItemSyncService:
                 object_type=object_type,
                 github_object_id=snapshot.github_object_id,
             )
+
+            if item is not None and is_stale(
+                has_thread=item.discord_thread_id is not None,
+                incoming=snapshot.updated_at,
+                stored=item.github_updated_at,
+            ):
+                logger.info(
+                    "ignoring a stale %s.%s for %s#%s",
+                    object_type.value,
+                    snapshot.action,
+                    snapshot.repository.full_name,
+                    snapshot.number,
+                )
+                return SyncResult(
+                    outcome=SyncOutcome.STALE,
+                    tracked_item_id=item.id,
+                    thread_id=item.discord_thread_id,
+                    message_id=item.discord_message_id,
+                )
+
             if item is None:
                 item = await items.create(
                     repository_id=repository.id,
@@ -215,18 +254,18 @@ def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> Event
         if snapshot is None:
             return WebhookOutcome.IGNORED
         result = await service.sync(snapshot)
-        return WebhookOutcome.PROCESSED if result is not None else WebhookOutcome.IGNORED
+        return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED
 
     return handle
 
 
 @dataclass(frozen=True, slots=True)
 class _SyncState:
-    """What the database step hands to the Discord step."""
+    """Work for the Discord step, only ever built when there is work to do."""
 
     tracked_item_id: int
     guild_id: int
     channel_id: int
+    metadata: str
     thread_id: int | None
     message_id: int | None
-    metadata: str
