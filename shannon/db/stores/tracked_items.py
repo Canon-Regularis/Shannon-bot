@@ -29,6 +29,23 @@ class TrackedItemStore:
     async def get_by_id(self, tracked_item_id: int) -> TrackedItem | None:
         return await self._session.get(TrackedItem, tracked_item_id)
 
+    async def get_by_number(self, *, repository_id: int, number: int) -> TrackedItem | None:
+        """Find an item by its GitHub number, whatever kind of item it is.
+
+        Issues and pull requests share one numbering sequence per repository, so a number
+        identifies exactly one of them. This exists because `issue_comment` payloads report the
+        issue id even for a pull request, which never matches the pull request id stored
+        against the tracked item. The number matches for both.
+        """
+        return await self._session.scalar(
+            select(TrackedItem)
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_number == number,
+            )
+            .order_by(TrackedItem.id)
+        )
+
     async def create(
         self,
         *,
