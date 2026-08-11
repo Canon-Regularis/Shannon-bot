@@ -533,3 +533,24 @@ past. Both findings were crashes reachable by ordinary use.
   error.
 - Dropped `TrackedItemStore.create`, which nothing called once the race-safe version replaced
   it.
+
+### Fourth look
+
+Three read-throughs had stopped turning anything up, so this one changed method. Property
+tests generate inputs rather than relying on the ones someone thought to write down, and
+`tests/unit/test_properties.py` states what should hold for every input rather than for a
+handful.
+
+- **`/pr [` crashed the command.** An unbalanced square bracket looks like a malformed IPv6
+  host, so the URL parser raised `ValueError` instead of answering. The command only expects
+  its own error type, so the interaction failed with nothing useful shown. Hypothesis found it
+  on its first run, from a single character. Any link the parser cannot read now comes back the
+  same way.
+- The four webhook parsers are now checked against arbitrary generated JSON, several hundred
+  shapes each. They already held up, which is worth knowing rather than assuming: these read
+  untrusted input off the network, and one that raises takes the request down with it.
+- Properties now cover the things that are easy to believe and hard to check by reading. Label
+  order never changes the priority. Adding labels never lowers it. A snapshot is never stale
+  against itself, and of two different instants exactly one is stale against the other. Every
+  rendered block fits inside Discord's limit, and a thread name is never empty whatever the
+  title.
