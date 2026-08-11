@@ -42,7 +42,7 @@ Issues #2 to #26.
   - `EventRouter` maps an event type to the handler that owns it, so the HTTP route knows
     nothing about pull requests.
   - Unsupported events and unsupported actions return 200 with `status: ignored`. A non-2xx
-    would make GitHub mark the delivery failed and retry something the bot will never handle.
+    would have GitHub record a failure for something the bot was never going to act on.
   - GitHub's one-off `ping` event is acknowledged.
   - Missing headers, non-JSON bodies and non-object bodies return 400 with a specific message.
 
@@ -60,8 +60,8 @@ Issues #2 to #26.
   - The claim is a single `INSERT ... ON CONFLICT DO NOTHING RETURNING`, so two deliveries
     racing on the same ID cannot both win. Verified with eight concurrent claims against a real
     database.
-  - A handler that raises releases its claim, because GitHub retries failed deliveries with the
-    same ID and that retry is real work rather than a duplicate.
+  - A handler that raises releases its claim, so the delivery is not remembered as done. This
+    was built expecting GitHub to send it again, which it does not. See the checkpoint below.
   - Duplicates are logged.
 
 - **Pull request URL parser** (closes #7)
@@ -447,10 +447,10 @@ bad enough to undo work in front of people.
 ### Fixed
 
 - **A webhook arriving late could undo what a newer one had already done.** GitHub does not
-  promise to deliver events in order, and a retry can turn up long after the event that
-  replaced it. Acting on one of those put an old title back. Worse, a late `closed` shut an
-  issue that had just been reopened, relocked its thread and set the status back to `DONE` in
-  front of whoever had reopened it. Anything describing an item as it was before what we
+  promise to deliver events in order, and a redelivery someone triggers by hand can turn up
+  long after the event that replaced it. Acting on one of those put an old title back. Worse, a
+  late `closed` shut an issue that had just been reopened, relocked its thread and set the
+  status back to `DONE` in front of whoever had reopened it. Anything describing an item as it was before what we
   already have is now ignored.
 
   Three things deliberately do not count as late. An item with no thread yet, because skipping
@@ -526,8 +526,8 @@ past. Both findings were crashes reachable by ordinary use.
   GitHub fires `opened` and `labeled` together for anything opened with labels, and they carry
   different delivery ids, so the duplicate guard passes both. Both then found no tracked item
   and both tried to insert one. A burst of six left five failing on the unique constraint,
-  which in production means a run of 500s and GitHub retrying. The insert carries its own
-  conflict handling now, the same way the delivery log already did.
+  which in production means a run of 500s and those events gone for good. The insert carries
+  its own conflict handling now, the same way the delivery log already did.
 - **Two people running `/register` at the same moment** hit the same shape of problem, and the
   loser now hears the same thing it would have heard a second later rather than an unhandled
   error.
@@ -578,3 +578,64 @@ tested at, and both get worse as a repository fills up.
 
 MVP 2 needed no migration at all. This is the first one since the original schema, and it adds
 an index rather than changing anything that is stored.
+
+### Sixth look
+
+The five looks before this one went after bugs in the code. This one found something else: an
+assumption the code had been built on that is simply not true.
+
+**GitHub does not redeliver failed webhooks.** Their documentation says so outright, and a
+delivery counts as failed if the endpoint takes more than ten seconds. Four places in this
+project said otherwise, two of them code comments justifying their logic with it.
+
+That mattered because the handler did all of its work inside those ten seconds. A single
+`issues.opened` makes up to eight Discord calls, and `thread.edit(name=...)` is rate limited to
+two renames per ten minutes, where discord.py sleeps on the 429 rather than failing. So a busy
+moment, a Discord hiccup, or one rename too many meant GitHub timed out, recorded a failure and
+never tried again. Only a hash of the body was stored, so it could not be replayed from this
+side either. The event was gone.
+
+- **The endpoint no longer does the work.** It checks the signature, writes the delivery down
+  and answers, which takes a couple of milliseconds and touches nothing that can be slow. A 200
+  now means the delivery is safely recorded, not that the thread appeared. Where it did appear
+  is in the worker's log and in the row's own status.
+- **`webhook_events` became a queue rather than a log.** Migration `0003` adds the body, the
+  attempt count, when it is next eligible, its lease and the last error. Everything is nullable
+  or defaulted, so it applies to a live table with nothing to backfill.
+- **A background worker does the work.** It runs beside the bot in the same process, takes a
+  batch and handles it one delivery at a time in arrival order, so two events for the same item
+  keep theirs. A failure waits and comes back, doubling each time up to fifteen minutes, and
+  gives up after ten attempts with the reason recorded. That rides out roughly two hours of
+  Discord being unreachable. Each delivery has its own timeout, so a handler that hangs on a
+  rate limit cannot wedge everything behind it.
+- **A worker that dies does not strand its work.** Deliveries are leased rather than simply
+  marked, so anything a killed process was holding comes back once the lease runs out. Leasing
+  uses `SELECT ... FOR UPDATE SKIP LOCKED`, which means a second worker takes different rows
+  rather than the same ones. Only one runs today; this keeps a second one from being a problem
+  later.
+- **Bodies are pruned after seven days.** They hold issue titles, comment text and author names
+  from private repositories, so they do not sit there indefinitely. Anything still waiting is
+  left alone however old it is.
+
+Ordering across deliveries was already handled, by the staleness guard from the first look.
+That was written for a rare reordering and is now load bearing.
+
+### Also in this pass
+
+Three things that had been noticed before and left, plus two found on the way through.
+
+- **Two people running `/set_channel` at once** would have both found nothing mapped and both
+  inserted, and the second would have hit the unique constraint. Same shape as the two races
+  already fixed, and the last one of them.
+- **A message trimmed to Discord's limit could be cut mid-markdown**, leaving `**` hanging open
+  and everything after it rendering as one long bold run. Trimming now stops at a line boundary,
+  since each line is built balanced on its own.
+- **A label with a backtick in its name broke the code span it was rendered into**, and the rest
+  of the line came out as prose. GitHub allows those. The fence is now longer than any run of
+  backticks inside the name, which is markdown's own answer to this.
+- Every deadline in the delivery table is now set and read against the database clock. Two of
+  them were being written from the application's, which would have a worker on a host whose
+  clock had drifted hold a lease for longer or shorter than it believed.
+- The property tests no longer fail on timing. Hypothesis fails an example that runs longer
+  than its deadline, and the first call into a module pays for importing it, so a green suite
+  could go red on the same code. What those tests assert is what holds, not how fast.
