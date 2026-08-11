@@ -34,3 +34,21 @@ async def register_repository(
     )
     await session.commit()
     return repository
+
+
+async def map_channel(
+    session: AsyncSession,
+    repository: Repository,
+    object_type: ObjectType,
+    *,
+    channel_id: int,
+) -> None:
+    """The state /set_channel leaves behind."""
+    session.add(
+        ChannelMapping(
+            repository_id=repository.id,
+            object_type=object_type,
+            discord_channel_id=channel_id,
+        )
+    )
+    await session.commit()
