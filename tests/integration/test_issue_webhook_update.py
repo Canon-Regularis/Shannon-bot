@@ -46,7 +46,7 @@ async def test_an_edit_updates_the_existing_thread(
         delivery="i1",
     )
 
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     assert len(threads.created) == 1
     assert "**Issue Name:** Locking is missing on close" in threads.metadata_of(
         threads.created[0].thread_id
@@ -167,7 +167,7 @@ async def test_a_repeated_update_delivery_is_dropped(
     first = await deliver(tracked, "issues", payload, delivery="i1")
     second = await deliver(tracked, "issues", payload, delivery="i1")
 
-    assert first.json()["status"] == "processed"
+    assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(threads.created) == 1
 

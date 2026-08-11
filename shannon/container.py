@@ -29,7 +29,7 @@ from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.channels import ChannelMappingService
-from shannon.services.idempotency import WebhookIdempotencyGuard
+from shannon.services.delivery_queue import WebhookDeliveryQueue
 from shannon.services.item_sync import ItemSyncService, build_item_handler
 from shannon.services.linking import UserLinkingService
 from shannon.services.manual_sync import ManualSync, build_issue_sync, build_pull_request_sync
@@ -37,6 +37,7 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.notifications import ActorNotifier
 from shannon.services.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.worker import DeliveryWorker, WorkerSettings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,8 @@ class Container:
     github: GitHubClient
     threads: ThreadGateway
     gate: PermissionGate
-    delivery_guard: WebhookIdempotencyGuard
+    queue: WebhookDeliveryQueue
+    worker: DeliveryWorker
     registration: RepositoryRegistrationService
     linking: UserLinkingService
     channels: ChannelMappingService
@@ -121,6 +123,8 @@ def build_container(
     comments = ItemNoteMirror(sessionmaker, threads, render=format_comment)
     reviews = ItemNoteMirror(sessionmaker, threads, render=format_review)
 
+    queue = WebhookDeliveryQueue(sessionmaker)
+
     event_router = EventRouter()
     event_router.register("pull_request", build_item_handler(pr_sync, parse_pull_request_event))
     event_router.register("issues", build_item_handler(issue_sync, parse_issue_event))
@@ -134,7 +138,8 @@ def build_container(
         github=github,
         threads=threads,
         gate=PermissionGate(settings),
-        delivery_guard=WebhookIdempotencyGuard(sessionmaker),
+        queue=queue,
+        worker=DeliveryWorker(queue, event_router, WorkerSettings.from_settings(settings)),
         registration=RepositoryRegistrationService(sessionmaker, github),
         linking=UserLinkingService(sessionmaker),
         channels=ChannelMappingService(sessionmaker),

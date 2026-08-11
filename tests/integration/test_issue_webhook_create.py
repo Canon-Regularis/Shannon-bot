@@ -42,7 +42,7 @@ async def test_an_opened_issue_creates_a_thread(
     response = await deliver(client, "issues", payloads.issue_event("opened"))
 
     assert response.status_code == 200
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     assert len(threads.created) == 1
     assert threads.created[0].channel_id == 98
 
@@ -140,7 +140,7 @@ async def test_the_same_delivery_twice_creates_one_thread(
     first = await deliver(client, "issues", payload, delivery="same")
     second = await deliver(client, "issues", payload, delivery="same")
 
-    assert first.json()["status"] == "processed"
+    assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(threads.created) == 1
     assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 1
@@ -177,9 +177,9 @@ async def test_an_issue_from_another_repository_is_ignored(
     payload = payloads.issue_event("opened")
     payload["repository"]["id"] = 999999
 
-    response = await deliver(client, "issues", payload)
+    await deliver(client, "issues", payload)
 
-    assert response.json()["status"] == "ignored"
+    assert await client.outcome_of("delivery-1") == "ignored"
     assert threads.created == []
 
 

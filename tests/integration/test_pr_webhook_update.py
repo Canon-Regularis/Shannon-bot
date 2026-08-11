@@ -51,7 +51,7 @@ async def test_an_edit_updates_the_existing_thread(
         delivery="d1",
     )
 
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     assert len(threads.created) == 1
     metadata = threads.metadata_of(threads.created[0].thread_id)
     assert "**PR Name:** Now with signature checks" in metadata
@@ -205,6 +205,6 @@ async def test_a_repeated_update_delivery_is_dropped(
     first = await deliver(tracked, "pull_request", payload, delivery="d1")
     second = await deliver(tracked, "pull_request", payload, delivery="d1")
 
-    assert first.json()["status"] == "processed"
+    assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(threads.created) == 1

@@ -38,6 +38,20 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # The webhook endpoint only writes a delivery down; these govern the worker that then acts
+    # on it. The defaults ride out roughly two hours of Discord being unreachable.
+    worker_poll_seconds: float = Field(default=2.0, gt=0)
+    worker_batch_size: int = Field(default=10, gt=0)
+    worker_max_attempts: int = Field(default=10, gt=0)
+    worker_max_backoff_seconds: float = Field(default=900.0, gt=0)
+    # How long a leased delivery stays claimed. A worker killed mid-delivery leaves its rows
+    # untouched until this passes, so this is also how long that work waits.
+    worker_lease_seconds: float = Field(default=300.0, gt=0)
+    worker_delivery_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Payloads hold issue titles, comment bodies and author names, so finished deliveries do not
+    # sit around indefinitely.
+    delivery_retention_days: int = Field(default=7, gt=0)
+
     @field_validator("log_level")
     @classmethod
     def _upper(cls, value: str) -> str:

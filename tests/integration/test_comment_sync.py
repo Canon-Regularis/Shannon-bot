@@ -51,7 +51,7 @@ async def test_a_comment_on_an_issue_reaches_its_thread(
         tracked, "issue_comment", payloads.issue_comment_event(), delivery="c1"
     )
 
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     posted = [
         content for thread_id, content in threads.posts if thread_id == thread_for(threads, 98)
     ]
@@ -81,7 +81,7 @@ async def test_a_comment_on_a_pull_request_reaches_the_pull_request_thread(
 
     response = await deliver(tracked, "issue_comment", payload, delivery="c1")
 
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     assert threads.posts[-1][0] == thread_for(threads, 99)
 
 
@@ -104,9 +104,9 @@ async def test_a_comment_on_an_untracked_item_is_ignored(
     before = len(threads.posts)
     payload = payloads.issue_comment_event(on=payloads.issue(id=999, number=999))
 
-    response = await deliver(tracked, "issue_comment", payload, delivery="c1")
+    await deliver(tracked, "issue_comment", payload, delivery="c1")
 
-    assert response.json()["status"] == "ignored"
+    assert await tracked.outcome_of("c1") == "ignored"
     assert len(threads.posts) == before
 
 
@@ -117,9 +117,9 @@ async def test_a_comment_from_another_repository_is_ignored(
     payload = payloads.issue_comment_event()
     payload["repository"]["id"] = 999999
 
-    response = await deliver(tracked, "issue_comment", payload, delivery="c1")
+    await deliver(tracked, "issue_comment", payload, delivery="c1")
 
-    assert response.json()["status"] == "ignored"
+    assert await tracked.outcome_of("c1") == "ignored"
     assert len(threads.posts) == before
 
 
@@ -156,7 +156,7 @@ async def test_a_repeated_comment_delivery_posts_once(
     first = await deliver(tracked, "issue_comment", payload, delivery="c1")
     second = await deliver(tracked, "issue_comment", payload, delivery="c1")
 
-    assert first.json()["status"] == "processed"
+    assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(threads.posts) == before + 1
 
@@ -190,7 +190,7 @@ async def test_a_comment_on_a_closed_issue_still_lands(
         tracked, "issue_comment", payloads.issue_comment_event(), delivery="c1"
     )
 
-    assert response.json()["status"] == "processed"
+    assert response.json()["status"] == "accepted"
     assert len(threads.posts) == before + 1
 
 
@@ -210,7 +210,7 @@ class TestReviewMirroring:
             tracked, "pull_request_review", payloads.pull_request_review_event(), delivery="r1"
         )
 
-        assert response.json()["status"] == "processed"
+        assert response.json()["status"] == "accepted"
         assert threads.posts[-1][0] == thread_for(threads, 99)
         assert "**monalisa** approved this pull request" in threads.posts[-1][1]
 
@@ -262,9 +262,9 @@ class TestReviewMirroring:
         payload = payloads.pull_request_review_event()
         payload["pull_request"]["number"] = 999
 
-        response = await deliver(tracked, "pull_request_review", payload, delivery="r1")
+        await deliver(tracked, "pull_request_review", payload, delivery="r1")
 
-        assert response.json()["status"] == "ignored"
+        assert await tracked.outcome_of("r1") == "ignored"
         assert len(threads.posts) == before
 
     async def test_a_dismissed_review_is_not_mirrored(
@@ -291,7 +291,7 @@ class TestReviewMirroring:
         first = await deliver(tracked, "pull_request_review", payload, delivery="r1")
         second = await deliver(tracked, "pull_request_review", payload, delivery="r1")
 
-        assert first.json()["status"] == "processed"
+        assert first.json()["status"] == "accepted"
         assert second.json()["status"] == "duplicate"
         assert len(threads.posts) == before + 1
 

@@ -1,24 +1,46 @@
 from __future__ import annotations
 
-from sqlalchemy import delete, func, update
+from collections.abc import Sequence
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy import Interval, cast, delete, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from shannon.db.models import WebhookEvent
+from shannon.domain.enums import DeliveryStatus
+
+TERMINAL = (DeliveryStatus.PROCESSED, DeliveryStatus.IGNORED, DeliveryStatus.FAILED)
+
+# A stack trace stringified from a handler can be enormous, and this column exists to be read
+# by a person.
+ERROR_LIMIT = 2000
+
+
+def _interval(value: timedelta) -> ColumnElement[timedelta]:
+    """A timedelta as something the database can add to a timestamp."""
+    return cast(literal(value), Interval)
 
 
 class WebhookEventStore:
-    """Data access for the delivery log."""
+    """Data access for the delivery queue."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def claim(
-        self, delivery_id: str, event_type: str, payload_hash: str, status: str
+    async def enqueue(
+        self,
+        *,
+        delivery_id: str,
+        event_type: str,
+        payload_hash: str,
+        payload: dict[str, Any],
     ) -> bool:
-        """Record a delivery, returning False if it was already recorded.
+        """Write a delivery down, returning False if it was already here.
 
-        The insert carries its own conflict handling so two workers racing on the same delivery
+        The insert carries its own conflict handling so two deliveries racing on the same id
         cannot both win. A read-then-write check would let both through.
         """
         statement = (
@@ -27,7 +49,9 @@ class WebhookEventStore:
                 github_delivery_id=delivery_id,
                 event_type=event_type,
                 payload_hash=payload_hash,
-                status=status,
+                payload=payload,
+                status=DeliveryStatus.PENDING,
+                attempts=0,
             )
             .on_conflict_do_nothing(index_elements=[WebhookEvent.github_delivery_id])
             .returning(WebhookEvent.id)
@@ -35,15 +59,98 @@ class WebhookEventStore:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none() is not None
 
-    async def mark(self, delivery_id: str, status: str) -> None:
-        await self._session.execute(
-            update(WebhookEvent)
-            .where(WebhookEvent.github_delivery_id == delivery_id)
-            .values(status=status, processed_at=func.now())
+    async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[WebhookEvent]:
+        """Take up to `limit` deliveries to work on, in the order they arrived.
+
+        `SKIP LOCKED` means a second worker picks up different rows rather than blocking, so
+        running more than one stays correct even though only one runs today.
+
+        A payload is required, which excludes rows written before this table became a queue.
+        A row still PROCESSING past its lease is taken back, which is how work belonging to a
+        worker that died gets retried instead of sitting there forever.
+        """
+        now = func.now()
+        eligible = (
+            select(WebhookEvent.id)
+            .where(
+                WebhookEvent.payload.is_not(None),
+                or_(
+                    (WebhookEvent.status == DeliveryStatus.PENDING)
+                    & (
+                        WebhookEvent.next_attempt_at.is_(None)
+                        | (WebhookEvent.next_attempt_at <= now)
+                    ),
+                    (WebhookEvent.status == DeliveryStatus.PROCESSING)
+                    & WebhookEvent.locked_until.is_not(None)
+                    & (WebhookEvent.locked_until <= now),
+                ),
+            )
+            .order_by(WebhookEvent.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
         )
 
-    async def release(self, delivery_id: str) -> None:
-        """Drop the record so a retry of a failed delivery is not mistaken for a duplicate."""
+        # Claiming in the same statement that selects, so nothing can slip between the two.
+        # Every deadline in this table is written and read against the database clock; setting
+        # one from the application clock would have a worker on a drifted host hold its lease
+        # for longer or shorter than it believes.
+        claimed = (
+            await self._session.scalars(
+                update(WebhookEvent)
+                .where(WebhookEvent.id.in_(eligible))
+                .values(status=DeliveryStatus.PROCESSING, locked_until=now + _interval(lease_for))
+                .returning(WebhookEvent)
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
+
+        # RETURNING makes no promise about order, and the order is the point.
+        return sorted(claimed, key=lambda row: row.id)
+
+    async def finish(self, event_id: int, status: DeliveryStatus) -> None:
         await self._session.execute(
-            delete(WebhookEvent).where(WebhookEvent.github_delivery_id == delivery_id)
+            update(WebhookEvent)
+            .where(WebhookEvent.id == event_id)
+            .values(status=status, processed_at=func.now(), locked_until=None, last_error=None)
         )
+
+    async def retry_later(self, event_id: int, *, error: str, delay: timedelta) -> None:
+        await self._session.execute(
+            update(WebhookEvent)
+            .where(WebhookEvent.id == event_id)
+            .values(
+                status=DeliveryStatus.PENDING,
+                attempts=WebhookEvent.attempts + 1,
+                next_attempt_at=func.now() + _interval(delay),
+                locked_until=None,
+                last_error=error[:ERROR_LIMIT],
+            )
+        )
+
+    async def give_up(self, event_id: int, *, error: str) -> None:
+        await self._session.execute(
+            update(WebhookEvent)
+            .where(WebhookEvent.id == event_id)
+            .values(
+                status=DeliveryStatus.FAILED,
+                attempts=WebhookEvent.attempts + 1,
+                processed_at=func.now(),
+                locked_until=None,
+                last_error=error[:ERROR_LIMIT],
+            )
+        )
+
+    async def prune(self, *, keep_for: timedelta) -> int:
+        """Drop finished deliveries older than `keep_for`.
+
+        The bodies hold issue titles and comment text from private repositories, so they do not
+        sit here indefinitely. Anything still pending is left alone however old it is.
+        """
+        result = await self._session.execute(
+            delete(WebhookEvent).where(
+                WebhookEvent.status.in_(TERMINAL),
+                WebhookEvent.processed_at < func.now() - _interval(keep_for),
+            )
+        )
+        return result.rowcount or 0

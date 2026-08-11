@@ -60,9 +60,13 @@ PING_EVENT = "ping"
 
 
 class WebhookOutcome(StrEnum):
-    PROCESSED = "processed"
+    # What the endpoint answers: the delivery is written down and will be acted on behind the
+    # response. Nothing has reached Discord yet at that point.
+    ACCEPTED = "accepted"
     IGNORED = "ignored"
     DUPLICATE = "duplicate"
+    # What a handler answers once the worker runs it.
+    PROCESSED = "processed"
 
 
 class EventHandler(Protocol):
