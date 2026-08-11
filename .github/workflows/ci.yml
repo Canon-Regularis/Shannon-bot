@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default. Any job needing more asks for it explicitly.
+permissions:
+  contents: read
+
+# A new push to a pull request makes the previous run pointless, so cancel it. Runs on main are
+# left alone because they gate releases.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_NO_PROGRESS: "1"
+  FORCE_COLOR: "1"
+# Installs use `uv sync --locked`, which fails on a lock file that no longer matches
+# pyproject.toml rather than quietly resolving something else. UV_FROZEN is deliberately not
+# set here: uv rejects it alongside --locked.
+
+jobs:
+  quality:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - run: uv sync --extra dev --locked
+
+      # The github format turns findings into inline annotations on the diff.
+      - name: Ruff
+        run: uv run ruff check --output-format=github .
+
+      - name: Formatting
+        run: uv run ruff format --check --diff .
+
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # One version failing should not hide the result for the others.
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: shannon
+          POSTGRES_PASSWORD: shannon
+          POSTGRES_DB: shannon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shannon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SHANNON_TEST_DATABASE_URL: postgresql+asyncpg://shannon:shannon@localhost:5432/shannon_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python }}
+
+      - run: uv sync --extra dev --locked
+
+      - name: Test
+        run: uv run pytest -q --durations=10
+
+      - name: Confirm the suite still passes without a database
+        # A fresh clone has no PostgreSQL, and the integration tier is supposed to skip rather
+        # than fail. This is the only step that proves it.
+        env:
+          SHANNON_TEST_DATABASE_URL: ""
+        run: uv run pytest -q
+
+  image:
+    name: Image build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: shannon
+          POSTGRES_PASSWORD: shannon
+          POSTGRES_DB: shannon
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shannon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://shannon:shannon@localhost:5432/shannon
+      WEBHOOK_SECRET: ci-webhook-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: shannon-bot:ci
+          # Layer cache lives in the Actions cache, so unchanged dependency layers are reused.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Apply migrations from the image
+        run: |
+          docker run --rm --network host \
+            -e SHANNON_DATABASE_URL="$DATABASE_URL" \
+            shannon-bot:ci alembic upgrade head
+
+      - name: Start the container
+        run: |
+          docker run -d --name shannon --network host \
+            -e SHANNON_DATABASE_URL="$DATABASE_URL" \
+            -e SHANNON_GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+            shannon-bot:ci
+
+      - name: Wait for it to report healthy
+        run: |
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' shannon)
+            [ "$status" = "healthy" ] && exit 0
+            [ "$status" = "unhealthy" ] && break
+            sleep 2
+          done
+          echo "container never became healthy"
+          docker logs shannon
+          exit 1
+
+      - name: A correctly signed delivery is accepted
+        run: |
+          body='{"action":"opened"}'
+          signature="sha256=$(printf '%s' "$body" \
+            | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')"
+          code=$(curl -s -o /tmp/body -w '%{http_code}' -X POST \
+            http://localhost:8000/webhooks/github \
+            -H 'Content-Type: application/json' \
+            -H 'X-GitHub-Event: pull_request' \
+            -H 'X-GitHub-Delivery: ci-1' \
+            -H "X-Hub-Signature-256: $signature" \
+            --data "$body")
+          echo "$code $(cat /tmp/body)"
+          [ "$code" = "200" ] || { docker logs shannon; exit 1; }
+
+      - name: An unsigned delivery is rejected
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://localhost:8000/webhooks/github \
+            -H 'Content-Type: application/json' \
+            -H 'X-GitHub-Event: pull_request' \
+            -H 'X-GitHub-Delivery: ci-2' \
+            --data '{"action":"opened"}')
+          [ "$code" = "401" ] || { echo "expected 401, got $code"; docker logs shannon; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: docker logs shannon || true
+
+  audit:
+    name: Dependency and secret audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan past commits, not just the working tree.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Known vulnerabilities in runtime dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project \
+            --format requirements-txt -o requirements.audit.txt
+          uvx pip-audit --strict --requirement requirements.audit.txt
+
+      - name: Committed secrets
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
+            detect --source=. --redact --verbose --no-banner
+
+  ci:
+    # Single required check to protect the branch with, so the matrix can grow without
+    # anyone having to update branch protection.
+    name: CI
+    runs-on: ubuntu-latest
+    needs: [quality, test, image, audit]
+    if: always()
+    timeout-minutes: 2
+    steps:
+      - name: Fail if anything upstream failed
+        run: |
+          [ "${{ contains(needs.*.result, 'failure') }}" = "false" ] || exit 1
+          [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ] || exit 1

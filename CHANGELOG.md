@@ -248,3 +248,37 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The migration was applied to an empty database, rolled back to base, and applied again. The
   applied schema was diffed back against the ORM metadata and matched exactly.
 - `ruff check` and `ruff format --check` clean.
+
+### Continuous integration
+
+- **`uv.lock`**, so CI installs the same versions every run instead of whatever resolved that
+  day. Installs use `uv sync --locked`, which fails on a lock that no longer matches
+  `pyproject.toml`.
+- **`.github/workflows/ci.yml`**, four jobs in parallel behind one required check:
+  - Lint and format, with findings reported as inline annotations on the diff.
+  - Tests on Python 3.12, 3.13 and 3.14 against a PostgreSQL service container, plus a second
+    run with no database to prove the integration tier skips rather than fails on a fresh
+    clone.
+  - Image build with a layer cache, then a real smoke test: apply migrations from the image,
+    start it, wait for the health check, post a correctly signed webhook and expect 200, post
+    an unsigned one and expect 401.
+  - Dependency audit against known vulnerabilities, and a secret scan over the full history.
+  - Pull request runs cancel their own superseded runs; runs on main do not, because they gate
+    releases.
+- **`.github/workflows/release.yml`** publishes the image to GHCR with signed build provenance
+  and an SBOM. Pushes to main publish `edge` for amd64; version tags publish semver tags for
+  amd64 and arm64, since arm64 goes through emulation and is only worth paying for on a real
+  release.
+- **`.github/dependabot.yml`** for Python, actions and base image updates, with routine bumps
+  grouped into one pull request.
+- **Migration tests** (`tests/integration/test_migrations.py`) covering the failure this
+  project is most exposed to: an ORM change landing without a matching revision. Applies
+  migrations to a throwaway database, diffs the result against the models, rolls back, and
+  reapplies. Also asserts there is exactly one head, since two make `upgrade head` ambiguous.
+
+### Fixed
+
+- `migrations/env.py` called `fileConfig` without `disable_existing_loggers=False`, so running
+  Alembic in the same process as the application silenced every application logger. Only
+  visible once something ran migrations in-process, which the new migration tests do.
+- `alembic.ini` used the deprecated `version_path_separator` key, now `path_separator`.

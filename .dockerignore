@@ -26,8 +26,10 @@ tests/
 secrets/
 
 docs/
+.github/
 CHANGELOG.md
 requirements.md
+requirements.audit.txt
 docker-compose.yml
 Dockerfile
 .dockerignore

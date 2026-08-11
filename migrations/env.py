@@ -15,7 +15,9 @@ from shannon.db.session import build_engine
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # fileConfig disables every logger it does not name unless told otherwise, which would
+    # silence the application's own loggers whenever Alembic runs inside the same process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
