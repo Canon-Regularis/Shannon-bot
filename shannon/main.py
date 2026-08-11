@@ -44,6 +44,16 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     )
 
 
+def _report_bot_exit(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("the Discord bot stopped: %s", error, exc_info=error)
+    else:
+        logger.warning("the Discord bot stopped without an error")
+
+
 def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -51,6 +61,9 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         token = settings.discord_token.get_secret_value()
         if token:
             task = asyncio.create_task(bot.start(token))
+            # Without this a bad token kills the task silently, and the webhook endpoint goes
+            # on answering 200 while nothing reaches Discord at all.
+            task.add_done_callback(_report_bot_exit)
         else:
             # Handy for poking the webhook endpoint locally, and loud enough that nobody
             # deploys like this by accident.
