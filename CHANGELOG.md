@@ -510,3 +510,26 @@ closely.
 - The message formatters were three pairs of nearly the same function: the two metadata
   blocks, the two ping messages, and comments against reviews. Each pair is now one function
   with the wording passed in, so the two kinds of thread cannot drift apart by accident.
+
+### Third look
+
+This pass went at the database layer and the services around it, which the first two had read
+past. Both findings were crashes reachable by ordinary use.
+
+- **`/link` crashed when someone took over a GitHub name another account already held.**
+  A guild can only have one row per GitHub name and one per Discord account, and those two
+  halves can sit on two different rows. Editing one of them in place collided with the other,
+  and the error came straight back out of the command. Two people linking themselves and then
+  one claiming the other's name was enough to trigger it. The pairing is now written fresh
+  after clearing whatever held either half.
+- **Several webhooks arriving at once for a brand new item crashed all but one of them.**
+  GitHub fires `opened` and `labeled` together for anything opened with labels, and they carry
+  different delivery ids, so the duplicate guard passes both. Both then found no tracked item
+  and both tried to insert one. A burst of six left five failing on the unique constraint,
+  which in production means a run of 500s and GitHub retrying. The insert carries its own
+  conflict handling now, the same way the delivery log already did.
+- **Two people running `/register` at the same moment** hit the same shape of problem, and the
+  loser now hears the same thing it would have heard a second later rather than an unhandled
+  error.
+- Dropped `TrackedItemStore.create`, which nothing called once the race-safe version replaced
+  it.
