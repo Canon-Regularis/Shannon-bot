@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import TrackedItem
@@ -54,7 +55,7 @@ class TrackedItemStore:
             query = query.where(TrackedItem.github_object_type == object_type)
         return await self._session.scalar(query.order_by(TrackedItem.id))
 
-    async def create(
+    async def get_or_create(
         self,
         *,
         repository_id: int,
@@ -68,20 +69,51 @@ class TrackedItemStore:
         priority: Priority = Priority.UNSET,
         github_updated_at: datetime | None = None,
     ) -> TrackedItem:
-        item = TrackedItem(
-            repository_id=repository_id,
-            github_object_type=object_type,
-            github_object_id=github_object_id,
-            github_object_number=github_object_number,
-            github_url=github_url,
-            title=title,
-            github_state=github_state,
-            status=status,
-            priority=priority,
-            github_updated_at=github_updated_at,
+        """Insert the item, or return the one another delivery inserted first.
+
+        GitHub fires several events at once for a newly opened item, and they carry different
+        delivery ids so the duplicate guard passes all of them through. Checking for the row
+        and then inserting it would let every one of them past the check and leave all but one
+        failing on the unique constraint, so the insert carries its own conflict handling.
+        """
+        statement = (
+            pg_insert(TrackedItem)
+            .values(
+                repository_id=repository_id,
+                github_object_type=object_type,
+                github_object_id=github_object_id,
+                github_object_number=github_object_number,
+                github_url=github_url,
+                title=title,
+                github_state=github_state,
+                status=status,
+                priority=priority,
+                github_updated_at=github_updated_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    TrackedItem.repository_id,
+                    TrackedItem.github_object_type,
+                    TrackedItem.github_object_id,
+                ]
+            )
+            .returning(TrackedItem.id)
         )
-        self._session.add(item)
-        await self._session.flush()
+        inserted = (await self._session.execute(statement)).scalar_one_or_none()
+
+        item = (
+            await self.get_by_id(inserted)
+            if inserted is not None
+            else await self.get(
+                repository_id=repository_id,
+                object_type=object_type,
+                github_object_id=github_object_id,
+            )
+        )
+        if item is None:
+            raise RuntimeError(
+                f"tracked item for {object_type.value} {github_object_id} vanished mid-write"
+            )
         return item
 
     async def set_discord_ids(

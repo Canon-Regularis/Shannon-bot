@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.channel_mappings import ChannelMappingStore
@@ -55,12 +56,20 @@ class RepositoryRegistrationService:
                     f"{snapshot.full_name} is already registered to another server"
                 )
 
-            repository = await repositories.add(
-                github_repo_id=snapshot.github_repo_id,
-                repo_name=snapshot.full_name,
-                repo_url=snapshot.html_url,
-                discord_guild_id=guild_id,
-            )
+            try:
+                repository = await repositories.add(
+                    github_repo_id=snapshot.github_repo_id,
+                    repo_name=snapshot.full_name,
+                    repo_url=snapshot.html_url,
+                    discord_guild_id=guild_id,
+                )
+            except IntegrityError as conflict:
+                # Two people running /register at the same moment both get past the checks
+                # above. The database settles it, and the loser should hear the same thing it
+                # would have heard a second later.
+                raise DuplicateRegistrationError(
+                    "This server was registered a moment ago. Try /register again to see where."
+                ) from conflict
             # The channel the command was run in becomes the home for PR threads.
             await ChannelMappingStore(session).set(
                 repository_id=repository.id,

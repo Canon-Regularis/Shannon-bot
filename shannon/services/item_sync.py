@@ -178,7 +178,7 @@ class ItemSyncService:
                 )
 
             if item is None:
-                item = await items.create(
+                item = await items.get_or_create(
                     repository_id=repository.id,
                     object_type=object_type,
                     github_object_id=snapshot.github_object_id,
