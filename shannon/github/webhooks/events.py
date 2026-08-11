@@ -7,8 +7,11 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-# MVP 1 handles pull requests only. Issue, project and comment events arrive from GitHub as soon
-# as the webhook is configured, so they are matched here and dropped rather than erroring.
+# Anything not listed here arrives from GitHub the moment the webhook is configured, and is
+# matched and dropped rather than erroring. Project events belong to MVP 4.
+# Removals are handled alongside the additions they undo. Listing only one half would leave a
+# thread claiming someone is still assigned, or still holding a label that was taken off, until
+# some later event happened to correct it.
 PULL_REQUEST_ACTIONS = frozenset(
     {
         "opened",
@@ -16,13 +19,40 @@ PULL_REQUEST_ACTIONS = frozenset(
         "closed",
         "reopened",
         "review_requested",
+        "review_request_removed",
         "labeled",
+        "unlabeled",
         "assigned",
+        "unassigned",
     }
 )
 
+ISSUE_ACTIONS = frozenset(
+    {
+        "opened",
+        "edited",
+        "closed",
+        "reopened",
+        "labeled",
+        "unlabeled",
+        "assigned",
+        "unassigned",
+    }
+)
+
+# Edits and deletions are not mirrored, so a comment in Discord is a record of what was said
+# when it was said.
+COMMENT_ACTIONS = frozenset({"created"})
+
+# `dismissed` and `edited` reviews are not mirrored, for the same reason comment edits are not:
+# the thread records what was said when it was said.
+REVIEW_ACTIONS = frozenset({"submitted"})
+
 SUPPORTED_EVENTS: Mapping[str, frozenset[str]] = {
     "pull_request": PULL_REQUEST_ACTIONS,
+    "issues": ISSUE_ACTIONS,
+    "issue_comment": COMMENT_ACTIONS,
+    "pull_request_review": REVIEW_ACTIONS,
 }
 
 # GitHub sends this once when a webhook is created. It carries no action and needs no work.
