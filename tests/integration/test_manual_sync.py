@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from shannon.db.models import Repository, TrackedItem
+from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError, UnparseableLinkError
+from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
+from shannon.github.errors import GitHubNotFoundError
+from shannon.services.manual_sync import ManualPullRequestSync
+from shannon.services.pr_sync import PullRequestSyncService
+from tests.fakes.github import FakeGitHubClient
+from tests.fakes.threads import FakeThreadGateway
+from tests.support import github_payloads as payloads
+
+pytestmark = pytest.mark.integration
+
+LINK = "https://github.com/Canon-Regularis/Shannon-bot/pull/7"
+REPO = RepositorySnapshot(
+    github_repo_id=payloads.REPO_ID,
+    owner=payloads.OWNER,
+    name=payloads.REPO,
+    html_url=f"https://github.com/{payloads.OWNER}/{payloads.REPO}",
+)
+SNAPSHOT = PullRequestSnapshot(
+    repository=REPO,
+    github_object_id=payloads.PR_ID,
+    number=7,
+    title="Add the webhook endpoint",
+    html_url=LINK,
+    state="open",
+    author=Actor("octocat"),
+    assignees=(Actor("hubot"),),
+    reviewers=(Actor("monalisa"),),
+    labels=(Label("backend"),),
+)
+
+
+@pytest.fixture
+def github() -> FakeGitHubClient:
+    return FakeGitHubClient(
+        pull_requests={("canon-regularis/shannon-bot", 7): SNAPSHOT},
+        repositories={"canon-regularis/shannon-bot": REPO},
+    )
+
+
+@pytest.fixture
+def manual(
+    db_sessionmaker: async_sessionmaker,
+    github: FakeGitHubClient,
+    sync_service: PullRequestSyncService,
+) -> ManualPullRequestSync:
+    return ManualPullRequestSync(db_sessionmaker, github, sync_service)
+
+
+async def test_a_valid_link_opens_a_thread(
+    registered: Repository, manual: ManualPullRequestSync, threads: FakeThreadGateway
+) -> None:
+    outcome = await manual.sync_link(guild_id=1, link=LINK)
+
+    assert outcome.created is True
+    assert outcome.number == 7
+    assert outcome.full_name == "Canon-Regularis/Shannon-bot"
+    assert len(threads.created) == 1
+
+
+async def test_running_it_twice_updates_rather_than_duplicates(
+    registered: Repository,
+    manual: ManualPullRequestSync,
+    threads: FakeThreadGateway,
+    db_session: AsyncSession,
+) -> None:
+    first = await manual.sync_link(guild_id=1, link=LINK)
+    second = await manual.sync_link(guild_id=1, link=LINK)
+
+    assert second.created is False
+    assert second.thread_id == first.thread_id
+    assert len(threads.created) == 1
+    assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 1
+
+
+async def test_it_picks_up_a_pull_request_a_webhook_already_synced(
+    registered: Repository,
+    manual: ManualPullRequestSync,
+    sync_service: PullRequestSyncService,
+    threads: FakeThreadGateway,
+    pr_event,
+) -> None:
+    """Manual and automatic sync share one service, so they share one thread."""
+    from_webhook = await sync_service.sync(pr_event("opened"))
+    outcome = await manual.sync_link(guild_id=1, link=LINK)
+
+    assert from_webhook is not None
+    assert outcome.thread_id == from_webhook.thread_id
+    assert outcome.created is False
+    assert len(threads.created) == 1
+
+
+async def test_an_unregistered_guild_is_told_to_register(
+    registered: Repository, manual: ManualPullRequestSync
+) -> None:
+    with pytest.raises(NotRegisteredError, match="Run /register first"):
+        await manual.sync_link(guild_id=2, link=LINK)
+
+
+async def test_a_link_to_another_repository_is_refused(
+    registered: Repository, manual: ManualPullRequestSync, github: FakeGitHubClient
+) -> None:
+    with pytest.raises(RepositoryMismatchError, match="not someone/else"):
+        await manual.sync_link(guild_id=1, link="https://github.com/someone/else/pull/1")
+
+    assert github.pull_request_calls == []
+
+
+async def test_an_issue_link_is_refused_before_anything_else(
+    registered: Repository, manual: ManualPullRequestSync, github: FakeGitHubClient
+) -> None:
+    with pytest.raises(UnparseableLinkError, match="is an issue link"):
+        await manual.sync_link(
+            guild_id=1, link="https://github.com/Canon-Regularis/Shannon-bot/issues/7"
+        )
+
+    assert github.pull_request_calls == []
+
+
+async def test_a_pull_request_github_does_not_have_is_reported(
+    registered: Repository, manual: ManualPullRequestSync
+) -> None:
+    with pytest.raises(GitHubNotFoundError):
+        await manual.sync_link(
+            guild_id=1, link="https://github.com/Canon-Regularis/Shannon-bot/pull/999"
+        )
+
+
+async def test_the_repository_name_match_ignores_case(
+    registered: Repository, manual: ManualPullRequestSync
+) -> None:
+    outcome = await manual.sync_link(
+        guild_id=1, link="https://github.com/canon-regularis/shannon-bot/pull/7"
+    )
+
+    assert outcome.created is True
