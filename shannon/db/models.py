@@ -85,6 +85,10 @@ class TrackedItem(TimestampMixin, Base):
             name="uq_tracked_items_repo_type_object",
         ),
         Index("ix_tracked_items_discord_thread_id", "discord_thread_id"),
+        # Comments and reviews are looked up by number. The unique constraint above leads with
+        # repository_id, so without this the planner scans every item in the repository and
+        # filters, which grows with the repository rather than staying flat.
+        Index("ix_tracked_items_repo_number", "repository_id", "github_object_number"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -112,10 +116,14 @@ class TrackedItem(TimestampMixin, Base):
     )
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
+    # Nothing reads this: assignments are always fetched through ItemAssignmentStore, which
+    # asks for one role at a time. It was eager loading on every single fetch of a tracked
+    # item, which is the hottest path there is. `raise` keeps the mapping for the cascade
+    # while making any accidental use an error rather than a quiet extra query.
     assignments: Mapped[list[ItemAssignment]] = relationship(
         back_populates="tracked_item",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="raise",
         passive_deletes=True,
     )
 
