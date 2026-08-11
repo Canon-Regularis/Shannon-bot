@@ -24,7 +24,15 @@ class ShannonBot(discord.Client):
     """
 
     def __init__(self) -> None:
-        super().__init__(intents=build_intents())
+        # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
+        # otherwise ping the whole server. Only the user mentions this bot builds itself are
+        # allowed to resolve.
+        super().__init__(
+            intents=build_intents(),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True, replied_user=False
+            ),
+        )
         self.tree = app_commands.CommandTree(self)
         self._pending: list[app_commands.Command] = []
 
