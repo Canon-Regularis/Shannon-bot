@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
+
+from shannon.domain.time import as_utc
 
 
 def is_stale(*, has_thread: bool, incoming: datetime | None, stored: datetime | None) -> bool:
@@ -22,9 +24,4 @@ def is_stale(*, has_thread: bool, incoming: datetime | None, stored: datetime | 
     """
     if not has_thread or incoming is None or stored is None:
         return False
-    return _as_utc(incoming) < _as_utc(stored)
-
-
-def _as_utc(value: datetime) -> datetime:
-    """The database hands back aware values, and comparing an aware one to a naive one raises."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return as_utc(incoming) < as_utc(stored)

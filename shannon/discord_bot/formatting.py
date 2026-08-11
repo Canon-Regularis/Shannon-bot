@@ -12,6 +12,7 @@ from shannon.domain.models import (
     ReviewSnapshot,
     TrackedSnapshot,
 )
+from shannon.domain.time import as_utc
 
 EMPTY = "None"
 UNKNOWN = "Unknown"
@@ -39,25 +40,19 @@ def format_pull_request(
     priority: Priority = Priority.UNSET,
     mentions: Mapping[str, int] | None = None,
 ) -> str:
-    """Render the metadata block that lives at the top of a PR thread.
+    """Render the metadata block that lives at the top of a pull request thread.
 
     `mentions` maps a lowercased GitHub login to a Discord user ID. Anyone missing from it is
     shown as a plain username, which is the normal case for contributors nobody has linked.
     """
-    lines = [
-        f"**PR Name:** {snapshot.title or UNKNOWN}",
-        "**Type:** PR",
-        f"**State:** {snapshot.display_state.capitalize()}",
-        f"**GitHub Link:** {snapshot.html_url}",
-        f"**Author:** {_people([snapshot.author] if snapshot.author else [], mentions)}",
-        f"**Assignees:** {_people(snapshot.assignees, mentions)}",
-        f"**Reviewers:** {_people(snapshot.reviewers, mentions)}",
-        f"**Status:** {status.value}",
-        f"**Priority:** {priority.value}",
-        f"**Tags:** {_tags(snapshot.label_names)}",
-        f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
-    ]
-    return _fit("\n".join(lines))
+    return _metadata(
+        snapshot,
+        noun="PR",
+        status=status,
+        priority=priority,
+        mentions=mentions,
+        reviewers=snapshot.reviewers,
+    )
 
 
 def format_issue(
@@ -72,19 +67,7 @@ def format_issue(
     No reviewers line: GitHub issues have no reviewers, and an always-empty field would be
     noise.
     """
-    lines = [
-        f"**Issue Name:** {snapshot.title or UNKNOWN}",
-        "**Type:** Issue",
-        f"**State:** {snapshot.display_state.capitalize()}",
-        f"**GitHub Link:** {snapshot.html_url}",
-        f"**Author:** {_people([snapshot.author] if snapshot.author else [], mentions)}",
-        f"**Assignees:** {_people(snapshot.assignees, mentions)}",
-        f"**Status:** {status.value}",
-        f"**Priority:** {priority.value}",
-        f"**Tags:** {_tags(snapshot.label_names)}",
-        f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
-    ]
-    return _fit("\n".join(lines))
+    return _metadata(snapshot, noun="Issue", status=status, priority=priority, mentions=mentions)
 
 
 def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
@@ -93,36 +76,26 @@ def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
     Anyone without a Discord link is still named, so the thread records who GitHub asked for
     even when nobody has run /link for them.
     """
-    rendered = _mentions_or_names(logins, mentions)
-    if not rendered:
-        return ""
-    return f"Review requested from {rendered}."
+    return _ping("Review requested from", logins, mentions)
 
 
 def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
     """Announce newly assigned people, on the same terms as the reviewer ping."""
-    rendered = _mentions_or_names(logins, mentions)
-    if not rendered:
-        return ""
-    return f"Assigned to {rendered}."
+    return _ping("Assigned to", logins, mentions)
 
 
 def format_comment(snapshot: CommentSnapshot, mentions: Mapping[str, int] | None = None) -> str:
-    """Render a GitHub comment for its Discord thread.
+    """Render a GitHub comment for its Discord thread."""
+    return _note(snapshot, "commented", mentions)
 
-    The body is quoted rather than inlined so that GitHub markdown cannot restyle the thread,
-    and it is truncated because Discord messages are capped and a comment is not.
+
+def format_review(snapshot: ReviewSnapshot, mentions: Mapping[str, int] | None = None) -> str:
+    """Render a submitted review for its Discord thread.
+
+    A review with an empty body is normal: approving without comment is the common case, and
+    the verdict alone is the point.
     """
-    author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
-    when = _timestamp(snapshot.created_at)
-
-    lines = [f"**{author}** commented {when}"]
-    body = _quote(snapshot.body)
-    if body:
-        lines.append(body)
-    if snapshot.html_url:
-        lines.append(f"<{snapshot.html_url}>")
-    return _fit("\n".join(lines))
+    return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions)
 
 
 # What each review verdict is called in the thread. GitHub's own words are terse enough that
@@ -135,23 +108,61 @@ _VERDICTS = {
 }
 
 
-def format_review(snapshot: ReviewSnapshot, mentions: Mapping[str, int] | None = None) -> str:
-    """Render a submitted review for its Discord thread.
+def _metadata(
+    snapshot: TrackedSnapshot,
+    *,
+    noun: str,
+    status: Status,
+    priority: Priority,
+    mentions: Mapping[str, int] | None,
+    reviewers: Iterable[Actor] | None = None,
+) -> str:
+    """The block both kinds of item share.
 
-    A review with an empty body is normal: approving without comment is the common case, and
-    the verdict alone is the point.
+    Only the noun and whether there is a reviewers line differ, so keeping one copy is what
+    stops the two drifting into slightly different shapes.
+    """
+    lines = [
+        f"**{noun} Name:** {snapshot.title or UNKNOWN}",
+        f"**Type:** {noun}",
+        f"**State:** {snapshot.display_state.capitalize()}",
+        f"**GitHub Link:** {snapshot.html_url}",
+        f"**Author:** {_people([snapshot.author] if snapshot.author else [], mentions)}",
+        f"**Assignees:** {_people(snapshot.assignees, mentions)}",
+    ]
+    if reviewers is not None:
+        lines.append(f"**Reviewers:** {_people(reviewers, mentions)}")
+    lines += [
+        f"**Status:** {status.value}",
+        f"**Priority:** {priority.value}",
+        f"**Tags:** {_tags(snapshot.label_names)}",
+        f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
+    ]
+    return _fit("\n".join(lines))
+
+
+def _note(
+    snapshot: CommentSnapshot | ReviewSnapshot, verb: str, mentions: Mapping[str, int] | None
+) -> str:
+    """A comment or a review, posted under the metadata block.
+
+    The body is quoted rather than inlined so that GitHub markdown cannot restyle the thread,
+    and it is truncated because Discord messages are capped and a comment is not.
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
-    verdict = _VERDICTS.get(snapshot.verdict, "reviewed")
-    when = _timestamp(snapshot.created_at)
 
-    lines = [f"**{author}** {verdict} {when}"]
+    lines = [f"**{author}** {verb} {_timestamp(snapshot.created_at)}"]
     body = _quote(snapshot.body)
     if body:
         lines.append(body)
     if snapshot.html_url:
         lines.append(f"<{snapshot.html_url}>")
     return _fit("\n".join(lines))
+
+
+def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) -> str:
+    rendered = ", ".join(_person(Actor(login), mentions) for login in logins)
+    return f"{lead} {rendered}." if rendered else ""
 
 
 def _quote(body: str) -> str:
@@ -161,10 +172,6 @@ def _quote(body: str) -> str:
     if len(text) > COMMENT_PREVIEW_LIMIT:
         text = text[:COMMENT_PREVIEW_LIMIT].rstrip() + "…"
     return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
-
-
-def _mentions_or_names(logins: Iterable[str], mentions: Mapping[str, int] | None) -> str:
-    return ", ".join(_person(Actor(login), mentions) for login in logins)
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
@@ -185,8 +192,9 @@ def _tags(names: Iterable[str]) -> str:
 def _timestamp(value: datetime | None) -> str:
     if value is None:
         return UNKNOWN
-    # Discord renders this in each reader's own timezone.
-    return f"<t:{int(value.timestamp())}:f>"
+    # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a
+    # naive datetime as local time, which would shift every rendered time by the host's offset.
+    return f"<t:{int(as_utc(value).timestamp())}:f>"
 
 
 def _fit(message: str) -> str:

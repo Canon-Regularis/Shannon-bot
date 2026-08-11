@@ -11,15 +11,22 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
+from shannon.domain.time import as_utc
 
 Payload = Mapping[str, Any]
 
 
 def parse_timestamp(value: Any) -> datetime | None:
+    """Read a GitHub timestamp, always as an aware one.
+
+    Normalising here means nothing downstream has to wonder whether a timestamp carries an
+    offset. GitHub sends them, but a payload without one would otherwise be read as local time
+    by whatever machine happened to be running.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        return as_utc(datetime.fromisoformat(value))
     except ValueError:
         return None
 
@@ -102,31 +109,11 @@ def issue(
     if not isinstance(payload, Mapping):
         return None
 
-    object_id = payload.get("id")
-    number = payload.get("number")
-    if not isinstance(object_id, int) or not isinstance(number, int):
+    shared = _shared_fields(payload, repo, path="issues", action=action)
+    if shared is None:
         return None
 
-    html_url = payload.get("html_url")
-    if not isinstance(html_url, str) or not html_url:
-        html_url = f"{repo.html_url}/issues/{number}"
-
-    title = payload.get("title")
-    state = payload.get("state")
-    return IssueSnapshot(
-        repository=repo,
-        github_object_id=object_id,
-        number=number,
-        title=title if isinstance(title, str) else "",
-        html_url=html_url,
-        state=state if isinstance(state, str) else "open",
-        author=actor(payload.get("user")),
-        assignees=actors(payload.get("assignees")),
-        labels=labels(payload.get("labels")),
-        updated_at=parse_timestamp(payload.get("updated_at")),
-        closed_at=parse_timestamp(payload.get("closed_at")),
-        action=action,
-    )
+    return IssueSnapshot(**shared, closed_at=parse_timestamp(payload.get("closed_at")))
 
 
 def is_pull_request(payload: Any) -> bool:
@@ -150,29 +137,48 @@ def pull_request(
     if not isinstance(payload, Mapping):
         return None
 
+    shared = _shared_fields(payload, repo, path="pull", action=action)
+    if shared is None:
+        return None
+
+    return PullRequestSnapshot(
+        **shared,
+        reviewers=actors(payload.get("requested_reviewers")),
+        # A closed pull request that was merged says so either way round, depending on which
+        # endpoint or event it came from.
+        merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
+    )
+
+
+def _shared_fields(
+    payload: Payload, repo: RepositorySnapshot, *, path: str, action: str | None
+) -> dict[str, Any] | None:
+    """The fields every mirrored object has, or None when the payload is unusable.
+
+    Issues and pull requests are the same shape here apart from the URL path, so pulling them
+    out once is what keeps the two from validating slightly differently.
+    """
     object_id = payload.get("id")
     number = payload.get("number")
-    title = payload.get("title")
     if not isinstance(object_id, int) or not isinstance(number, int):
         return None
 
     html_url = payload.get("html_url")
     if not isinstance(html_url, str) or not html_url:
-        html_url = f"{repo.html_url}/pull/{number}"
+        html_url = f"{repo.html_url}/{path}/{number}"
 
+    title = payload.get("title")
     state = payload.get("state")
-    return PullRequestSnapshot(
-        repository=repo,
-        github_object_id=object_id,
-        number=number,
-        title=title if isinstance(title, str) else "",
-        html_url=html_url,
-        state=state if isinstance(state, str) else "open",
-        author=actor(payload.get("user")),
-        assignees=actors(payload.get("assignees")),
-        reviewers=actors(payload.get("requested_reviewers")),
-        labels=labels(payload.get("labels")),
-        merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
-        updated_at=parse_timestamp(payload.get("updated_at")),
-        action=action,
-    )
+    return {
+        "repository": repo,
+        "github_object_id": object_id,
+        "number": number,
+        "title": title if isinstance(title, str) else "",
+        "html_url": html_url,
+        "state": state if isinstance(state, str) else "open",
+        "author": actor(payload.get("user")),
+        "assignees": actors(payload.get("assignees")),
+        "labels": labels(payload.get("labels")),
+        "updated_at": parse_timestamp(payload.get("updated_at")),
+        "action": action,
+    }
