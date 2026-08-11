@@ -157,6 +157,46 @@ def test_an_absurd_title_is_truncated_to_fit_discord() -> None:
     assert len(message) <= MESSAGE_LIMIT
 
 
+def test_truncation_never_leaves_bold_hanging_open() -> None:
+    """A cut inside `**` turns the rest of the message into one long bold run."""
+    huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
+
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+
+    assert len(message) <= MESSAGE_LIMIT
+    assert message.count("**") % 2 == 0
+
+
+def test_truncation_keeps_whole_lines() -> None:
+    huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
+
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+
+    kept = message.removesuffix("\n…").split("\n")
+    original = format_pull_request(huge, status=Status.NOT_REVIEWED).split("\n")
+    assert kept == original[: len(kept)]
+
+
+def test_a_single_line_longer_than_the_whole_limit_is_still_cut() -> None:
+    """No boundary to cut on, so the hard cut is the only option left."""
+    huge = replace(SNAPSHOT, title="x" * 5000, labels=())
+
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+
+    assert len(message) <= MESSAGE_LIMIT
+    assert message.endswith("…")
+
+
+def test_a_label_containing_a_backtick_keeps_its_code_span() -> None:
+    """GitHub allows a backtick in a label name; a single-backtick span would close early."""
+    quoted = replace(SNAPSHOT, labels=(Label("needs `review`"), Label("bug")))
+
+    fields = lines(format_pull_request(quoted, status=Status.NOT_REVIEWED))
+
+    # Padding goes on both ends because markdown only strips a space from each side as a pair.
+    assert fields["Tags"] == "`` needs `review` ``, `bug`"
+
+
 def test_a_missing_title_reads_unknown() -> None:
     fields = lines(format_pull_request(replace(SNAPSHOT, title=""), status=Status.NOT_REVIEWED))
 

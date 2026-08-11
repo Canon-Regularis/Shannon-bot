@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
@@ -19,6 +20,7 @@ UNKNOWN = "Unknown"
 
 # Discord rejects anything longer than this.
 MESSAGE_LIMIT = 2000
+TRUNCATED = "\n…"
 
 # A comment is a pointer to the discussion on GitHub, not a copy of it.
 COMMENT_PREVIEW_LIMIT = 700
@@ -185,8 +187,22 @@ def _person(actor: Actor, mentions: Mapping[str, int] | None) -> str:
 
 
 def _tags(names: Iterable[str]) -> str:
-    rendered = [f"`{name}`" for name in names]
+    rendered = [_code(name) for name in names]
     return ", ".join(rendered) if rendered else EMPTY
+
+
+def _code(text: str) -> str:
+    """Wrap a label in a code span that its own backticks cannot break out of.
+
+    GitHub allows a backtick in a label name. A single-backtick span around one closes early and
+    the rest of the line renders as prose. Markdown's own answer is a longer fence.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    # A space keeps a leading or trailing backtick from touching the fence, which would merge
+    # with it. Markdown strips one space from each end when rendering.
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
 
 
 def _timestamp(value: datetime | None) -> str:
@@ -198,6 +214,26 @@ def _timestamp(value: datetime | None) -> str:
 
 
 def _fit(message: str) -> str:
+    """Trim to Discord's limit on a line boundary.
+
+    Each line is built balanced, so dropping whole lines leaves what remains rendering properly.
+    Cutting at an arbitrary character can land inside `**bold**` or halfway through a `<@123>`
+    mention, and the rest of the message goes with it.
+    """
     if len(message) <= MESSAGE_LIMIT:
         return message
-    return message[: MESSAGE_LIMIT - 1] + "…"
+
+    budget = MESSAGE_LIMIT - len(TRUNCATED)
+    kept: list[str] = []
+    used = 0
+    for line in message.split("\n"):
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > budget:
+            break
+        kept.append(line)
+        used += cost
+
+    # A single line longer than the whole limit has no boundary to cut on.
+    if not kept:
+        return message[:budget] + TRUNCATED
+    return "\n".join(kept) + TRUNCATED
