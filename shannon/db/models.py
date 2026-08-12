@@ -87,7 +87,6 @@ class TrackedItem(TimestampMixin, Base):
             "github_object_id",
             name="uq_tracked_items_repo_type_object",
         ),
-        Index("ix_tracked_items_discord_thread_id", "discord_thread_id"),
         # Comments and reviews are looked up by number. The unique constraint above leads with
         # repository_id, so without this the planner scans every item in the repository and
         # filters, which grows with the repository rather than staying flat.
