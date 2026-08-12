@@ -6,6 +6,15 @@ class ShannonError(Exception):
         self.message = message
 
 
+class PermanentError(ShannonError):
+    """Something a retry cannot fix.
+
+    The delivery worker retries a failed handler ten times over roughly two hours, which is the
+    right answer for Discord being briefly unreachable and the wrong one for a missing
+    permission. Anything raised as this is recorded and dropped on the first attempt.
+    """
+
+
 class UnparseableLinkError(ShannonError):
     """A GitHub link did not match the shape the parser expects."""
 
@@ -20,3 +29,11 @@ class DuplicateRegistrationError(ShannonError):
 
 class RepositoryMismatchError(ShannonError):
     """The link points at a repository other than the one registered here."""
+
+
+class ItemNotReadyError(ShannonError):
+    """The item is tracked but its Discord thread does not exist yet.
+
+    Deliberately not permanent. The sync that opens the thread is either in flight or waiting on
+    its own backoff, and the note belongs in that thread once it is there.
+    """
