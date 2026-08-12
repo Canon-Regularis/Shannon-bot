@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -164,3 +166,63 @@ def test_token_is_sent_as_a_bearer_header() -> None:
 
     assert _headers("abc123")["Authorization"] == "Bearer abc123"
     assert "Authorization" not in _headers("")
+
+
+class TestHowLongToWait:
+    """The two headers GitHub answers with are not the same kind of number."""
+
+    async def test_retry_after_is_already_a_delay(self) -> None:
+        async with client_with(
+            responds(429, {"message": "slow down"}, {"retry-after": "60"})
+        ) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after == 60
+
+    async def test_the_reset_header_is_a_moment_and_becomes_a_delay(self) -> None:
+        """It is the epoch second the window reopens. Reported raw it reads as fifty-six years."""
+        served = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+        headers = {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": str(int(served.timestamp()) + 90),
+            "date": format_datetime(served, usegmt=True),
+        }
+
+        async with client_with(responds(403, {"message": "rate limited"}, headers)) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after == 90
+
+    async def test_a_window_that_has_already_reopened_asks_for_no_wait(self) -> None:
+        served = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+        headers = {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": str(int(served.timestamp()) - 30),
+            "date": format_datetime(served, usegmt=True),
+        }
+
+        async with client_with(responds(403, {"message": "rate limited"}, headers)) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after == 0
+
+    async def test_retry_after_wins_over_the_reset_moment(self) -> None:
+        headers = {"retry-after": "12", "x-ratelimit-reset": "9999999999"}
+
+        async with client_with(responds(429, {"message": "slow down"}, headers)) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after == 12
+
+    async def test_neither_header_means_no_answer(self) -> None:
+        async with client_with(
+            responds(403, {"message": "rate limited"}, {"x-ratelimit-remaining": "0"})
+        ) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after is None

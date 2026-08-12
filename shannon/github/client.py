@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import logging
+import time
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 
 import httpx
@@ -143,8 +146,6 @@ def _raise_for_status(response: httpx.Response, path: str) -> None:
         raise GitHubRateLimitError("GitHub rate limit reached", retry_after=_retry_after(response))
     if status in {401, 403}:
         raise GitHubAuthError(f"GitHub refused the request for {path} ({status})")
-    if status >= 500:
-        raise GitHubUnavailableError(f"GitHub returned {status} for {path}")
     raise GitHubUnavailableError(f"GitHub returned {status} for {path}")
 
 
@@ -155,8 +156,26 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 
 
 def _retry_after(response: httpx.Response) -> int | None:
-    for header in ("retry-after", "x-ratelimit-reset"):
-        value = response.headers.get(header)
-        if value and value.isdigit():
-            return int(value)
+    """Seconds to wait before trying again.
+
+    The two headers GitHub can answer with are not the same kind of number. `retry-after` is
+    already a delay; `x-ratelimit-reset` is the epoch second the window reopens, so returning
+    it unchanged would report a wait of about fifty-six years. It is turned into a delay
+    against GitHub's own `date` header, which is the clock it was measured on.
+    """
+    delay = response.headers.get("retry-after")
+    if delay and delay.isdigit():
+        return int(delay)
+
+    reset = response.headers.get("x-ratelimit-reset")
+    if reset and reset.isdigit():
+        return max(0, int(reset) - _served_at(response))
     return None
+
+
+def _served_at(response: httpx.Response) -> int:
+    served = response.headers.get("date")
+    if served:
+        with contextlib.suppress(TypeError, ValueError):
+            return int(parsedate_to_datetime(served).timestamp())
+    return int(time.time())
