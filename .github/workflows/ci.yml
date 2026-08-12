@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # Tags are tested too. Release publishes from them, and without this a tagged commit could
+    # ship having run nothing at all.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -226,3 +229,17 @@ jobs:
         run: |
           [ "${{ contains(needs.*.result, 'failure') }}" = "false" ] || exit 1
           [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ] || exit 1
+
+  publish:
+    # The image is only published from a commit that has just passed everything above it.
+    name: Publish
+    needs: [quality, test, image, audit]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml

@@ -1,9 +1,11 @@
 name: Release
 
+# Called by CI once its checks have passed, rather than triggered by the push itself. Triggering
+# on the push would race the test matrix on main and skip it altogether on a tag, so a tagged
+# commit could publish a signed, attested image having run nothing. Being called rather than
+# triggered also keeps github.ref pointing at the tag, which is what the tagging below reads.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
