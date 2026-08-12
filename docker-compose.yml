@@ -24,7 +24,7 @@ services:
     build: .
     command: ["alembic", "upgrade", "head"]
     environment:
-      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
+      SHANNON_DATABASE_URL: ${SHANNON_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}}
     depends_on:
       db:
         condition: service_healthy
@@ -38,7 +38,7 @@ services:
     environment:
       # Inside the compose network the database is reached by service name on 5432. The 5433
       # mapping above is for reaching it from the host.
-      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
+      SHANNON_DATABASE_URL: ${SHANNON_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}}
     ports:
       - "8000:8000"
     depends_on:
