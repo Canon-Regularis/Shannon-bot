@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 
@@ -65,10 +67,17 @@ class ActorNotifier:
 
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))
-        except Exception:
+        except BaseException:
             # Nothing was said, so the ping is owed again. Being pinged late is a great deal
             # better than being pinged twice or not at all.
-            await self._release(tracked_item_id, logins)
+            #
+            # Cancellation counts as a failure here and is the reason this catches everything
+            # rather than Exception. The worker puts a deadline on each delivery and cancels
+            # the handler where it stands, and where it stands is often exactly here, because
+            # discord.py sleeps through a rate limit rather than failing. The hand-back is
+            # shielded so that same cancellation cannot interrupt it too.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._release(tracked_item_id, logins))
             raise
 
         await self._record_mentions(tracked_item_id, mentions)

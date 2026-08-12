@@ -348,3 +348,65 @@ class TestReRequestingAReviewAfterOneWasGiven:
         await ReviewRequestLedger(db_sessionmaker).fulfilled(
             parse_review_event("submitted", payload)
         )
+
+
+class TestAPingInterruptedMidFlight:
+    """The worker cancels a handler when its deadline passes, often inside the Discord call.
+
+    discord.py sleeps through a rate limit rather than failing, so the post is exactly where a
+    delivery tends to be when its sixty seconds run out.
+    """
+
+    async def test_a_cancelled_post_leaves_the_ping_owed(
+        self, registered: Repository, db_sessionmaker, db_session: AsyncSession, pr_event
+    ) -> None:
+        threads = _HangingOnPost()
+        service = _notifying(db_sessionmaker, threads)
+
+        # TimeoutError is what wait_for turns the cancellation into, and what the worker sees.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(service.sync(pr_event("opened")), timeout=0.2)
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row is not None and row.notified_at is None
+
+    async def test_the_owed_ping_goes_out_on_the_retry(
+        self, registered: Repository, db_sessionmaker, pr_event
+    ) -> None:
+        threads = _HangingOnPost()
+        service = _notifying(db_sessionmaker, threads)
+        # TimeoutError is what wait_for turns the cancellation into, and what the worker sees.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(service.sync(pr_event("opened")), timeout=0.2)
+
+        threads.hanging = False
+        result = await service.sync(pr_event("opened"))
+
+        assert result.notified == ("monalisa",)
+
+
+def _notifying(db_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
+    return ItemSyncService(
+        db_sessionmaker,
+        threads,
+        PullRequestPolicy(),
+        ActorNotifier(
+            db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+        ),
+    )
+
+
+class _HangingOnPost(FakeThreadGateway):
+    """A gateway whose post never returns, the way a rate-limited one behaves."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hanging = True
+
+    async def post(self, *, thread_id: int, content: str) -> int | None:
+        if self.hanging:
+            await asyncio.sleep(60)
+        return await super().post(thread_id=thread_id, content=content)
