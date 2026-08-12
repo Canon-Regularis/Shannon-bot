@@ -118,9 +118,14 @@ def build_note_handler(
         if snapshot is None:
             return WebhookOutcome.IGNORED
 
-        posted = await mirror.mirror(snapshot)
+        # The database work first, the Discord post last. A retry re-runs the whole handler,
+        # and posting a message is the one step that cannot be undone: anything after it that
+        # fails puts the same comment in the thread a second time. Closing a review request
+        # twice costs nothing, so it is the half that is safe to repeat.
         if then is not None:
             await then(snapshot)
+
+        posted = await mirror.mirror(snapshot)
         return WebhookOutcome.PROCESSED if posted else WebhookOutcome.IGNORED
 
     return handle

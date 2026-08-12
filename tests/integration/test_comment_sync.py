@@ -6,11 +6,15 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import TrackedItem
+from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ObjectType, Status
+from shannon.github.webhooks.comments import parse_comment_event
+from shannon.services.item_sync import ItemSyncService
+from shannon.services.notes import ItemNoteMirror, build_note_handler
+from shannon.services.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository
@@ -363,3 +367,59 @@ class TestNoteTargeting:
         )
 
         assert wrong is None
+
+
+class TestARetryAfterTheCommentLanded:
+    """A retry re-runs the whole handler, and posting a message cannot be undone."""
+
+    async def test_the_comment_is_not_posted_a_second_time(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        issues = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        failures = _FailsAfterTheNote()
+        handler = build_note_handler(mirror, parse_comment_event, then=failures)
+
+        with pytest.raises(RuntimeError):
+            await handler("created", payloads.issue_comment_event())
+        await handler("created", payloads.issue_comment_event())
+
+        assert [content for _, content in threads.posts].count("hello") == 1
+
+    async def test_the_step_after_it_still_runs(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        issues = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        seen: list[object] = []
+
+        async def record(snapshot: object) -> None:
+            seen.append(snapshot)
+
+        handler = build_note_handler(mirror, parse_comment_event, then=record)
+        await handler("created", payloads.issue_comment_event())
+
+        assert len(seen) == 1
+        assert [content for _, content in threads.posts].count("hello") == 1
+
+
+class _FailsAfterTheNote:
+    """Whatever runs alongside the mirror, failing the first time it is asked."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, snapshot: object) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("the database went away")
