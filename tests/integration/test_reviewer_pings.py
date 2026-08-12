@@ -367,11 +367,9 @@ class TestAPingInterruptedMidFlight:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(service.sync(pr_event("opened")), timeout=0.2)
 
-        db_session.expire_all()
-        row = await db_session.scalar(
-            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
-        )
-        assert row is not None and row.notified_at is None
+        # The hand-back is shielded, so the cancellation returns here first and it lands a
+        # moment later on its own. That it happens is the point; that it is instant is not.
+        assert await _owed_again(db_session), "the ping was claimed and never handed back"
 
     async def test_the_owed_ping_goes_out_on_the_retry(
         self, registered: Repository, db_sessionmaker, pr_event
@@ -410,3 +408,16 @@ class _HangingOnPost(FakeThreadGateway):
         if self.hanging:
             await asyncio.sleep(60)
         return await super().post(thread_id=thread_id, content=content)
+
+
+async def _owed_again(session: AsyncSession, timeout: float = 5.0) -> bool:
+    """Whether the reviewer's ping is unclaimed again, waiting briefly for the hand-back."""
+    async with asyncio.timeout(timeout):
+        while True:
+            session.expire_all()
+            row = await session.scalar(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+            )
+            if row is not None and row.notified_at is None:
+                return True
+            await asyncio.sleep(0.02)

@@ -51,19 +51,13 @@ class ActorNotifier:
         that fails partway through is retried from the top; either would send the same person
         the same ping twice if the claim came last.
         """
-        async with self._sessionmaker() as session, session.begin():
-            logins = tuple(
-                sorted(
-                    await ItemAssignmentStore(session).claim_notifications(
-                        tracked_item_id, self._role
-                    )
-                )
-            )
-            if not logins:
-                return ()
-            mentions = await UserLinkStore(session).resolve_many(
-                guild_id=guild_id, github_usernames=logins
-            )
+        # Shielded, so a cancellation cannot land between the claim committing and the guard
+        # below taking responsibility for it. That gap is only a transaction commit wide, but
+        # cancellation is delivered at exactly such a point, and a ping claimed by nobody is
+        # one nobody ever sends.
+        logins, mentions = await asyncio.shield(self._claim(tracked_item_id, guild_id))
+        if not logins:
+            return ()
 
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))
@@ -74,8 +68,12 @@ class ActorNotifier:
             # Cancellation counts as a failure here and is the reason this catches everything
             # rather than Exception. The worker puts a deadline on each delivery and cancels
             # the handler where it stands, and where it stands is often exactly here, because
-            # discord.py sleeps through a rate limit rather than failing. The hand-back is
-            # shielded so that same cancellation cannot interrupt it too.
+            # discord.py sleeps through a rate limit rather than failing.
+            #
+            # Shielded, so that same cancellation cannot interrupt the hand-back. One
+            # consequence worth knowing: when this path is reached by cancellation the await
+            # returns at once and the hand-back lands a moment later, on its own. The delivery
+            # is not retried for another five seconds at the soonest, so it is back in time.
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._release(tracked_item_id, logins))
             raise
@@ -83,6 +81,25 @@ class ActorNotifier:
         await self._record_mentions(tracked_item_id, mentions)
         logger.info("pinged %s %s on tracked item %s", self._role, logins, tracked_item_id)
         return logins
+
+    async def _claim(
+        self, tracked_item_id: int, guild_id: int
+    ) -> tuple[tuple[str, ...], Mapping[str, int]]:
+        """Take the pings nobody has sent yet, and work out how to address them."""
+        async with self._sessionmaker() as session, session.begin():
+            logins = tuple(
+                sorted(
+                    await ItemAssignmentStore(session).claim_notifications(
+                        tracked_item_id, self._role
+                    )
+                )
+            )
+            if not logins:
+                return (), {}
+            mentions = await UserLinkStore(session).resolve_many(
+                guild_id=guild_id, github_usernames=logins
+            )
+        return logins, mentions
 
     async def _release(self, tracked_item_id: int, logins: tuple[str, ...]) -> None:
         async with self._sessionmaker() as session, session.begin():
