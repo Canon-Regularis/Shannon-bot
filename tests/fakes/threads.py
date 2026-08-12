@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from shannon.discord_bot.errors import ThreadNotFoundError
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.threads import ThreadHandle, truncate_thread_name
 
 
@@ -30,6 +30,11 @@ class FakeThreadGateway:
         self.posts: list[tuple[int, str]] = []
         self.renames: list[tuple[int, str]] = []
         self.locks: list[tuple[int, bool]] = []
+        self.deleted: list[int] = []
+        self.unarchived: list[int] = []
+        # Set by a test that needs the next thread creation to fail the way a Discord outage
+        # would, so what happens to everything queued behind it can be observed.
+        self.fail_next_create = False
         self._next_id = 1000
 
     def _allocate(self) -> int:
@@ -37,6 +42,10 @@ class FakeThreadGateway:
         return self._next_id
 
     async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+        if self.fail_next_create:
+            self.fail_next_create = False
+            raise DiscordGatewayError("Discord refused to create a thread")
+
         thread_id = self._allocate()
         message_id = self._allocate()
         thread = FakeThread(
@@ -53,13 +62,7 @@ class FakeThreadGateway:
     async def update(
         self, *, thread_id: int, message_id: int | None, name: str, content: str
     ) -> ThreadHandle:
-        thread = self.threads.get(thread_id)
-        if thread is None:
-            raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
-        # Locked is fine: the bot holds Manage Threads. Archived is not, because Discord
-        # rejects writes to an archived thread until it is unarchived.
-        if thread.archived:
-            raise ThreadNotFoundError(f"Thread {thread_id} is archived")
+        thread = self._wake(thread_id)
 
         wanted = truncate_thread_name(name)
         if thread.name != wanted:
@@ -76,23 +79,39 @@ class FakeThreadGateway:
         thread = self.threads.get(thread_id)
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
-        if thread.locked == locked:
+        if thread.locked == locked and not thread.archived:
             return
-        thread.locked = locked
-        self.locks.append((thread_id, locked))
+        # The real gateway unarchives in the same edit that changes the lock.
+        thread.archived = False
+        if thread.locked != locked:
+            thread.locked = locked
+            self.locks.append((thread_id, locked))
 
     async def post(self, *, thread_id: int, content: str) -> int | None:
-        thread = self.threads.get(thread_id)
-        if thread is None:
-            raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
-        # Locked is fine: the bot holds Manage Threads. Archived is not, because Discord
-        # rejects writes to an archived thread until it is unarchived.
-        if thread.archived:
-            raise ThreadNotFoundError(f"Thread {thread_id} is archived")
+        thread = self._wake(thread_id)
         message_id = self._allocate()
         thread.messages[message_id] = content
         self.posts.append((thread_id, content))
         return message_id
+
+    async def delete(self, *, thread_id: int) -> None:
+        thread = self.threads.pop(thread_id, None)
+        if thread is not None:
+            self.deleted.append(thread_id)
+
+    def _wake(self, thread_id: int) -> FakeThread:
+        """Find a thread, unarchiving it the way the real gateway does before it writes.
+
+        Discord rejects writes to an archived thread, and archives one on its own once it goes
+        quiet, so every write path reopens it first.
+        """
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
+        if thread.archived:
+            thread.archived = False
+            self.unarchived.append(thread_id)
+        return thread
 
     def metadata_of(self, thread_id: int) -> str:
         thread = self.threads[thread_id]

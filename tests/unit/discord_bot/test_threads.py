@@ -8,13 +8,17 @@ import pytest
 from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
+    DiscordPermissionError,
     ThreadNotFoundError,
+    ThreadStartedEmptyError,
 )
 from shannon.discord_bot.threads import (
+    ARCHIVE_AFTER_MINUTES,
     THREAD_NAME_LIMIT,
     DiscordThreadGateway,
     truncate_thread_name,
 )
+from shannon.domain.errors import PermanentError
 
 
 def message(message_id: int) -> MagicMock:
@@ -24,12 +28,23 @@ def message(message_id: int) -> MagicMock:
     return stub
 
 
-def thread(thread_id: int = 500, name: str = "#7 Add the webhook endpoint") -> MagicMock:
+def thread(
+    thread_id: int = 500,
+    name: str = "#7 Add the webhook endpoint",
+    *,
+    archived: bool = False,
+    locked: bool = False,
+) -> MagicMock:
     stub = MagicMock(spec=discord.Thread)
     stub.id = thread_id
     stub.name = name
+    # Set explicitly: an unset attribute on a MagicMock is itself a Mock, which is truthy, so
+    # leaving these out would have every test look like an archived and locked thread.
+    stub.archived = archived
+    stub.locked = locked
     stub.send = AsyncMock(return_value=message(900))
     stub.edit = AsyncMock()
+    stub.delete = AsyncMock()
     stub.fetch_message = AsyncMock(return_value=message(600))
     return stub
 
@@ -201,3 +216,180 @@ def test_long_thread_names_are_truncated() -> None:
 
 def test_a_blank_thread_name_gets_a_placeholder() -> None:
     assert truncate_thread_name("   ") == "Untitled"
+
+
+class TestArchivedThreads:
+    """Discord archives a quiet thread by itself and then refuses every edit to it.
+
+    A pull request nobody discusses for a day is completely ordinary, so without reopening
+    first the mirror stops for good the first time that happens.
+    """
+
+    async def test_a_thread_is_created_with_the_longest_archive_window(self) -> None:
+        created = thread()
+        channel = text_channel(created)
+        gateway = DiscordThreadGateway(client_with(channel))
+
+        await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+
+        kwargs = channel.create_thread.await_args.kwargs
+        assert kwargs["auto_archive_duration"] == ARCHIVE_AFTER_MINUTES
+
+    async def test_a_forum_thread_gets_the_same_window(self) -> None:
+        channel = forum_channel(thread(), message(901))
+        gateway = DiscordThreadGateway(client_with(channel))
+
+        await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+
+        assert channel.create_thread.await_args.kwargs["auto_archive_duration"] == (
+            ARCHIVE_AFTER_MINUTES
+        )
+
+    async def test_updating_reopens_an_archived_thread_first(self) -> None:
+        existing = thread(archived=True)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.update(thread_id=500, message_id=600, name=existing.name, content="new")
+
+        assert existing.edit.await_args_list[0].kwargs == {"archived": False}
+
+    async def test_posting_reopens_an_archived_thread_first(self) -> None:
+        existing = thread(archived=True)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.post(thread_id=500, content="a comment")
+
+        existing.edit.assert_awaited_once_with(archived=False)
+        existing.send.assert_awaited_once_with("a comment")
+
+    async def test_an_open_thread_is_not_edited_just_to_reopen_it(self) -> None:
+        existing = thread(archived=False)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.post(thread_id=500, content="a comment")
+
+        existing.edit.assert_not_awaited()
+
+    async def test_locking_reopens_in_the_same_edit(self) -> None:
+        """One call rather than two, and a locked thread needs Manage Threads either way."""
+        existing = thread(archived=True, locked=False)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_locked(thread_id=500, locked=True)
+
+        existing.edit.assert_awaited_once_with(archived=False, locked=True)
+
+    async def test_an_archived_thread_is_reopened_even_when_the_lock_already_matches(self) -> None:
+        existing = thread(archived=True, locked=True)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_locked(thread_id=500, locked=True)
+
+        existing.edit.assert_awaited_once_with(archived=False, locked=True)
+
+    async def test_nothing_happens_when_the_thread_is_already_as_wanted(self) -> None:
+        existing = thread(archived=False, locked=True)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_locked(thread_id=500, locked=True)
+
+        existing.edit.assert_not_awaited()
+
+
+class TestPartialCreation:
+    """Opening a thread and writing in it are two calls and two separate permissions."""
+
+    async def test_a_failed_first_message_still_reports_the_thread_id(self) -> None:
+        created = thread()
+        created.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "boom"))
+        gateway = DiscordThreadGateway(client_with(text_channel(created)))
+
+        with pytest.raises(ThreadStartedEmptyError) as raised:
+            await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+
+        assert raised.value.thread_id == 500
+
+    async def test_a_missing_permission_is_not_worth_retrying(self) -> None:
+        created = thread()
+        created.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "nope"))
+        gateway = DiscordThreadGateway(client_with(text_channel(created)))
+
+        with pytest.raises(ThreadStartedEmptyError) as raised:
+            await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+
+        assert isinstance(raised.value.__cause__, DiscordPermissionError)
+
+    async def test_being_refused_the_thread_itself_is_a_permission_error(self) -> None:
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.create_thread = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(status=403), "nope")
+        )
+        gateway = DiscordThreadGateway(client_with(channel))
+
+        with pytest.raises(DiscordPermissionError):
+            await gateway.create(channel_id=10, name="x", content="y")
+
+    async def test_a_permission_error_is_permanent(self) -> None:
+        """The worker gives up on these at once rather than retrying for two hours."""
+        assert issubclass(DiscordPermissionError, PermanentError)
+
+
+class TestDeletingAThread:
+    async def test_a_stranded_thread_is_removed(self) -> None:
+        existing = thread()
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.delete(thread_id=500)
+
+        existing.delete.assert_awaited_once()
+
+    async def test_failing_to_remove_one_is_not_worth_raising_over(self) -> None:
+        existing = thread()
+        existing.delete = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "x"))
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.delete(thread_id=500)
+
+
+class TestRefusedIsNotGone:
+    """A permission refusal must never read as a deleted thread.
+
+    Callers rebuild on a missing thread. Reporting a 403 that way would have a temporary loss
+    of access delete the item's record of its thread and open a replacement, orphaning
+    everything already mirrored into the original.
+    """
+
+    def _client_refusing(self) -> MagicMock:
+        stub = MagicMock(spec=discord.Client)
+        stub.get_channel = MagicMock(return_value=None)
+        stub.fetch_channel = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "no"))
+        return stub
+
+    async def test_a_refused_thread_is_a_permission_error(self) -> None:
+        gateway = DiscordThreadGateway(self._client_refusing())
+
+        with pytest.raises(DiscordPermissionError):
+            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+
+    async def test_a_refused_channel_is_a_permission_error(self) -> None:
+        gateway = DiscordThreadGateway(self._client_refusing())
+
+        with pytest.raises(DiscordPermissionError):
+            await gateway.create(channel_id=10, name="x", content="y")
+
+    async def test_a_missing_thread_is_still_reported_as_missing(self) -> None:
+        client = MagicMock(spec=discord.Client)
+        client.get_channel = MagicMock(return_value=None)
+        client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "x"))
+        gateway = DiscordThreadGateway(client)
+
+        with pytest.raises(ThreadNotFoundError):
+            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+
+    async def test_a_channel_that_is_gone_is_permanent(self) -> None:
+        """Both a deleted channel and one that cannot hold threads need /set_channel."""
+        assert issubclass(ChannelNotFoundError, PermanentError)
+
+    async def test_a_missing_thread_is_not_permanent(self) -> None:
+        """It is a signal to rebuild, which is work rather than a dead end."""
+        assert not issubclass(ThreadNotFoundError, PermanentError)
