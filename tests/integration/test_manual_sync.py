@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -141,3 +143,90 @@ async def test_the_repository_name_match_ignores_case(
     )
 
     assert outcome.created is True
+
+
+class TestARenamedRepository:
+    """GitHub keeps a repository's id across a rename; the stored name catches up on a webhook.
+
+    Until it does, checking the link by name refuses the correct link for a repository that has
+    only moved, and no server admin can do anything about it.
+    """
+
+    @pytest.fixture
+    def renamed(self) -> FakeGitHubClient:
+        """The same repository, same id, under the name GitHub uses now."""
+        moved = replace(REPO, name="Shannon", html_url="https://github.com/Canon-Regularis/Shannon")
+        return FakeGitHubClient(
+            pull_requests={("canon-regularis/shannon", 7): replace(SNAPSHOT, repository=moved)},
+            repositories={"canon-regularis/shannon": moved},
+        )
+
+    @pytest.fixture
+    def moved_link(self) -> str:
+        return "https://github.com/Canon-Regularis/Shannon/pull/7"
+
+    async def test_a_link_under_the_new_name_is_accepted(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        sync_service: ItemSyncService,
+        renamed: FakeGitHubClient,
+        moved_link: str,
+    ) -> None:
+        service = build_pull_request_sync(db_sessionmaker, renamed, sync_service)
+
+        outcome = await service.sync_link(guild_id=1, link=moved_link)
+
+        assert outcome.thread_id is not None
+        assert outcome.full_name == "Canon-Regularis/Shannon"
+
+    async def test_the_stored_name_is_brought_up_to_date(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        sync_service: ItemSyncService,
+        renamed: FakeGitHubClient,
+        moved_link: str,
+    ) -> None:
+        service = build_pull_request_sync(db_sessionmaker, renamed, sync_service)
+        repository_id = registered.id
+
+        await service.sync_link(guild_id=1, link=moved_link)
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Canon-Regularis/Shannon"
+
+    async def test_the_matching_link_costs_no_extra_call(
+        self, registered: Repository, manual: ManualSync, github: FakeGitHubClient
+    ) -> None:
+        """The id check only runs on the path that was about to refuse."""
+        await manual.sync_link(guild_id=1, link=LINK)
+
+        assert github.repository_calls == []
+
+    async def test_a_link_to_a_genuinely_different_repository_is_still_refused(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        sync_service: ItemSyncService,
+    ) -> None:
+        elsewhere = replace(REPO, github_repo_id=999999, owner="someone", name="else")
+        github = FakeGitHubClient(repositories={"someone/else": elsewhere})
+        service = build_pull_request_sync(db_sessionmaker, github, sync_service)
+
+        with pytest.raises(RepositoryMismatchError, match="not someone/else"):
+            await service.sync_link(guild_id=1, link="https://github.com/someone/else/pull/7")
+
+    async def test_a_link_to_nothing_at_all_is_still_refused(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        sync_service: ItemSyncService,
+    ) -> None:
+        service = build_pull_request_sync(db_sessionmaker, FakeGitHubClient(), sync_service)
+
+        with pytest.raises(RepositoryMismatchError):
+            await service.sync_link(guild_id=1, link="https://github.com/nobody/nothing/pull/7")

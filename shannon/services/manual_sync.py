@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from shannon.db.models import Repository
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.errors import (
     NotRegisteredError,
@@ -15,6 +16,7 @@ from shannon.domain.errors import (
 )
 from shannon.domain.models import RepositoryRef, TrackedSnapshot
 from shannon.github.client import GitHubClient
+from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
 from shannon.services.item_sync import ItemSyncService, SyncOutcome
 
@@ -64,6 +66,35 @@ class ManualSync:
         self._fetch = fetch
         self._noun = noun
 
+    async def _confirm_same_repository(
+        self, repository: Repository, ref: RepositoryRef, *, guild_id: int
+    ) -> None:
+        """Settle a link that names a different repository against the id rather than the name.
+
+        GitHub lets a repository be renamed and keeps its numeric id. The stored name only
+        catches up when a webhook arrives, so refusing on the name alone leaves both commands
+        rejecting the correct link for a repository that has only moved. This costs one API
+        call, and only on the path that was about to refuse anyway.
+        """
+        try:
+            named = await self._github.get_repository(ref.owner, ref.name)
+        except GitHubNotFoundError:
+            named = None
+
+        if named is None or named.github_repo_id != repository.github_repo_id:
+            raise RepositoryMismatchError(
+                f"This server is registered to {repository.repo_name}, not {ref.full_name}."
+            )
+
+        async with self._sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            stored = await repositories.get_by_guild(guild_id)
+            if stored is not None:
+                await repositories.follow_rename(
+                    stored, repo_name=named.full_name, repo_url=named.html_url
+                )
+        repository.repo_name = named.full_name
+
     async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome:
         """Fetch an item by link and mirror it into this guild's Discord channel.
 
@@ -79,9 +110,7 @@ class ManualSync:
         if repository is None:
             raise NotRegisteredError("This server has no repository yet. Run /register first.")
         if repository.repo_name.lower() != ref.full_name.lower():
-            raise RepositoryMismatchError(
-                f"This server is registered to {repository.repo_name}, not {ref.full_name}."
-            )
+            await self._confirm_same_repository(repository, ref, guild_id=guild_id)
 
         if ref.number is None:
             # The link parsers guarantee a number, so this is a contract breach rather than
