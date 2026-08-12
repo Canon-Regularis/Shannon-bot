@@ -474,3 +474,65 @@ class TestPruning:
 
         assert removed == 0
         assert (await stored(db_session, "waiting")).status == DeliveryStatus.PENDING
+
+
+class TestWhenTheBotNeverConnects:
+    """wait_until_ready waits on an event only ever set by a successful connection."""
+
+    async def test_a_readiness_check_that_fails_stops_the_worker_loudly(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        async def never_connects() -> None:
+            raise RuntimeError("the Discord bot stopped before it ever connected")
+
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, poll_interval=timedelta(seconds=0.01))
+        await enqueue(queue, "delivery-a")
+
+        with pytest.raises(RuntimeError, match="ever connected"):
+            await worker.run_forever(never_connects)
+
+        assert handler.calls == 0
+        # Left for a process that can actually reach Discord, rather than burned through.
+        event = await stored(db_session, "delivery-a")
+        assert event.status == DeliveryStatus.PENDING
+        assert event.attempts == 0
+
+
+class TestPruningThatFails:
+    async def test_a_failing_prune_is_not_retried_on_every_poll(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """The timer used to move only on success, so a broken prune ran every couple of seconds."""
+        attempts = 0
+
+        async def failing_prune(*, keep_for: timedelta) -> int:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("the prune failed")
+
+        worker = build_worker(
+            queue,
+            Exploding(failures=0),
+            poll_interval=timedelta(seconds=0.01),
+            prune_interval=timedelta(hours=1),
+        )
+        worker._queue = _PruneFails(queue, failing_prune)
+
+        running = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.3)
+        worker.stop()
+        await running
+
+        assert attempts == 1
+
+
+class _PruneFails:
+    """The real queue with one method swapped, so everything else behaves normally."""
+
+    def __init__(self, queue: WebhookDeliveryQueue, prune) -> None:
+        self._queue = queue
+        self.prune = prune
+
+    def __getattr__(self, name: str):
+        return getattr(self._queue, name)

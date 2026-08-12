@@ -81,6 +81,31 @@ async def _stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
         await task
 
 
+def _connected(bot: ShannonBot, bot_task: asyncio.Task) -> ReadyCheck:
+    """Wait for the gateway, and give up if the bot stops trying to reach it.
+
+    `wait_until_ready` waits on an event that is only ever set once a connection succeeds, so a
+    bad token or a refused login leaves it waiting for the rest of the process's life. A worker
+    parked there never leases anything: the endpoint goes on accepting deliveries, the queue
+    grows, pruning never runs, and nothing says why. Failing instead stops the worker loudly and
+    leaves the deliveries pending for a process that can actually reach Discord.
+    """
+
+    async def connected() -> None:
+        ready = asyncio.ensure_future(bot.wait_until_ready())
+        try:
+            await asyncio.wait({ready, bot_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            ready.cancel()
+
+        if not bot_task.done():
+            return
+
+        raise RuntimeError("the Discord bot stopped before it ever connected")
+
+    return connected
+
+
 def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -90,7 +115,7 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         if token:
             bot_task = asyncio.create_task(bot.start(token))
             bot_task.add_done_callback(_report_exit("Discord bot"))
-            ready = bot.wait_until_ready
+            ready = _connected(bot, bot_task)
         else:
             # Handy for poking the webhook endpoint locally, and loud enough that nobody
             # deploys like this by accident.

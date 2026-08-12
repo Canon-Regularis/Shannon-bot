@@ -47,8 +47,9 @@ class Settings(BaseSettings):
     worker_max_attempts: int = Field(default=16, gt=0)
     worker_max_backoff_seconds: float = Field(default=900.0, gt=0)
     # How long a leased delivery stays claimed. A worker killed mid-delivery leaves its rows
-    # untouched until this passes, so this is also how long that work waits.
-    worker_lease_seconds: float = Field(default=300.0, gt=0)
+    # untouched until this passes, so this is also how long that work waits. It has to cover a
+    # whole batch at its worst, which is batch_size deliveries each taking the full timeout.
+    worker_lease_seconds: float = Field(default=900.0, gt=0)
     worker_delivery_timeout_seconds: float = Field(default=60.0, gt=0)
     # How long shutdown waits for the delivery in hand to finish. Longer than one delivery
     # normally takes, and well inside the ten seconds a container gets before SIGKILL.

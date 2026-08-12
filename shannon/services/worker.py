@@ -33,9 +33,11 @@ class WorkerSettings:
     max_attempts: int = 16
     first_backoff: timedelta = timedelta(seconds=5)
     max_backoff: timedelta = timedelta(minutes=15)
-    # Longer than any single delivery should take, short enough that a killed worker's rows
-    # come back reasonably soon.
-    lease: timedelta = timedelta(minutes=5)
+    # Long enough to cover a whole batch at its worst, which is every delivery in it running to
+    # the timeout, and short enough that a killed worker's rows come back reasonably soon. A
+    # lease that expires while the batch is still being worked would let a second replica take
+    # deliveries this one is in the middle of.
+    lease: timedelta = timedelta(minutes=15)
     delivery_timeout: timedelta = timedelta(seconds=60)
     retention: timedelta = timedelta(days=7)
     prune_interval: timedelta = timedelta(hours=1)
@@ -111,7 +113,14 @@ class DeliveryWorker:
                 # locked for the whole lease while the replacement process polls an empty queue.
                 await self._queue.release(deliveries[index:])
                 return index
-            await self._handle(delivery)
+            try:
+                await self._handle(delivery)
+            except asyncio.CancelledError:
+                # Cancelled outright, which is what happens when the grace period runs out
+                # before the delivery in hand finishes. The rest of the batch was never touched
+                # and there is no reason for it to wait out the lease as well.
+                await asyncio.shield(self._queue.release(deliveries[index + 1 :]))
+                raise
         return len(deliveries)
 
     async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None:
@@ -133,10 +142,13 @@ class DeliveryWorker:
                 handled = await self.run_once()
 
                 if loop.time() >= pruned_after:
+                    # Rescheduled whatever happens. Moving it only on success would have a
+                    # failing prune tried again on every poll, which is every couple of
+                    # seconds, for as long as the reason it failed lasts.
+                    pruned_after = loop.time() + self._settings.prune_interval.total_seconds()
                     removed = await self._queue.prune(keep_for=self._settings.retention)
                     if removed:
                         logger.info("pruned %s finished deliveries", removed)
-                    pruned_after = loop.time() + self._settings.prune_interval.total_seconds()
 
                 # Straight back round while there is a backlog, so a burst drains at once
                 # rather than one batch per tick.
