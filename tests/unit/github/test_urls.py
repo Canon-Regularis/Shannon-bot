@@ -139,3 +139,24 @@ def test_the_two_parsers_reject_each_other_symmetrically() -> None:
         parse_pull_request_url(issue_link)
     with pytest.raises(UnparseableLinkError, match="is a pull request link, not an issue link"):
         parse_issue_url(pull_link)
+
+
+class TestNumbersThatAreNotAsciiDigits:
+    """str.isdigit is true for a great deal more than 0-9, and int() disagrees with it."""
+
+    def test_an_arabic_indic_number_is_refused_rather_than_converted(self) -> None:
+        """It converts silently, so this used to sync a different pull request entirely."""
+        with pytest.raises(UnparseableLinkError):
+            parse_pull_request_url("https://github.com/o/r/pull/\u0667")
+
+    def test_a_superscript_is_refused_rather_than_raising(self) -> None:
+        """isdigit passes it and int() then raises, which escaped as an unhandled error."""
+        with pytest.raises(UnparseableLinkError):
+            parse_pull_request_url("https://github.com/o/r/pull/\u00b2")
+
+    def test_a_circled_digit_is_refused_rather_than_raising(self) -> None:
+        with pytest.raises(UnparseableLinkError):
+            parse_issue_url("https://github.com/o/r/issues/\u2467")
+
+    def test_an_ordinary_number_still_works(self) -> None:
+        assert parse_pull_request_url("https://github.com/o/r/pull/7").number == 7

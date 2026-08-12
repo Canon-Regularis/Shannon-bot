@@ -103,7 +103,13 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
 
 
 def _parse_number(segment: str, link: str) -> int:
-    if not segment.isdigit():
+    """The item number out of a link, or a refusal.
+
+    ASCII digits only. `str.isdigit` is true for a great deal more than that: Arabic-Indic
+    digits convert silently, so a link ending in a number nobody typed would sync a different
+    item, and superscripts and circled digits pass the check and then raise on conversion.
+    """
+    if not (segment.isascii() and segment.isdigit()):
         raise UnparseableLinkError(f"{link!r} has no valid number")
     number = int(segment)
     if number < 1:
