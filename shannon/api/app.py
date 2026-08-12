@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from shannon.api.routes import webhooks
+from shannon.api.routes import health, webhooks
 from shannon.config import Settings, get_settings
 from shannon.github.webhooks.events import EventRouter
 from shannon.services.delivery_queue import DeliveryQueue
@@ -28,5 +28,9 @@ def create_app(
     app.state.settings = settings or get_settings()
     app.state.event_router = event_router or EventRouter()
     app.state.delivery_queue = queue
+    # Set by the lifespan once the worker exists. Without it /health can only report that the
+    # port is open, which is what it says.
+    app.state.liveness = None
     app.include_router(webhooks.router)
+    app.include_router(health.router)
     return app

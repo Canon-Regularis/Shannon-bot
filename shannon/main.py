@@ -4,9 +4,12 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import uvicorn
 from fastapi import FastAPI
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from shannon.api.app import create_app
 from shannon.config import Settings, get_settings
@@ -81,6 +84,38 @@ async def _stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
         await task
 
 
+@dataclass(slots=True)
+class ProcessLiveness:
+    """What /health reports, kept where the things it reports on actually live."""
+
+    engine: AsyncEngine
+    worker_task: asyncio.Task | None = None
+
+    async def database_reachable(self) -> bool:
+        try:
+            async with self.engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        except Exception as error:
+            logger.warning("the database is not reachable: %s", error)
+            return False
+        return True
+
+    def worker_running(self) -> bool:
+        return self.worker_task is not None and not self.worker_task.done()
+
+
+async def _require_a_working_database(engine: AsyncEngine) -> None:
+    """Prove the database is there and migrated before the port opens.
+
+    Building an engine connects to nothing, so without this a wrong password or a database that
+    has never been migrated still reaches "startup complete" and passes a health check, while
+    every delivery is accepted and then fails behind it. Failing here stops the process with
+    something an operator can act on.
+    """
+    async with engine.connect() as connection:
+        await connection.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
+
+
 def _connected(bot: ShannonBot, bot_task: asyncio.Task) -> ReadyCheck:
     """Wait for the gateway, and give up if the bot stops trying to reach it.
 
@@ -108,7 +143,20 @@ def _connected(bot: ShannonBot, bot_task: asyncio.Task) -> ReadyCheck:
 
 def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            await _require_a_working_database(container.engine)
+        except Exception as error:
+            logger.error(
+                "cannot reach the database, or it has never been migrated: %s. "
+                "Check SHANNON_DATABASE_URL and run `alembic upgrade head`.",
+                error,
+            )
+            raise
+
+        liveness = ProcessLiveness(container.engine)
+        app.state.liveness = liveness
+
         bot_task: asyncio.Task | None = None
         ready: ReadyCheck | None = None
         token = settings.discord_token.get_secret_value()
@@ -127,6 +175,10 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         # one before Discord is connected only wastes an attempt.
         worker_task = asyncio.create_task(container.worker.run_forever(ready))
         worker_task.add_done_callback(_report_exit("delivery worker"))
+        # A worker that dies takes the whole point of the process with it, and the endpoint
+        # would go on answering 200 to deliveries nothing will act on. /health is what makes
+        # that visible from outside.
+        liveness.worker_task = worker_task
 
         try:
             yield
