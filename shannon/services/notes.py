@@ -47,6 +47,10 @@ class ItemNoteMirror:
                 snapshot.repository.github_repo_id
             )
             if repository is None:
+                logger.info(
+                    "a note arrived for %s, which is not registered to any guild",
+                    snapshot.repository.full_name,
+                )
                 return False
 
             # By number, not by id. A pull request reports its issue id in comment payloads,
@@ -57,7 +61,7 @@ class ItemNoteMirror:
                 object_type=snapshot.object_type,
             )
             if item is None:
-                logger.debug(
+                logger.info(
                     "note on %s#%s is not tracked here, ignoring",
                     snapshot.repository.full_name,
                     snapshot.item_number,

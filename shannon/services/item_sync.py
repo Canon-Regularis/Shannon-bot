@@ -158,8 +158,14 @@ class ItemSyncService:
             repositories = RepositoryStore(session)
             repository = await repositories.get_by_github_id(snapshot.repository.github_repo_id)
             if repository is None:
-                logger.debug(
-                    "%s is not registered to any guild, ignoring", snapshot.repository.full_name
+                # Not debug: a repository somebody registered going missing, or a webhook
+                # installed across an organisation, is the likeliest reason for "the bot has
+                # stopped posting" and the only place it is ever said.
+                logger.info(
+                    "%s is not registered to any guild, ignoring %s.%s",
+                    snapshot.repository.full_name,
+                    object_type.value,
+                    snapshot.action,
                 )
                 return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
