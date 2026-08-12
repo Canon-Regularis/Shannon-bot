@@ -5,6 +5,9 @@ import logging
 import discord
 from discord import app_commands
 
+from shannon.discord_bot.commands._replies import reply_for
+from shannon.discord_bot.responses import reply
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +37,20 @@ class ShannonBot(discord.Client):
             ),
         )
         self.tree = app_commands.CommandTree(self)
+        self.tree.on_error = self._command_failed
         self._pending: list[app_commands.Command] = []
+
+    async def _command_failed(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Answer an interaction whose command raised something it did not expect.
+
+        Each command handles the errors it knows about. Anything else, a dropped database
+        connection or a plain bug, would otherwise leave the person who ran it looking at a
+        spinner until Discord gave up, with the reason only in the log.
+        """
+        logger.exception("a slash command failed", exc_info=error)
+        await reply(interaction, reply_for(error))
 
     def install(self, *commands: app_commands.Command) -> None:
         self._pending.extend(commands)

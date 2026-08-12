@@ -3,10 +3,11 @@ from __future__ import annotations
 import pytest
 
 from shannon.config import Settings
-from shannon.discord_bot.commands.pr import build_pr_command
+from shannon.discord_bot.commands.sync_link import build_issue_command, build_pr_command
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.errors import (
+    ItemNotReadyError,
     NotRegisteredError,
     RepositoryMismatchError,
     UnparseableLinkError,
@@ -20,7 +21,14 @@ from tests.fakes.discord_objects import (
     FakeRole,
 )
 
-LINK = "https://github.com/Canon-Regularis/Shannon-bot/pull/7"
+# /pr and /issue share their whole body, so both are driven through the same tests. What used to
+# be two near-identical files could drift; this cannot. They keep their own parameter names,
+# which the requirements spell out and which people type in Discord.
+KINDS = [
+    pytest.param(build_pr_command, "pr", "pull request", "pull/7", id="pr"),
+    pytest.param(build_issue_command, "issue", "issue", "issues/7", id="issue"),
+]
+
 OPENED = ManualSyncOutcome(
     thread_id=555, created=True, number=7, full_name="Canon-Regularis/Shannon-bot"
 )
@@ -45,18 +53,57 @@ class StubManualSync:
         return self.outcome
 
 
-def command(service: StubManualSync):
-    return build_pr_command(service, PermissionGate(Settings()))  # type: ignore[arg-type]
+def command(service: StubManualSync, build=build_pr_command):
+    return build(service, PermissionGate(Settings()))  # type: ignore[arg-type]
 
 
 def member_with(role: str) -> FakeMember:
     return FakeMember(roles=[FakeRole(role)])
 
 
-async def run(service: StubManualSync, member: FakeMember, link: str = LINK) -> FakeInteraction:
+async def run(
+    service: StubManualSync,
+    member: FakeMember,
+    *,
+    link: str = "https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+    build=build_pr_command,
+) -> FakeInteraction:
     interaction = FakeInteraction(guild_id=1, channel_id=99, user=member)
-    await command(service).callback(interaction, link)
+    await command(service, build).callback(interaction, link)
     return interaction
+
+
+@pytest.mark.parametrize(("build", "name", "noun", "path"), KINDS)
+async def test_a_new_item_reports_the_thread_as_opened(
+    build, name: str, noun: str, path: str
+) -> None:
+    service = StubManualSync(outcome=OPENED)
+    link = f"https://github.com/Canon-Regularis/Shannon-bot/{path}"
+
+    interaction = await run(service, member_with("Developer"), link=link, build=build)
+
+    assert service.calls == [{"guild_id": 1, "link": link}]
+    assert interaction.reply.startswith("Opened the thread for Canon-Regularis/Shannon-bot#7")
+    assert "<#555>" in interaction.reply
+
+
+@pytest.mark.parametrize(("build", "name", "noun", "path"), KINDS)
+async def test_a_missing_item_names_the_right_kind(build, name: str, noun: str, path: str) -> None:
+    service = StubManualSync(error=GitHubNotFoundError("GitHub has nothing there"))
+
+    interaction = await run(service, member_with("Developer"), build=build)
+
+    assert interaction.reply == f"GitHub has no {noun} at that link."
+
+
+@pytest.mark.parametrize(("build", "name", "noun", "path"), KINDS)
+async def test_a_member_with_no_roles_is_rejected(build, name: str, noun: str, path: str) -> None:
+    service = StubManualSync()
+
+    interaction = await run(service, FakeMember(), build=build)
+
+    assert service.calls == []
+    assert f"You need one of these roles to use /{name}" in interaction.reply
 
 
 @pytest.mark.parametrize("role", ["Developer", "Reviewer", "Project Manager"])
@@ -65,7 +112,7 @@ async def test_the_three_allowed_tiers_can_sync(role: str) -> None:
 
     interaction = await run(service, member_with(role))
 
-    assert service.calls == [{"guild_id": 1, "link": LINK}]
+    assert len(service.calls) == 1
     assert "<#555>" in interaction.reply
 
 
@@ -77,24 +124,7 @@ async def test_an_administrator_can_sync() -> None:
     assert len(service.calls) == 1
 
 
-async def test_a_member_with_no_roles_is_rejected() -> None:
-    service = StubManualSync()
-
-    interaction = await run(service, FakeMember())
-
-    assert service.calls == []
-    assert "You need one of these roles to use /pr" in interaction.reply
-
-
-async def test_a_new_pull_request_reports_the_thread_as_opened() -> None:
-    service = StubManualSync(outcome=OPENED)
-
-    interaction = await run(service, member_with("Developer"))
-
-    assert interaction.reply.startswith("Opened the thread for Canon-Regularis/Shannon-bot#7")
-
-
-async def test_an_existing_pull_request_reports_the_thread_as_updated() -> None:
+async def test_an_existing_item_reports_the_thread_as_updated() -> None:
     service = StubManualSync(outcome=UPDATED)
 
     interaction = await run(service, member_with("Developer"))
@@ -108,9 +138,10 @@ async def test_an_invalid_link_is_reported() -> None:
     interaction = await run(service, member_with("Developer"), link="x")
 
     assert "That link did not work" in interaction.reply
+    assert "not a github.com link" in interaction.reply
 
 
-async def test_an_issue_link_is_reported_as_such() -> None:
+async def test_a_link_of_the_wrong_kind_is_reported_as_such() -> None:
     service = StubManualSync(
         error=UnparseableLinkError("'...' is an issue link, not a pull request link")
     )
@@ -138,14 +169,6 @@ async def test_a_link_to_another_repository_is_refused() -> None:
     interaction = await run(service, member_with("Reviewer"))
 
     assert interaction.reply == "This server is registered to a/b, not c/d."
-
-
-async def test_a_missing_pull_request_is_reported() -> None:
-    service = StubManualSync(error=GitHubNotFoundError("GitHub has nothing at /pulls/7"))
-
-    interaction = await run(service, member_with("Developer"))
-
-    assert interaction.reply == "GitHub has no pull request at that link."
 
 
 async def test_a_github_failure_is_reported_rather_than_raised() -> None:
@@ -176,7 +199,17 @@ async def test_a_repository_without_a_channel_mapping_is_explained() -> None:
     assert "no pull request channel mapped" in interaction.reply
 
 
+async def test_an_item_still_being_set_up_says_to_try_again() -> None:
+    """The note path raises this. A command hitting it should say something useful."""
+    service = StubManualSync(error=ItemNotReadyError("no thread yet"))
+
+    interaction = await run(service, member_with("Developer"))
+
+    assert "still being set up" in interaction.reply
+
+
 async def test_an_unexpected_failure_is_not_swallowed() -> None:
+    """Not a ShannonError, so the command lets it out for the tree's handler to answer."""
     service = StubManualSync(error=RuntimeError("connection pool exhausted"))
 
     with pytest.raises(RuntimeError):
@@ -187,7 +220,7 @@ async def test_running_outside_a_guild_is_refused() -> None:
     service = StubManualSync()
     interaction = FakeInteraction(guild_id=None, user=member_with("Developer"))
 
-    await command(service).callback(interaction, LINK)
+    await command(service).callback(interaction, "x")
 
     assert service.calls == []
     assert interaction.reply == "Run this inside a server channel."
@@ -197,6 +230,6 @@ async def test_the_command_defers_before_doing_slow_work() -> None:
     service = StubManualSync()
     interaction = FakeInteraction(guild_id=1, user=member_with("Developer"))
 
-    await command(service).callback(interaction, LINK)
+    await command(service).callback(interaction, "x")
 
     assert interaction.response.deferred is True

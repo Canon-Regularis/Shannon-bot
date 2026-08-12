@@ -8,11 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
-from shannon.discord_bot.commands.issue import build_issue_command
 from shannon.discord_bot.commands.link import build_link_command
-from shannon.discord_bot.commands.pr import build_pr_command
 from shannon.discord_bot.commands.register import build_register_command
 from shannon.discord_bot.commands.set_channel import build_set_channel_command
+from shannon.discord_bot.commands.sync_link import build_issue_command, build_pr_command
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
     format_comment,
@@ -37,6 +36,7 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.notifications import ActorNotifier
 from shannon.services.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.worker import DeliveryWorker, WorkerSettings
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,12 @@ def build_container(
     event_router.register("pull_request", build_item_handler(pr_sync, parse_pull_request_event))
     event_router.register("issues", build_item_handler(issue_sync, parse_issue_event))
     event_router.register("issue_comment", build_note_handler(comments, parse_comment_event))
-    event_router.register("pull_request_review", build_note_handler(reviews, parse_review_event))
+    event_router.register(
+        "pull_request_review",
+        build_note_handler(
+            reviews, parse_review_event, then=ReviewRequestLedger(sessionmaker).fulfilled
+        ),
+    )
 
     return Container(
         settings=settings,
