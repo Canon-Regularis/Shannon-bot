@@ -639,3 +639,148 @@ Three things that had been noticed before and left, plus two found on the way th
 - The property tests no longer fail on timing. Hypothesis fails an example that runs longer
   than its deadline, and the first call into a module pays for importing it, so a green suite
   could go red on the same code. What those tests assert is what holds, not how fast.
+
+### Seventh look
+
+This one went looking in the places the previous six had no reason to visit: what Discord does
+on its own when nobody is watching, and what happens to an item after somebody deletes
+something by hand. Seven defects, six of which end with an item going permanently quiet in
+Discord while everything on the GitHub side looks fine.
+
+- **A thread nobody talked in for a day stopped receiving updates for good.** Discord archives
+  a quiet thread by itself after its auto-archive window, and then refuses every edit to it. The
+  bot never set that window, so it got the one day default, and a pull request nobody discusses
+  for a day is completely ordinary. The first event after the archive failed, the worker retried
+  it for two hours and gave up, and so did every event after that. Threads are now opened with
+  the longest window Discord offers, one week, and every write reopens the thread first if it
+  needs to. Locking does the reopening in the same call rather than paying for a second one.
+- **Deleting a thread killed its item.** The stored thread id was never cleared, so once someone
+  tidied a channel every later event for that pull request failed on a thread that no longer
+  existed, and `/pr` on it answered the same way for ever. The only way back was editing the
+  database by hand. A thread that has gone is now forgotten and rebuilt, and the replacement
+  carries the item's current state.
+- **Opening a thread and writing in it are two calls, and the second one can fail on its own.**
+  Creating a thread and posting in it need two separate Discord permissions, so a bot can be
+  allowed the first and refused the second. The thread id was thrown away when the message
+  failed, which left the thread orphaned and had the retry open another one beside it, ten times
+  over. The id is now recorded before the failure surfaces, so the retry writes into the thread
+  that already exists.
+- **Two syncs could give one item two threads.** The Discord call happens outside any
+  transaction, so the worker and somebody running `/pr` on the same pull request could both find
+  no thread and both open one. The row kept whichever finished last and the other was stranded:
+  still in the channel, never updated again, and unreachable by anything. The claim is now a
+  conditional update, so exactly one wins, and the one that lost is deleted rather than left
+  sitting there.
+- **A comment could be dropped because it arrived a moment too early.** A comment on a pull
+  request opened seconds ago can be handled while that pull request's own thread is still being
+  created. That was answered as "nothing to do", which is terminal, so the comment was never
+  seen again even though the thread appeared five seconds later. It now waits and is retried,
+  which is what the queue is for. A comment on something genuinely untracked is still ignored,
+  because that one is not coming later.
+- **Missing permissions were retried for two hours.** `discord.Forbidden` is a subclass of the
+  general HTTP error, so catching the general one first filed "the bot is not allowed to do
+  this" as "Discord is briefly unhappy". No amount of waiting grants a permission, so these are
+  now recorded and dropped on the first attempt, with the reason in the row.
+- **Renaming a repository on GitHub broke `/pr` and `/issue` permanently.** Webhooks find a
+  repository by its numeric id, which survives a rename, so the mirror kept working. Both
+  commands compare the pasted link against the stored name, so both started answering that the
+  link was for the wrong repository, with no way for an admin to correct it. Every payload
+  carries the current name, so a rename is now picked up the first time anything happens in the
+  repository afterwards.
+- **`/register` accepted a channel that cannot hold threads.** Run inside a thread, the command
+  reported that thread as its channel and stored it. `/set_channel` had checked for this since it
+  was written; `/register` had not, and the failure surfaced hours later in the worker where
+  there was nobody left to tell. Both commands now share one definition of what can hold a
+  thread.
+
+### Also in this pass
+
+- The item sync service had grown a second job. Which Discord thread an item owns is now its own
+  piece, `services/item_threads.py`, because the awkward parts of it, the racing, the rebuilding
+  and the half-finished creation, are all about thread identity rather than about what the item
+  says. The sync flow reads as one sequence again.
+- Migration `0004` drops the index on `tracked_items.discord_thread_id`. Nothing has ever
+  queried by thread id: every use reads the column off a row already found some other way. It
+  was write cost on the busiest table in exchange for no plan anywhere, and it implied a lookup
+  that no store offers. If a later command resolves an item from the thread it was run in, the
+  index comes back alongside the query that needs it.
+- The fake thread gateway used in tests now behaves the way the real one does about archiving
+  and deletion. It had a comment saying Discord rejects writes to an archived thread, which was
+  right, but no test ever set that flag and the real gateway did not handle it. A fake that is
+  more forgiving than the thing it stands in for hides exactly this kind of defect.
+
+### Eighth look
+
+The seventh look ran eight reviewers over the repository and only two of them finished; the
+rest were cut off. This is the other six, and they went at the parts nobody had looked at yet:
+what two things doing the same work at the same time do to each other, what a half-finished
+delivery leaves behind, and what GitHub does that the code was never told about.
+
+Three of these are damage the seventh look's own fixes did. Rebuilding a deleted thread was the
+right idea, and it opened its own holes.
+
+- **A permission refusal read as a deleted thread, and deleting a thread is now something the
+  bot acts on.** `discord.Forbidden` and `discord.NotFound` were caught together and both
+  reported as "gone". Since a thread that is gone gets rebuilt, an admin briefly denying the bot
+  View Channel would have it forget the item's thread and open a fresh one, orphaning everything
+  already mirrored into the original. The two are now told apart everywhere: gone means rebuild,
+  refused means stop and say so. A channel that is gone or cannot hold threads is permanent as
+  well, since both need somebody to run `/set_channel`.
+- **An issue whose thread was deleted was still lost for good.** The rebuild lives in the write
+  path, but an open issue unlocks its thread before writing, and that unlock ran on the dead id
+  and raised first. Pull requests never unlock, so it worked for them and never ran for issues,
+  which is why the tests missed it. The unlock now steps aside for a thread that is not there;
+  the replacement is unlocked anyway.
+- **A comment on a deleted thread was retried for two hours and then dropped.** The note mirror
+  and the item sync sit either side of the same boundary and only one of them knew a dead thread
+  can be rebuilt. A note that finds its thread gone now lets go of the id and asks to be tried
+  again, and the item's next event rebuilds. Letting go is conditional on the id still being the
+  one that failed, so a rebuild that has already happened is not undone.
+- **The rebuild could give one item two live threads.** Clearing the thread pointer was
+  unconditional, so it could wipe a claim another sync had just made, and then both callers
+  claimed successfully. Attaching a thread is now a swap from the exact id the caller read, which
+  covers first creation and rebuilding as one case and removed a whole step in the process.
+- **The delivery timeout could cancel between creating a thread and recording it.** Sixty
+  seconds is generous but discord.py sleeps through rate limits, and a dozen pull requests opened
+  at once will reach it. The cancellation landed wherever the handler happened to be, and if that
+  was inside the create call the thread existed in Discord with nothing pointing at it, so the
+  retry opened another. Creating and recording now run as one unit that a timeout cannot split.
+- **Redeploying parked a whole batch for five minutes.** Shutdown cancelled the worker outright,
+  and the deliveries it had leased but not started stayed locked until their lease ran out, while
+  the new process polled an empty queue. The worker is now asked to stop, finishes the delivery
+  in hand, and hands the rest straight back without counting an attempt against them.
+- **Two syncs of one item could ping the same reviewer twice**, and so could a delivery that
+  failed after the ping went out. Who has been told was read first and written afterwards, which
+  is the same read-then-write shape fixed three times elsewhere. The ping is claimed before the
+  message is sent now, and handed back if the message does not go.
+- **Re-requesting a review told nobody, which is the one moment the feature exists for.** GitHub
+  drops a reviewer from `requested_reviewers` the moment they submit their review, and sends no
+  `pull_request` event saying so. The ping fires when the assignment row is created, so the stale
+  row survived and the re-request read as "already asked". The author's push does not help
+  either: that arrives as `synchronize`, which is deliberately not handled. A submitted review
+  now closes the request that asked for it, so a later re-request is a fresh one. The old test
+  passed only because it injected an event GitHub never sends.
+- **The retry budget was documented as two hours and was really thirty-six minutes.** Six
+  comments quoted the figure and none of them matched the arithmetic: growth stops at the
+  fifteen minute cap long before ten attempts add up to two hours. Attempts are now sixteen,
+  which is what two hours costs, and the figure is computed from the settings rather than
+  written down again, with a test holding the two together.
+
+### Also in this pass
+
+- **The shipped image was built from unpinned dependency ranges.** `uv.lock` is committed and
+  CI installs from it, but the Dockerfile ran a plain `pip install .`, so the image got whatever
+  PyPI served that minute. Three different dependency sets existed at once: tested, audited, and
+  shipped. That also made the build provenance attestation describe something nobody could
+  reproduce. The image is now built from the lock with hashes.
+- **A version tag published a signed release image without running a single test.** CI did not
+  trigger on tags and the release workflow did not depend on CI, so the two raced on `main` and
+  on a tag nothing ran at all. Release is now a workflow CI calls once its checks have passed,
+  which also keeps the tag ref pointing where the image tagging expects.
+- `/pr` and `/issue` were the same fifty-seven lines twice, and every command carried its own
+  error ladder covering a different subset. One error caught in only one of them was a silent
+  failure in the others: the reply came after the interaction had been deferred, so the person
+  who ran it watched a spinner. They now share one body, error replies come from one table, and
+  the command tree has a handler so anything unexpected still gets answered rather than leaving
+  somebody waiting. Both keep their own parameter names, `pr_link` and `issue_link`, because
+  those are what somebody types and the requirements name them.
