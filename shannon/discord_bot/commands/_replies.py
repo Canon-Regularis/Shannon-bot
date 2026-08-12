@@ -43,6 +43,11 @@ UNEXPECTED = "Something went wrong here. It has been logged."
 
 def reply_for(error: Exception, *, noun: str = "item") -> str:
     """The message for an error, or the catch-all if it is not one we know about."""
+    # discord.py hands its error handler whatever a command raised wrapped in a
+    # CommandInvokeError. Looking through that is what lets the table match at all when the
+    # error arrives that way; without it everything unexpected reads as the catch-all.
+    error = getattr(error, "original", error)
+
     for kind, template in _REPLIES:
         if isinstance(error, kind):
             return template.format(message=getattr(error, "message", str(error)), noun=noun)

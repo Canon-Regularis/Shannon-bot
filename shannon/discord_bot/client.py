@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import discord
@@ -49,8 +50,12 @@ class ShannonBot(discord.Client):
         connection or a plain bug, would otherwise leave the person who ran it looking at a
         spinner until Discord gave up, with the reason only in the log.
         """
-        logger.exception("a slash command failed", exc_info=error)
-        await reply(interaction, reply_for(error))
+        logger.error("a slash command failed", exc_info=error)
+        # An error handler that raises is worse than not having one: discord.py logs a second
+        # traceback and the person who ran the command is still left waiting. The interaction
+        # may also have expired, or already been answered, and neither is worth a stack trace.
+        with contextlib.suppress(discord.HTTPException):
+            await reply(interaction, reply_for(error))
 
     def install(self, *commands: app_commands.Command) -> None:
         self._pending.extend(commands)
