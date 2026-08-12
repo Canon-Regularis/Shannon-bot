@@ -50,3 +50,12 @@ def test_a_single_flipped_byte_fails() -> None:
     tampered = BODY.replace(b"opened", b"openeD")
 
     assert verify(tampered, SECRET, sign(BODY, SECRET)) is SignatureResult.INVALID
+
+
+def test_a_non_ascii_signature_header_is_malformed_rather_than_a_crash() -> None:
+    """The header comes off the network, and compare_digest only accepts ASCII."""
+    assert verify(b"{}", "secret", "sha256=\u00e9" + "a" * 63) is SignatureResult.MALFORMED
+
+
+def test_a_header_of_the_right_shape_but_wrong_digest_is_invalid() -> None:
+    assert verify(b"{}", "secret", "sha256=" + "a" * 64) is SignatureResult.INVALID

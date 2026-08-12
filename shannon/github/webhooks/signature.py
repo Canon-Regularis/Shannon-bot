@@ -27,7 +27,11 @@ def verify(body: bytes, secret: str, header_value: str | None) -> SignatureResul
         return SignatureResult.MALFORMED
 
     # compare_digest keeps the check constant time, so a wrong signature cannot be narrowed
-    # down byte by byte from response timing.
-    if hmac.compare_digest(sign(body, secret), header_value):
-        return SignatureResult.VALID
-    return SignatureResult.INVALID
+    # down byte by byte from response timing. It only accepts ASCII, and this header comes
+    # off the network, so anything else is malformed rather than an excuse to raise.
+    try:
+        matched = hmac.compare_digest(sign(body, secret), header_value)
+    except TypeError:
+        return SignatureResult.MALFORMED
+
+    return SignatureResult.VALID if matched else SignatureResult.INVALID
