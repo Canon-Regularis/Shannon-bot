@@ -63,9 +63,18 @@ def _report_exit(what: str):
     return report
 
 
-async def _stop(task: asyncio.Task | None) -> None:
+async def _stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
+    """Wait `grace` seconds for a task to finish on its own, then cancel it."""
     if task is None:
         return
+
+    if grace > 0:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+        if task.done():
+            return
+        logger.warning("a background task did not stop within %ss, cancelling it", grace)
+
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -92,7 +101,11 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         try:
             yield
         finally:
-            await _stop(worker_task)
+            # Asked to stop rather than cancelled, so the delivery in hand finishes and the
+            # rest of its batch goes back on the queue instead of sitting locked for the whole
+            # lease while the replacement process polls an empty one.
+            container.worker.stop()
+            await _stop(worker_task, grace=settings.worker_shutdown_grace_seconds)
             if bot_task is not None:
                 await bot.close()
                 await _stop(bot_task)

@@ -78,6 +78,10 @@ class WebhookDeliveryQueue:
                 for row in rows
             ]
 
+    async def release(self, deliveries: Sequence[Delivery]) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await WebhookEventStore(session).release([delivery.id for delivery in deliveries])
+
     async def finish(self, delivery: Delivery, status: DeliveryStatus) -> None:
         async with self._sessionmaker() as session, session.begin():
             await WebhookEventStore(session).finish(delivery.id, status)

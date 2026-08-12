@@ -108,6 +108,21 @@ class WebhookEventStore:
         # RETURNING makes no promise about order, and the order is the point.
         return sorted(claimed, key=lambda row: row.id)
 
+    async def release(self, event_ids: Sequence[int]) -> None:
+        """Hand leased deliveries back without counting an attempt against them.
+
+        Nothing was tried, so this is not a failure. Leaving them locked instead would keep the
+        replacement process from touching them until the lease ran out.
+        """
+        if not event_ids:
+            return
+        await self._session.execute(
+            update(WebhookEvent)
+            .where(WebhookEvent.id.in_(event_ids), WebhookEvent.status == DeliveryStatus.PROCESSING)
+            .values(status=DeliveryStatus.PENDING, locked_until=None)
+            .execution_options(synchronize_session=False)
+        )
+
     async def finish(self, event_id: int, status: DeliveryStatus) -> None:
         await self._session.execute(
             update(WebhookEvent)

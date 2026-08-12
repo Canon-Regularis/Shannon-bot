@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from shannon.config import Settings
 from shannon.domain.enums import DeliveryStatus
+from shannon.domain.errors import PermanentError
 from shannon.github.webhooks.events import EventRouter, WebhookOutcome
 from shannon.services.delivery_queue import Delivery, WebhookDeliveryQueue
 
@@ -18,12 +19,15 @@ class WorkerSettings:
     """How hard the worker tries, and how long it holds on.
 
     The defaults survive roughly two hours of Discord being unreachable, which covers an outage
-    without holding a delivery so long that acting on it would be strange.
+    without holding a delivery so long that acting on it would be strange. `total_backoff`
+    computes that figure rather than restating it.
     """
 
     poll_interval: timedelta = timedelta(seconds=2)
     batch_size: int = 10
-    max_attempts: int = 10
+    # Sixteen attempts is what the two hours actually costs. Growth stops at the cap after nine
+    # of them, so the first nine are worth half an hour between them and the rest are flat.
+    max_attempts: int = 16
     first_backoff: timedelta = timedelta(seconds=5)
     max_backoff: timedelta = timedelta(minutes=15)
     # Longer than any single delivery should take, short enough that a killed worker's rows
@@ -52,6 +56,17 @@ class WorkerSettings:
         grown = self.first_backoff * 2 ** min(max(attempts, 0), 32)
         return min(grown, self.max_backoff)
 
+    def total_backoff(self) -> timedelta:
+        """How long a delivery is held before it is given up on.
+
+        Several comments quote this figure. Having it computed from the settings rather than
+        written down again means they cannot drift apart from what the worker really does.
+        """
+        return sum(
+            (self.backoff_for(attempt) for attempt in range(self.max_attempts - 1)),
+            timedelta(),
+        )
+
 
 class DeliveryWorker:
     """Does the work the webhook endpoint no longer does inline.
@@ -70,6 +85,11 @@ class DeliveryWorker:
         self._queue = queue
         self._router = router
         self._settings = settings or WorkerSettings()
+        self._stopping = False
+
+    def stop(self) -> None:
+        """Ask the worker to finish the delivery it is on and come back."""
+        self._stopping = True
 
     async def run_once(self) -> int:
         """Work through one batch, returning how many deliveries were handled.
@@ -81,7 +101,13 @@ class DeliveryWorker:
         deliveries = await self._queue.lease(
             limit=self._settings.batch_size, lease_for=self._settings.lease
         )
-        for delivery in deliveries:
+
+        for index, delivery in enumerate(deliveries):
+            if self._stopping:
+                # Shutting down. Anything not started is handed straight back, or it would sit
+                # locked for the whole lease while the replacement process polls an empty queue.
+                await self._queue.release(deliveries[index:])
+                return index
             await self._handle(delivery)
         return len(deliveries)
 
@@ -89,7 +115,7 @@ class DeliveryWorker:
         pruned_after = 0.0
         loop = asyncio.get_running_loop()
 
-        while True:
+        while not self._stopping:
             try:
                 handled = await self.run_once()
 
@@ -101,7 +127,7 @@ class DeliveryWorker:
 
                 # Straight back round while there is a backlog, so a burst drains at once
                 # rather than one batch per tick.
-                if handled < self._settings.batch_size:
+                if handled < self._settings.batch_size and not self._stopping:
                     await asyncio.sleep(self._settings.poll_interval.total_seconds())
             except asyncio.CancelledError:
                 raise
@@ -119,6 +145,12 @@ class DeliveryWorker:
             )
         except asyncio.CancelledError:
             raise
+        except PermanentError as error:
+            # A missing permission or a channel that cannot hold threads does not heal on its
+            # own, so retrying for two hours only delays the log line that says so.
+            logger.error("delivery %s cannot be handled: %s", delivery.delivery_id, error.message)
+            await self._queue.give_up(delivery, error=f"{type(error).__name__}: {error}")
+            return
         except Exception as error:
             await self._reschedule(delivery, error)
             return

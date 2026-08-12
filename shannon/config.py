@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # untouched until this passes, so this is also how long that work waits.
     worker_lease_seconds: float = Field(default=300.0, gt=0)
     worker_delivery_timeout_seconds: float = Field(default=60.0, gt=0)
+    # How long shutdown waits for the delivery in hand to finish. Longer than one delivery
+    # normally takes, and well inside the ten seconds a container gets before SIGKILL.
+    worker_shutdown_grace_seconds: float = Field(default=5.0, ge=0)
     # Payloads hold issue titles, comment bodies and author names, so finished deliveries do not
     # sit around indefinitely.
     delivery_retention_days: int = Field(default=7, gt=0)
