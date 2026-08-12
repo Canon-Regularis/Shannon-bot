@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ItemAssignment, Repository
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.formatting import format_reviewer_ping
 from shannon.domain.enums import ActorRole
+from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.item_sync import ItemSyncService
+from shannon.services.notifications import ActorNotifier
+from shannon.services.policies import PullRequestPolicy
+from shannon.services.reviews import ReviewRequestLedger
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -161,3 +169,182 @@ async def test_a_pull_request_with_no_reviewers_pings_nobody(
     assert result is not None
     assert result.notified == ()
     assert threads.posts == []
+
+
+class TestNobodyIsPingedTwice:
+    """Two syncs of one item overlap whenever /pr is run while an event for it is in flight."""
+
+    async def test_two_concurrent_syncs_post_one_ping(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        results = await asyncio.gather(
+            notifying_sync_service.sync(pr_event("opened")),
+            notifying_sync_service.sync(pr_event("review_requested")),
+        )
+
+        pinged = [logins for result in results for logins in result.notified]
+        assert pinged == ["monalisa"]
+        assert sum("Review requested" in content for _, content in threads.posts) == 1
+
+    async def test_a_delivery_retried_after_the_ping_does_not_ping_again(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """The worker retries from the top, and the ping already went out."""
+        await notifying_sync_service.sync(pr_event("opened"))
+
+        again = await notifying_sync_service.sync(pr_event("opened"))
+
+        assert again.notified == ()
+        assert sum("Review requested" in content for _, content in threads.posts) == 1
+
+    async def test_a_ping_that_never_went_out_is_still_owed(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        """Claiming before posting must not swallow a ping when the post fails."""
+        threads = _RefusingToPost()
+        service = ItemSyncService(
+            db_sessionmaker,
+            threads,
+            PullRequestPolicy(),
+            ActorNotifier(
+                db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+            ),
+        )
+
+        with pytest.raises(DiscordGatewayError):
+            await service.sync(pr_event("opened"))
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row is not None and row.notified_at is None
+
+    async def test_the_owed_ping_goes_out_on_the_retry(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        pr_event,
+    ) -> None:
+        threads = _RefusingToPost()
+        service = ItemSyncService(
+            db_sessionmaker,
+            threads,
+            PullRequestPolicy(),
+            ActorNotifier(
+                db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+            ),
+        )
+        with pytest.raises(DiscordGatewayError):
+            await service.sync(pr_event("opened"))
+
+        threads.refusing = False
+        result = await service.sync(pr_event("opened"))
+
+        assert result.notified == ("monalisa",)
+
+
+class _RefusingToPost(FakeThreadGateway):
+    """A gateway that will open a thread but not post into it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refusing = True
+
+    async def post(self, *, thread_id: int, content: str) -> int | None:
+        if self.refusing:
+            raise DiscordGatewayError("Discord refused to post to the thread")
+        return await super().post(thread_id=thread_id, content=content)
+
+
+class TestReRequestingAReviewAfterOneWasGiven:
+    """The single moment the reviewer ping exists for, and it used to say nothing at all.
+
+    GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
+    `pull_request` event saying so. Nothing else in the sequence tells us either: the author's
+    push arrives as `synchronize`, which is deliberately not handled.
+    """
+
+    async def test_the_reviewer_is_pinged_again(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        await notifying_sync_service.sync(pr_event("opened"))
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", payloads.pull_request_review_event())
+        )
+
+        result = await notifying_sync_service.sync(pr_event("review_requested"))
+
+        assert result.notified == ("monalisa",)
+        assert sum("Review requested" in content for _, content in threads.posts) == 2
+
+    async def test_the_request_is_closed_when_the_review_lands(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        db_session: AsyncSession,
+        notifying_sync_service: ItemSyncService,
+        pr_event,
+    ) -> None:
+        await notifying_sync_service.sync(pr_event("opened"))
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", payloads.pull_request_review_event())
+        )
+
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+            )
+        ).all()
+        assert rows == []
+
+    async def test_somebody_else_reviewing_leaves_the_request_alone(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        db_session: AsyncSession,
+        notifying_sync_service: ItemSyncService,
+        pr_event,
+    ) -> None:
+        await notifying_sync_service.sync(pr_event("opened"))
+        payload = payloads.pull_request_review_event()
+        payload["review"]["user"] = payloads.user("someone-else", 900)
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", payload)
+        )
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row is not None and row.github_username == "monalisa"
+
+    async def test_a_review_on_something_untracked_does_nothing(
+        self, registered: Repository, db_sessionmaker, pr_event
+    ) -> None:
+        payload = payloads.pull_request_review_event()
+        payload["pull_request"]["number"] = 999
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", payload)
+        )
