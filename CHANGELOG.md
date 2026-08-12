@@ -911,3 +911,68 @@ One reviewer found these by breaking the code and seeing what still passed.
   retried. The case where the item exists without a thread was fixed; this one is ambiguous,
   because most notes on untracked items are on things this bot will never track, and retrying
   them all would spend the full budget on every one.
+
+### Eleventh look
+
+Six reviewers, no verification stage, because the two passes before this lost every verifier to
+a session limit while the finders came back fine. Three of them independently found the same
+defect, which was introduced by the ninth look.
+
+- **A Discord login that failed parked the worker for the life of the process.** The ninth look
+  had the worker wait for the gateway before its first batch, which was right, but
+  `wait_until_ready` waits on an event that is only ever set by a connection that succeeds. A
+  bad token left it waiting forever: the endpoint went on accepting deliveries, the queue grew,
+  pruning never ran, and nothing said why. It now waits for the connection or for the bot to
+  stop trying, whichever comes first, and stops loudly in the second case. The deliveries stay
+  pending for a process that can actually reach Discord, rather than being burned through.
+- **A comment was posted again on every retry of its delivery.** The eighth look added a step
+  after the note was mirrored, to close a fulfilled review request. A retry re-runs the whole
+  handler, so anything failing after the post put the same comment in the thread a second time.
+  The recoverable database work now happens first and the Discord post last, which is the order
+  the rest of the project already uses. Closing a review request twice costs nothing.
+- **`/pr` and `/issue` accepted numbers that are not numbers.** `str.isdigit` is true for a
+  great deal more than 0-9. An Arabic-Indic digit converted silently, so a link ending in one
+  synced a different pull request than the one somebody pasted; a superscript or a circled digit
+  passed the check and then raised on conversion, escaping as an unhandled error. This is the
+  same shape as the `/pr [` crash from the fourth look, in the same function.
+- **A refusal could be too long to send.** Several replies quote back what was typed, and a
+  slash command argument can be longer than a Discord message may be, so an over-long argument
+  made the refusal itself fail and the person saw nothing at all. Replies are trimmed centrally
+  now rather than at each call site.
+- **A failing prune ran every couple of seconds instead of once an hour**, because the timer was
+  only moved forward when it succeeded.
+- **The lease was half of what a batch can take.** Ten deliveries each allowed sixty seconds is
+  ten minutes; the lease was five. A second replica could take deliveries this one was in the
+  middle of. It covers the batch now.
+- **A hard cancellation left the rest of the batch locked.** The cooperative stop hands back
+  what it has not started, but a cancellation that lands mid-delivery skipped that entirely.
+
+- **The ping claim had a gap of its own.** The ninth look moved the claim before the message
+  and handed it back on failure, but a cancellation could land between the claim committing and
+  the guard that hands it back, which is exactly where cancellation is delivered. The claim is
+  shielded now. The hand-back itself is asynchronous under cancellation, by design: the await
+  returns at once and the release lands a moment later, well inside the five seconds before the
+  delivery is retried. A test that asserted it synchronously was flaking about one run in five,
+  and was asserting an ordering the code never promised.
+
+### The locking window, mitigated rather than closed
+
+Two syncs of one item can still interleave their Discord calls: `/pr` runs beside the worker and
+the Discord phase is outside any transaction by design. The step where that actually hurt is
+locking, because it is last and it is decided from a snapshot that may already be superseded, and
+because a reopened issue left in a locked thread does not right itself the way a stale metadata
+block does. That step now re-reads the item first and stands down if a newer sync has been
+through. The metadata window remains and is self-healing. A per-item lock held across the Discord
+phase would close both, at the cost of pinning a pool connection for every sync and making `/pr`
+wait on the worker; that is a design decision rather than a patch.
+
+### Found and not acted on
+
+- Pull request priority is never read from GitHub labels, so every PR thread reads
+  `Priority: UNSET` while an issue with the same labels reads `HIGH`. The parser exists and the
+  issue path already calls it. This is a behaviour change to a documented field rather than a
+  defect in isolation, so it wants a decision first.
+- A review requested from a GitHub team pings nobody: `requested_teams` is never parsed, and
+  there is no GitHub-team to Discord-role mapping in the schema at all. That is a feature.
+- The permissions table in requirements.md does not grant the Reviewer tier `/pr` and `/issue`,
+  and the code does. Widening, not narrowing, but the two should be made to agree.
