@@ -83,8 +83,13 @@ class ItemSnapshot:
 
     @property
     def priority(self) -> Priority:
-        """Where the item's priority comes from, when it has one at all."""
-        return Priority.UNSET
+        """Priority as GitHub has it, which is a label.
+
+        The same rule for every kind of item. A pull request and an issue carrying the same
+        label meant different things before this, and the metadata block would show a pull
+        request as UNSET on the line directly above the label that set it.
+        """
+        return parse_priority(self.label_names)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -116,11 +121,6 @@ class IssueSnapshot(ItemSnapshot):
     closed_at: datetime | None = None
 
     object_type: ObjectType = field(default=ObjectType.ISSUE, init=False)
-
-    @property
-    def priority(self) -> Priority:
-        """Issues carry their priority as a GitHub label."""
-        return parse_priority(self.label_names)
 
 
 @dataclass(frozen=True, slots=True)

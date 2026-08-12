@@ -68,7 +68,8 @@ class PullRequestPolicy:
         return current
 
     def priority_for(self, snapshot: PullRequestSnapshot, current: Priority) -> Priority:
-        return current
+        """Pull request priority lives in the GitHub labels, exactly as an issue's does."""
+        return snapshot.priority
 
     def locked(self, snapshot: PullRequestSnapshot) -> bool | None:
         """Pull request threads are never locked automatically; MVP 3 owns that."""
