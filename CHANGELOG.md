@@ -784,3 +784,25 @@ right idea, and it opened its own holes.
   the command tree has a handler so anything unexpected still gets answered rather than leaving
   somebody waiting. Both keep their own parameter names, `pr_link` and `issue_link`, because
   those are what somebody types and the requirements name them.
+
+### The test matrix had never passed
+
+`pyproject.toml` says `requires-python = ">=3.12"` and CI runs the suite on 3.12, 3.13 and 3.14.
+Two of those three legs had been failing since the day they were added, and nobody had run them
+anywhere the result was visible.
+
+`PullRequestSnapshot.display_state` called `super().display_state`. Every snapshot is a
+`slots=True` dataclass, and that decorator cannot add slots to a class in place: it builds a new
+one and throws the original away. The bare `super()` reads its class from a cell captured at
+compile time, which still points at the class that was discarded, so calling it raises
+`TypeError: super(type, obj): obj must be an instance or subtype of type`. Python 3.14 fixed
+that; 3.12 and 3.13 did not. Twenty-two tests failed on both, including every rendering test,
+because rendering reads `display_state`.
+
+Naming the class in the `super()` call resolves it when the method runs rather than when it was
+compiled, so it finds the class that exists. The whole suite now passes on 3.12 and 3.13 as well
+as 3.14, which is what the declared floor was always claiming.
+
+Worth saying how this was found: not by reading, but by running `uv sync --python 3.12` and the
+suite against it, which is exactly what the CI job does and what nobody had watched it do.
+

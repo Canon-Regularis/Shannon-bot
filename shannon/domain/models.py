@@ -100,10 +100,15 @@ class PullRequestSnapshot(ItemSnapshot):
 
         GitHub reports only open or closed and carries merging as a separate flag, so the
         three-way answer is derived once here rather than in every caller.
+
+        `super()` is spelled out rather than left bare. A `slots=True` dataclass is rebuilt
+        into a new class by the decorator, and the bare form reads the class off a cell that
+        still points at the one it replaced, which raises on Python before 3.14. Naming the
+        class here resolves it at call time, so it finds the class that actually exists.
         """
         if self.merged:
             return "merged"
-        return super().display_state
+        return super(PullRequestSnapshot, self).display_state
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
