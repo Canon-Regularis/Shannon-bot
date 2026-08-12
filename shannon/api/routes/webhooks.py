@@ -42,6 +42,7 @@ async def receive_github_webhook(
             status_code=status.HTTP_400_BAD_REQUEST, detail="X-GitHub-Delivery header is missing"
         )
 
+    _require_a_sane_size(request)
     body = await request.body()
     _require_valid_signature(
         body, settings.github_webhook_secret.get_secret_value(), x_hub_signature_256
@@ -95,6 +96,22 @@ async def _accept(
     if not await queue.enqueue(delivery_id, event, payload):
         return WebhookOutcome.DUPLICATE
     return WebhookOutcome.ACCEPTED
+
+
+# GitHub will not send a payload larger than this, and says so. The endpoint is open to the
+# internet and the body is read into memory before anything can be checked, because the
+# signature covers the whole of it, so the limit has to be applied before the read.
+MAX_BODY_BYTES = 25 * 1024 * 1024
+
+
+def _require_a_sane_size(request: Request) -> None:
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        logger.warning("rejecting a %s byte delivery", declared)
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Body is larger than GitHub will ever send",
+        )
 
 
 _SIGNATURE_FAILURES = {
