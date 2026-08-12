@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import discord
 import pytest
 
 from shannon.config import Settings
@@ -186,3 +189,35 @@ async def test_a_rejected_user_is_answered_without_deferring() -> None:
 
     assert interaction.response.deferred is False
     assert interaction.response.messages != []
+
+
+async def test_registering_where_threads_cannot_be_opened_is_refused() -> None:
+    """The channel becomes the home for pull request threads, so it has to be able to hold one.
+
+    A slash command run inside a thread reports that thread as its channel. Catching it here is
+    the last moment somebody is watching; the sync path reaches it hours later with nobody left
+    to tell.
+    """
+    service = StubRegistration()
+    interaction = FakeInteraction(
+        guild_id=1, channel_id=99, user=project_manager(), channel=MagicMock(spec=discord.Thread)
+    )
+
+    await command(service).callback(interaction, LINK)
+
+    assert "text or forum channel" in interaction.reply
+    assert service.calls == []
+
+
+async def test_a_forum_channel_is_accepted() -> None:
+    service = StubRegistration()
+    interaction = FakeInteraction(
+        guild_id=1,
+        channel_id=99,
+        user=project_manager(),
+        channel=MagicMock(spec=discord.ForumChannel),
+    )
+
+    await command(service).callback(interaction, LINK)
+
+    assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK}]

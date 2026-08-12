@@ -7,6 +7,7 @@ from discord import app_commands
 
 from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.threads import THREADABLE
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.services.channels import ChannelMappingService
@@ -18,10 +19,6 @@ CHOICES = [
     app_commands.Choice(name="pull requests", value=ObjectType.PR.value),
     app_commands.Choice(name="issues", value=ObjectType.ISSUE.value),
 ]
-
-# Threads can only be opened in these. Offering a voice or category channel would fail later
-# with a confusing error instead of now with a clear one.
-THREADABLE = (discord.TextChannel, discord.ForumChannel)
 
 
 def build_set_channel_command(

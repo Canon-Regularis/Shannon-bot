@@ -7,6 +7,7 @@ from discord import app_commands
 
 from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.threads import THREADABLE
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubError, GitHubNotFoundError
 from shannon.services.registration import RepositoryRegistrationService
@@ -28,6 +29,15 @@ def build_register_command(
             return
         if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, gate.denial("register", REGISTER_ROLES))
+            return
+        # The channel this was run in becomes the home for pull request threads, and a thread
+        # or a voice channel cannot hold one. Refusing here is the last chance to say so to
+        # somebody who is looking; the sync path hits it hours later with nobody to tell.
+        if not isinstance(interaction.channel, THREADABLE):
+            await reply(
+                interaction,
+                "Run /register in a text or forum channel. Threads cannot be opened here.",
+            )
             return
 
         await defer(interaction)

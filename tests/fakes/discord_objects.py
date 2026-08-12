@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import MagicMock
+
+import discord
 
 
 class FakeResponse:
@@ -60,10 +63,14 @@ class FakeInteraction:
         guild_id: int | None = 1,
         channel_id: int | None = 10,
         user: FakeMember | None = None,
+        channel: object | None = None,
     ) -> None:
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.user = user or FakeMember()
+        # A real text channel by default, because that is where a command normally runs and
+        # /register refuses anywhere threads cannot be opened.
+        self.channel = channel if channel is not None else MagicMock(spec=discord.TextChannel)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
 
