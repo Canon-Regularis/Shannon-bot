@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,10 +15,12 @@ from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.errors import ThreadNotFoundError
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, Priority, Status
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
+from shannon.services.item_threads import ItemThreads, ThreadTarget
 from shannon.services.notifications import ActorNotifier
 from shannon.services.policies import SyncPolicy
 from shannon.services.staleness import is_stale
@@ -70,6 +73,7 @@ class ItemSyncService:
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
+        self._binding = ItemThreads(sessionmaker, threads)
         self._policy = policy
         self._notifier = notifier
 
@@ -87,12 +91,18 @@ class ItemSyncService:
         wants_locked = self._policy.locked(snapshot)
 
         # Unlocking comes first, because a locked thread rejects edits and posts. Locking comes
-        # last for the same reason.
+        # last for the same reason, by which point the thread is known to exist.
         if wants_locked is False and state.thread_id is not None:
-            await self._threads.set_locked(thread_id=state.thread_id, locked=False)
+            # A thread that has been deleted is rebuilt by the write below, and a new thread is
+            # never locked. Letting this raise instead would stop the rebuild ever running: an
+            # open issue always unlocks, so a deleted thread would end its mirror for good.
+            with contextlib.suppress(ThreadNotFoundError):
+                await self._threads.set_locked(thread_id=state.thread_id, locked=False)
 
-        handle, created = await self._write_thread(state, self._policy.thread_name(snapshot))
-        await self._persist_thread(state.tracked_item_id, handle.thread_id, handle.message_id)
+        written = await self._binding.write(
+            state.target, name=self._policy.thread_name(snapshot), content=state.metadata
+        )
+        handle = written.handle
 
         notified: tuple[str, ...] = ()
         if self._notifier is not None:
@@ -110,37 +120,29 @@ class ItemSyncService:
             tracked_item_id=state.tracked_item_id,
             thread_id=handle.thread_id,
             message_id=handle.message_id,
-            created=created,
+            created=written.created,
             notified=notified,
         )
-
-    async def _write_thread(self, state: _SyncState, name: str):
-        if state.thread_id is None:
-            handle = await self._threads.create(
-                channel_id=state.channel_id, name=name, content=state.metadata
-            )
-            return handle, True
-
-        handle = await self._threads.update(
-            thread_id=state.thread_id,
-            message_id=state.message_id,
-            name=name,
-            content=state.metadata,
-        )
-        return handle, False
 
     async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | SyncResult:
         object_type = self._policy.object_type
 
         async with self._sessionmaker() as session, session.begin():
-            repository = await RepositoryStore(session).get_by_github_id(
-                snapshot.repository.github_repo_id
-            )
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_github_id(snapshot.repository.github_repo_id)
             if repository is None:
                 logger.debug(
                     "%s is not registered to any guild, ignoring", snapshot.repository.full_name
                 )
                 return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
+
+            # Every payload carries the current name, so a rename is noticed the first time
+            # anything happens in the repository afterwards.
+            await repositories.follow_rename(
+                repository,
+                repo_name=snapshot.repository.full_name,
+                repo_url=snapshot.repository.html_url,
+            )
 
             channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
             if channel is None:
@@ -231,16 +233,6 @@ class ItemSyncService:
         for role, actors in roles.items():
             await assignments.replace(tracked_item_id=tracked_item_id, role=role, actors=actors)
 
-    async def _persist_thread(
-        self, tracked_item_id: int, thread_id: int, message_id: int | None
-    ) -> None:
-        async with self._sessionmaker() as session, session.begin():
-            items = TrackedItemStore(session)
-            item = await items.get_by_id(tracked_item_id)
-            if item is None:
-                return
-            await items.set_discord_ids(item, thread_id=thread_id, message_id=message_id)
-
 
 def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> EventHandler:
     """Adapt a webhook event to the sync service.
@@ -269,3 +261,12 @@ class _SyncState:
     metadata: str
     thread_id: int | None
     message_id: int | None
+
+    @property
+    def target(self) -> ThreadTarget:
+        return ThreadTarget(
+            tracked_item_id=self.tracked_item_id,
+            channel_id=self.channel_id,
+            thread_id=self.thread_id,
+            message_id=self.message_id,
+        )
