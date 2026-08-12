@@ -976,3 +976,52 @@ wait on the worker; that is a design decision rather than a patch.
   there is no GitHub-team to Discord-role mapping in the schema at all. That is a feature.
 - The permissions table in requirements.md does not grant the Reviewer tier `/pr` and `/issue`,
   and the code does. Widening, not narrowing, but the two should be made to agree.
+
+### Twelfth look
+
+Six lenses aimed at operating this rather than reading it; three came back before the session
+limit. Two of their findings were the unfinished half of the eleventh look's own fix: that pass
+turned a worker that hung silently into one that died silently, which is better, and still not
+something anybody would notice.
+
+- **The process reported healthy with its worker dead.** A rotated Discord token kills the worker
+  task; one ERROR line goes past and the container carries on. The healthcheck was a TCP connect
+  to the API port, which proves only that uvicorn is listening, so `restart: unless-stopped`
+  never fired, GitHub saw 200 for every delivery, and the queue grew with nobody looking at it.
+  There is a `GET /health` now reporting whether the worker is alive and the database reachable,
+  and the container healthcheck asks it rather than the socket.
+- **Startup never touched the database.** Building an engine connects to nothing, so a wrong
+  password or a database that had never been migrated still reached "startup complete" and passed
+  a health check, with every delivery accepted and then failing behind it. Startup now proves the
+  database is there and migrated before the port opens, and says which setting to look at when
+  it is not.
+- **GitHub's Redeliver button did nothing.** It sends the same delivery id, so a delivery this bot
+  had already given up on came back as a duplicate and was answered without anything happening.
+  That button is the obvious thing to press once whatever broke has been fixed, and the only
+  alternative was hand-written SQL against the queue. A redelivery of a FAILED delivery now puts
+  it back. A repeat of one already processed is still a duplicate.
+- **Nothing enforced the lease invariant.** Two comments state that the lease has to cover
+  batch size times the delivery timeout, and nothing checked it, so raising the batch size for
+  throughput would quietly let a batch outlive its own lease and hand rows still in flight to
+  another replica. Settings refuses that combination now, at startup, naming all three.
+- **The likeliest explanation for "the bot has stopped posting" was logged below the level that
+  ships.** A webhook installed across an organisation, or a repository whose registration has
+  gone, files every delivery as IGNORED with no reason recorded and said so only at DEBUG while
+  the default is INFO. One of the three branches said nothing at all. All three are at INFO now
+  and name the repository and the event.
+- **docker compose overrode the database URL the operator set.** `environment:` wins over
+  `env_file:`, so the first line of .env.example had no effect under compose, and the whole
+  stack agreed with itself. The literal is a default now.
+
+### Decisions taken rather than found
+
+Two long-standing disagreements between requirements.md and the code, settled by the owner.
+
+- **Pull request priority now comes from GitHub labels**, exactly as an issue's does. A pull
+  request labelled `high priority` used to render `Priority: UNSET` on the line directly above
+  the label that set it, while an issue with the same label read `HIGH`. The rule lives on the
+  shared snapshot now rather than on one of the two subclasses.
+- **Reviewers no longer have /pr and /issue**, which is what the permissions table says. Somebody
+  who is a reviewer and also a developer or project manager keeps them: holding any listed role
+  is what grants a command, rather than holding only listed ones. That was already how the gate
+  worked, and there are now tests saying so.

@@ -106,8 +106,8 @@ async def test_a_member_with_no_roles_is_rejected(build, name: str, noun: str, p
     assert f"You need one of these roles to use /{name}" in interaction.reply
 
 
-@pytest.mark.parametrize("role", ["Developer", "Reviewer", "Project Manager"])
-async def test_the_three_allowed_tiers_can_sync(role: str) -> None:
+@pytest.mark.parametrize("role", ["Developer", "Project Manager"])
+async def test_the_tiers_the_table_grants_can_sync(role: str) -> None:
     service = StubManualSync()
 
     interaction = await run(service, member_with(role))
@@ -166,7 +166,7 @@ async def test_a_link_to_another_repository_is_refused() -> None:
         error=RepositoryMismatchError("This server is registered to a/b, not c/d.")
     )
 
-    interaction = await run(service, member_with("Reviewer"))
+    interaction = await run(service, member_with("Developer"))
 
     assert interaction.reply == "This server is registered to a/b, not c/d."
 
