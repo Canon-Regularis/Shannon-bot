@@ -190,11 +190,25 @@ class TestCommentFormatting:
 
         assert "Unknown" in message
 
-    def test_a_mass_mention_in_the_body_is_only_text(self) -> None:
-        """The client suppresses these, and quoting keeps them from looking like the bot's own."""
+    def test_a_mass_mention_in_the_body_cannot_resolve(self) -> None:
+        """Broken here as well as suppressed by the client, so it reads as text and pings nobody."""
         message = format_comment(replace(COMMENT, body="@everyone look at this"))
 
-        assert "> @everyone look at this" in message
+        assert "@everyone" not in message
+        assert "look at this" in message
+
+    def test_a_user_mention_in_the_body_cannot_resolve(self) -> None:
+        """The one form the client is told to honour, so quoting alone would let it through."""
+        message = format_comment(replace(COMMENT, body="ping <@1234567> about this"))
+
+        assert "<@1234567>" not in message
+        assert "1234567" in message
+
+    def test_markup_in_the_body_does_not_restyle_the_thread(self) -> None:
+        message = format_comment(replace(COMMENT, body="**bold** and `code`"))
+
+        assert "**bold**" not in message
+        assert "bold" in message
 
 
 REVIEW = ReviewSnapshot(

@@ -4,6 +4,8 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
+import discord
+
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
     Actor,
@@ -125,7 +127,7 @@ def _metadata(
     stops the two drifting into slightly different shapes.
     """
     lines = [
-        f"**{noun} Name:** {snapshot.title or UNKNOWN}",
+        f"**{noun} Name:** {as_plain_text(snapshot.title) if snapshot.title else UNKNOWN}",
         f"**Type:** {noun}",
         f"**State:** {snapshot.display_state.capitalize()}",
         f"**GitHub Link:** {snapshot.html_url}",
@@ -168,12 +170,40 @@ def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) 
 
 
 def _quote(body: str) -> str:
+    """A comment body, made safe to drop into a Discord message.
+
+    Blockquoting alone does not stop GitHub markdown rendering: bold, code fences and mentions
+    all still resolve inside a quote. So the text is neutralised first, which also means the
+    preview can be cut anywhere without leaving a `**` open and bolding everything after it.
+    """
     text = (body or "").strip()
     if not text:
         return ""
     if len(text) > COMMENT_PREVIEW_LIMIT:
         text = text[:COMMENT_PREVIEW_LIMIT].rstrip() + "…"
-    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
+    return "\n".join(f"> {line}" if line else ">" for line in as_plain_text(text).splitlines())
+
+
+# The one mention form that can still ping somebody. `allowed_mentions` refuses @everyone and
+# roles, and `escape_mentions` handles the bare @everyone and @here spellings, but neither
+# touches this one, and users are the category the bot is told to honour.
+_MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
+
+
+def as_plain_text(text: str) -> str:
+    """Render GitHub-authored text as what it says, rather than as markup.
+
+    Two separate reasons. Anyone who can comment on the repository can otherwise reach into the
+    thread: `<@1234>` in a comment body resolves to a real ping, because Discord is told to
+    honour user mentions and cannot tell the ones this bot built from the ones it is quoting.
+    And markup that arrives half-finished, or is cut in half by a preview limit, restyles
+    everything after it.
+
+    A zero-width space is enough to stop a mention resolving, and leaves it reading as what
+    was written.
+    """
+    escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(text))
+    return _MENTION.sub("<​\\1\\2>", escaped)
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
