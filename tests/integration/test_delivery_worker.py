@@ -383,3 +383,45 @@ def test_the_retry_budget_is_the_two_hours_it_claims_to_be() -> None:
     held = WorkerSettings().total_backoff()
 
     assert timedelta(hours=2) <= held <= timedelta(hours=2, minutes=30)
+
+
+class TestWaitingForDiscord:
+    """Logging in takes seconds, and nothing can be done about a delivery until it finishes."""
+
+    async def test_nothing_is_leased_until_the_bot_is_ready(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        connected = asyncio.Event()
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, poll_interval=timedelta(seconds=0.01))
+        await enqueue(queue, "delivery-a")
+
+        running = asyncio.create_task(worker.run_forever(connected.wait))
+        await asyncio.sleep(0.2)
+        assert handler.calls == 0
+        assert (await stored(db_session, "delivery-a")).status == DeliveryStatus.PENDING
+
+        connected.set()
+        await _until(lambda: handler.calls == 1)
+        worker.stop()
+        await running
+
+        assert (await stored(db_session, "delivery-a")).status == DeliveryStatus.PROCESSED
+
+    async def test_without_a_check_it_starts_at_once(self, queue: WebhookDeliveryQueue) -> None:
+        """No token means no bot to wait for, and the queue should still be worked."""
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, poll_interval=timedelta(seconds=0.01))
+        await enqueue(queue, "delivery-a")
+
+        running = asyncio.create_task(worker.run_forever())
+        await _until(lambda: handler.calls == 1)
+        worker.stop()
+        await running
+
+
+async def _until(condition, timeout: float = 10.0) -> None:
+    """Wait for something the worker does on its own schedule, rather than guessing at a sleep."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)

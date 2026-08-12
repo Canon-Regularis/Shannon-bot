@@ -13,6 +13,7 @@ from shannon.config import Settings, get_settings
 from shannon.container import Container, build_container
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.threads import DiscordThreadGateway
+from shannon.services.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
 
@@ -84,18 +85,22 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         bot_task: asyncio.Task | None = None
+        ready: ReadyCheck | None = None
         token = settings.discord_token.get_secret_value()
         if token:
             bot_task = asyncio.create_task(bot.start(token))
             bot_task.add_done_callback(_report_exit("Discord bot"))
+            ready = bot.wait_until_ready
         else:
             # Handy for poking the webhook endpoint locally, and loud enough that nobody
             # deploys like this by accident.
             logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
 
         # Deliveries are only written down by the endpoint. Without this running, they queue up
-        # and nothing reaches Discord.
-        worker_task = asyncio.create_task(container.worker.run_forever())
+        # and nothing reaches Discord. It waits for the bot rather than racing it: the endpoint
+        # accepts deliveries from the moment the port is open, which is the point, but acting on
+        # one before Discord is connected only wastes an attempt.
+        worker_task = asyncio.create_task(container.worker.run_forever(ready))
         worker_task.add_done_callback(_report_exit("delivery worker"))
 
         try:

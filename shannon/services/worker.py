@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -12,6 +13,8 @@ from shannon.github.webhooks.events import EventRouter, WebhookOutcome
 from shannon.services.delivery_queue import Delivery, WebhookDeliveryQueue
 
 logger = logging.getLogger(__name__)
+
+ReadyCheck = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +114,17 @@ class DeliveryWorker:
             await self._handle(delivery)
         return len(deliveries)
 
-    async def run_forever(self) -> None:
+    async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None:
+        """Work the queue until asked to stop.
+
+        `wait_for_ready` holds the first batch back until Discord is connected. Logging in and
+        connecting takes seconds, and every delivery leased before that fails against a client
+        with no session, which spends attempts on a problem that fixes itself.
+        """
+        if wait_for_ready is not None:
+            logger.info("waiting for Discord before working through the queue")
+            await wait_for_ready()
+
         pruned_after = 0.0
         loop = asyncio.get_running_loop()
 
