@@ -9,6 +9,8 @@ from discord import app_commands
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.commands._replies import UNEXPECTED, reply_for
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.formatting import MESSAGE_LIMIT
+from shannon.discord_bot.responses import reply
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError
 from tests.fakes.discord_objects import FakeInteraction
@@ -89,3 +91,22 @@ class TestTheBackstop:
 
 async def _refusing(*_args: object, **_kwargs: object) -> None:
     raise discord.NotFound(MagicMock(status=404), "unknown interaction")
+
+
+class TestARepliesThatWouldNotFit:
+    """Several replies quote back what the person typed, and an argument can be far too long."""
+
+    async def test_an_enormous_reply_is_trimmed_to_discord_s_limit(self) -> None:
+        interaction = FakeInteraction()
+
+        await reply(interaction, "x" * 5000)
+
+        assert len(interaction.reply) <= MESSAGE_LIMIT
+        assert interaction.reply.endswith("…")
+
+    async def test_an_ordinary_reply_is_untouched(self) -> None:
+        interaction = FakeInteraction()
+
+        await reply(interaction, "Registered owner/repo.")
+
+        assert interaction.reply == "Registered owner/repo."

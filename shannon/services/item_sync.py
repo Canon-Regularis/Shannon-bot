@@ -113,7 +113,7 @@ class ItemSyncService:
                 guild_id=state.guild_id,
             )
 
-        if wants_locked is True:
+        if wants_locked is True and await self._still_current(state.tracked_item_id, snapshot):
             await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
 
         return SyncResult(
@@ -124,6 +124,32 @@ class ItemSyncService:
             created=written.created,
             notified=notified,
         )
+
+    async def _still_current(self, tracked_item_id: int, snapshot: TrackedSnapshot) -> bool:
+        """Whether a newer sync has been through this item since this one read it.
+
+        Only the database half of a sync is ordered. The Discord half happens outside any
+        transaction, so `/pr` running beside the worker can interleave with it, and locking is
+        the step where that shows: it is last, and it is decided from a snapshot that may
+        already have been superseded. Left alone, a reopened issue can end up in a thread
+        nobody can post in, and unlike a stale metadata block that does not right itself.
+
+        Strictly newer, because this sync has already written its own timestamp.
+        """
+        if snapshot.updated_at is None:
+            return True
+
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+            stored = item.github_updated_at if item is not None else None
+
+        if stored is None or as_utc(stored) <= as_utc(snapshot.updated_at):
+            return True
+
+        logger.info(
+            "not locking tracked item %s: a newer sync has been through since", tracked_item_id
+        )
+        return False
 
     async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | SyncResult:
         object_type = self._policy.object_type
