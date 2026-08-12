@@ -168,13 +168,34 @@ def test_truncation_never_leaves_bold_hanging_open() -> None:
 
 
 def test_truncation_keeps_whole_lines() -> None:
+    """Every kept line must be one the untruncated block actually contains, start to finish."""
     huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
 
     message = format_pull_request(huge, status=Status.NOT_REVIEWED)
 
     kept = message.removesuffix("\n…").split("\n")
-    original = format_pull_request(huge, status=Status.NOT_REVIEWED).split("\n")
-    assert kept == original[: len(kept)]
+    # Checked against the shape a line must have, not against the function's own output, or
+    # this compares the truncated block with itself and passes whatever truncation does.
+    assert len(kept) < 11, "nothing was dropped, so this proves nothing"
+    for line in kept:
+        assert line.startswith("**") and ":** " in line, f"a line was cut in half: {line[:60]!r}"
+    assert kept[0].startswith("**PR Name:**")
+
+
+def test_truncation_drops_from_the_end() -> None:
+    """The lines that survive are the first ones, not an arbitrary subset."""
+    huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
+
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+
+    kept = message.removesuffix("\n…").split("\n")
+    labels = [line.split(":**")[0] for line in kept]
+    assert (
+        labels
+        == ["**PR Name", "**Type", "**State", "**GitHub Link", "**Author", "**Assignees"][
+            : len(labels)
+        ]
+    )
 
 
 def test_a_single_line_longer_than_the_whole_limit_is_still_cut() -> None:
