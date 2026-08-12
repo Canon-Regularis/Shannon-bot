@@ -9,8 +9,13 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.domain.models import RepositorySnapshot
 from shannon.github.errors import GitHubNotFoundError
+from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.services.item_sync import ItemSyncService
+from shannon.services.policies import PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
 from tests.fakes.github import FakeGitHubClient
+from tests.fakes.threads import FakeThreadGateway
+from tests.support import github_payloads as payloads
 
 pytestmark = pytest.mark.integration
 
@@ -112,3 +117,54 @@ async def test_a_rejected_registration_leaves_no_rows_behind(
 
     mappings = (await db_session.scalars(select(ChannelMapping))).all()
     assert len(mappings) == 1
+
+
+class TestARepositoryRenamedOnGitHub:
+    """Webhooks find a repository by its numeric id, but /pr compares the link by name."""
+
+    async def test_the_stored_name_follows_the_rename(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        # Read before expiring, or the attribute reload would be sync IO in an async test.
+        repository_id = registered.id
+
+        await service.sync(_renamed_to("Shannon"))
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Canon-Regularis/Shannon"
+        assert stored.repo_url == "https://github.com/Canon-Regularis/Shannon"
+
+    async def test_an_unchanged_name_is_left_alone(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        repository_id, before = registered.id, registered.updated_at
+
+        await service.sync(pr_event("edited"))
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None and stored.updated_at == before
+
+
+def _renamed_to(name: str):
+    """The same repository, under the name GitHub reports after a rename."""
+    payload = payloads.pull_request_event("edited")
+    payload["repository"]["name"] = name
+    payload["repository"]["full_name"] = f"Canon-Regularis/{name}"
+    payload["repository"]["html_url"] = f"https://github.com/Canon-Regularis/{name}"
+    snapshot = parse_pull_request_event("edited", payload)
+    assert snapshot is not None
+    return snapshot

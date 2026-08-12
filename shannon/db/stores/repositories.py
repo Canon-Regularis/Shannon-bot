@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository
+
+logger = logging.getLogger(__name__)
 
 
 class RepositoryStore:
@@ -34,3 +38,20 @@ class RepositoryStore:
         self._session.add(repository)
         await self._session.flush()
         return repository
+
+    async def follow_rename(self, repository: Repository, *, repo_name: str, repo_url: str) -> bool:
+        """Take the name and URL GitHub is using now, reporting whether they moved.
+
+        Webhooks find a repository by its numeric id, which survives a rename, but `/pr` and
+        `/issue` compare the link against the stored name. Without this, renaming a repository
+        on GitHub leaves the mirror working and both commands answering that the link is for
+        the wrong repository, with nothing the server admin can do about it.
+        """
+        if repository.repo_name == repo_name and repository.repo_url == repo_url:
+            return False
+
+        logger.info("%s is now %s, following the rename", repository.repo_name, repo_name)
+        repository.repo_name = repo_name
+        repository.repo_url = repo_url
+        await self._session.flush()
+        return True
