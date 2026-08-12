@@ -4,6 +4,7 @@ import json
 import logging
 
 import pytest
+from pydantic import ValidationError
 
 from shannon.config import Settings
 
@@ -120,3 +121,32 @@ def test_no_credential_reaches_the_api_response_model() -> None:
     payload = json.loads(Settings(discord_token=BOT_TOKEN).model_dump_json())
 
     assert payload["discord_token"] == "**********"
+
+
+class TestTheLeaseCoversItsBatch:
+    """Three settings have to agree, and nothing made them before."""
+
+    def test_the_defaults_agree(self) -> None:
+        settings = Settings()
+
+        assert settings.worker_lease_seconds >= (
+            settings.worker_batch_size * settings.worker_delivery_timeout_seconds
+        )
+
+    def test_a_lease_shorter_than_its_batch_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="worker_lease_seconds"):
+            Settings(
+                worker_lease_seconds=60,
+                worker_batch_size=10,
+                worker_delivery_timeout_seconds=60,
+            )
+
+    def test_raising_the_batch_size_without_the_lease_is_refused(self) -> None:
+        """The way somebody would actually hit this: tuning throughput and nothing else."""
+        with pytest.raises(ValidationError):
+            Settings(worker_batch_size=100)
+
+    def test_raising_both_together_is_accepted(self) -> None:
+        settings = Settings(worker_batch_size=100, worker_lease_seconds=6000)
+
+        assert settings.worker_batch_size == 100

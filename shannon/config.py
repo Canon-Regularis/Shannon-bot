@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from shannon.domain.enums import CommandRole
@@ -62,6 +62,25 @@ class Settings(BaseSettings):
     @classmethod
     def _upper(cls, value: str) -> str:
         return value.upper()
+
+    @model_validator(mode="after")
+    def _lease_covers_a_whole_batch(self) -> Settings:
+        """Refuse a lease shorter than the batch it has to cover.
+
+        The whole batch is leased at once and then worked one delivery at a time, so a lease
+        that lapses part way through hands rows that are still in flight to another replica,
+        and a comment gets posted twice. Three settings have to agree for that not to happen
+        and nothing made them, so raising the batch size quietly broke the invariant the
+        comments above describe.
+        """
+        needed = self.worker_batch_size * self.worker_delivery_timeout_seconds
+        if self.worker_lease_seconds < needed:
+            raise ValueError(
+                f"worker_lease_seconds ({self.worker_lease_seconds}) must be at least "
+                f"worker_batch_size x worker_delivery_timeout_seconds ({needed}), or a batch "
+                "can outlive its own lease"
+            )
+        return self
 
     def role_display_names(self, role: CommandRole) -> tuple[str, ...]:
         """Configured Discord role names for a permission tier, as typed."""
