@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Status
 from shannon.services.item_sync import ItemSyncService
+from shannon.services.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration
@@ -175,3 +176,54 @@ async def test_an_issue_that_opens_already_closed_is_locked(
     item = await db_session.scalar(select(TrackedItem))
     assert item is not None
     assert item.status is Status.DONE
+
+
+class TestLockingAfterANewerSyncHasBeenThrough:
+    """Only the database half of a sync is ordered; the Discord half can interleave with /pr."""
+
+    async def test_a_superseded_close_does_not_lock_a_reopened_issue(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
+        # The reopen lands while the close is still in its Discord phase.
+        await service.sync(
+            issue_event("reopened", state="open", closed_at=None, updated_at="2026-08-01T12:00:00Z")
+        )
+
+        superseded = issue_event(
+            "closed",
+            state="closed",
+            closed_at="2026-08-01T11:00:00Z",
+            updated_at="2026-08-01T11:00:00Z",
+        )
+        await service.sync(superseded)
+
+        thread = threads.threads[next(iter(threads.threads))]
+        assert thread.locked is False, "an open issue was left in a thread nobody can post in"
+
+    async def test_the_newest_close_still_locks(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
+
+        await service.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-01T12:00:00Z",
+                updated_at="2026-08-01T12:00:00Z",
+            )
+        )
+
+        thread = threads.threads[next(iter(threads.threads))]
+        assert thread.locked is True
