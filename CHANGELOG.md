@@ -846,3 +846,68 @@ the bugs are, and code written to fix bugs is not exempt.
   was about to refuse anyway, so a matching link costs no extra call.
 - A dead branch in the status handling: 5xx and everything else unrecognised raised the same
   error with the same message, written twice.
+
+### Tenth look
+
+This one was run empirically: reviewers that built harnesses and ran them rather than reading.
+Several of the findings are damage from the seventh, eighth and ninth looks, including one where
+a fix was made and the setting that ships was left behind.
+
+- **The retry budget was never raised where it counts.** The ninth look changed
+  `WorkerSettings.max_attempts` to 16, which is what two hours costs, and added a test to hold
+  the two together. `Settings.worker_max_attempts` stayed at 10, and that is the value the
+  running worker uses, so the shipped budget was still thirty-six minutes. The test passed
+  because it measured the dataclass default rather than the path production takes. Both are 16
+  now, and the test measures the configured one.
+- **A rebuild could destroy the thread it had just made and report success.** Attaching a thread
+  swaps from the id the sync started with, and treats any other outcome as "somebody else got
+  there first". But the pointer can also be empty, because the note mirror lets go of a thread it
+  finds deleted. The rebuild then deleted its own healthy replacement, left the item with nothing
+  at all, and still answered SYNCED, so the delivery was finished and the event lost. An empty
+  slot is now taken rather than treated as a loss, and an item that has gone entirely is reported
+  rather than dressed up as success.
+- **A late delivery put an old repository name back.** The eighth look taught the sync to follow
+  a rename, and it did that before checking whether the delivery was stale. Every payload carries
+  the name as it was when GitHub sent it, so a delivery that arrived late reverted the rename and
+  broke `/pr` again until the next event. The rename is now followed only for a delivery that is
+  actually current.
+- **The staleness watermark could move backwards.** An item with no thread is deliberately never
+  treated as stale, because skipping there would leave it without one; that means an old snapshot
+  can be applied, and it was overwriting the stored timestamp with its own. The next genuinely
+  late delivery then passed the guard too. It is a high-water mark now.
+- **Anyone who could comment on the repository could ping any Discord user.** Mirrored text is
+  quoted, and the code said that stopped GitHub markdown restyling the thread. It does not:
+  markdown renders inside a blockquote, and `<@1234>` resolves to a real ping, because Discord is
+  told to honour user mentions and cannot tell the ones the bot built from the ones it is
+  quoting. Titles and comment bodies are now neutralised before they go in, which also means the
+  700-character preview can be cut anywhere without leaving a `**` open.
+- **A signature header with a non-ASCII byte answered 500 instead of 401.** `compare_digest`
+  only accepts ASCII and raises otherwise, and that header comes off the network from anybody.
+- **The endpoint read a body of any size into memory before it could check anything.** The
+  signature covers the whole body, so it has to be buffered first; the cap therefore has to come
+  before the read. GitHub will not send more than 25MB.
+- **`_remember` was the one write to the thread pointer without a compare-and-swap**, so a sync
+  a step behind could point an item back at a thread that had already been abandoned.
+
+### The tests that were not testing anything
+
+One reviewer found these by breaking the code and seeing what still passed.
+
+- `test_truncation_keeps_whole_lines` compared the truncated block with itself, so it passed
+  whatever truncation did. It now checks the shape every surviving line must have, and a second
+  test checks that the lines kept are the first ones rather than an arbitrary subset.
+- Nothing exercised the worker's pruning, so the seven-day retention of private-repository
+  payloads was only tested at the store. The loop that has to call it is covered now.
+
+### Known and not fixed
+
+- Two syncs of one item can still interleave their Discord calls. The database half is ordered
+  by the staleness guard, and the worker handles deliveries one at a time, but `/pr` and `/issue`
+  can run beside the worker, and the Discord phase happens outside any transaction by design.
+  A reviewer reproduced a superseded snapshot locking a thread after a newer one had unlocked it,
+  by injecting realistic latency into every Discord call. Closing it properly means holding a
+  per-item lock across the Discord phase, which is a design change rather than a patch.
+- A comment that arrives before its item has been tracked at all is still dropped rather than
+  retried. The case where the item exists without a thread was fixed; this one is ambiguous,
+  because most notes on untracked items are on things this bot will never track, and retrying
+  them all would spend the full budget on every one.

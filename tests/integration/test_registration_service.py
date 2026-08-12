@@ -158,13 +158,39 @@ class TestARepositoryRenamedOnGitHub:
         stored = await db_session.get(Repository, repository_id)
         assert stored is not None and stored.updated_at == before
 
+    async def test_a_stale_delivery_does_not_put_the_old_name_back(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Every payload carries the name as it was when GitHub sent it, late ones included."""
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        repository_id = registered.id
+        await service.sync(_renamed_to("Shannon", at="2026-08-12T12:00:00Z"))
 
-def _renamed_to(name: str):
+        await service.sync(_at_the_old_name(at="2026-08-01T12:00:00Z"))
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Canon-Regularis/Shannon"
+
+
+def _renamed_to(name: str, *, at: str | None = None):
     """The same repository, under the name GitHub reports after a rename."""
-    payload = payloads.pull_request_event("edited")
+    payload = payloads.pull_request_event("edited", **({"updated_at": at} if at else {}))
     payload["repository"]["name"] = name
     payload["repository"]["full_name"] = f"Canon-Regularis/{name}"
     payload["repository"]["html_url"] = f"https://github.com/Canon-Regularis/{name}"
+    snapshot = parse_pull_request_event("edited", payload)
+    assert snapshot is not None
+    return snapshot
+
+
+def _at_the_old_name(*, at: str):
+    payload = payloads.pull_request_event("edited", updated_at=at)
     snapshot = parse_pull_request_event("edited", payload)
     assert snapshot is not None
     return snapshot

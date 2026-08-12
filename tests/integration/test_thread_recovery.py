@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -309,3 +310,95 @@ class TestANoteOnADeletedThread:
 
         assert cleared is False
         assert (await stored(db_session)).discord_thread_id == rebuilt.thread_id
+
+
+class TestARebuildWhoseSlotWasClearedUnderIt:
+    """The note mirror lets go of a dead thread while a sync may be rebuilding the same item."""
+
+    async def test_the_replacement_is_kept_rather_than_destroyed(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        first = await service.sync(pr_event("opened"))
+        threads.threads.pop(first.thread_id)
+        # Somebody else notices the thread is gone and lets go of it first.
+        async with db_sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).forget_thread(
+                first.tracked_item_id, dead_thread_id=first.thread_id
+            )
+
+        second = await service.sync(pr_event("edited", title="Rebuilt"))
+
+        assert second.thread_id is not None
+        assert second.thread_id in threads.threads
+        assert (await stored(db_session)).discord_thread_id == second.thread_id
+
+    async def test_the_item_is_never_left_holding_nothing(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """Reporting SYNCED with no thread would finish the delivery and lose the event."""
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        first = await service.sync(pr_event("opened"))
+        threads.threads.pop(first.thread_id)
+        async with db_sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).forget_thread(
+                first.tracked_item_id, dead_thread_id=first.thread_id
+            )
+
+        second = await service.sync(pr_event("edited"))
+
+        assert second.synced
+        assert second.thread_id is not None
+        assert len(threads.threads) == 1
+
+
+class TestTheStalenessWatermark:
+    async def test_an_old_snapshot_applied_without_a_thread_does_not_lower_it(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """An item with no thread is never stale, so an old snapshot can still be applied."""
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        newest = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+        await service.sync(pr_event("edited", updated_at=newest.isoformat()))
+        first = await stored(db_session)
+        threads.threads.pop(first.discord_thread_id)
+        async with db_sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).forget_thread(
+                first.id, dead_thread_id=first.discord_thread_id
+            )
+
+        older = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+        await service.sync(pr_event("edited", updated_at=older.isoformat()))
+
+        assert (await stored(db_session)).github_updated_at == newest
+
+    async def test_a_newer_snapshot_still_advances_it(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        await service.sync(pr_event("opened"))
+        newer = datetime(2026, 12, 25, 9, 0, tzinfo=UTC)
+
+        await service.sync(pr_event("edited", updated_at=newer.isoformat()))
+
+        assert (await stored(db_session)).github_updated_at == newer

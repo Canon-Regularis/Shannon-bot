@@ -19,6 +19,7 @@ from shannon.discord_bot.errors import ThreadNotFoundError
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, Priority, Status
 from shannon.domain.models import Actor, TrackedSnapshot
+from shannon.domain.time import as_utc
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.item_threads import ItemThreads, ThreadTarget
 from shannon.services.notifications import ActorNotifier
@@ -136,14 +137,6 @@ class ItemSyncService:
                 )
                 return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
-            # Every payload carries the current name, so a rename is noticed the first time
-            # anything happens in the repository afterwards.
-            await repositories.follow_rename(
-                repository,
-                repo_name=snapshot.repository.full_name,
-                repo_url=snapshot.repository.html_url,
-            )
-
             channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
             if channel is None:
                 logger.warning(
@@ -178,6 +171,15 @@ class ItemSyncService:
                     thread_id=item.discord_thread_id,
                     message_id=item.discord_message_id,
                 )
+
+            # Only once the delivery is known to be current. Every payload carries the
+            # repository's name at the time it was sent, so following one from a delivery that
+            # arrived late would put the old name back and break /pr all over again.
+            await repositories.follow_rename(
+                repository,
+                repo_name=snapshot.repository.full_name,
+                repo_url=snapshot.repository.html_url,
+            )
 
             if item is None:
                 item = await items.get_or_create(
@@ -221,7 +223,14 @@ class ItemSyncService:
         item.status = self._policy.status_for(snapshot, item.status)
         item.priority = self._policy.priority_for(snapshot, item.priority)
         if snapshot.updated_at is not None:
-            item.github_updated_at = snapshot.updated_at
+            # A high-water mark, not simply the last value seen. An item with no thread is
+            # deliberately never treated as stale, so an old snapshot can reach here; letting
+            # it lower the mark would blind the guard to the next late delivery as well.
+            item.github_updated_at = (
+                snapshot.updated_at
+                if item.github_updated_at is None
+                else max(as_utc(item.github_updated_at), as_utc(snapshot.updated_at))
+            )
 
     async def _store_people(
         self,

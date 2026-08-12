@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadGateway, ThreadHandle
+from shannon.domain.errors import ItemNotReadyError
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +103,27 @@ class ItemThreads:
         an item; the one that lost is removed rather than left in the channel collecting
         nothing for ever.
         """
-        async with self._sessionmaker() as session, session.begin():
-            claimed_thread, claimed_message = await TrackedItemStore(session).claim_thread(
-                target.tracked_item_id,
-                thread_id=thread_id,
-                message_id=message_id,
-                replacing=target.thread_id,
+        claimed_thread, claimed_message = await self._swap(
+            target.tracked_item_id, thread_id, message_id, replacing=target.thread_id
+        )
+
+        # Nobody owns the item now. Somebody let go of the old thread while this one was being
+        # opened, which is what the note mirror does when a comment finds the thread deleted.
+        # The swap missed because it was written from an id that is no longer there, not
+        # because another thread won, so this one takes the empty slot rather than being thrown
+        # away with the item left holding nothing.
+        if claimed_thread is None:
+            claimed_thread, claimed_message = await self._swap(
+                target.tracked_item_id, thread_id, message_id, replacing=None
+            )
+
+        if claimed_thread is None:
+            # The item itself has gone: the repository was unregistered, or the row was removed
+            # while this was in flight. There is nothing to attach the thread to, so it is
+            # tidied away and the delivery is left to be retried rather than reported as done.
+            await self._threads.delete(thread_id=thread_id)
+            raise ItemNotReadyError(
+                f"tracked item {target.tracked_item_id} is no longer there to attach a thread to"
             )
 
         if claimed_thread == thread_id:
@@ -122,12 +138,28 @@ class ItemThreads:
         await self._threads.delete(thread_id=thread_id)
         return ThreadHandle(thread_id=claimed_thread, message_id=claimed_message)
 
-    async def _remember(self, tracked_item_id: int, handle: ThreadHandle) -> None:
-        """Record where the metadata message now lives, which moves if it was deleted."""
+    async def _swap(
+        self, tracked_item_id: int, thread_id: int, message_id: int | None, *, replacing: int | None
+    ) -> tuple[int | None, int | None]:
         async with self._sessionmaker() as session, session.begin():
-            items = TrackedItemStore(session)
-            item = await items.get_by_id(tracked_item_id)
-            if item is not None:
-                await items.set_discord_ids(
-                    item, thread_id=handle.thread_id, message_id=handle.message_id
-                )
+            return await TrackedItemStore(session).claim_thread(
+                tracked_item_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                replacing=replacing,
+            )
+
+    async def _remember(self, tracked_item_id: int, handle: ThreadHandle) -> None:
+        """Record where the metadata message now lives, which moves if it was deleted.
+
+        Conditional on the item still pointing at the thread that was just written to, for the
+        same reason every other write here is: the Discord call happened outside any
+        transaction, so the item may have moved on to a different thread in the meantime and
+        writing this id back would send it to one somebody has already abandoned.
+        """
+        await self._swap(
+            tracked_item_id,
+            handle.thread_id,
+            handle.message_id,
+            replacing=handle.thread_id,
+        )
