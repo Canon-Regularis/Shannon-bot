@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     # on it. The defaults ride out roughly two hours of Discord being unreachable.
     worker_poll_seconds: float = Field(default=2.0, gt=0)
     worker_batch_size: int = Field(default=10, gt=0)
-    worker_max_attempts: int = Field(default=10, gt=0)
+    # Sixteen is what the two hours in WorkerSettings actually costs. This is the number that
+    # ships, so it is the one the documented window has to be computed from.
+    worker_max_attempts: int = Field(default=16, gt=0)
     worker_max_backoff_seconds: float = Field(default=900.0, gt=0)
     # How long a leased delivery stays claimed. A worker killed mid-delivery leaves its rows
     # untouched until this passes, so this is also how long that work waits.

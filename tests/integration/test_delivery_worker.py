@@ -6,9 +6,10 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.config import Settings
 from shannon.db.models import WebhookEvent
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import DeliveryStatus, ObjectType
@@ -425,3 +426,51 @@ async def _until(condition, timeout: float = 10.0) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
+
+
+class TestTheRetryBudgetThatShips:
+    """The dataclass default is not what runs; Settings is, and the two had drifted apart."""
+
+    def test_the_configured_budget_is_the_two_hours_claimed(self) -> None:
+        held = WorkerSettings.from_settings(Settings()).total_backoff()
+
+        assert timedelta(hours=2) <= held <= timedelta(hours=2, minutes=30)
+
+    def test_the_dataclass_default_agrees_with_it(self) -> None:
+        assert WorkerSettings().max_attempts == Settings().worker_max_attempts
+
+
+class TestPruning:
+    """Bodies hold private-repository content, so the seven-day retention has to actually run."""
+
+    async def test_the_worker_prunes_as_it_goes(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        worker = build_worker(
+            queue,
+            Exploding(failures=0),
+            poll_interval=timedelta(seconds=0.01),
+            retention=timedelta(seconds=-1),
+        )
+        await enqueue(queue, "old")
+        await worker.run_once()
+        assert (await stored(db_session, "old")).status == DeliveryStatus.PROCESSED
+
+        running = asyncio.create_task(worker.run_forever())
+        await _until(lambda: True)
+        await asyncio.sleep(0.2)
+        worker.stop()
+        await running
+
+        db_session.expire_all()
+        assert await db_session.scalar(select(func.count()).select_from(WebhookEvent)) == 0
+
+    async def test_a_delivery_still_waiting_is_never_pruned(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        await enqueue(queue, "waiting")
+
+        removed = await queue.prune(keep_for=timedelta(seconds=-1))
+
+        assert removed == 0
+        assert (await stored(db_session, "waiting")).status == DeliveryStatus.PENDING
