@@ -269,3 +269,62 @@ async def test_pruning_leaves_recent_and_pending_deliveries_alone(
 
     assert await queue.prune(keep_for=timedelta(days=7)) == 0
     assert await count_events(db_session) == 2
+
+
+class TestRedeliveringSomethingThatFailed:
+    """GitHub's Redeliver button sends the same delivery id, which used to read as a duplicate."""
+
+    async def test_a_failed_delivery_is_put_back_on_the_queue(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+        leased = await queue.lease(limit=10, lease_for=LEASE)
+        await queue.give_up(leased[0], error="Discord would not have it")
+
+        assert await queue.enqueue("delivery-a", "pull_request", PAYLOAD) is True
+
+        event = await row(db_session, "delivery-a")
+        assert event.status == DeliveryStatus.PENDING
+        assert event.attempts == 0
+        assert event.last_error is None
+        assert event.next_attempt_at is None
+
+    async def test_the_revived_delivery_is_leased_again(self, queue: WebhookDeliveryQueue) -> None:
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+        leased = await queue.lease(limit=10, lease_for=LEASE)
+        await queue.give_up(leased[0], error="gave up")
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+
+        again = await queue.lease(limit=10, lease_for=LEASE)
+
+        assert [delivery.delivery_id for delivery in again] == ["delivery-a"]
+
+    async def test_the_body_is_taken_from_the_redelivery(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+        leased = await queue.lease(limit=10, lease_for=LEASE)
+        await queue.give_up(leased[0], error="gave up")
+
+        await queue.enqueue("delivery-a", "pull_request", {"action": "closed", "number": 7})
+
+        assert (await row(db_session, "delivery-a")).payload["action"] == "closed"
+
+    async def test_a_repeat_of_something_already_done_is_still_a_duplicate(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        """Only a delivery that was given up on is revived. The guard still has a job to do."""
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+        leased = await queue.lease(limit=10, lease_for=LEASE)
+        await queue.finish(leased[0], DeliveryStatus.PROCESSED)
+
+        assert await queue.enqueue("delivery-a", "pull_request", PAYLOAD) is False
+        assert (await row(db_session, "delivery-a")).status == DeliveryStatus.PROCESSED
+
+    async def test_a_repeat_of_one_still_pending_is_still_a_duplicate(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        await queue.enqueue("delivery-a", "pull_request", PAYLOAD)
+
+        assert await queue.enqueue("delivery-a", "pull_request", PAYLOAD) is False
+        assert await count_events(db_session) == 1

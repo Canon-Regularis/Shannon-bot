@@ -56,8 +56,37 @@ class WebhookEventStore:
             .on_conflict_do_nothing(index_elements=[WebhookEvent.github_delivery_id])
             .returning(WebhookEvent.id)
         )
-        result = await self._session.execute(statement)
-        return result.scalar_one_or_none() is not None
+        if (await self._session.execute(statement)).scalar_one_or_none() is not None:
+            return True
+
+        return await self._revive(delivery_id, payload)
+
+    async def _revive(self, delivery_id: str, payload: dict[str, Any]) -> bool:
+        """Put a delivery that was given up on back on the queue, reporting whether it moved.
+
+        GitHub's Redeliver button sends the same delivery id, so a delivery this bot has already
+        marked FAILED comes back as a duplicate and is answered without anything happening. That
+        button is the obvious thing to press when somebody has fixed whatever broke, and the only
+        alternative was hand-written SQL. A delivery in any other state is left alone: a repeat
+        of one already processed is still a duplicate.
+        """
+        result = await self._session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.github_delivery_id == delivery_id,
+                WebhookEvent.status == DeliveryStatus.FAILED,
+            )
+            .values(
+                status=DeliveryStatus.PENDING,
+                payload=payload,
+                attempts=0,
+                next_attempt_at=None,
+                locked_until=None,
+                last_error=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return bool(result.rowcount)
 
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[WebhookEvent]:
         """Take up to `limit` deliveries to work on, in the order they arrived.
