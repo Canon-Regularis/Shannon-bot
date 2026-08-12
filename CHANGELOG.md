@@ -806,3 +806,43 @@ as 3.14, which is what the declared floor was always claiming.
 Worth saying how this was found: not by reading, but by running `uv sync --python 3.12` and the
 suite against it, which is exactly what the CI job does and what nobody had watched it do.
 
+
+### Ninth look
+
+Four of the five things here were introduced by the seventh and eighth looks. New code is where
+the bugs are, and code written to fix bugs is not exempt.
+
+- **A reviewer could be told nobody was going to tell them.** The eighth look made the notifier
+  claim a ping before sending it, and hand the claim back if the message did not go. Handing it
+  back was guarded by `except Exception`, which does not catch cancellation, and cancellation is
+  the likeliest way that post fails: the worker gives each delivery sixty seconds and cancels the
+  handler where it stands, and where it stands is inside a Discord call that discord.py is
+  sleeping through because of a rate limit. The claim survived, the retry found nothing to
+  claim, and the ping was never sent by anyone. It now catches everything, and the hand-back is
+  shielded so the same cancellation cannot interrupt that too.
+- **The worker started leasing before the bot had connected.** Both tasks are created in the same
+  breath at startup, but logging in and connecting to the gateway takes seconds, and until it
+  finishes there is no session to make a Discord call on. Every delivery leased in that window
+  failed against a client that was not ready and spent an attempt on a problem that fixes itself
+  a second later. The worker now waits for the bot before its first batch. The endpoint does not
+  wait for anything, which is the point of writing deliveries down.
+- **The command error backstop could only ever say "something went wrong".** discord.py hands its
+  handler whatever the command raised wrapped in a `CommandInvokeError`, and the reply table
+  matched on the wrapper, which is not an error it knows. Every error reaching the backstop got
+  the catch-all instead of the message written for it. It looks through the wrapper now.
+- **The backstop could also raise.** An interaction that has expired, or been answered already,
+  makes the reply fail, and a failing error handler is worse than none: discord.py logs a second
+  traceback and the person who ran the command is still waiting. It no longer raises.
+- **`GitHubRateLimitError.retry_after` carried a moment in time labelled as a number of
+  seconds.** `retry-after` is a delay, but `x-ratelimit-reset` is the epoch second the window
+  reopens, and both were being returned unchanged. Nothing reads the field yet, so nothing has
+  gone wrong; whoever reads it first would have waited about fifty-six years. It is a delay now,
+  worked out against GitHub's own `date` header rather than this machine's clock.
+- **`/pr` and `/issue` still identified the repository by name.** The eighth look taught the
+  webhook path to follow a rename, which fixed the mirror but not the commands: both compare the
+  pasted link against the stored name, and that name is only corrected when a webhook happens to
+  arrive. Between the rename and the next event, the correct link was still refused. They settle
+  it on the numeric id now, which is what GitHub keeps across a rename, and only on the path that
+  was about to refuse anyway, so a matching link costs no extra call.
+- A dead branch in the status handling: 5xx and everything else unrecognised raised the same
+  error with the same message, written twice.
