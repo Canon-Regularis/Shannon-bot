@@ -1175,3 +1175,61 @@ the job: making what is already here easier to work on.
   narrowing an except clause later.
 
 Nothing in this pass fixes a defect, because none was found. That is the result.
+
+### Eighteenth look
+
+Every defect here is a race, and every one of them was found by asking the same question of a
+different piece of code: what happens when two of these run at once. The answer had been worked
+out carefully for some paths and never asked of others.
+
+- **`/health` reported a healthy process as down whenever two checks landed together.** The probe
+  is cached so a public endpoint cannot open a connection per request, but the cache was stamped
+  fresh on the way *in*, before the connection was awaited. Every caller arriving during that
+  window was handed the cached value before anything had set it, which on the first probe is its
+  initial `False`. Two probes at once is not an exotic case: it is what an orchestrator running a
+  liveness and a readiness check does, and the answer it gets back is the one that decides whether
+  to restart the process. So the endpoint added to catch a wedged process was itself the thing
+  most likely to kill a working one. The stamp now happens once there is an answer, a lock means
+  one probe runs at a time rather than the whole burst opening a connection each, and the probe
+  has a deadline so a database that accepts the socket and then goes quiet cannot park every
+  health check behind it. The existing tests all awaited the probe one call at a time against a
+  fake that connected instantly, so there was never an await point for a second caller to arrive
+  in. The fake can be slow now.
+- **Two syncs of one item both adding the same person collided on the unique constraint.** The
+  assignment store read the existing rows and then inserted the difference. That is safe only if
+  nothing else is syncing the same item, and three things regularly are: `/pr` runs on the bot's
+  task while the worker is mid-delivery, GitHub sends several events at once for one item, and a
+  second replica leases in parallel by design. The loser of the race took the whole sync down.
+  Worth saying why this survived a file named `test_concurrent_sync.py`: every test in it used an
+  item that did not exist yet, and a new item is serialised by the upsert in `get_or_create`, so
+  the loser blocks until the winner commits and then sees the winner's rows. Nothing serialises
+  an item that already exists, which is the case `/pr` is for. The insert settles its own
+  conflict now, doing nothing rather than overwriting, because the row the other caller wrote is
+  the row this one was about to write and it may already hold a claimed `notified_at`.
+- **A double-submitted `/link` came back as a raw database error.** Both halves of a link are
+  unique within a guild and either can be held by a different row, so the store clears both out
+  and writes the pairing fresh; two of those overlapping have both find nothing to clear and both
+  insert. The loser now retries instead of raising, which lands cleanly because the rollback left
+  the other attempt standing. Last writer wins, which is what replacing whatever either side had
+  already meant.
+- **A failure closing the HTTP client left the database pool open.** `Container.aclose` closed
+  the client and then disposed the engine, so anything thrown by the first skipped the second.
+  This is the same shape as the shutdown bug fixed two passes ago, in the code that shutdown
+  calls. The engine goes in a `finally`.
+
+### The fake that keeps being narrower than the real thing
+
+Three times now a stand-in has offered less than the thing it replaces, and not once did it fail
+a test. It quietly removed a path from what the suite could reach, which is worse than failing,
+because the suite went on reporting green over the hole: a thread gateway whose docstring
+described behaviour it did not have, a GitHub client with no `get_issue` so nothing could drive
+`/issue` at all, and a lifespan container standing in for seventeen attributes with three. The
+third was written one pass after the entry warning about the second.
+
+Protocols are structural and there is no type checker in this project, so nothing was ever going
+to catch this by itself. Now something does. `tests/unit/test_stand_ins_match_what_they_replace.py`
+walks every protocol's members by reflection and checks each implementation offers all of them
+with the same argument names, covering the real implementations as well as the fakes, since
+neither was being checked. It was run against both historical bugs before being kept: the missing
+`get_issue` and a renamed parameter are both caught. The lifespan container is gone, replaced by
+the real one with only its worker swapped.
