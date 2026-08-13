@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ItemAssignment
@@ -39,6 +40,17 @@ class ItemAssignmentStore:
         People no longer on the item are removed, so a reassigned pull request stops listing
         whoever used to be on it. People already there keep their row, and with it the
         `notified_at` that stops them being pinged twice.
+
+        The insert settles the conflict itself, because reading the existing rows and then
+        writing is only safe if nothing else is syncing the same item. Something else regularly
+        is: `/pr` runs on the bot's task while the worker is mid-delivery, GitHub sends several
+        events at once for a newly opened item, and a second replica leases in parallel by
+        design. All three have both callers find the row missing and both insert it, and the
+        loser of that race takes the whole sync down with a unique violation.
+
+        Doing nothing on conflict is the right resolution rather than a convenient one: the row
+        the other caller wrote is the row this one was about to write, and leaving theirs alone
+        keeps the `notified_at` they may already have claimed.
         """
         wanted = {actor.login.lower() for actor in actors}
         existing = {row.github_username for row in await self.list_for(tracked_item_id, role)}
@@ -53,11 +65,21 @@ class ItemAssignmentStore:
                 )
             )
 
-        for login in sorted(wanted - existing):
-            self._session.add(
-                ItemAssignment(
-                    tracked_item_id=tracked_item_id, github_username=login, role_type=role
+        added = sorted(wanted - existing)
+        if added:
+            await self._session.execute(
+                pg_insert(ItemAssignment)
+                .values(
+                    [
+                        {
+                            "tracked_item_id": tracked_item_id,
+                            "github_username": login,
+                            "role_type": role,
+                        }
+                        for login in added
+                    ]
                 )
+                .on_conflict_do_nothing(constraint="uq_item_assignments_item_user_role")
             )
 
         await self._session.flush()
