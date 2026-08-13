@@ -226,3 +226,70 @@ class TestHowLongToWait:
                 await client.get_repository("owner", "repo")
 
         assert caught.value.retry_after is None
+
+
+def serves(issue: dict | None = None):
+    """Answer both calls get_issue makes: the issue, then its repository.
+
+    The issues endpoint carries no repository object, only a URL, so the client has to fetch it
+    separately. A handler that answers everything with the issue body fails on the second call.
+    """
+    body = issue if issue is not None else payloads.issue()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/issues/" in request.url.path:
+            return httpx.Response(200, content=json.dumps(body))
+        return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+    return handler
+
+
+class TestFetchingAnIssue:
+    """The issues endpoint, whose body had never been executed by any test."""
+
+    async def test_it_returns_a_snapshot(self) -> None:
+        async with client_with(serves()) as client:
+            issue = await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+        assert issue.number == 12
+        assert issue.title == payloads.issue()["title"]
+        assert issue.repository.github_repo_id == payloads.REPO_ID
+
+    async def test_it_asks_the_issues_endpoint_then_the_repository(self) -> None:
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return serves()(request)
+
+        async with client_with(handler) as client:
+            await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+        assert paths == [
+            f"/repos/{payloads.OWNER}/{payloads.REPO}/issues/12",
+            f"/repos/{payloads.OWNER}/{payloads.REPO}",
+        ]
+
+    async def test_a_pull_request_served_from_this_endpoint_is_not_an_issue(self) -> None:
+        """GitHub answers /issues/N for a pull request too. Tracking it as one would be wrong."""
+        body = payloads.issue()
+        body["pull_request"] = {"url": "https://api.github.com/repos/o/r/pulls/12"}
+
+        async with client_with(serves(body)) as client:
+            with pytest.raises(GitHubNotFoundError, match="is a pull request, not an issue"):
+                await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+    async def test_a_missing_issue_is_reported(self) -> None:
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            with pytest.raises(GitHubNotFoundError):
+                await client.get_issue(payloads.OWNER, payloads.REPO, 999)
+
+    async def test_a_body_it_cannot_read_is_reported(self) -> None:
+        async with client_with(serves({"number": None})) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+    async def test_github_refusing_is_reported_rather_than_raised_raw(self) -> None:
+        async with client_with(responds(500, {"message": "boom"})) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.get_issue(payloads.OWNER, payloads.REPO, 12)

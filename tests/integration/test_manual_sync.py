@@ -7,11 +7,18 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
+from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError, UnparseableLinkError
-from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
+from shannon.domain.models import (
+    Actor,
+    IssueSnapshot,
+    Label,
+    PullRequestSnapshot,
+    RepositorySnapshot,
+)
 from shannon.github.errors import GitHubNotFoundError
 from shannon.services.item_sync import ItemSyncService
-from shannon.services.manual_sync import ManualSync, build_pull_request_sync
+from shannon.services.manual_sync import ManualSync, build_issue_sync, build_pull_request_sync
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -36,6 +43,20 @@ SNAPSHOT = PullRequestSnapshot(
     assignees=(Actor("hubot"),),
     reviewers=(Actor("monalisa"),),
     labels=(Label("backend"),),
+)
+
+
+ISSUE_LINK = "https://github.com/Canon-Regularis/Shannon-bot/issues/12"
+ISSUE = IssueSnapshot(
+    repository=REPO,
+    github_object_id=555001,
+    number=12,
+    title="The thread stays open after closing",
+    html_url=ISSUE_LINK,
+    state="open",
+    author=Actor("monalisa"),
+    assignees=(Actor("hubot"),),
+    labels=(Label("bug"),),
 )
 
 
@@ -230,3 +251,84 @@ class TestARenamedRepository:
 
         with pytest.raises(RepositoryMismatchError):
             await service.sync_link(guild_id=1, link="https://github.com/nobody/nothing/pull/7")
+
+
+class TestSyncingAnIssueByLink:
+    """The /issue service path, which no test had ever constructed.
+
+    FakeGitHubClient had no get_issue, so nothing could drive build_issue_sync at all, and the
+    Protocol being structural meant nothing complained. /pr was covered throughout.
+    """
+
+    @pytest.fixture
+    def issue_github(self) -> FakeGitHubClient:
+        return FakeGitHubClient(
+            issues={("canon-regularis/shannon-bot", 12): ISSUE},
+            repositories={"canon-regularis/shannon-bot": REPO},
+        )
+
+    @pytest.fixture
+    def issues(
+        self,
+        db_sessionmaker: async_sessionmaker,
+        issue_github: FakeGitHubClient,
+        issue_service: ItemSyncService,
+    ) -> ManualSync:
+        return build_issue_sync(db_sessionmaker, issue_github, issue_service)
+
+    async def test_a_valid_link_opens_a_thread(
+        self, registered: Repository, issues: ManualSync, threads: FakeThreadGateway
+    ) -> None:
+        outcome = await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+        assert outcome.created is True
+        assert outcome.number == 12
+        assert len(threads.created) == 1
+
+    async def test_it_records_the_item_as_an_issue(
+        self, registered: Repository, issues: ManualSync, db_session: AsyncSession
+    ) -> None:
+        await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+        item = await db_session.scalar(select(TrackedItem))
+        assert item is not None
+        assert item.github_object_type is ObjectType.ISSUE
+        assert item.github_object_number == 12
+
+    async def test_a_second_run_updates_rather_than_opening_another(
+        self, registered: Repository, issues: ManualSync, threads: FakeThreadGateway
+    ) -> None:
+        first = await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+        second = await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+        assert second.created is False
+        assert second.thread_id == first.thread_id
+        assert len(threads.created) == 1
+
+    async def test_it_asks_github_for_an_issue_not_a_pull_request(
+        self, registered: Repository, issues: ManualSync, issue_github: FakeGitHubClient
+    ) -> None:
+        await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+        assert issue_github.issue_calls == [("canon-regularis/shannon-bot", 12)]
+        assert issue_github.pull_request_calls == []
+
+    async def test_a_pull_request_link_is_refused(
+        self, registered: Repository, issues: ManualSync
+    ) -> None:
+        """The parsers keep the two apart before GitHub is asked anything."""
+        with pytest.raises(UnparseableLinkError, match="pull request link"):
+            await issues.sync_link(guild_id=1, link=LINK)
+
+    async def test_a_missing_issue_is_reported(
+        self, registered: Repository, issues: ManualSync
+    ) -> None:
+        with pytest.raises(GitHubNotFoundError):
+            await issues.sync_link(
+                guild_id=1, link="https://github.com/Canon-Regularis/Shannon-bot/issues/999"
+            )
+
+    async def test_an_unregistered_guild_is_told_to_register(self, issues: ManualSync) -> None:
+        with pytest.raises(NotRegisteredError):
+            await issues.sync_link(guild_id=1, link=ISSUE_LINK)
