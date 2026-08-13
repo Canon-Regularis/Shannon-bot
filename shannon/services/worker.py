@@ -119,6 +119,13 @@ class DeliveryWorker:
                 # Cancelled outright, which is what happens when the grace period runs out
                 # before the delivery in hand finishes. The rest of the batch was never touched
                 # and there is no reason for it to wait out the lease as well.
+                #
+                # Best effort, and worth being plain about why: awaiting anything from inside a
+                # cancelled task returns at once, so this starts the hand-back and does not see
+                # it finish. It usually lands, because shutdown waits for this task and the loop
+                # is still running. If the loop stops first the rows simply wait out their
+                # lease, which is where they would have been anyway. The cooperative stop above
+                # is the path that does this properly, and the one taken almost every time.
                 await asyncio.shield(self._queue.release(deliveries[index + 1 :]))
                 raise
         return len(deliveries)

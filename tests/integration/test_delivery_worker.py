@@ -14,7 +14,9 @@ from shannon.db.models import WebhookEvent
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import DeliveryStatus, ObjectType
 from shannon.github.webhooks.events import EventRouter, WebhookOutcome
+from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.delivery_queue import WebhookDeliveryQueue
+from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.worker import DeliveryWorker, WorkerSettings
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -536,3 +538,50 @@ class _PruneFails:
 
     def __getattr__(self, name: str):
         return getattr(self._queue, name)
+
+
+class TestBeingCancelledOutright:
+    """What happens when the grace period runs out before the delivery in hand finishes."""
+
+    async def test_the_rest_of_the_batch_is_handed_back(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        async def hang(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+            await asyncio.sleep(60)
+            return WebhookOutcome.PROCESSED
+
+        worker = build_worker(queue, hang)
+        for index in range(4):
+            await enqueue(queue, f"delivery-{index}")
+
+        running = asyncio.create_task(worker.run_once())
+        await _until(lambda: True)
+        await asyncio.sleep(0.2)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        await asyncio.sleep(0.2)
+
+        # The one in hand keeps its lease and waits it out; the untouched three come straight
+        # back, rather than sitting locked while the replacement process polls an empty queue.
+        for index in range(1, 4):
+            event = await stored(db_session, f"delivery-{index}")
+            assert event.status == DeliveryStatus.PENDING, f"delivery-{index} was left locked"
+            assert event.attempts == 0
+
+
+class TestAReviewLedgerWithNothingToDo:
+    async def test_a_review_with_no_author_is_left_alone(self, db_sessionmaker) -> None:
+        """GitHub can report a deleted account as no author at all."""
+        payload = payloads.pull_request_review_event()
+        payload["review"]["user"] = None
+        snapshot = parse_review_event("submitted", payload)
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
+
+    async def test_a_review_on_an_unregistered_repository_is_left_alone(
+        self, db_sessionmaker
+    ) -> None:
+        snapshot = parse_review_event("submitted", payloads.pull_request_review_event())
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
