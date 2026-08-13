@@ -1310,3 +1310,39 @@ scanned for mentions.
 Also learned, the hard way, twice: two pytest sessions pointed at one database corrupt each
 other, because the session fixture rebuilds the schema with `drop_all` before `create_all`. Test
 failures that appear only while something else is running are that, and not the code.
+
+### Twenty-first look
+
+Carrying on with running things rather than reading them. Most of this pass is verification that
+found nothing, which is worth writing down as plainly as the one defect.
+
+- **A link could steer the bot's API call to a path nobody built.** `.` and `..` both match the
+  repository name pattern, and neither is a name GitHub will ever create. The name goes straight
+  into the path of a request made with the bot's token, and the HTTP client collapses dot
+  segments before sending, so what leaves is not what the caller wrote: `/pr` on
+  `github.com/owner/../pull/7` builds `/repos/owner/../pulls/7` and sends `/repos/pulls/7`, and
+  `/register` on `github.com/owner/..` sends a bare `/repos`. Nothing private is reachable, because
+  the owner pattern has no dots in it so there is only ever one level to climb, and both parsers
+  already refuse anything that is not github.com. It is still a request the code did not make.
+  Both names are refused now, next to the checks that were already being done on the rest of the
+  link. A repository with dots in its name is untouched, since only the two that mean something
+  to a path are refused.
+
+Run against the code and found sound:
+
+- **The webhook parsers do not break on a malformed payload.** Every field of every real payload
+  was deleted, nulled, emptied, and replaced with each of a dict, a list, a list of nulls, a bool,
+  a float, a 64-bit integer, a negative number, an empty string, a hundred-thousand character
+  string, and a run of unicode direction marks. 3,376 mutations, and every one came back with a
+  snapshot or with None. This matters more than it sounds: a parser that raises is not a crash,
+  it is sixteen retries across two hours and then an event lost for good.
+- **Nothing gets a live mention past the defusing.** 16,000 generated inputs through
+  `as_plain_text` and `defuse_mentions`, including text drawn only from the characters that could
+  plausibly build or break a mention, and not one live `<@id>` came out the other side.
+- **The worker's settings mean what the comments say.** The shipped values and the dataclass
+  defaults agree field for field, a delivery is held 2:06:15 before being given up on, which is
+  the "roughly two hours" quoted in three places, and a worst-case batch of ten deliveries each
+  running to its one minute timeout takes ten minutes against a fifteen minute lease.
+- The adversarial link corpus is otherwise refused as it should be: a userinfo host
+  (`github.com@evil.com`), a lookalike host, a non-http scheme, an issue link handed to `/pr`, a
+  zero or negative number, and an Arabic-Indic numeral.
