@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
+from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import (
     Actor,
     IssueSnapshot,
@@ -13,6 +14,7 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
+from shannon.services.item_sync import ItemSyncService
 from shannon.services.policies import IssuePolicy, PullRequestPolicy
 
 REPO = RepositorySnapshot(
@@ -109,3 +111,28 @@ class TestWhatEachPolicyStores:
     def test_the_object_type_each_one_owns(self) -> None:
         assert PullRequestPolicy().object_type is ObjectType.PR
         assert IssuePolicy().object_type is ObjectType.ISSUE
+
+
+class TestAPolicyHandedTheWrongKindOfSnapshot:
+    """Nothing pairs these but the wiring, and MVP 4 adds a third kind to get wrong."""
+
+    async def test_a_pull_request_policy_refuses_an_issue(self) -> None:
+        service = ItemSyncService(None, None, PullRequestPolicy())  # type: ignore[arg-type]
+
+        with pytest.raises(WrongPolicyError, match="PullRequestPolicy was handed a ISSUE"):
+            await service.sync(ISSUE)
+
+    async def test_an_issue_policy_refuses_a_pull_request(self) -> None:
+        service = ItemSyncService(None, None, IssuePolicy())  # type: ignore[arg-type]
+
+        with pytest.raises(WrongPolicyError, match="IssuePolicy was handed a PR"):
+            await service.sync(PULL_REQUEST)
+
+    async def test_it_names_the_item_so_the_wiring_can_be_found(self) -> None:
+        service = ItemSyncService(None, None, IssuePolicy())  # type: ignore[arg-type]
+
+        with pytest.raises(WrongPolicyError, match="Canon-Regularis/Shannon-bot#7"):
+            await service.sync(PULL_REQUEST)
+
+    async def test_it_is_permanent_so_the_worker_does_not_retry_a_wiring_bug(self) -> None:
+        assert issubclass(WrongPolicyError, PermanentError)

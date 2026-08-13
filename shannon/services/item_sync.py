@@ -18,6 +18,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, Priority, Status
+from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
@@ -80,6 +81,16 @@ class ItemSyncService:
 
     async def sync(self, snapshot: TrackedSnapshot) -> SyncResult:
         """Bring Discord in line with a snapshot."""
+        if snapshot.object_type is not self._policy.object_type:
+            # Wiring, not input: a policy paired with the wrong kind of snapshot would file the
+            # item under the wrong type and read fields the snapshot may not have. Nothing can
+            # make that succeed, so it fails once and loudly rather than sixteen times. MVP 4
+            # adds a third object type, which is when this becomes easy to get wrong.
+            raise WrongPolicyError(
+                f"{type(self._policy).__name__} was handed a {snapshot.object_type.value} "
+                f"snapshot for {snapshot.repository.full_name}#{snapshot.number}"
+            )
+
         decision = await self._record(snapshot)
         # The database step either hands over work to do or answers on its own.
         if isinstance(decision, SyncResult):
