@@ -26,7 +26,7 @@ from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.item_threads import ItemThreads, ThreadTarget
 from shannon.services.notifications import ActorNotifier
 from shannon.services.policies import SyncPolicy
-from shannon.services.staleness import is_stale
+from shannon.services.staleness import is_superseded
 
 logger = logging.getLogger(__name__)
 
@@ -197,11 +197,11 @@ class ItemSyncService:
                 github_object_id=snapshot.github_object_id,
             )
 
-            if item is not None and is_stale(
-                has_thread=item.discord_thread_id is not None,
-                incoming=snapshot.updated_at,
-                stored=item.github_updated_at,
-            ):
+            superseded = item is not None and is_superseded(
+                snapshot.updated_at, item.github_updated_at
+            )
+
+            if superseded and item.discord_thread_id is not None:
                 logger.info(
                     "ignoring a stale %s.%s for %s#%s",
                     object_type.value,
@@ -238,10 +238,28 @@ class ItemSyncService:
                     priority=self._policy.priority_for(snapshot, Priority.UNSET),
                     github_updated_at=snapshot.updated_at,
                 )
-            self._apply(items, item, snapshot)
-
             roles = self._policy.assignments(snapshot)
-            await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
+
+            if superseded:
+                # The item lost its thread, so one has to be built whatever the age of this
+                # delivery: an item with no thread is never treated as stale, or it would never
+                # get one. That is a reason to build the thread and not a reason to believe this
+                # payload about anything else. Adopting it would put back a title that had been
+                # changed, and swap the people for whoever was on the item at the time, which
+                # deletes the ones since added and pings the ones since removed. The metadata
+                # goes up out of date and the next delivery corrects it; a ping cannot be taken
+                # back, which is why the people are left exactly as they are.
+                logger.info(
+                    "rebuilding a thread for %s#%s from an old %s.%s, keeping what is stored",
+                    snapshot.repository.full_name,
+                    snapshot.number,
+                    object_type.value,
+                    snapshot.action,
+                )
+                roles = {}
+            else:
+                self._apply(items, item, snapshot)
+                await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
 
             logins = [actor.login for actors in roles.values() for actor in actors]
             mentions = await UserLinkStore(session).resolve_many(
