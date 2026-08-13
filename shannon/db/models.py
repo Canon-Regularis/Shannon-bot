@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -164,7 +165,18 @@ class WebhookEvent(Base):
     __tablename__ = "webhook_events"
     __table_args__ = (
         UniqueConstraint("github_delivery_id", name="uq_webhook_events_github_delivery_id"),
-        Index("ix_webhook_events_status_next_attempt", "status", "next_attempt_at"),
+        # The lease reads `next_attempt_at IS NULL OR next_attempt_at <= now()`, which no index
+        # can answer as a condition, so an index leading on status only ever contributed its
+        # first column and the planner abandoned it for a full table scan as soon as a few
+        # hundred deliveries were backing off. This is what the predicate can actually prove,
+        # and it covers only the live rows so it stays small however long deliveries are kept.
+        Index(
+            "ix_webhook_events_live",
+            "id",
+            postgresql_where=text("status IN ('PENDING', 'PROCESSING')"),
+        ),
+        # Pruning has to find the slice past the retention window without reading the rest.
+        Index("ix_webhook_events_processed_at", "processed_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -192,9 +192,14 @@ class WebhookEventStore:
         sit here indefinitely. Anything still pending is left alone however old it is.
         """
         result = await self._session.execute(
-            delete(WebhookEvent).where(
+            delete(WebhookEvent)
+            .where(
                 WebhookEvent.status.in_(TERMINAL),
                 WebhookEvent.processed_at < func.now() - _interval(keep_for),
             )
+            # Without this the ORM cannot work out which loaded objects the DELETE hit, so it
+            # asks the database to hand every deleted primary key back. Nothing here holds
+            # those rows in a session, so there is nothing to synchronise.
+            .execution_options(synchronize_session=False)
         )
         return result.rowcount or 0
