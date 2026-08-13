@@ -237,7 +237,7 @@ class ItemSyncService:
                     priority=self._policy.priority_for(snapshot, Priority.UNSET),
                     github_updated_at=snapshot.updated_at,
                 )
-            self._apply(item, snapshot)
+            self._apply(items, item, snapshot)
 
             roles = self._policy.assignments(snapshot)
             await self._store_people(session, item.id, roles)
@@ -258,7 +258,7 @@ class ItemSyncService:
                 ),
             )
 
-    def _apply(self, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
+    def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
         item.title = snapshot.title
         item.github_url = snapshot.html_url
         item.github_object_number = snapshot.number
@@ -266,14 +266,10 @@ class ItemSyncService:
         item.status = self._policy.status_for(snapshot, item.status)
         item.priority = self._policy.priority_for(snapshot, item.priority)
         if snapshot.updated_at is not None:
-            # A high-water mark, not simply the last value seen. An item with no thread is
-            # deliberately never treated as stale, so an old snapshot can reach here; letting
-            # it lower the mark would blind the guard to the next late delivery as well.
-            item.github_updated_at = (
-                snapshot.updated_at
-                if item.github_updated_at is None
-                else max(as_utc(item.github_updated_at), as_utc(snapshot.updated_at))
-            )
+            # An item with no thread is deliberately never treated as stale, so a snapshot older
+            # than what is stored can reach here. The store is what keeps the mark from moving
+            # backwards when it does.
+            items.raise_updated_at(item, snapshot.updated_at)
 
     async def _store_people(
         self,

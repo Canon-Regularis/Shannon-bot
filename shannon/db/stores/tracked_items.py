@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.time import as_utc
 
 
 class TrackedItemStore:
@@ -29,6 +30,25 @@ class TrackedItemStore:
 
     async def get_by_id(self, tracked_item_id: int) -> TrackedItem | None:
         return await self._session.get(TrackedItem, tracked_item_id)
+
+    def raise_updated_at(self, item: TrackedItem, incoming: datetime) -> None:
+        """Move the item's high-water mark up, and never down.
+
+        This is what tells a late delivery from a current one, so lowering it blinds the guard
+        to the next one as well, and the lock step reads the same field to decide whether it has
+        been superseded, which is the step whose mistakes do not right themselves.
+
+        GREATEST rather than a comparison in Python, because the value read at the top of a
+        transaction is not the value at the bottom of it. Two syncs of one item overlap by
+        design: both read the mark before either commits, and the one that commits last writes
+        whatever it worked out from a read that is by then out of date. Letting the database
+        compare against the row as it stands at write time is the only version of this that
+        holds. Nulls are ignored, which covers an item that has never carried a timestamp.
+
+        Staged rather than executed, so it goes out with the rest of the item's changes as one
+        statement rather than a second round trip.
+        """
+        item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 
     async def get_by_number(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -8,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import Actor
+from shannon.domain.time import as_utc
 from shannon.services.channels import ChannelMappingService
 from shannon.services.item_sync import ItemSyncService, SyncOutcome
 from shannon.services.policies import IssuePolicy, PullRequestPolicy
@@ -163,3 +166,50 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
             .where(ItemAssignment.role_type == ActorRole.REVIEWER)
         )
     ) == 1
+
+
+async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """`github_updated_at` is what tells a late delivery from a current one.
+
+    Both syncs read the mark before either commits, which is the normal case rather than a rare
+    one: nothing serialises two syncs of an item that already exists. Whichever commits last
+    then writes a value it worked out from a read that is by then out of date, and if it is
+    carrying the older timestamp the mark moves backwards. The next genuinely late delivery
+    reads as current, and the lock step decides from this same field whether it has been
+    superseded.
+
+    Interleaved on purpose rather than gathered and hoped for. Gathering them does not
+    reproduce it: once the first commits, the staleness guard turns the rest away before they
+    ever reach the write.
+    """
+    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    await service.sync(pr_event("opened", updated_at="2026-08-10T12:00:00Z"))
+
+    item_id = await db_session.scalar(select(TrackedItem.id))
+
+    async with db_sessionmaker() as ahead, db_sessionmaker() as behind:
+        await ahead.begin()
+        await behind.begin()
+
+        # Both read the same mark, because neither has written yet.
+        newer = await TrackedItemStore(ahead).get_by_id(item_id)
+        older = await TrackedItemStore(behind).get_by_id(item_id)
+        assert as_utc(newer.github_updated_at) == as_utc(older.github_updated_at)
+
+        TrackedItemStore(ahead).raise_updated_at(newer, datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+        await ahead.commit()
+
+        # Carrying the older timestamp and a read that is now out of date, and committing last.
+        TrackedItemStore(behind).raise_updated_at(older, datetime(2026, 8, 10, 13, 0, tzinfo=UTC))
+        await behind.commit()
+
+    db_session.expunge_all()
+    stored = await db_session.scalar(select(TrackedItem.github_updated_at))
+    assert as_utc(stored) == datetime(2026, 8, 10, 18, 0, tzinfo=UTC), (
+        "an older sync pushed the mark back down, so the next late delivery reads as current"
+    )
