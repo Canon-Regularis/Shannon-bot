@@ -10,8 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from shannon.api.app import create_app
 from shannon.config import Settings
+from shannon.container import Container, build_container
 from shannon.main import _lifespan
 from shannon.services.worker import ReadyCheck
+from tests.fakes.github import FakeGitHubClient
+from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration
 
@@ -56,14 +59,34 @@ class FakeWorker:
             await asyncio.sleep(0.01)
 
 
-class FakeContainer:
-    def __init__(self, engine: AsyncEngine, worker: FakeWorker) -> None:
-        self.engine = engine
-        self.worker = worker
+class ClosingGitHub(FakeGitHubClient):
+    """Records that Container.aclose reached it, which is how closing is observed here."""
+
+    def __init__(self) -> None:
+        super().__init__()
         self.closed = False
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def container_for(engine: AsyncEngine, worker: FakeWorker, github: ClosingGitHub) -> Container:
+    """The real Container, with only the worker swapped.
+
+    Deliberately not a stand-in with the three attributes the lifespan happens to use today. A
+    fake narrower than the thing it replaces does not fail, it quietly stops the test covering
+    whatever gets added later, and this project has been caught by that twice already: a thread
+    gateway whose comment described behaviour it did not have, and a GitHub client missing the
+    one method that would have let anything drive /issue.
+    """
+    container = build_container(
+        threads=FakeThreadGateway(),
+        settings=Settings(github_webhook_secret="x"),
+        engine=engine,
+        github=github,
+    )
+    container.worker = worker
+    return container
 
 
 @pytest.fixture
@@ -96,7 +119,7 @@ class TestStartingUp:
         """
         engine = create_async_engine("postgresql+asyncpg://nobody:nobody@localhost:1/nothing")
         _, lifespan = await run_lifespan(
-            FakeBot(), FakeContainer(engine, FakeWorker()), settings_with()
+            FakeBot(), container_for(engine, FakeWorker(), ClosingGitHub()), settings_with()
         )
 
         with pytest.raises((OSError, SQLAlchemyError)):
@@ -111,7 +134,7 @@ class TestStartingUp:
         async with db_engine.begin() as connection:
             await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
         _, lifespan = await run_lifespan(
-            FakeBot(), FakeContainer(db_engine, FakeWorker()), settings_with()
+            FakeBot(), container_for(db_engine, FakeWorker(), ClosingGitHub()), settings_with()
         )
 
         with pytest.raises(SQLAlchemyError):
@@ -121,7 +144,7 @@ class TestStartingUp:
     async def test_without_a_token_the_worker_still_runs(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
         app, lifespan = await run_lifespan(
-            FakeBot(), FakeContainer(migrated, worker), settings_with()
+            FakeBot(), container_for(migrated, worker, ClosingGitHub()), settings_with()
         )
 
         async with lifespan:
@@ -134,7 +157,7 @@ class TestStartingUp:
         worker = FakeWorker()
         bot = FakeBot()
         app, lifespan = await run_lifespan(
-            bot, FakeContainer(migrated, worker), settings_with("a-token")
+            bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
         )
 
         async with lifespan:
@@ -149,7 +172,9 @@ class TestWhileRunning:
     ) -> None:
         worker = FakeWorker()
         app, lifespan = await run_lifespan(
-            FakeBot(connects=False), FakeContainer(migrated, worker), settings_with("a-token")
+            FakeBot(connects=False),
+            container_for(migrated, worker, ClosingGitHub()),
+            settings_with("a-token"),
         )
 
         async with lifespan:
@@ -162,7 +187,8 @@ class TestShuttingDown:
     async def test_everything_is_closed(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
         bot = FakeBot()
-        container = FakeContainer(migrated, worker)
+        github = ClosingGitHub()
+        container = container_for(migrated, worker, github)
         _, lifespan = await run_lifespan(bot, container, settings_with("a-token"))
 
         async with lifespan:
@@ -170,7 +196,7 @@ class TestShuttingDown:
 
         assert worker.stopped is True
         assert bot.closed is True
-        assert container.closed is True
+        assert github.closed is True
 
     async def test_a_worker_that_already_died_does_not_stop_the_rest_closing(
         self, migrated: AsyncEngine
@@ -178,7 +204,8 @@ class TestShuttingDown:
         """Stopping the worker is the first thing shutdown does, and it used to raise here."""
         worker = FakeWorker(dies=True)
         bot = FakeBot()
-        container = FakeContainer(migrated, worker)
+        github = ClosingGitHub()
+        container = container_for(migrated, worker, github)
         _, lifespan = await run_lifespan(bot, container, settings_with("a-token"))
 
         async with lifespan:
@@ -186,4 +213,4 @@ class TestShuttingDown:
             await asyncio.sleep(0.05)
 
         assert bot.closed is True, "the Discord client was left open"
-        assert container.closed is True, "the engine and HTTP client were left open"
+        assert github.closed is True, "the engine and HTTP client were left open"
