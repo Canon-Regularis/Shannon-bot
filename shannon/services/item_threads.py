@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 
@@ -12,6 +13,11 @@ from shannon.discord_bot.threads import ThreadGateway, ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 
 logger = logging.getLogger(__name__)
+
+# How long a shutdown will wait for a thread that is mid-creation to be attached to its item.
+# Long enough for a Discord call that has already been made to come back and a single row to be
+# written; short enough that a gateway which has stopped answering cannot hold up the process.
+CLAIM_GRACE_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +78,32 @@ class ItemThreads:
     async def _open(self, target: ThreadTarget, *, name: str, content: str) -> ThreadHandle:
         """Open a thread and attach it, replacing whatever the item pointed at before.
 
-        Creating and claiming are shielded together. The worker puts a deadline on each
-        delivery, and a deadline that expired between these two would leave a thread in Discord
-        that no row mentions, which the retry has no way to find and so opens another beside.
+        Creating and claiming are shielded together. The worker puts a deadline on each delivery,
+        and a deadline that expired between these two would leave a thread in Discord that no row
+        mentions, which the retry has no way to find and so opens another beside.
+
+        Shielding alone did not deliver that. A shield keeps the inner work running, but the
+        caller's await raises at once, and everything above walked away: the worker task ended,
+        shutdown took that as the worker having stopped, the engine was disposed and the loop
+        closed with the claim still unfinished. The thread reached Discord and no row ever
+        mentioned it. So the cancellation is caught here and the work is waited for, which is the
+        thing that was missing, and the cancellation is then passed on as it always was.
+
+        Bounded, because shutdown cannot hang on a gateway that has stopped answering. Running
+        out is the old behaviour and no worse than it.
         """
-        return await asyncio.shield(self._create_and_claim(target, name=name, content=content))
+        claiming = asyncio.ensure_future(self._create_and_claim(target, name=name, content=content))
+        try:
+            return await asyncio.shield(claiming)
+        except asyncio.CancelledError:
+            done, _ = await asyncio.wait({claiming}, timeout=CLAIM_GRACE_SECONDS)
+            if not done:
+                logger.error(
+                    "gave up waiting for a thread to be attached to tracked item %s; if one was "
+                    "opened it is in the channel with nothing pointing at it",
+                    target.tracked_item_id,
+                )
+            raise
 
     async def _create_and_claim(
         self, target: ThreadTarget, *, name: str, content: str
@@ -88,10 +115,45 @@ class ItemThreads:
         except ThreadStartedEmptyError as error:
             # The thread is real even though its first message never landed. Recording it here
             # means the retry writes into it instead of opening another one beside it.
-            await self._claim(target, error.thread_id, None)
+            await self._attach_or_take_back(target, error.thread_id, None)
             raise
 
-        return await self._claim(target, handle.thread_id, handle.message_id)
+        return await self._attach_or_take_back(target, handle.thread_id, handle.message_id)
+
+    async def _attach_or_take_back(
+        self, target: ThreadTarget, thread_id: int, message_id: int | None
+    ) -> ThreadHandle:
+        """Claim the thread, and remove it again if the claim could not be written down.
+
+        A claim that never committed leaves a thread in Discord that no row mentions, and
+        nothing anywhere reconciles those: `discord_thread_id` is only ever read off a row found
+        some other way, so an id that never reached a row cannot be reached by anything. The
+        retry finds no thread, opens a second one, and the first stays in the channel taking no
+        comment, review or ping for the rest of its life.
+
+        Taking it back is both possible and right, because of which half failed. Discord answered
+        or there would be no thread; it is the database that did not, so the call that undoes it
+        is the one still working. Nothing is claimed at the point this can fire either: the swap
+        either commits and returns, or matches nothing and commits nothing.
+
+        Best effort, and quiet about it. The delivery is going to be retried on the original
+        error, which is the one worth reporting.
+        """
+        try:
+            return await self._claim(target, thread_id, message_id)
+        except ItemNotReadyError:
+            # The claim ran and decided there was nothing to attach to. It has already tidied up.
+            raise
+        except Exception:
+            logger.warning(
+                "could not attach thread %s to tracked item %s, taking it back so the retry "
+                "does not open a second one beside it",
+                thread_id,
+                target.tracked_item_id,
+            )
+            with contextlib.suppress(Exception):
+                await self._threads.delete(thread_id=thread_id)
+            raise
 
     async def _claim(
         self, target: ThreadTarget, thread_id: int, message_id: int | None
