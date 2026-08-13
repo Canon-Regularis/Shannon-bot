@@ -13,6 +13,14 @@ GITHUB_HOST = "github.com"
 _OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
+# Both match the pattern above and neither is a repository GitHub will ever create. They are
+# path segments with a meaning, and the name goes straight into the path of an API call made
+# with the bot's token: `/repos/{owner}/../pulls/{n}` is collapsed by the HTTP client before it
+# is sent, so the request that goes out is not the one the caller built. Refused here, at the
+# boundary where the rest of the link is already being checked, rather than left for whatever
+# the other end makes of it.
+_NOT_REPOSITORIES = frozenset({".", ".."})
+
 _PULL_SEGMENT = "pull"
 _ISSUE_SEGMENT = "issues"
 
@@ -96,7 +104,7 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
     owner, repo = segments[0], segments[1].removesuffix(".git")
     if not _OWNER.match(owner):
         raise UnparseableLinkError(f"{owner!r} is not a valid GitHub owner")
-    if not _REPO.match(repo):
+    if not _REPO.match(repo) or repo in _NOT_REPOSITORIES:
         raise UnparseableLinkError(f"{repo!r} is not a valid GitHub repository name")
 
     return owner, repo, segments

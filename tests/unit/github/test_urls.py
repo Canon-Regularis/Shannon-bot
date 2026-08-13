@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.errors import UnparseableLinkError
-from shannon.github.urls import parse_issue_url, parse_pull_request_url
+from shannon.github.urls import (
+    parse_issue_url,
+    parse_pull_request_url,
+    parse_repository_url,
+)
 
 
 @pytest.mark.parametrize(
@@ -160,3 +164,36 @@ class TestNumbersThatAreNotAsciiDigits:
 
     def test_an_ordinary_number_still_works(self) -> None:
         assert parse_pull_request_url("https://github.com/o/r/pull/7").number == 7
+
+
+class TestRepositoryNamesThatAreReallyPathSegments:
+    """`.` and `..` match the name pattern and are not repositories GitHub will ever create.
+
+    The name goes straight into the path of an API call made with the bot's token, and the HTTP
+    client collapses the dots before the request goes out, so what is sent is not what the caller
+    built: `/repos/{owner}/../pulls/7` leaves as `/repos/pulls/7`, and `/repos/{owner}/..` leaves
+    as `/repos`. Neither reaches anything private, and neither is the request anyone asked for.
+    """
+
+    @pytest.mark.parametrize("dots", [".", ".."])
+    @pytest.mark.parametrize(
+        ("parse", "segment"),
+        [
+            (parse_pull_request_url, "pull"),
+            (parse_issue_url, "issues"),
+        ],
+    )
+    def test_a_dot_segment_repository_is_refused(self, parse, segment: str, dots: str) -> None:
+        with pytest.raises(UnparseableLinkError):
+            parse(f"https://github.com/owner/{dots}/{segment}/7")
+
+    @pytest.mark.parametrize("dots", [".", ".."])
+    def test_register_refuses_one_too(self, dots: str) -> None:
+        with pytest.raises(UnparseableLinkError):
+            parse_repository_url(f"https://github.com/owner/{dots}")
+
+    def test_a_name_with_dots_in_it_is_still_a_name(self) -> None:
+        """Only the two that mean something to a path are refused, not every dot."""
+        assert parse_pull_request_url("https://github.com/owner/my.repo.name/pull/7").name == (
+            "my.repo.name"
+        )
