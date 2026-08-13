@@ -1122,3 +1122,29 @@ requests they were filed alongside.
   the wrong type and read fields the snapshot may not carry. It fails once and loudly now,
   rather than being retried for two hours: it is a wiring mistake and no payload can cause it.
   MVP 4 adds a third object type, which is when this becomes easy to get wrong.
+
+### Sixteenth look
+
+A different method, because the hunting was giving less each time: take the coverage report,
+list every line of production code the suite never executes, and read each one to decide whether
+it is wrong or merely untested. Unlike a search, that list is finite and it ends.
+
+The answer, mostly, was untested. Which is worth recording as a result rather than glossed over:
+after fifteen passes the uncovered lines are almost all error and edge branches, and reading them
+found no new defect in any of them. What it did find is that the branches guarding the subtlest
+behaviour in the project had nothing watching them.
+
+- **The two branches that settle a rebuild racing a cleared thread pointer had never run.** They
+  are the narrowest race here: a rebuild swaps from the dead thread id it started with, and the
+  note mirror can let go of that same id while the rebuild is in flight. Both branches turn out
+  to be correct. Neither was exercised, so either could have been broken by any later edit
+  without a single test noticing. They are covered now, by a gateway that clears the slot at the
+  moment the replacement is being opened, and one that deletes the item outright.
+- **The worker's hand-back on an outright cancellation is best effort, and now says so.** Awaiting
+  anything from inside a cancelled task returns at once, so it starts the hand-back and does not
+  see it finish. It usually lands, because shutdown waits for the task and the loop is still
+  running; if the loop stops first the rows wait out their lease, which is where they would have
+  been anyway. The comment claimed more than that. The cooperative stop is the path that does it
+  properly and the one taken almost every time.
+- Also covered: the review ledger's two early returns, for a review by a deleted account and one
+  on a repository nobody registered.
