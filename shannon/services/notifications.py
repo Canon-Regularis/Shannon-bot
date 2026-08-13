@@ -51,11 +51,13 @@ class ActorNotifier:
         that fails partway through is retried from the top; either would send the same person
         the same ping twice if the claim came last.
         """
-        # Shielded, so a cancellation cannot land between the claim committing and the guard
-        # below taking responsibility for it. That gap is only a transaction commit wide, but
-        # cancellation is delivered at exactly such a point, and a ping claimed by nobody is
-        # one nobody ever sends.
-        logins, mentions = await asyncio.shield(self._claim(tracked_item_id, guild_id))
+        # Deliberately not shielded. Shielding this looks like it protects the claim, and does
+        # the opposite: the await raises at once while the claim carries on and commits, so
+        # `logins` is never bound, the guard below is never entered, and the ping is owed to
+        # nobody for ever. Unshielded, a cancellation here aborts the transaction before it
+        # commits and nothing was claimed, which is the outcome worth having. Once this returns
+        # there is no await before the guard, so nothing can land in between.
+        logins, mentions = await self._claim(tracked_item_id, guild_id)
         if not logins:
             return ()
 
