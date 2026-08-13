@@ -1547,3 +1547,38 @@ than failing. The second needs the database gone for the moment between two call
 The test that pins the first one had to be made to cancel at the right instant. The first version
 slept and cancelled during the database work instead, well before the thread existed, and proved
 nothing while passing.
+
+### The queries, and a shield that said too much
+
+The schema and query lens was the one review pass that never ran, so it was done here by hand
+against a populated database rather than by reading. It found nothing, which is worth recording
+as plainly as a defect.
+
+Every id that comes from Discord or GitHub is `bigint`; only the internal keys and the pull
+request number are 32-bit, which is what they should be. On 200,000 tracked items, 200,000
+assignments, 200,000 mirrored notes, 100,000 links and 200,000 deliveries, every query the
+services actually run goes through an index: the item lookup by number, the assignment lookup by
+item and role, the ping claim, the link resolution, and the queue lease, which still uses the
+partial index from `0005` and touched 22 buffers to take ten rows.
+
+One thing found and fixed, in code written earlier the same day:
+
+- **A failure while shutting down was reported by asyncio instead of by us.** Opening a thread ran
+  under `asyncio.shield`, and a shielded future whose caller has been cancelled has its exception
+  reported by asyncio in its own words, which says less than we can and arrives during shutdown,
+  where the log is the only thing anybody has. Running the work as a plain task and waiting on it
+  protects it exactly as well, and leaves the failure ours to report. Checked both ways: with the
+  shield, the loop's exception handler reports `RuntimeError exception in shielded future` and
+  nothing else; without it, the log says which item, that it was shutting down, and what went
+  wrong, and the loop reports nothing at all.
+
+  Worth being straight about how this one went. The first attempt kept the shield and retrieved
+  the inner exception, on the assumption that retrieving it was what stopped asyncio complaining.
+  It was not, and the comment written to explain it was wrong; the message is keyed on the shield
+  being cancelled, not on whether anybody read the result. Running it proved that, and the fix
+  changed accordingly.
+
+Known and not acted on: `mirrored_notes` and `item_assignments` grow without ever being pruned,
+unlike `webhook_events`. A note row is about sixty bytes and cannot be needed once its delivery
+has aged out of the seven day retention window, so pruning it is safe and easy whenever the size
+starts to matter. It does not yet.
