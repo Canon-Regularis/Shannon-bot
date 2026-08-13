@@ -42,8 +42,7 @@ async def receive_github_webhook(
             status_code=status.HTTP_400_BAD_REQUEST, detail="X-GitHub-Delivery header is missing"
         )
 
-    _require_a_sane_size(request)
-    body = await request.body()
+    body = await _read_within_limit(request)
     _require_valid_signature(
         body, settings.github_webhook_secret.get_secret_value(), x_hub_signature_256
     )
@@ -100,18 +99,43 @@ async def _accept(
 
 # GitHub will not send a payload larger than this, and says so. The endpoint is open to the
 # internet and the body is read into memory before anything can be checked, because the
-# signature covers the whole of it, so the limit has to be applied before the read.
+# signature covers the whole of it, so the limit has to be applied during the read.
 MAX_BODY_BYTES = 25 * 1024 * 1024
 
 
-def _require_a_sane_size(request: Request) -> None:
+def _too_large() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail="Body is larger than GitHub will ever send",
+    )
+
+
+async def _read_within_limit(request: Request) -> bytes:
+    """Read the body, giving up once it goes past what GitHub would ever send.
+
+    Counted as it arrives rather than trusted from Content-Length. Nothing obliges a client to
+    send that header, and a chunked request without one used to be read to the end whatever its
+    size: the check passed on a header that was not there, and the limit did nothing. Anyone who
+    can reach the port can do that, and they do not need the signing secret to, because the
+    signature covers the body and so cannot be checked until the body is in hand.
+
+    The declared size is still worth a look first. It costs nothing and refuses an oversized
+    delivery that is honest about itself without reading any of it.
+    """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-        logger.warning("rejecting a %s byte delivery", declared)
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail="Body is larger than GitHub will ever send",
-        )
+        logger.warning("rejecting a delivery declaring %s bytes", declared)
+        raise _too_large()
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            logger.warning("rejecting a delivery still arriving past %s bytes", MAX_BODY_BYTES)
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 _SIGNATURE_FAILURES = {

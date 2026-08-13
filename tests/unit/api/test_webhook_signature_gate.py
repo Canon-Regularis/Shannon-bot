@@ -78,7 +78,7 @@ async def test_signature_is_checked_before_the_body_is_parsed(handler: Recording
     assert response.status_code == 401
 
 
-async def test_a_body_larger_than_github_can_send_is_refused_before_it_is_read() -> None:
+async def test_a_body_larger_than_github_can_send_is_refused_on_its_declared_size() -> None:
     """The body is buffered whole before anything can be checked, so the cap comes first."""
     async with build_client(RecordingHandler()) as client:
         response = await client.post(
@@ -89,6 +89,33 @@ async def test_a_body_larger_than_github_can_send_is_refused_before_it_is_read()
                 "Content-Length": str(MAX_BODY_BYTES + 1),
                 "X-GitHub-Event": "pull_request",
                 "X-GitHub-Delivery": "huge",
+            },
+        )
+
+    assert response.status_code == 413
+
+
+async def test_a_body_that_never_declares_its_size_is_still_refused() -> None:
+    """Nothing obliges a client to send Content-Length, and this endpoint has to be reachable.
+
+    Checking only the declared size means a chunked request without one is read to the end
+    whatever its size, because the check passes on a header that is not there. No secret is
+    needed to do it either: the signature covers the body, so it cannot be checked until the
+    body is already in hand. Counting as it arrives is the only place the cap holds.
+    """
+
+    async def far_too_much():
+        for _ in range((MAX_BODY_BYTES // (1024 * 1024)) + 4):
+            yield b"a" * 1024 * 1024
+
+    async with build_client(RecordingHandler()) as client:
+        response = await client.post(
+            "/webhooks/github",
+            content=far_too_much(),
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "chunked",
             },
         )
 
