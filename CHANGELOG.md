@@ -1487,3 +1487,29 @@ existing test had to change with it: it sent a re-request carrying a timestamp f
 review it was supposedly answering, which cannot happen in a real sequence. If the assumption
 ever turns out to be wrong, that test is where it will show, and the answer is to find another
 way to tell a re-request from a straggler rather than to loosen the comparison.
+
+### Losing a thread stopped meaning losing the item
+
+An item with no thread is deliberately never treated as stale, because skipping there would mean
+it never gets one. That bypass was doing more than it was meant to. It said "build the thread
+whatever the age of this delivery", and the code behind it also read "and believe everything else
+this delivery says", so a payload captured before the item was last changed put back the old
+title, the old state, the old status and priority, and swapped the people for whoever was on the
+item at the time. That deletes assignees added since and pings ones removed since, in a thread
+that has only just been rebuilt.
+
+Reproduced both ways round before changing anything, which is what showed how narrow the trigger
+looks and how ordinary it actually is. With the thread intact the old delivery is refused. With
+the thread pointer cleared, the same delivery reverted the title and pinged a reviewer who was no
+longer on the pull request.
+
+The two questions are separate now. `is_superseded` asks only whether this payload predates what
+is stored; `is_stale` is that plus having a thread to leave alone. A superseded delivery for an
+item that has lost its thread still builds the thread and touches nothing else. Its metadata block
+goes up out of date and the next delivery corrects it, which is a window rather than damage. The
+people are what mattered: a ping cannot be taken back, and a reviewer deleted from the row is a
+reviewer nobody is ever told about again.
+
+The thread pointer is cleared in more than one way, so this is not a corner: the note mirror lets
+go of a thread somebody deleted, and an item whose first thread creation failed never had one
+while its row was already committed.
