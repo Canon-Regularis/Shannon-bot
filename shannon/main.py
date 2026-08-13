@@ -5,7 +5,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import uvicorn
 from fastapi import FastAPI
@@ -116,24 +116,45 @@ class ProcessLiveness:
     # a connection per request would let a flood exhaust the pool the worker runs on, which is
     # the very thing this endpoint exists to notice.
     probe_every: float = 5.0
+    # A database that has not answered in this long is not reachable in any sense the caller
+    # cares about. Without a bound, a host that accepts the connection and then goes quiet parks
+    # the probe for as long as the kernel allows, and every health check waits behind it.
+    probe_timeout: float = 5.0
     _probed_at: float = 0.0
     _reachable: bool = False
+    # One probe at a time. Without this a burst of requests all miss the cache together and open
+    # a connection each, which is the pool exhaustion the cache is here to prevent.
+    _probing: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def _answer_is_fresh(self) -> bool:
+        return bool(self._probed_at) and time.monotonic() - self._probed_at < self.probe_every
 
     async def database_reachable(self) -> bool:
-        now = time.monotonic()
-        if self._probed_at and now - self._probed_at < self.probe_every:
+        if self._answer_is_fresh():
             return self._reachable
 
-        self._probed_at = now
-        try:
-            async with self.engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-        except Exception as error:
-            logger.warning("the database is not reachable: %s", error)
-            self._reachable = False
-        else:
-            self._reachable = True
-        return self._reachable
+        async with self._probing:
+            # Asked again holding the lock, because whoever held it before may have just answered
+            # the question this caller queued up to ask.
+            if self._answer_is_fresh():
+                return self._reachable
+
+            try:
+                async with asyncio.timeout(self.probe_timeout), self.engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            except Exception as error:
+                logger.warning("the database is not reachable: %s", error)
+                self._reachable = False
+            else:
+                self._reachable = True
+
+            # Stamped once there is an answer, never before. Stamping on the way in marks the
+            # result fresh while it is still being worked out, and every caller arriving in that
+            # window is handed `_reachable` before anything has set it. On the first probe that
+            # is its initial False, so two health checks landing together report a healthy
+            # process as down and an orchestrator restarts it for that.
+            self._probed_at = time.monotonic()
+            return self._reachable
 
     def worker_running(self) -> bool:
         return self.worker_task is not None and not self.worker_task.done()
