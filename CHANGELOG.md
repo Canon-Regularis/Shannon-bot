@@ -1233,3 +1233,41 @@ with the same argument names, covering the real implementations as well as the f
 neither was being checked. It was run against both historical bugs before being kept: the missing
 `get_issue` and a renamed parameter are both caught. The lifespan container is gone, replaced by
 the real one with only its worker swapped.
+
+### Nineteenth look
+
+Same lens as the last pass, pointed at the paths it had not reached yet.
+
+- **An older sync could push the staleness high-water mark backwards.** `github_updated_at` is
+  what tells a late delivery from a current one, and it was raised with a comparison done in
+  Python against a value read at the top of the transaction. That read is not the row at the
+  bottom of it: two syncs of one item overlap by design, both read the mark before either
+  commits, and whichever commits last writes what it worked out from a read that is by then out
+  of date. If it is the one carrying the older timestamp, the mark drops. The next genuinely late
+  delivery then reads as current, and the lock step decides from this same field whether it has
+  been superseded, which is the step whose mistakes do not right themselves. The comparison is
+  `GREATEST` in the update now, so it is made against the row as it stands at write time, and it
+  has moved to `TrackedItemStore.raise_updated_at` where the rest of the item's SQL lives and
+  where it can be tested on its own.
+
+  The first test written for this was worthless and worth saying so: six gathered syncs with
+  descending timestamps, which passes on the broken code. Once the first one commits the
+  staleness guard turns the other five away before they ever reach the write, so the interleaving
+  that breaks it never happens. The test that replaced it holds two transactions open and commits
+  them in the order that does the damage.
+
+- **The webhook body size limit did nothing unless the sender volunteered its size.** The cap was
+  applied to `Content-Length` and then the body was read whole with `await request.body()`.
+  Nothing obliges a client to send that header, so a chunked request without one passed a check
+  on a header that was not there and was read to the end whatever its size. The endpoint has to
+  be reachable from the internet for GitHub to use it, and no secret is needed to do this, because
+  the signature covers the body and cannot be checked until the body is in hand. Measured before
+  fixing: 40MB went into memory and came back 401. The bytes are counted as they arrive now. The
+  declared size is still checked first, since it costs nothing and turns away an oversized
+  delivery that is honest about itself without reading any of it.
+
+Also looked at and found sound: the thread claim's compare-and-swap and its two-step recovery
+when the slot is emptied mid-flight, the permission gate's role matching and additive resolution,
+and the lease duration against the worst case batch. One thing noted and not acted on: `/pr` for a
+repository deleted and recreated under the same name reports "no channel mapped", which is
+misleading, but the path needs a repository to be destroyed and rebuilt with its name intact.
