@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
@@ -402,3 +402,82 @@ class TestTheStalenessWatermark:
         await service.sync(pr_event("edited", updated_at=newer.isoformat()))
 
         assert (await stored(db_session)).github_updated_at == newer
+
+
+class TestTheSlotBeingClearedMidRebuild:
+    """The branch that guards the narrowest race here, and nothing exercised it.
+
+    A rebuild swaps from the dead id it started with. If the note mirror lets go of that same
+    dead thread while the rebuild is in flight, the swap matches nothing, and the replacement
+    would be deleted with the item left holding no thread at all.
+    """
+
+    async def test_the_replacement_is_kept_when_the_slot_empties_underneath(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        threads = _ClearsTheSlotWhileCreating(db_sessionmaker)
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        first = await service.sync(pr_event("opened"))
+        threads.threads.pop(first.thread_id)
+        threads.arm(first.tracked_item_id, first.thread_id)
+
+        second = await service.sync(pr_event("edited", title="Rebuilt"))
+
+        assert second.thread_id is not None
+        assert second.thread_id in threads.threads
+        assert (await stored(db_session)).discord_thread_id == second.thread_id
+        assert threads.deleted == [], "the replacement was thrown away"
+
+    async def test_an_item_that_has_gone_takes_its_thread_with_it(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> None:
+        """Unregistering mid-flight leaves nothing to attach to, and a thread nobody can reach."""
+        threads = _DeletesTheItemWhileCreating(db_sessionmaker)
+        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+
+        with pytest.raises(ItemNotReadyError, match="no longer there"):
+            await service.sync(pr_event("opened"))
+
+        assert len(threads.deleted) == 1
+        assert threads.threads == {}
+
+
+class _ClearsTheSlotWhileCreating(FakeThreadGateway):
+    """Lets go of the dead thread at the moment the replacement is being opened."""
+
+    def __init__(self, sessionmaker) -> None:
+        super().__init__()
+        self._sessionmaker = sessionmaker
+        self._item: int | None = None
+        self._dead: int | None = None
+
+    def arm(self, tracked_item_id: int, dead_thread_id: int) -> None:
+        self._item, self._dead = tracked_item_id, dead_thread_id
+
+    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+        if self._item is not None:
+            async with self._sessionmaker() as session, session.begin():
+                await TrackedItemStore(session).forget_thread(self._item, dead_thread_id=self._dead)
+            self._item = None
+        return await super().create(channel_id=channel_id, name=name, content=content)
+
+
+class _DeletesTheItemWhileCreating(FakeThreadGateway):
+    """Removes the tracked item itself while the thread is being opened."""
+
+    def __init__(self, sessionmaker) -> None:
+        super().__init__()
+        self._sessionmaker = sessionmaker
+
+    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+        handle = await super().create(channel_id=channel_id, name=name, content=content)
+        async with self._sessionmaker() as session, session.begin():
+            await session.execute(delete(TrackedItem))
+        return handle
