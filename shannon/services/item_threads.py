@@ -82,19 +82,26 @@ class ItemThreads:
         and a deadline that expired between these two would leave a thread in Discord that no row
         mentions, which the retry has no way to find and so opens another beside.
 
-        Shielding alone did not deliver that. A shield keeps the inner work running, but the
-        caller's await raises at once, and everything above walked away: the worker task ended,
-        shutdown took that as the worker having stopped, the engine was disposed and the loop
-        closed with the claim still unfinished. The thread reached Discord and no row ever
-        mentioned it. So the cancellation is caught here and the work is waited for, which is the
-        thing that was missing, and the cancellation is then passed on as it always was.
+        Running it as its own task is what keeps it out of reach of the caller's cancellation.
+        That much a shield also did, and a shield was what used to be here, but keeping the work
+        alive was only half of it: the caller's await raises at once either way, and everything
+        above walked away. The worker task ended, shutdown read that as the worker having
+        stopped, and the engine was disposed and the loop closed with the claim unfinished, so
+        the thread reached Discord and no row ever mentioned it. The missing half is waiting,
+        which is what the cancellation path below does before passing the cancellation on.
+
+        Waiting on the task rather than shielding it, because the two protect equally and this
+        one leaves a failure readable. A shielded future whose caller has been cancelled has its
+        exception reported by asyncio itself, in its own words, at the moment the log is the only
+        thing anybody has; done this way the failure is ours to report, and it is reported below.
 
         Bounded, because shutdown cannot hang on a gateway that has stopped answering. Running
         out is the old behaviour and no worse than it.
         """
         claiming = asyncio.ensure_future(self._create_and_claim(target, name=name, content=content))
         try:
-            return await asyncio.shield(claiming)
+            await asyncio.wait({claiming})
+            return claiming.result()
         except asyncio.CancelledError:
             done, _ = await asyncio.wait({claiming}, timeout=CLAIM_GRACE_SECONDS)
             if not done:
@@ -102,6 +109,12 @@ class ItemThreads:
                     "gave up waiting for a thread to be attached to tracked item %s; if one was "
                     "opened it is in the channel with nothing pointing at it",
                     target.tracked_item_id,
+                )
+            elif not claiming.cancelled() and claiming.exception() is not None:
+                logger.warning(
+                    "a thread being opened for tracked item %s failed as it was shutting down: %s",
+                    target.tracked_item_id,
+                    claiming.exception(),
                 )
             raise
 
