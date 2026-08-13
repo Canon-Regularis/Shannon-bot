@@ -26,6 +26,7 @@ settings.load_profile("shannon")
 
 TABLES = (
     "item_assignments",
+    "mirrored_notes",
     "tracked_items",
     "channel_mappings",
     "user_links",

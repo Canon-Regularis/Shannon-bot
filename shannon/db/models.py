@@ -150,8 +150,41 @@ class ItemAssignment(TimestampMixin, Base):
     discord_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     role_type: Mapped[ActorRole] = mapped_column(_enum(ActorRole, "actor_role"), nullable=False)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the review this row asked for was submitted, in GitHub's clock rather than ours.
+    # The row is kept rather than removed so a delivery captured before the review, and retried
+    # after it, cannot resurrect the request and ping somebody to review what they just approved.
+    # Cleared again by a request that is genuinely newer than the review, which is what a person
+    # clicking re-request looks like.
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tracked_item: Mapped[TrackedItem] = relationship(back_populates="assignments")
+
+
+class MirroredNote(TimestampMixin, Base):
+    """A comment or review already posted into an item's thread.
+
+    The queue is at-least-once on purpose: a delivery whose status could not be written stays
+    leased, comes back when the lease runs out, and is handled again. Every other handler
+    survives that, because syncing an item upserts, swaps the thread pointer from the id it
+    read, and claims a ping before sending it. Mirroring a note had nothing of the sort and
+    simply posted it a second time.
+
+    Claimed before the post rather than recorded after it, for the same reason the ping claim
+    is: recording afterwards leaves the same gap one step further along.
+    """
+
+    __tablename__ = "mirrored_notes"
+    __table_args__ = (
+        UniqueConstraint("tracked_item_id", "note_key", name="uq_mirrored_notes_item_note"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tracked_item_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
+    )
+    # `comment:123` or `review:123`. GitHub numbers the two separately and they collide, so the
+    # kind belongs in the key rather than in a column nothing would think to filter on.
+    note_key: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class WebhookEvent(Base):
