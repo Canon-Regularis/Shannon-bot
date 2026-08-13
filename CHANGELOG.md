@@ -1025,3 +1025,52 @@ Two long-standing disagreements between requirements.md and the code, settled by
   who is a reviewer and also a developer or project manager keeps them: holding any listed role
   is what grants a command, rather than holding only listed ones. That was already how the gate
   worked, and there are now tests saying so.
+
+### Thirteenth look
+
+The three lenses the twelfth look lost to a session limit, resumed. Two of the four defects were
+in code written earlier the same day, and one of them was a fix that caused the thing it claimed
+to prevent.
+
+- **The shield on the ping claim guaranteed the lost ping it was added to stop.** `asyncio.shield`
+  protects the coroutine, not the caller's await: cancelling meant the await raised at once while
+  the claim carried on and committed, so the variable holding who had been claimed was never
+  bound, the guard that hands the claim back was never entered, and the ping was owed to nobody
+  for ever. Unshielded, the same cancellation aborts the transaction before it commits and
+  nothing was claimed, which is the outcome worth having. The reasoning that put it there was
+  wrong in a way worth naming: there is no await between the claim returning and the guard, so
+  there was never a gap to close.
+- **/health called a process healthy with its gateway dead.** It watched the worker and not the
+  bot. The worker waits for Discord once, before its first batch, so a gateway that dies after
+  connecting, a rotated token or a revoked intent, leaves the worker leasing happily while every
+  Discord call fails. That is precisely the case the endpoint was added for a day earlier, and it
+  reported 200 through all of it. It reports the bot now, and says which half failed.
+- **/health opened a database connection on every request.** The route is public and
+  unauthenticated, so a flood of requests could exhaust the pool the worker runs on, which is the
+  very thing the endpoint exists to notice. The probe is reused for five seconds; the container
+  asks every fifteen.
+- **Shutdown skipped every cleanup step once the worker had died.** Stopping a task adopted its
+  exception, and stopping the worker is the first thing shutdown does, so a worker that ended in
+  the designed way, a bad token, took the Discord client, the HTTP client and the database pool
+  down with it unclosed. Each step is now guarded on its own, and stopping a task watches it
+  rather than awaiting its result.
+
+### The queue's indexes, measured rather than assumed
+
+Both of these were found by filling a database with 200,000 deliveries and reading the plans.
+
+- **The lease had no index it could use.** The one meant to serve it led on `status`, and the
+  rest of the predicate is `next_attempt_at IS NULL OR next_attempt_at <= now()`, which no index
+  can answer as a condition. While the queue is nearly empty `status` alone is selective enough
+  and nothing looks wrong. Once a few hundred deliveries are backing off the planner decides the
+  primary key is cheaper and walks the whole table: 24,637 buffers and 126 ms to return nothing,
+  every two seconds, getting worse as the retention window fills. Migration `0005` replaces it
+  with a partial index over the live rows, which is what the predicate can actually prove.
+  Measured on the same 200,000 rows: **13 buffers**.
+- **Pruning read every row to find the few past the retention window**, and paid the same full
+  scan in the hours it deletes nothing, which with a seven-day window is most of them. It is
+  indexed now: **3 buffers, 0.2 ms**, from 22,902 and 73 ms. The delete was also asking the
+  database to hand back every deleted primary key, for a session holding none of them.
+
+`shannon/main.py` had no test coverage at all before this, which is part of why three of these
+lived there. It has some now.
