@@ -57,15 +57,19 @@ def build_set_channel_command(
         except NotRegisteredError as error:
             await reply(interaction, error.message)
         else:
-            moved = (
-                f" Moved from <#{assignment.replaced}>."
+            # What happens to the threads already open is the thing an admin actually needs to
+            # know, and it is not what "moved from" would suggest: Discord cannot move a thread
+            # between channels, and every item already tracked keeps the one it has. Only new
+            # threads go anywhere different.
+            stayed = (
+                f" Threads already open stay in <#{assignment.replaced}>."
                 if assignment.replaced is not None and assignment.replaced != channel.id
                 else ""
             )
             await reply(
                 interaction,
-                f"{object_type.name.capitalize()} for {assignment.repository_name} will post "
-                f"in <#{channel.id}>.{moved}",
+                f"{object_type.name.capitalize()} for {assignment.repository_name} will now "
+                f"appear in <#{channel.id}>.{stayed}",
             )
 
     return set_channel

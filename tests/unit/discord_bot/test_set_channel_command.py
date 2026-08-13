@@ -91,22 +91,35 @@ async def test_a_developer_cannot_map_a_channel() -> None:
     assert "You need one of these roles to use /set_channel" in interaction.reply
 
 
-async def test_moving_a_mapping_says_where_it_moved_from() -> None:
+async def test_replacing_a_mapping_says_what_happens_to_the_open_threads() -> None:
+    """Discord cannot move a thread between channels, and every tracked item keeps the one it
+    has. Saying it moved would send an admin looking for threads that never went anywhere."""
     service = StubChannels(replaced=1111)
     interaction = FakeInteraction(guild_id=1, user=project_manager())
 
     await command(service).callback(interaction, choice("ISSUE"), text_channel())
 
-    assert "Moved from <#1111>" in interaction.reply
+    assert "Threads already open stay in <#1111>" in interaction.reply
+    assert "moved" not in interaction.reply.lower()
 
 
-async def test_remapping_to_the_same_channel_does_not_claim_a_move() -> None:
+async def test_it_names_the_new_channel_and_the_kind_of_item() -> None:
+    service = StubChannels(replaced=1111)
+    interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+    await command(service).callback(interaction, choice("ISSUE"), text_channel(4242))
+
+    assert interaction.reply.startswith("Issues for Canon-Regularis/Shannon-bot will now appear")
+    assert "<#4242>" in interaction.reply
+
+
+async def test_remapping_to_the_same_channel_mentions_no_other_one() -> None:
     service = StubChannels(replaced=4242)
     interaction = FakeInteraction(guild_id=1, user=project_manager())
 
     await command(service).callback(interaction, choice("ISSUE"), text_channel(4242))
 
-    assert "Moved from" not in interaction.reply
+    assert "already open" not in interaction.reply
 
 
 async def test_a_forum_channel_is_accepted() -> None:
