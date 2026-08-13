@@ -49,11 +49,29 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     )
 
 
-def _report_exit(what: str):
-    """Say why a background task stopped.
+@dataclass(slots=True)
+class _Shutdown:
+    """Whether the process asked for what is about to happen.
+
+    A background task ending is either an emergency or a formality, and nothing about the task
+    itself says which. This is the only thing that does.
+    """
+
+    asked: bool = False
+
+
+def _report_exit(what: str, shutdown: _Shutdown):
+    """Say why a background task stopped, when nobody asked it to.
 
     Without this a task that dies takes its exception with it, and the endpoint carries on
     answering while nothing behind it works.
+
+    Quiet once the stop has been asked for, because a clean shutdown ends these tasks the same
+    way a failure does: the worker's loop returns when it is told to, and the Discord client's
+    start returns when it is closed. Warning either way put "the delivery worker stopped without
+    an error" in the log on every normal shutdown, which is the one line meaning the process is
+    now useless, printed most often at the moment it means nothing at all. An error is still
+    reported whenever it happens, shutting down or not.
     """
 
     def report(task: asyncio.Task) -> None:
@@ -62,7 +80,7 @@ def _report_exit(what: str):
         error = task.exception()
         if error is not None:
             logger.error("the %s stopped: %s", what, error, exc_info=error)
-        else:
+        elif not shutdown.asked:
             logger.warning("the %s stopped without an error", what)
 
     return report
@@ -226,13 +244,14 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
 
         liveness = ProcessLiveness(container.engine)
         app.state.liveness = liveness
+        shutdown = _Shutdown()
 
         bot_task: asyncio.Task | None = None
         ready: ReadyCheck | None = None
         token = settings.discord_token.get_secret_value()
         if token:
             bot_task = asyncio.create_task(bot.start(token))
-            bot_task.add_done_callback(_report_exit("Discord bot"))
+            bot_task.add_done_callback(_report_exit("Discord bot", shutdown))
             ready = _connected(bot, bot_task)
         else:
             # Handy for poking the webhook endpoint locally, and loud enough that nobody
@@ -244,7 +263,7 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         # accepts deliveries from the moment the port is open, which is the point, but acting on
         # one before Discord is connected only wastes an attempt.
         worker_task = asyncio.create_task(container.worker.run_forever(ready))
-        worker_task.add_done_callback(_report_exit("delivery worker"))
+        worker_task.add_done_callback(_report_exit("delivery worker", shutdown))
         # A worker that dies takes the whole point of the process with it, and the endpoint
         # would go on answering 200 to deliveries nothing will act on. /health is what makes
         # that visible from outside.
@@ -254,6 +273,9 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         try:
             yield
         finally:
+            # Set before anything is stopped, so the done callbacks can tell a task that failed
+            # from one that was told to finish.
+            shutdown.asked = True
             # Asked to stop rather than cancelled, so the delivery in hand finishes and the
             # rest of its batch goes back on the queue instead of sitting locked for the whole
             # lease while the replacement process polls an empty one.

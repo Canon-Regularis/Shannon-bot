@@ -184,6 +184,28 @@ class TestWhileRunning:
 
 
 class TestShuttingDown:
+    async def test_a_clean_shutdown_says_nothing_alarming(
+        self, migrated: AsyncEngine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The whole point of the warning is that it is rare enough to be worth reading.
+
+        Both tasks end on a normal shutdown exactly the way they end on a failure: the worker's
+        loop returns when told to stop, and the Discord client's start returns once it is closed.
+        Reported either way, the line meaning the process is now useless appeared on every
+        deployment restart, which is the fastest way to teach everyone to ignore it.
+        """
+        worker = FakeWorker()
+        bot = FakeBot()
+        _, lifespan = await run_lifespan(
+            bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
+        )
+
+        with caplog.at_level("WARNING", logger="shannon.main"):
+            async with lifespan:
+                await asyncio.wait_for(worker.ran.wait(), timeout=2)
+
+        assert "stopped without an error" not in caplog.text
+
     async def test_everything_is_closed(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
         bot = FakeBot()
