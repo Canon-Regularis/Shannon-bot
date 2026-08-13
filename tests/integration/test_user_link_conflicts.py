@@ -87,14 +87,19 @@ async def test_two_links_landing_together_do_not_raise_at_whoever_lost(
     """A double-submitted /link, or two people claiming one name at once.
 
     Both halves of a link are unique within a guild, so the store clears out anything holding
-    either half and writes the pairing fresh. Overlapping, both find nothing to clear and both
-    insert, and the loser used to come back to the person who ran it as a raw database error
-    even though the link it asked for was sitting there committed.
+    either half and writes the pairing fresh. Overlapping, they all find nothing to clear and
+    they all insert, and the losers used to come back to the people who ran it as a raw database
+    error even though the link they asked for was sitting there committed.
+
+    Eight of them rather than two, because retrying was tried first and two callers were not
+    enough to show it up: with three or more, the retries collide with each other rather than
+    with the original winner, and this failed about one run in four until the write was made
+    indivisible instead.
     """
     results = await asyncio.gather(
         *(
             service.link(guild_id=1, github_username="octocat", discord_user_id=who)
-            for who in (500, 600, 700)
+            for who in range(500, 508)
         ),
         return_exceptions=True,
     )

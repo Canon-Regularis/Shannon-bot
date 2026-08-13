@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import UserLink
@@ -49,7 +49,21 @@ class UserLinkStore:
         Both halves are unique within a guild, and they can be held by two different rows at
         once. Editing one of those rows in place collides with the other, so anything holding
         either half is cleared out first and the pairing written fresh.
+
+        That clearing and writing has to be one indivisible step, which is what the lock is for.
+        Two of these overlapping both find nothing to clear and both insert, and the loser hits
+        one of the two constraints. An upsert cannot settle it, because a row can conflict on
+        either half and `ON CONFLICT` takes one constraint. Retrying cannot settle it either:
+        that was tried, and it fails whenever the retries collide with each other rather than
+        with the original winner, which a third caller makes likely and a slow machine makes
+        ordinary. It was caught by a test that failed roughly one run in four.
+
+        The lock is held to the end of the transaction and taken per guild, so linking in one
+        server never waits on another. Nothing else in the schema uses advisory locks, so the
+        guild id can be the whole key.
         """
+        await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
+
         username = github_username.lower()
 
         existing = await self._session.scalar(
