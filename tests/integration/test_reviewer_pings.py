@@ -290,7 +290,16 @@ class TestReRequestingAReviewAfterOneWasGiven:
             parse_review_event("submitted", payloads.pull_request_review_event())
         )
 
-        result = await notifying_sync_service.sync(pr_event("review_requested"))
+        # Later than the review, because that is the only thing a request made after one can be.
+        # A closed request is reopened by a payload newer than the review that closed it, which
+        # is what separates somebody clicking re-request from a delivery still retrying from
+        # before it. That rests on GitHub advancing `pull_request.updated_at` when a review is
+        # requested, which it does because requesting one changes the pull request. If that ever
+        # turns out to be wrong, this is the test that says so, and the fix is to find another
+        # way to tell the two apart rather than to widen the comparison.
+        result = await notifying_sync_service.sync(
+            pr_event("review_requested", updated_at="2026-08-12T09:00:00Z")
+        )
 
         assert result.notified == ("monalisa",)
         assert sum("Review requested" in content for _, content in threads.posts) == 2
@@ -303,6 +312,13 @@ class TestReRequestingAReviewAfterOneWasGiven:
         notifying_sync_service: ItemSyncService,
         pr_event,
     ) -> None:
+        """Closed, not removed.
+
+        Removing it let a `pull_request` delivery retried after the review put the request
+        straight back, because the payload it was captured with still lists the reviewer. What
+        matters is that the request is answered, and the stamp is what says so to anything that
+        arrives later.
+        """
         await notifying_sync_service.sync(pr_event("opened"))
 
         await ReviewRequestLedger(db_sessionmaker).fulfilled(
@@ -315,7 +331,9 @@ class TestReRequestingAReviewAfterOneWasGiven:
                 select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
             )
         ).all()
-        assert rows == []
+        assert [(row.github_username, row.fulfilled_at is not None) for row in rows] == [
+            ("monalisa", True)
+        ]
 
     async def test_somebody_else_reviewing_leaves_the_request_alone(
         self,

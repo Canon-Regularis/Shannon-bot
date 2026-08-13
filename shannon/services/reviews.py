@@ -21,6 +21,11 @@ class ReviewRequestLedger:
     so without following that here the row survives with its `notified_at` set, and clicking
     re-request review reads as "already asked" and tells nobody. That is the one moment the
     feature exists for.
+
+    The request is stamped rather than removed. A delivery captured before the review and
+    retried after it still lists the reviewer, and with the row gone it put the request back and
+    pinged them to review what they had already approved. The stamp is what a later payload gets
+    compared against, so a genuine re-request still reopens it and a straggler does not.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
@@ -45,8 +50,8 @@ class ReviewRequestLedger:
             if item is None:
                 return
 
-            cleared = await ItemAssignmentStore(session).clear_role_for(
-                item.id, ActorRole.REVIEWER, snapshot.author.login
+            cleared = await ItemAssignmentStore(session).mark_fulfilled(
+                item.id, ActorRole.REVIEWER, snapshot.author.login, snapshot.created_at
             )
 
         if cleared:

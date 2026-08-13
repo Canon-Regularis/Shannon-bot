@@ -4,6 +4,7 @@ import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -240,7 +241,7 @@ class ItemSyncService:
             self._apply(items, item, snapshot)
 
             roles = self._policy.assignments(snapshot)
-            await self._store_people(session, item.id, roles)
+            await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
 
             logins = [actor.login for actors in roles.values() for actor in actors]
             mentions = await UserLinkStore(session).resolve_many(
@@ -276,10 +277,23 @@ class ItemSyncService:
         session: AsyncSession,
         tracked_item_id: int,
         roles: Mapping[ActorRole, Sequence[Actor]],
+        *,
+        as_of: datetime | None,
     ) -> None:
+        """Make the stored people match the payload, and reopen anything it asks for again.
+
+        `as_of` is when GitHub says this payload was current. A request already closed by a
+        review is only reopened by a payload newer than that review, which is what separates
+        somebody clicking re-request from a delivery that has been retrying since before it.
+        """
         assignments = ItemAssignmentStore(session)
         for role, actors in roles.items():
             await assignments.replace(tracked_item_id=tracked_item_id, role=role, actors=actors)
+            reopened = await assignments.reopen_if_newer(
+                tracked_item_id, role, [actor.login for actor in actors], as_of
+            )
+            if reopened:
+                logger.info("review requested again from %s", ", ".join(reopened))
 
 
 def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> EventHandler:

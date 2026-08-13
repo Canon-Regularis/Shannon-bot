@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -112,6 +113,10 @@ class ItemAssignmentStore:
                     ItemAssignment.tracked_item_id == tracked_item_id,
                     ItemAssignment.role_type == role,
                     ItemAssignment.notified_at.is_(None),
+                    # A request the review already answered is not owed a ping, even if the ping
+                    # it was owed never went out. The reviewer failed to be told, then reviewed
+                    # it anyway; telling them afterwards is worse than not telling them at all.
+                    ItemAssignment.fulfilled_at.is_(None),
                 )
                 .values(notified_at=func.now())
                 .returning(ItemAssignment.github_username)
@@ -151,20 +156,62 @@ class ItemAssignmentStore:
                 .execution_options(synchronize_session=False)
             )
 
-    async def clear_role_for(
-        self, tracked_item_id: int, role: ActorRole, github_username: str
+    async def mark_fulfilled(
+        self, tracked_item_id: int, role: ActorRole, github_username: str, when: datetime | None
     ) -> bool:
-        """Drop one person's assignment in one role, reporting whether there was one.
+        """Record that the review this row asked for has been submitted.
 
-        GitHub drops a reviewer from `requested_reviewers` the moment they submit a review, and
-        sends no `pull_request` event saying so. Following that here is what lets a later
-        re-request read as a fresh request and ping them again.
+        GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
+        `pull_request` event saying so, so this used to delete the row and let a later
+        re-request insert a fresh one that would ping again.
+
+        Deleting it was too much. A `pull_request` delivery whose Discord step failed is retried
+        with the payload it was captured with, and that payload still lists the reviewer: with
+        the row gone, the retry put it back and pinged somebody to review what they had just
+        approved, and left `notified_at` set so the next genuine re-request told nobody at all.
+
+        Keeping the row and stamping it is what lets the two be told apart later. The stamp is
+        GitHub's time for the review rather than ours, because the thing it gets compared against
+        is a timestamp from a GitHub payload.
         """
         result = await self._session.execute(
-            delete(ItemAssignment).where(
+            update(ItemAssignment)
+            .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
                 ItemAssignment.role_type == role,
                 ItemAssignment.github_username == github_username.lower(),
             )
+            .values(fulfilled_at=when or func.now())
+            .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)
+
+    async def reopen_if_newer(
+        self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None
+    ) -> Sequence[str]:
+        """Reopen requests that a payload newer than the review asks for again.
+
+        This is what a person clicking re-request looks like from here: the item comes back with
+        the reviewer on it and a timestamp later than the review that closed the last request.
+        A payload older than the review is a delivery catching up, and is left alone.
+
+        Both stamps are cleared, because a reopened request has to be able to ping again.
+        """
+        wanted = [login.lower() for login in logins]
+        if not wanted or as_of is None:
+            return ()
+        return (
+            await self._session.scalars(
+                update(ItemAssignment)
+                .where(
+                    ItemAssignment.tracked_item_id == tracked_item_id,
+                    ItemAssignment.role_type == role,
+                    ItemAssignment.github_username.in_(wanted),
+                    ItemAssignment.fulfilled_at.is_not(None),
+                    ItemAssignment.fulfilled_at < as_of,
+                )
+                .values(fulfilled_at=None, notified_at=None)
+                .returning(ItemAssignment.github_username)
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
