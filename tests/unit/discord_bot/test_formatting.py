@@ -218,6 +218,28 @@ def test_a_label_containing_a_backtick_keeps_its_code_span() -> None:
     assert fields["Tags"] == "`` needs `review` ``, `bug`"
 
 
+def test_a_label_cannot_smuggle_a_working_mention_into_the_thread() -> None:
+    """A label is GitHub-authored text, and `<@id>` is the one mention form that still pings.
+
+    The code span around a label is a markdown rendering, and `allowed_mentions` is not reading
+    markdown: it is the delivery gate, it is told to honour user mentions, and it reads the
+    content it is handed. Every other untrusted field here is defused before it goes out; this
+    one was left to the span.
+    """
+    labelled = replace(SNAPSHOT, labels=(Label("<@1234567890>"),))
+
+    fields = lines(format_pull_request(labelled, status=Status.NOT_REVIEWED))
+
+    assert "<@1234567890>" not in fields["Tags"], "a label name pinged whoever it named"
+    assert "1234567890" in fields["Tags"], "the label should still read as what was written"
+
+
+def test_defusing_a_label_leaves_an_ordinary_one_alone() -> None:
+    fields = lines(format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED))
+
+    assert fields["Tags"] == "`backend`, `bug`"
+
+
 def test_a_missing_title_reads_unknown() -> None:
     fields = lines(format_pull_request(replace(SNAPSHOT, title=""), status=Status.NOT_REVIEWED))
 

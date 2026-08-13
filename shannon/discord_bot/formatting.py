@@ -190,6 +190,21 @@ def _quote(body: str) -> str:
 _MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
 
 
+def defuse_mentions(text: str) -> str:
+    """Stop `<@1234>` resolving, leaving it reading as what was written.
+
+    A zero-width space inside the brackets is enough. Kept apart from the markdown escaping
+    because the two are needed in different places: text going into a code span wants this and
+    not that, since escaping there would put the backslashes on show.
+
+    Whether a mention inside a code span pings is a question about how Discord renders markdown,
+    and `allowed_mentions` is not a rendering question: it is the delivery gate, it is told to
+    honour user mentions, and it reads the content it is given. Relying on the span means
+    relying on the wrong layer, so nothing here does.
+    """
+    return _MENTION.sub("<​\\1\\2>", text)
+
+
 def as_plain_text(text: str) -> str:
     """Render GitHub-authored text as what it says, rather than as markup.
 
@@ -198,12 +213,8 @@ def as_plain_text(text: str) -> str:
     honour user mentions and cannot tell the ones this bot built from the ones it is quoting.
     And markup that arrives half-finished, or is cut in half by a preview limit, restyles
     everything after it.
-
-    A zero-width space is enough to stop a mention resolving, and leaves it reading as what
-    was written.
     """
-    escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(text))
-    return _MENTION.sub("<​\\1\\2>", escaped)
+    return defuse_mentions(discord.utils.escape_mentions(discord.utils.escape_markdown(text)))
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
@@ -217,7 +228,13 @@ def _person(actor: Actor, mentions: Mapping[str, int] | None) -> str:
 
 
 def _tags(names: Iterable[str]) -> str:
-    rendered = [_code(name) for name in names]
+    """Label names, which are GitHub-authored text like any other.
+
+    Defused before fencing, not left to the code span. Every other untrusted field in this
+    module goes through `as_plain_text`; this was the one that did not, and a label is named by
+    anybody with triage rights on the repository.
+    """
+    rendered = [_code(defuse_mentions(name)) for name in names]
     return ", ".join(rendered) if rendered else EMPTY
 
 
