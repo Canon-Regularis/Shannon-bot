@@ -1148,3 +1148,30 @@ behaviour in the project had nothing watching them.
   properly and the one taken almost every time.
 - Also covered: the review ledger's two early returns, for a review by a deleted account and one
   on a repository nobody registered.
+
+### Seventeenth look
+
+Two passes of hunting had turned up nothing new, so this one spent its time on the other half of
+the job: making what is already here easier to work on.
+
+- **The test suite emitted a thousand warnings a run, and they were all the same one.** discord.py
+  2.7 passes `re.sub`'s count positionally, which Python 3.13 deprecated; it is their code and
+  there is nothing to do but wait for a release. Left alone it was a thousand lines per run,
+  which is more than enough to bury a warning that does matter. That one message is filtered by
+  name, with the reason written down. Everything else is untouched, and a deprecation warning
+  from our own code still fails the suite outright, which was already the case and is worth
+  keeping.
+- **The lifespan had no tests, and it is where the last three defects in this project lived.**
+  Startup ordering, the database check that has to fail before the port opens, the readiness
+  gate, and the shutdown sequence were all covered only by reading. `shannon/main.py` went from
+  53% to 92%; what is left is the process entry points. The tests that matter most are the two
+  that pin the defects: a gateway that never connects is reported unhealthy rather than fine,
+  and a worker that has already died does not stop the Discord client, the engine and the HTTP
+  client from being closed.
+
+  Writing them turned up one thing worth recording: a database that refuses the connection
+  surfaces as `OSError`, not as anything SQLAlchemy wraps. The lifespan catches broadly and
+  reports, which is right, but it is the sort of assumption that is easy to get wrong when
+  narrowing an except clause later.
+
+Nothing in this pass fixes a defect, because none was found. That is the result.
