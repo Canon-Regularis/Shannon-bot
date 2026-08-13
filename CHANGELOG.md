@@ -1387,3 +1387,103 @@ acted on, and each fix has a test that fails without it. The redirect fix needed
 than one: every other test in that file injects its own HTTP client, so the behaviour test would
 have passed with or without the change, and only a test that inspects the client the class builds
 for itself actually pins the decision.
+
+### Twenty-third look
+
+- **The `/link` fix from the last pass was wrong, and its own test caught it.** Retrying once when
+  the insert lost a race is enough for two callers and nothing more: with three, the two retries
+  collide with each other rather than with the original winner, and the second collision has no
+  retry left. It failed about one run in four, and only showed up on a machine busy enough to
+  spread the scheduling out. Retrying was the wrong shape for it. Both halves of a link are
+  unique within a guild, a row can conflict on either, and `ON CONFLICT` settles one constraint,
+  so no single statement can do this: it needs the clearing and the writing to be one indivisible
+  step. That is a per-guild advisory lock, taken for the length of the transaction, which linking
+  in another server never waits on. The retry is gone, because with the lock it could not fire.
+  The test now uses eight callers rather than three and fails every run without the lock instead
+  of one in four.
+- **A worker still waiting for Discord never noticed it had been told to stop.** The stop was a
+  flag, and the loop that reads it had not started: the wait for the gateway had nothing to
+  interrupt it, so the only thing that ended it was the shutdown grace running out and the task
+  being cancelled. Every restart before Discord answered sat out the full five seconds and was
+  then killed. A gateway that is slow, refused, or misconfigured is exactly when a restart is
+  most likely, so this was at its worst in the case it was most likely to meet. The stop is
+  published as something waitable as well as a flag, and the wait now finishes on either. A
+  gateway that failed outright is still reported rather than being read as an ordinary stop,
+  which is checked by its own test because the two are one line apart.
+
+### Deliberately failing Discord part way through
+
+`tests/integration/test_flaky_discord.py` fails a fixed fraction of every gateway call rather than
+one arranged call, so failures land at different points inside deliveries that have already done
+part of their work. At every rate tried the invariants hold: one item keeps one thread with none
+abandoned beside it, the item points at a thread that exists, nobody is pinged twice, and nothing
+is left half-finished in the queue.
+
+Two things came out of writing it. At a fifty per cent failure rate a reviewer really is left owed
+a ping, because the delivery ran out its sixteen attempts and was given up on, which is the end of
+that road by design rather than a defect; that claim lives in its own test where the gateway
+recovers. And the test was checked by breaking what it guards: with the ping claim no longer
+stamping `notified_at`, it reports seven pings where it expects one.
+
+### Mirroring a note twice
+
+The delivery queue is at-least-once on purpose, and only some of it was written that way.
+
+A delivery whose status write fails after the handler has already succeeded stays leased, comes
+back when the lease runs out, and is handled again from the top. Every handler but one survives
+that: syncing an item upserts its row, swaps the thread pointer from the id it read rather than
+writing over whatever is there now, and claims a ping before sending it. Mirroring a comment or
+a review had none of it. It posted, kept no record of having posted, and so posted again.
+
+Reproduced against a live database before anything was changed, by failing the status write once
+and letting the lease expire: the same comment appeared in the thread twice.
+
+`mirrored_notes` is the record, added by migration `0006`. It is claimed before the post and
+handed back if the post does not land, which is the shape `item_assignments.notified_at` already
+uses for pings and for the same reason: recording it afterwards leaves the identical gap one step
+further along. Handing it back matters as much as taking it. Without that, a note that failed to
+send would be marked as sent, every retry would read it as done, and the note would be lost
+silently, which is worse than the duplicate this prevents. Both hand-back paths have tests, the
+ordinary failure and the one where the thread turns out to have been deleted.
+
+The key carries the kind, `comment:123` or `review:123`, because GitHub numbers the two
+separately and they do collide. Keyed on the number alone, whichever arrived second would be
+taken for one already posted and dropped. That has a test too, with a comment and a review
+deliberately given the same number.
+
+Nothing is backfilled. Every note already in a thread has been through the queue, so an empty
+table costs one claim each and nothing is at risk of being posted twice.
+
+Two of the four tests fail without the fix. The other two cover the hand-back, which cannot fail
+before there is a claim to hand back.
+
+### A review request that came back from the dead
+
+GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
+`pull_request` event saying so, so the ledger followed the review and closed the request by
+deleting the assignment row. A later re-request then inserted a fresh row with a null
+`notified_at`, and the reviewer was asked again. That is the one moment the feature exists for.
+
+Deleting it was too much for a queue that retries. A `pull_request` delivery whose Discord step
+failed is retried with the payload it was captured with, and that payload still lists the
+reviewer. Retried after the review, it found no row, inserted one, and posted `Review requested
+from monalisa.` directly underneath `**monalisa** approved this pull request`. The row then
+existed again with `notified_at` set, which is precisely the state the ledger exists to prevent,
+so the next genuine re-request found it already there and told nobody for the life of the pull
+request. Reproduced end to end before anything was changed, and the second half is the worse
+half: the odd ping is noise, the swallowed re-request is the feature not working.
+
+The row is kept and stamped with the time of the review instead, in GitHub's clock rather than
+ours, because what it gets compared against is a timestamp out of a GitHub payload. A request
+older than the stamp is a delivery catching up and is left alone. One newer is somebody clicking
+re-request, and clears both stamps so the ping can happen again. The ping claim also skips a
+fulfilled request outright, which is what stops a reviewer being asked to look at something they
+have already approved when the original ping never made it out.
+
+**This rests on GitHub advancing `pull_request.updated_at` when a review is requested.** It does,
+because requesting one changes the pull request, but it is an assumption rather than something
+this codebase can prove, so it is written down here and in the test that depends on it. One
+existing test had to change with it: it sent a re-request carrying a timestamp from before the
+review it was supposedly answering, which cannot happen in a real sequence. If the assumption
+ever turns out to be wrong, that test is where it will show, and the answer is to find another
+way to tell a re-request from a straggler rather than to loosen the comparison.
