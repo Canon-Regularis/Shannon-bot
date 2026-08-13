@@ -91,10 +91,15 @@ class DeliveryWorker:
         self._router = router
         self._settings = settings or WorkerSettings()
         self._stopping = False
+        # The flag is enough for the loop, which reaches a check every couple of seconds. It is
+        # not enough before the loop starts, where the wait for Discord has no such check and
+        # nothing to interrupt it, so the stop is published as something waitable too.
+        self._stopped = asyncio.Event()
 
     def stop(self) -> None:
         """Ask the worker to finish the delivery it is on and come back."""
         self._stopping = True
+        self._stopped.set()
 
     async def run_once(self) -> int:
         """Work through one batch, returning how many deliveries were handled.
@@ -139,7 +144,9 @@ class DeliveryWorker:
         """
         if wait_for_ready is not None:
             logger.info("waiting for Discord before working through the queue")
-            await wait_for_ready()
+            if not await self._ready_or_stopped(wait_for_ready):
+                logger.info("asked to stop before Discord ever connected")
+                return
 
         pruned_after = 0.0
         loop = asyncio.get_running_loop()
@@ -168,6 +175,33 @@ class DeliveryWorker:
                 # for a restart.
                 logger.exception("the delivery worker hit an error, carrying on")
                 await asyncio.sleep(self._settings.poll_interval.total_seconds())
+
+    async def _ready_or_stopped(self, wait_for_ready: ReadyCheck) -> bool:
+        """Wait for Discord, and give up the moment a stop is asked for instead.
+
+        Waiting on the gateway alone means `stop` goes unnoticed until something cancels this,
+        and the only thing that does is the shutdown grace running out. So a process told to
+        stop before Discord ever answered sat out the full five seconds and was then killed,
+        every time. A gateway that is slow, refused, or misconfigured is exactly when a restart
+        is most likely, which is exactly when this was at its worst.
+
+        Returns whether Discord connected. An error from the wait is still raised: a bot that
+        stopped before connecting is a real failure and the caller reports it.
+        """
+        ready = asyncio.ensure_future(wait_for_ready())
+        stopped = asyncio.ensure_future(self._stopped.wait())
+        try:
+            await asyncio.wait({ready, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+            if not ready.done():
+                ready.cancel()
+
+        # Checked before the flag, so a gateway that failed is reported rather than being read
+        # as an ordinary stop when both finish together.
+        if ready.done() and not ready.cancelled() and ready.exception() is not None:
+            raise ready.exception()
+        return not self._stopping
 
     async def _handle(self, delivery: Delivery) -> None:
         try:

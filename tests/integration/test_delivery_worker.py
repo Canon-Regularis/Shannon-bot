@@ -411,6 +411,36 @@ class TestWaitingForDiscord:
 
         assert (await stored(db_session, "delivery-a")).status == DeliveryStatus.PROCESSED
 
+    async def test_a_stop_while_still_waiting_is_obeyed_at_once(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """Waiting on the gateway alone left `stop` unnoticed until something cancelled this.
+
+        The only thing that does is the shutdown grace running out, so a process told to stop
+        before Discord ever answered sat out the whole five seconds and was then killed. A
+        gateway that is slow, refused, or misconfigured is when a restart is most likely, which
+        is when this was at its worst.
+        """
+        worker = build_worker(queue, Exploding(failures=0), poll_interval=timedelta(seconds=0.01))
+        never = asyncio.Event()
+
+        running = asyncio.create_task(worker.run_forever(never.wait))
+        await asyncio.sleep(0.05)
+        worker.stop()
+
+        await asyncio.wait_for(running, timeout=1)
+
+    async def test_a_gateway_that_died_is_still_reported(self, queue: WebhookDeliveryQueue) -> None:
+        """Giving up quietly on a stop must not become giving up quietly on a failure."""
+
+        async def never_connects() -> None:
+            raise RuntimeError("the Discord bot stopped before it ever connected")
+
+        worker = build_worker(queue, Exploding(failures=0))
+
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(worker.run_forever(never_connects), timeout=2)
+
     async def test_without_a_check_it_starts_at_once(self, queue: WebhookDeliveryQueue) -> None:
         """No token means no bot to wait for, and the queue should still be worked."""
         handler = Exploding(failures=0)
