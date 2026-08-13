@@ -43,7 +43,15 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: requires a live PostgreSQL instance (SHANNON_TEST_DATABASE_URL)",
 ]
-filterwarnings = ["error::DeprecationWarning:shannon.*"]
+filterwarnings = [
+    # A deprecation warning from our own code is a bug to fix, not a note to read later.
+    "error::DeprecationWarning:shannon.*",
+    # discord.py 2.7 passes re.sub's `count` positionally, which Python 3.13 deprecated. It is
+    # their code and there is nothing to do here but wait for a release that fixes it. Left
+    # alone it is a thousand lines of noise per run, which is more than enough to bury a
+    # warning that does matter.
+    "ignore:'count' is passed as positional argument:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
