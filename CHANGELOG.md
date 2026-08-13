@@ -1098,3 +1098,27 @@ session limit and returned nothing, so this is one finding, found by reading.
   real thing does not fail, it silently narrows what anyone can test. The eighth look found the
   same shape in the thread gateway fake, where a comment described behaviour the fake did not
   have. This is the second time.
+
+### Fifteenth look
+
+Three things carried forward from earlier passes and never acted on, because each was recorded
+as "found and not fixed" rather than resolved. All three are defects rather than the feature
+requests they were filed alongside.
+
+- **/set_channel said threads had moved when nothing moves.** It answered "Moved from
+  <#old>", and Discord cannot move a thread between channels: every item already tracked keeps
+  the thread it has, and only new ones appear anywhere different. An admin running the command
+  to tidy a server would go looking for threads that never went anywhere. It now says what
+  actually happens, which is the part they need: "Issues for owner/repo will now appear in
+  <#new>. Threads already open stay in <#old>."
+- **The worker's log lines named nothing an operator could act on.** All three of them, the
+  retry, the give-up and the permanent failure, carried a GitHub delivery id and an exception
+  message. Told that delivery `4f2a...` cannot be handled because Discord will not let the bot
+  create a thread, there is no way to know which repository or which channel to go and fix
+  without finding the row and decoding its payload, and the row is gone once it ages out. Every
+  one of them now names the event, the repository and the item number.
+- **A policy handed the wrong kind of snapshot filed it silently.** Nothing but the wiring pairs
+  `PullRequestPolicy` with a pull request, and a mismatched pairing would store the item under
+  the wrong type and read fields the snapshot may not carry. It fails once and loudly now,
+  rather than being retried for two hours: it is a wiring mistake and no payload can cause it.
+  MVP 4 adds a third object type, which is when this becomes easy to get wrong.

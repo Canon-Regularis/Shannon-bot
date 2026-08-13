@@ -37,3 +37,11 @@ class ItemNotReadyError(ShannonError):
     Deliberately not permanent. The sync that opens the thread is either in flight or waiting on
     its own backoff, and the note belongs in that thread once it is there.
     """
+
+
+class WrongPolicyError(PermanentError):
+    """A sync policy was handed a snapshot of a kind it does not handle.
+
+    A wiring mistake rather than anything a GitHub payload can cause, so retrying it for two
+    hours would only delay the traceback that explains it.
+    """
