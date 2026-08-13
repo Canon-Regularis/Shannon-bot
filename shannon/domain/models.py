@@ -143,6 +143,10 @@ class CommentSnapshot:
     # carrying rather than being rediscovered downstream.
     object_type: ObjectType | None = None
 
+    @property
+    def note_key(self) -> str:
+        return f"comment:{self.comment_id}"
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewSnapshot:
@@ -165,6 +169,10 @@ class ReviewSnapshot:
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
 
     @property
+    def note_key(self) -> str:
+        return f"review:{self.review_id}"
+
+    @property
     def verdict(self) -> str:
         return (self.state or "").lower()
 
@@ -181,6 +189,16 @@ class ItemNote(Protocol):
     item_number: int
     author: Actor | None
     object_type: ObjectType | None
+
+    @property
+    def note_key(self) -> str:
+        """What identifies this note, kind included.
+
+        The kind has to be in the key. GitHub numbers comments and reviews separately, so the
+        two can collide, and a review that happened to share a number with a comment would
+        otherwise be taken for one already posted and dropped.
+        """
+        ...
 
 
 @runtime_checkable

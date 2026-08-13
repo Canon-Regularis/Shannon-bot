@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -86,20 +89,60 @@ class ItemNoteMirror:
                 else {}
             )
 
+        # Claimed before the post, not recorded after it. The queue is at-least-once by design:
+        # a delivery whose status could not be written stays leased, comes back when the lease
+        # runs out, and is handled again from the top. Recording afterwards leaves that same gap
+        # one step further along, and the gap put the same comment in the thread twice.
+        if not await self._claim(item_id, snapshot.note_key):
+            logger.info(
+                "a note on %s#%s is already in its thread, not posting it again",
+                snapshot.repository.full_name,
+                snapshot.item_number,
+            )
+            return True
+
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(snapshot, mentions))
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the
             # channel and the metadata. Letting go of the dead id is what lets that happen, and
             # asking to be tried again is what gets this note into the new thread.
+            await self._hand_back(item_id, snapshot.note_key)
             await self._forget_thread(item_id, thread_id)
             raise ItemNotReadyError(
                 f"thread {thread_id} for {snapshot.repository.full_name}"
                 f"#{snapshot.item_number} is gone and has to be rebuilt"
             ) from error
+        except BaseException:
+            # Nothing was said, so the claim has to go back or the retry reads it as already
+            # posted and the note is lost for good. Cancellation counts as a failure here, which
+            # is why this catches everything: the worker puts a deadline on each delivery and
+            # cancels the handler where it stands, and discord.py sleeps through a rate limit
+            # rather than failing, so where it stands is often exactly here.
+            await self._hand_back(item_id, snapshot.note_key)
+            raise
 
         logger.info("mirrored a note on %s#%s", snapshot.repository.full_name, snapshot.item_number)
         return True
+
+    async def _claim(self, tracked_item_id: int, note_key: str) -> bool:
+        async with self._sessionmaker() as session, session.begin():
+            return await MirroredNoteStore(session).claim(tracked_item_id, note_key)
+
+    async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
+        """Give a claim back, best effort.
+
+        Shielded so a cancellation arriving mid-flight cannot interrupt the hand-back itself,
+        and suppressed because a claim that cannot be released is not worth losing the original
+        failure over: the note stays unposted either way, and the original error is the one that
+        says why. This is the same shape as the ping hand-back, for the same reasons.
+        """
+        with contextlib.suppress(Exception):
+            await asyncio.shield(self._release(tracked_item_id, note_key))
+
+    async def _release(self, tracked_item_id: int, note_key: str) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await MirroredNoteStore(session).release(tracked_item_id, note_key)
 
     async def _forget_thread(self, tracked_item_id: int, dead_thread_id: int) -> None:
         async with self._sessionmaker() as session, session.begin():
