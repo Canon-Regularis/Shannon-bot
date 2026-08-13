@@ -1513,3 +1513,37 @@ reviewer nobody is ever told about again.
 The thread pointer is cleared in more than one way, so this is not a corner: the note mirror lets
 go of a thread somebody deleted, and an item whose first thread creation failed never had one
 while its row was already committed.
+
+### Threads that reached Discord and nothing else
+
+Two ways a thread could end up in a channel with no row pointing at it. Nothing anywhere
+reconciles those: `discord_thread_id` is only ever read off a row found some other way, and the
+index on it was dropped in migration `0004`, so an id that never reached a row cannot be reached
+by anything at all. The retry finds no thread, opens a second one, and the first sits there taking
+no comment, review or ping for the rest of its life.
+
+- **Shutdown walked away from a thread it was in the middle of opening.** Creating and claiming
+  are shielded together precisely so a deadline cannot land between them, and the shield was not
+  enough on its own. It keeps the inner work running, but the caller's await raises at once, so
+  the worker task ended, shutdown read that as the worker having stopped, and the engine was
+  disposed and the loop closed with the claim unfinished. The shield was doing its half; nothing
+  was doing the other half, which is waiting. The cancellation is caught now and the work waited
+  for, bounded so a gateway that has stopped answering cannot hold the process open, and then
+  passed on exactly as before. Worth being accurate about the shield: it is not what caused this,
+  it is what made it fixable, because the work survives as something that can still be waited for.
+- **A claim that could not be written left the thread behind.** Which half failed is what makes
+  this recoverable: Discord answered or there would be no thread to worry about, so the database
+  is the part that is down and the call that undoes the thread is the one still working. It is
+  taken back now, which leaves the retry starting from where it thinks it is. Safe to do because
+  nothing is claimed at the point it can fire, since the swap either commits and returns or
+  matches nothing and commits nothing, and the one path that does raise after tidying up is
+  allowed through untouched.
+
+Both are narrower than they first look and neither is exotic. The first needs a shutdown while
+Discord is slow, which is what a rate limit does, because discord.py sleeps through those rather
+than failing. The second needs the database gone for the moment between two calls, which
+`pool_pre_ping` already absorbs when it is only a stale pooled connection.
+
+The test that pins the first one had to be made to cancel at the right instant. The first version
+slept and cancelled during the database work instead, well before the thread existed, and proved
+nothing while passing.
