@@ -1271,3 +1271,42 @@ when the slot is emptied mid-flight, the permission gate's role matching and add
 and the lease duration against the worst case batch. One thing noted and not acted on: `/pr` for a
 repository deleted and recreated under the same name reports "no channel mapped", which is
 misleading, but the path needs a repository to be destroyed and rebuilt with its name intact.
+
+### Twentieth look
+
+Both defects here were found by running the thing rather than reading it, which is the first time
+that has been true in this project.
+
+- **Every clean shutdown logged the line that means the process is dead.** Booting the real
+  application end to end, rather than the lifespan with fakes in it, put "the delivery worker
+  stopped without an error" in the output of a shutdown where nothing had gone wrong. The done
+  callback exists to catch a background task dying on its own, and it could not tell that from a
+  task being told to finish, because a clean shutdown ends both of them exactly the way a failure
+  does: the worker's loop returns when it is stopped, and the Discord client's start returns once
+  it is closed. So the one message meaning this process is now useless was printed most often at
+  the moment it meant nothing, which is the fastest way there is to teach everyone to skip it.
+  The lifespan now says whether it asked, and the callback stays quiet when it did. An error is
+  still reported either way, because being on the way out is a reason to expect the exit, not a
+  reason to stop reading the error.
+- **A label name could carry a working mention into the thread.** Every other piece of
+  GitHub-authored text that reaches a Discord message goes through `as_plain_text`, which puts a
+  zero-width space inside `<@1234>` because that is, as the module already says, the one mention
+  form that can still ping somebody. Label names went out wrapped in a markdown code span
+  instead. A code span is a rendering, and `allowed_mentions` is not reading renderings: it is
+  the delivery gate, it is told to honour user mentions, and it reads the content it is handed.
+  Labels are named by anyone with triage rights, so this is a smaller door than a comment body,
+  but it was the only untrusted field in the module relying on the wrong layer. The defusing is
+  its own function now and both callers use it, and a label with a backtick in it still renders
+  the way it did.
+
+Checked by running it and found sound: the migration chain applies from nothing to head, reverses
+to base leaving only `alembic_version`, and applying it a second time produces a byte-identical
+schema. `@everyone`, `@here` and role mentions cannot ping from any field, because
+`allowed_mentions` refuses them outright. Titles and comment bodies were already defused. An
+author's login cannot carry a mention at all, since GitHub logins are letters, digits and
+hyphens. A title does reach the thread name undefused, and that is fine: thread names are not
+scanned for mentions.
+
+Also learned, the hard way, twice: two pytest sessions pointed at one database corrupt each
+other, because the session fixture rebuilds the schema with `drop_all` before `create_all`. Test
+failures that appear only while something else is running are that, and not the code.
