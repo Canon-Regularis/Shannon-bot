@@ -244,3 +244,25 @@ def test_a_missing_title_reads_unknown() -> None:
     fields = lines(format_pull_request(replace(SNAPSHOT, title=""), status=Status.NOT_REVIEWED))
 
     assert fields["PR Name"] == "Unknown"
+
+
+class TestMarkupGluedToALink:
+    """`escape_markdown` skips whatever its URL pattern matches, and that runs to the next space.
+
+    Left at its default, the escaping this module relies on has a hole exactly the width of a
+    URL: anything markdown-shaped stuck to the end of one is handed to Discord intact.
+    """
+
+    def test_a_bold_marker_stuck_to_a_url_cannot_unbalance_the_block(self) -> None:
+        """Bold runs past a newline, so an odd marker re-pairs every label with the wrong value."""
+        titled = replace(SNAPSHOT, title="Fix https://a.com/**")
+
+        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED)
+
+        assert rendered.count("**") % 2 == 0
+
+    def test_the_link_back_to_github_is_still_a_link(self) -> None:
+        """The cost of escaping links is paid by previews, not by the pointer that matters."""
+        rendered = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
+
+        assert SNAPSHOT.html_url in rendered

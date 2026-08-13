@@ -213,8 +213,22 @@ def as_plain_text(text: str) -> str:
     honour user mentions and cannot tell the ones this bot built from the ones it is quoting.
     And markup that arrives half-finished, or is cut in half by a preview limit, restyles
     everything after it.
+
+    `ignore_links=False` because the default is the opposite, and the default undoes the second
+    reason entirely. Left on, `escape_markdown` skips whatever its URL pattern matches, and that
+    pattern runs to the next space: a comment ending `https://example.com/``` ` keeps its fence,
+    opens a code block nobody closes, and swallows the rest of the message including the link
+    back to GitHub. A title ending `https://a.com/**` leaves an odd number of bold markers, and
+    bold runs past a newline, so every field below it trades its emphasis with the value beside
+    it and the block can be made to read however the author of the title likes.
+
+    It is paid for, in that a URL with an underscore comes out with the underscore escaped and
+    stops being clickable inside a quoted body. That is the right way round: this is a preview
+    and a pointer rather than a copy, `_note` puts the real GitHub link at the bottom where
+    nothing escapes it, and the metadata block has a link field of its own.
     """
-    return defuse_mentions(discord.utils.escape_mentions(discord.utils.escape_markdown(text)))
+    escaped = discord.utils.escape_markdown(discord.utils.escape_mentions(text), ignore_links=False)
+    return defuse_mentions(escaped)
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:

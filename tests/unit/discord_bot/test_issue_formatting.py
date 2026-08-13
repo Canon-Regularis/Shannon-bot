@@ -267,3 +267,24 @@ class TestReviewFormatting:
 
     def test_a_deleted_account_does_not_crash(self) -> None:
         assert "Unknown" in format_review(replace(REVIEW, author=None))
+
+
+class TestMarkupGluedToALink:
+    """`escape_markdown` skips whatever its URL pattern matches, and that runs to the next space.
+
+    Left at its default, the escaping this module relies on has a hole exactly the width of a
+    URL: anything markdown-shaped stuck to the end of one reaches Discord intact.
+    """
+
+    def test_a_fence_stuck_to_a_url_cannot_open_a_code_block(self) -> None:
+        """An unclosed fence eats the rest of the message, including the link back to GitHub."""
+        hostile = replace(COMMENT, body="lgtm https://example.com/```\n**SHIPPED BY ADMIN**")
+
+        rendered = format_comment(hostile)
+
+        assert "```" not in rendered
+        assert "**SHIPPED BY ADMIN**" not in rendered
+
+    def test_the_link_back_to_github_is_still_a_link(self) -> None:
+        """The cost of escaping links is paid by the preview, not by the pointer that matters."""
+        assert f"<{COMMENT.html_url}>" in format_comment(COMMENT)
