@@ -293,3 +293,44 @@ class TestFetchingAnIssue:
         async with client_with(responds(500, {"message": "boom"})) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+
+class TestARepositoryThatMoved:
+    """GitHub answers 301 for a renamed repository or owner, and for a transferred issue.
+
+    That is a documented, ordinary answer. Unfollowed it lands in the catch-all and comes back
+    to the person who ran the command as "GitHub could not be reached", so `/register` on the
+    old link never succeeds. `/pr` is worse: after a rename the stored name is stale, so the
+    guard that would have checked the id sees a match, skips the check, and asks for the old
+    name, and the command stays broken until a webhook happens to arrive and correct the name.
+    """
+
+    def test_the_client_this_builds_follows_redirects(self) -> None:
+        """Pinned separately because every other test here injects its own client."""
+        client = HttpGitHubClient(token="t")
+
+        assert client._client.follow_redirects is True
+
+    async def test_a_renamed_repository_resolves_to_its_new_name(self) -> None:
+        # full_name is built from the owner and the name rather than read, so those are what
+        # have to move for the snapshot to report the new location.
+        moved = payloads.repository()
+        moved["name"] = "new-name"
+        moved["owner"] = {"login": "acme", "id": 1, "type": "User"}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/new-name"):
+                return httpx.Response(200, content=json.dumps(moved))
+            return httpx.Response(
+                301, headers={"Location": "https://api.github.com/repos/acme/new-name"}
+            )
+
+        client = HttpGitHubClient(
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler),
+                base_url="https://api.github.com",
+                follow_redirects=True,
+            )
+        )
+
+        assert (await client.get_repository("acme", "old-name")).full_name == "acme/new-name"
