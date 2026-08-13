@@ -1346,3 +1346,44 @@ Run against the code and found sound:
 - The adversarial link corpus is otherwise refused as it should be: a userinfo host
   (`github.com@evil.com`), a lookalike host, a non-http scheme, an issue link handed to `/pr`, a
   zero or negative number, and an Arabic-Indic numeral.
+
+### Twenty-second look
+
+Both of these came out of a review pass that was killed part way through. One finder had finished
+before it died, nothing had verified its findings, and both turned out to be real once checked.
+
+- **Markdown glued to a link went out unescaped.** `as_plain_text` exists so GitHub-authored text
+  cannot restyle the thread it is quoted into, and `escape_markdown` takes an `ignore_links`
+  argument that defaults to true: it skips whatever its URL pattern matches, and that pattern
+  runs to the next space. So a comment ending `https://example.com/``` ` kept its fence, opened a
+  code block nothing closed, and swallowed the rest of the message including the link back to
+  GitHub. A title ending `https://a.com/**` left an odd number of bold markers, and bold runs
+  past a newline, so every field label below it traded its emphasis with the value beside it and
+  the block could be made to read however the title's author liked. Anyone who can open an issue
+  on the repository can write either. The escaping no longer makes an exception for links.
+
+  It is paid for and worth saying so: a URL with an underscore in it now comes out escaped and
+  stops being clickable inside a quoted body. That is the right way round. A quoted comment is a
+  preview and a pointer rather than a copy, the real link sits at the bottom of the note where
+  nothing escapes it, and the metadata block has a link field of its own.
+
+- **A renamed repository could not be reached at all.** GitHub answers 301 for a repository or
+  owner that has been renamed, and for an issue moved to another repository; both are documented
+  and ordinary. httpx does not follow redirects unless told to, and the status handling has cases
+  for 401, 403, 404 and 429 with everything else falling through to "GitHub could not be
+  reached". So `/register` on the old link failed permanently with a message about an outage that
+  was not happening. `/pr` was worse: after a rename the stored name is stale, so the guard that
+  exists precisely to settle a renamed repository by its id saw the stale name match, skipped
+  itself, and asked GitHub for the old name, which meant `/pr` and `/issue` stayed broken for
+  that guild until a webhook happened to arrive and correct the name. That guard also caught only
+  a 404, so it could not have helped even when it did run. Redirects are followed now.
+
+  Checked before turning it on, because the client carries a token: httpx drops the Authorization
+  header when a redirect crosses to another origin and keeps it when it does not, which is the
+  behaviour this needs.
+
+Neither finding had been verified when the pass died, so both were reproduced here before being
+acted on, and each fix has a test that fails without it. The redirect fix needed two tests rather
+than one: every other test in that file injects its own HTTP client, so the behaviour test would
+have passed with or without the change, and only a test that inspects the client the class builds
+for itself actually pins the decision.
