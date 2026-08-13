@@ -173,7 +173,12 @@ class DeliveryWorker:
         except PermanentError as error:
             # A missing permission or a channel that cannot hold threads does not heal on its
             # own, so retrying for two hours only delays the log line that says so.
-            logger.error("delivery %s cannot be handled: %s", delivery.delivery_id, error.message)
+            logger.error(
+                "delivery %s (%s) cannot be handled: %s",
+                delivery.delivery_id,
+                delivery.subject,
+                error.message,
+            )
             await self._queue.give_up(delivery, error=f"{type(error).__name__}: {error}")
             return
         except Exception as error:
@@ -193,8 +198,9 @@ class DeliveryWorker:
 
         if attempts >= self._settings.max_attempts:
             logger.error(
-                "giving up on delivery %s after %s attempts: %s",
+                "giving up on delivery %s (%s) after %s attempts: %s",
                 delivery.delivery_id,
+                delivery.subject,
                 attempts,
                 reason,
             )
@@ -203,8 +209,9 @@ class DeliveryWorker:
 
         delay = self._settings.backoff_for(delivery.attempts)
         logger.warning(
-            "delivery %s failed (attempt %s), retrying in %ss: %s",
+            "delivery %s (%s) failed (attempt %s), retrying in %ss: %s",
             delivery.delivery_id,
+            delivery.subject,
             attempts,
             int(delay.total_seconds()),
             reason,

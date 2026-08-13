@@ -31,6 +31,28 @@ class Delivery:
         action = self.payload.get("action")
         return action if isinstance(action, str) else None
 
+    @property
+    def subject(self) -> str:
+        """What this delivery is about, for a log line somebody has to act on.
+
+        A delivery id identifies a row and nothing else. Told only that one cannot be handled,
+        an operator has to find the row and decode its payload before they know which repository
+        or which item to go and look at, and the row is gone once it ages out.
+        """
+        repository = self.payload.get("repository")
+        name = repository.get("full_name") if isinstance(repository, dict) else None
+
+        number = None
+        for key in ("pull_request", "issue"):
+            item = self.payload.get(key)
+            if isinstance(item, dict) and isinstance(item.get("number"), int):
+                number = item["number"]
+                break
+
+        where = f"{name}#{number}" if name and number else name
+        described = f"{self.event_type}.{self.action}" if self.action else self.event_type
+        return f"{described} {where}" if where else described
+
 
 class DeliveryQueue(Protocol):
     """Where deliveries wait between arriving and being acted on."""
