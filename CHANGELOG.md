@@ -1074,3 +1074,27 @@ Both of these were found by filling a database with 200,000 deliveries and readi
 
 `shannon/main.py` had no test coverage at all before this, which is part of why three of these
 lived there. It has some now.
+
+### Fourteenth look
+
+Aimed rather than broad this time, on the grounds that thirteen passes have worked the original
+code over and the risk has moved to what the review itself keeps changing. The fan-out hit a
+session limit and returned nothing, so this is one finding, found by reading.
+
+- **The `/issue` service path had never been exercised.** `FakeGitHubClient` implemented two of
+  the three methods the `GitHubClient` Protocol declares, and the missing one was `get_issue`.
+  A Protocol is structural and unchecked at runtime, so nothing ever complained: the fake simply
+  could not drive the issue path, so no test was written that would have needed it, and
+  `get_issue`, `build_issue_sync` and `manual_issue_sync` appeared nowhere in ten thousand lines
+  of tests. `/pr` was covered throughout. Its twin had nothing.
+
+  The path turns out to work. That is worth saying plainly rather than dressing up: this was a
+  test gap and not a defect, and the fix is the tests that were missing, plus the method on the
+  fake that made them impossible to write. `HttpGitHubClient.get_issue` went from an entirely
+  unexecuted body to 96% covered, including the case that matters most, GitHub answering the
+  issues endpoint for a pull request, which must not be tracked as an issue.
+
+  Worth noting how it stayed hidden: a fake more capable than nothing but less capable than the
+  real thing does not fail, it silently narrows what anyone can test. The eighth look found the
+  same shape in the thread gateway fake, where a comment described behaviour the fake did not
+  have. This is the second time.
