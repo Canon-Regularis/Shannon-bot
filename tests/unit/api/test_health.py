@@ -7,15 +7,19 @@ from shannon.config import Settings
 
 
 class FakeLiveness:
-    def __init__(self, *, database: bool = True, worker: bool = True) -> None:
+    def __init__(self, *, database: bool = True, worker: bool = True, bot: bool = True) -> None:
         self.database = database
         self.worker = worker
+        self.bot = bot
 
     async def database_reachable(self) -> bool:
         return self.database
 
     def worker_running(self) -> bool:
         return self.worker
+
+    def bot_connected(self) -> bool:
+        return self.bot
 
 
 def client_with(liveness: object | None) -> AsyncClient:
@@ -29,7 +33,7 @@ async def test_a_working_process_reports_healthy() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"healthy": True, "database": True, "worker": True}
+    assert response.json() == {"healthy": True, "database": True, "worker": True, "bot": True}
 
 
 async def test_a_dead_worker_makes_the_process_unhealthy() -> None:
@@ -55,3 +59,16 @@ async def test_with_nothing_wired_in_it_only_claims_to_be_listening() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
+
+
+async def test_a_dead_gateway_makes_the_process_unhealthy() -> None:
+    """The worker only waits for the bot once, so a gateway that dies later leaves it leasing.
+
+    Reporting only the worker would call that healthy while every Discord call fails.
+    """
+    async with client_with(FakeLiveness(bot=False)) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["bot"] is False
+    assert response.json()["worker"] is True

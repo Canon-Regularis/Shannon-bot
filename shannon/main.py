@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 
 import uvicorn
@@ -67,21 +68,39 @@ def _report_exit(what: str):
     return report
 
 
+async def _safely(what: str, closing: Awaitable[None]) -> None:
+    """Run one shutdown step, reporting a failure rather than raising it.
+
+    One step failing must not take the rest with it. What goes unclosed is a database pool, an
+    HTTP client and a gateway connection, and a process that cannot shut down cleanly is one an
+    orchestrator ends up killing instead.
+    """
+    try:
+        await closing
+    except Exception as error:
+        logger.error("could not %s while shutting down: %s", what, error)
+
+
 async def _stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
-    """Wait `grace` seconds for a task to finish on its own, then cancel it."""
+    """Wait `grace` seconds for a task to finish on its own, then cancel it.
+
+    This watches the task rather than awaiting its result. A task that has already died takes
+    its exception with it, and adopting that here would raise out of the shutdown path: this is
+    the first thing the lifespan does when closing, so everything after it, the Discord client
+    and the engine and the HTTP client, would never be closed at all. The exception has already
+    been reported by the done callback.
+    """
     if task is None:
         return
 
     if grace > 0:
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+        await asyncio.wait({task}, timeout=grace)
         if task.done():
             return
         logger.warning("a background task did not stop within %ss, cancelling it", grace)
 
     task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    await asyncio.wait({task})
 
 
 @dataclass(slots=True)
@@ -90,22 +109,48 @@ class ProcessLiveness:
 
     engine: AsyncEngine
     worker_task: asyncio.Task | None = None
+    # None when no token was configured, which is the deliberate no-bot mode rather than a
+    # failure. Anything else and a finished task means the gateway has gone.
+    bot_task: asyncio.Task | None = None
+    # A probe is reused for this long. The route is open to anyone who can reach the port, and
+    # a connection per request would let a flood exhaust the pool the worker runs on, which is
+    # the very thing this endpoint exists to notice.
+    probe_every: float = 5.0
+    _probed_at: float = 0.0
+    _reachable: bool = False
 
     async def database_reachable(self) -> bool:
+        now = time.monotonic()
+        if self._probed_at and now - self._probed_at < self.probe_every:
+            return self._reachable
+
+        self._probed_at = now
         try:
             async with self.engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
         except Exception as error:
             logger.warning("the database is not reachable: %s", error)
-            return False
-        return True
+            self._reachable = False
+        else:
+            self._reachable = True
+        return self._reachable
 
     def worker_running(self) -> bool:
         return self.worker_task is not None and not self.worker_task.done()
 
+    def bot_connected(self) -> bool:
+        """Whether the gateway is still there, if this deployment has one at all.
+
+        The worker only waits for the bot once, before its first batch, so a gateway that dies
+        after connecting leaves the worker running and leasing while every Discord call fails.
+        Reporting only the worker would call that healthy, which is exactly the case this
+        endpoint was added for.
+        """
+        return self.bot_task is None or not self.bot_task.done()
+
 
 async def _require_a_working_database(engine: AsyncEngine) -> None:
-    """Prove the database is there and migrated before the port opens.
+    """Prove the database answers and has been migrated before the port opens.
 
     Building an engine connects to nothing, so without this a wrong password or a database that
     has never been migrated still reaches "startup complete" and passes a health check, while
@@ -113,6 +158,10 @@ async def _require_a_working_database(engine: AsyncEngine) -> None:
     something an operator can act on.
     """
     async with engine.connect() as connection:
+        # Reading alembic_version proves the database answers and that migrations have been
+        # applied at least once. It does not prove they are at head; doing that would mean
+        # loading the Alembic environment into the running app, which is not worth it for a
+        # check whose job is to catch a wrong URL or a database nobody has migrated at all.
         await connection.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
 
 
@@ -179,6 +228,7 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
         # would go on answering 200 to deliveries nothing will act on. /health is what makes
         # that visible from outside.
         liveness.worker_task = worker_task
+        liveness.bot_task = bot_task
 
         try:
             yield
@@ -187,11 +237,14 @@ def _lifespan(bot: ShannonBot, container: Container, settings: Settings):
             # rest of its batch goes back on the queue instead of sitting locked for the whole
             # lease while the replacement process polls an empty one.
             container.worker.stop()
-            await _stop(worker_task, grace=settings.worker_shutdown_grace_seconds)
+            await _safely(
+                "stop the worker",
+                _stop(worker_task, grace=settings.worker_shutdown_grace_seconds),
+            )
             if bot_task is not None:
-                await bot.close()
-                await _stop(bot_task)
-            await container.aclose()
+                await _safely("close the Discord client", bot.close())
+                await _safely("stop the bot", _stop(bot_task))
+            await _safely("close the container", container.aclose())
 
     return lifespan
 

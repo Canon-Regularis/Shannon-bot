@@ -18,11 +18,14 @@ class Liveness(Protocol):
 
     def worker_running(self) -> bool: ...
 
+    def bot_connected(self) -> bool: ...
+
 
 class HealthResponse(BaseModel):
     healthy: bool
     database: bool
     worker: bool
+    bot: bool
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -39,14 +42,15 @@ async def health(request: Request, response: Response) -> HealthResponse:
     if liveness is None:
         # Nothing was wired in, which is how the route-level tests run. Listening is all that
         # can honestly be claimed.
-        return HealthResponse(healthy=True, database=True, worker=True)
+        return HealthResponse(healthy=True, database=True, worker=True, bot=True)
 
     database = await liveness.database_reachable()
     worker = liveness.worker_running()
-    healthy = database and worker
+    bot = liveness.bot_connected()
+    healthy = database and worker and bot
 
     if not healthy:
-        logger.warning("reporting unhealthy: database=%s worker=%s", database, worker)
+        logger.warning("reporting unhealthy: database=%s worker=%s bot=%s", database, worker, bot)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
-    return HealthResponse(healthy=healthy, database=database, worker=worker)
+    return HealthResponse(healthy=healthy, database=database, worker=worker, bot=bot)
