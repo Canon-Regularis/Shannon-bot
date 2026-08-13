@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -77,3 +79,27 @@ async def test_a_conflict_in_another_guild_is_not_touched(
     await service.link(guild_id=1, github_username="bob", discord_user_id=100)
 
     assert await db_session.scalar(select(func.count()).select_from(UserLink)) == 2
+
+
+async def test_two_links_landing_together_do_not_raise_at_whoever_lost(
+    service: UserLinkingService, db_session: AsyncSession
+) -> None:
+    """A double-submitted /link, or two people claiming one name at once.
+
+    Both halves of a link are unique within a guild, so the store clears out anything holding
+    either half and writes the pairing fresh. Overlapping, both find nothing to clear and both
+    insert, and the loser used to come back to the person who ran it as a raw database error
+    even though the link it asked for was sitting there committed.
+    """
+    results = await asyncio.gather(
+        *(
+            service.link(guild_id=1, github_username="octocat", discord_user_id=who)
+            for who in (500, 600, 700)
+        ),
+        return_exceptions=True,
+    )
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert failures == [], f"a concurrent /link raised: {failures}"
+    # One name, one holder: whoever committed last, which is what taking over a name means.
+    assert await db_session.scalar(select(func.count()).select_from(UserLink)) == 1
