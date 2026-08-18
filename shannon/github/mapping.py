@@ -4,12 +4,15 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
+from shannon.domain.enums import ObjectType
 from shannon.domain.models import (
     Actor,
+    CommentSnapshot,
     IssueSnapshot,
     Label,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewSnapshot,
 )
 from shannon.domain.time import as_utc
 
@@ -181,4 +184,63 @@ def _shared_fields(
         "labels": labels(payload.get("labels")),
         "updated_at": parse_timestamp(payload.get("updated_at")),
         "action": action,
+    }
+
+
+def comment(
+    payload: Any, repo: RepositorySnapshot, *, item_number: int, on: Any
+) -> CommentSnapshot | None:
+    """Build a snapshot from a comment object.
+
+    `on` is the issue the comment was left under, needed only to tell which kind of item it is:
+    GitHub serves pull request comments from the issues endpoint and marks them with one key.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+
+    comment_id = payload.get("id")
+    if not isinstance(comment_id, int):
+        return None
+
+    return CommentSnapshot(
+        repository=repo,
+        item_number=item_number,
+        comment_id=comment_id,
+        **_note_fields(payload, created="created_at"),
+        object_type=ObjectType.PR if is_pull_request(on) else ObjectType.ISSUE,
+    )
+
+
+def review(payload: Any, repo: RepositorySnapshot, *, item_number: int) -> ReviewSnapshot | None:
+    """Build a snapshot from a submitted review."""
+    if not isinstance(payload, Mapping):
+        return None
+
+    review_id = payload.get("id")
+    if not isinstance(review_id, int):
+        return None
+
+    state = payload.get("state")
+    return ReviewSnapshot(
+        repository=repo,
+        item_number=item_number,
+        review_id=review_id,
+        state=state if isinstance(state, str) else "",
+        **_note_fields(payload, created="submitted_at"),
+    )
+
+
+def _note_fields(payload: Payload, *, created: str) -> dict[str, Any]:
+    """What a comment and a review carry alike.
+
+    They differ only in which key holds the time they were written, which is why that is a
+    parameter and the rest is not.
+    """
+    html_url = payload.get("html_url")
+    body = payload.get("body")
+    return {
+        "html_url": html_url if isinstance(html_url, str) else "",
+        "body": body if isinstance(body, str) else "",
+        "author": actor(payload.get("user")),
+        "created_at": parse_timestamp(payload.get(created)),
     }

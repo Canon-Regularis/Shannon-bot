@@ -4,7 +4,6 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from shannon.domain.enums import ObjectType
 from shannon.domain.models import CommentSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import COMMENT_ACTIONS
@@ -32,25 +31,7 @@ def parse_comment_event(action: str, payload: Mapping[str, Any]) -> CommentSnaps
         logger.warning("issue_comment.%s arrived without an item number", action)
         return None
 
-    comment = payload.get("comment")
-    if not isinstance(comment, Mapping):
-        logger.warning("issue_comment.%s arrived without a comment", action)
-        return None
-
-    comment_id = comment.get("id")
-    if not isinstance(comment_id, int):
-        return None
-
-    html_url = comment.get("html_url")
-    body = comment.get("body")
-    return CommentSnapshot(
-        repository=repository,
-        item_number=number,
-        comment_id=comment_id,
-        html_url=html_url if isinstance(html_url, str) else "",
-        body=body if isinstance(body, str) else "",
-        author=mapping.actor(comment.get("user")),
-        created_at=mapping.parse_timestamp(comment.get("created_at")),
-        # The `pull_request` key is how GitHub distinguishes the two here.
-        object_type=ObjectType.PR if mapping.is_pull_request(item) else ObjectType.ISSUE,
-    )
+    snapshot = mapping.comment(payload.get("comment"), repository, item_number=number, on=item)
+    if snapshot is None:
+        logger.warning("issue_comment.%s arrived without a usable comment", action)
+    return snapshot

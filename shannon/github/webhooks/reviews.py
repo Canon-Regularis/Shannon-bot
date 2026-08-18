@@ -31,25 +31,7 @@ def parse_review_event(action: str, payload: Mapping[str, Any]) -> ReviewSnapsho
         logger.warning("pull_request_review.%s arrived without a pull request number", action)
         return None
 
-    review = payload.get("review")
-    if not isinstance(review, Mapping):
-        logger.warning("pull_request_review.%s arrived without a review", action)
-        return None
-
-    review_id = review.get("id")
-    if not isinstance(review_id, int):
-        return None
-
-    html_url = review.get("html_url")
-    body = review.get("body")
-    state = review.get("state")
-    return ReviewSnapshot(
-        repository=repository,
-        item_number=number,
-        review_id=review_id,
-        html_url=html_url if isinstance(html_url, str) else "",
-        body=body if isinstance(body, str) else "",
-        state=state if isinstance(state, str) else "",
-        author=mapping.actor(review.get("user")),
-        created_at=mapping.parse_timestamp(review.get("submitted_at")),
-    )
+    snapshot = mapping.review(payload.get("review"), repository, item_number=number)
+    if snapshot is None:
+        logger.warning("pull_request_review.%s arrived without a usable review", action)
+    return snapshot
