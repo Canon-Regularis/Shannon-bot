@@ -17,6 +17,12 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.commands.link import LinksAccounts
+from shannon.commands.register import RegistersRepositories
+from shannon.commands.set_channel import MapsChannels
+from shannon.commands.sync_link import SyncsByLink
+from shannon.container import Container
+from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
     LocksThread,
@@ -26,12 +32,17 @@ from shannon.discord_bot.threads import (
 )
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.github.webhooks.events import EventRouter
+from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
 from shannon.runtime.liveness import ProcessLiveness
+from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
     DeliveryQueue,
     WebhookDeliveryQueue,
 )
+from shannon.services.delivery.worker import DeliveryWorker
+from shannon.services.linking import UserLinkingService
+from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -39,6 +50,7 @@ from shannon.services.sync.items import (
     SyncsItems,
     ThreadBinding,
 )
+from shannon.services.sync.manual import ManualSync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
 from shannon.services.sync.threads import ItemThreads
@@ -67,18 +79,52 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ThreadBinding, ItemThreads),
     (SyncsItems, ItemSyncService),
     (EventIntake, EventRouter),
+    (Gateway, ShannonBot),
+    (ProcessParts, Container),
+    (RunsDeliveries, DeliveryWorker),
+    (LinksAccounts, UserLinkingService),
+    (RegistersRepositories, RepositoryRegistrationService),
+    (MapsChannels, ChannelMappingService),
+    (SyncsByLink, ManualSync),
 ]
 
 
-def parameters_of(member: Any) -> list[str] | None:
-    """Parameter names, or None for anything that is not a plain function.
+def parameters_of(member: Any) -> inspect.Signature | None:
+    """The signature, or None for anything that is not a plain function.
 
-    Properties and attributes have no signature to compare, and asking for one raises rather
+    Properties and attributes have nothing to compare, and asking for a signature raises rather
     than returning something empty, so they are checked for presence only.
     """
     if not inspect.isfunction(member):
         return None
-    return [name for name in inspect.signature(member).parameters if name != "self"]
+    return inspect.signature(member)
+
+
+def accepts_everything_promised(promised: inspect.Signature, real: inspect.Signature) -> str | None:
+    """Whether a call written against `promised` is one `real` will accept.
+
+    Not equality. An implementation may take more than the protocol declares as long as the
+    extra arguments have defaults, which is how `discord.Client.start(token, *, reconnect=True)`
+    satisfies a protocol that only ever passes a token. What it may not do is rename a parameter
+    the protocol names, or require one the protocol does not know to pass.
+    """
+    wanted = [n for n in promised.parameters if n != "self"]
+    have = {n: p for n, p in real.parameters.items() if n != "self"}
+
+    missing = [n for n in wanted if n not in have]
+    if missing:
+        return f"does not accept {missing}"
+
+    required = [
+        n
+        for n, p in have.items()
+        if n not in wanted
+        and p.default is inspect.Parameter.empty
+        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    if required:
+        return f"demands {required}, which no caller of the protocol knows to pass"
+    return None
 
 
 def describe(protocol: type[Any], implementation: type[Any]) -> str:
@@ -104,12 +150,14 @@ class TestNothingIsNarrowerThanWhatItReplaces:
     ) -> None:
         differences = []
         for name in sorted(protocol.__protocol_attrs__):
-            expected = parameters_of(getattr(protocol, name, None))
-            actual = parameters_of(getattr(implementation, name, None))
+            promised = parameters_of(getattr(protocol, name, None))
+            real = parameters_of(getattr(implementation, name, None))
             # None on either side means there is nothing to compare: a property, an attribute, or
             # a member the presence test above already reports on.
-            if expected is None or actual is None or expected == actual:
+            if promised is None or real is None:
                 continue
-            differences.append(f"{name}: expected {expected}, got {actual}")
+            complaint = accepts_everything_promised(promised, real)
+            if complaint:
+                differences.append(f"{name}: {complaint}")
 
         assert not differences, f"{describe(protocol, implementation)} differs: {differences}"

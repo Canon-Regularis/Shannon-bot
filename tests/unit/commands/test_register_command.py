@@ -44,7 +44,7 @@ class StubRegistration:
 
 
 def command(service: StubRegistration):
-    return build_register_command(service, PermissionGate(Settings()))  # type: ignore[arg-type]
+    return build_register_command(service, PermissionGate(Settings()))
 
 
 def project_manager() -> FakeMember:

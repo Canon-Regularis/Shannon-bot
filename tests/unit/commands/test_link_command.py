@@ -33,7 +33,7 @@ class StubLinking:
 
 
 def command(service: StubLinking):
-    return build_link_command(service, PermissionGate(Settings()))  # type: ignore[arg-type]
+    return build_link_command(service, PermissionGate(Settings()))
 
 
 async def test_anyone_can_link_their_own_account() -> None:

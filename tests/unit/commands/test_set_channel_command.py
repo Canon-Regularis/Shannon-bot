@@ -43,7 +43,7 @@ class StubChannels:
 
 
 def command(service: StubChannels):
-    return build_set_channel_command(service, PermissionGate(Settings()))  # type: ignore[arg-type]
+    return build_set_channel_command(service, PermissionGate(Settings()))
 
 
 def choice(value: str) -> app_commands.Choice[str]:

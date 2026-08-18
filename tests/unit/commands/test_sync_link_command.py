@@ -54,7 +54,7 @@ class StubManualSync:
 
 
 def command(service: StubManualSync, build=build_pr_command):
-    return build(service, PermissionGate(Settings()))  # type: ignore[arg-type]
+    return build(service, PermissionGate(Settings()))
 
 
 def member_with(role: str) -> FakeMember:
