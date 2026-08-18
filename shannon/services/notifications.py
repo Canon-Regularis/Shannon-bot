@@ -64,18 +64,14 @@ class ActorNotifier:
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))
         except BaseException:
-            # Nothing was said, so the ping is owed again. Being pinged late is a great deal
-            # better than being pinged twice or not at all.
+            # Nothing was said, so the ping is owed again; late beats twice or never.
             #
-            # Cancellation counts as a failure here and is the reason this catches everything
-            # rather than Exception. The worker puts a deadline on each delivery and cancels
-            # the handler where it stands, and where it stands is often exactly here, because
-            # discord.py sleeps through a rate limit rather than failing.
-            #
-            # Shielded, so that same cancellation cannot interrupt the hand-back. One
-            # consequence worth knowing: when this path is reached by cancellation the await
-            # returns at once and the hand-back lands a moment later, on its own. The delivery
-            # is not retried for another five seconds at the soonest, so it is back in time.
+            # BaseException because cancellation counts as a failure here: the worker puts a
+            # deadline on each delivery and cancels the handler where it stands, and discord.py
+            # sleeps through a rate limit rather than failing, so where it stands is often
+            # exactly here. Shielded so that cancellation cannot interrupt the hand-back itself.
+            # Under cancellation the await returns at once and the release lands a moment later,
+            # well before the retry five seconds on.
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._release(tracked_item_id, logins))
             raise

@@ -64,11 +64,9 @@ class WebhookEventStore:
     async def _revive(self, delivery_id: str, payload: dict[str, Any]) -> bool:
         """Put a delivery that was given up on back on the queue, reporting whether it moved.
 
-        GitHub's Redeliver button sends the same delivery id, so a delivery this bot has already
-        marked FAILED comes back as a duplicate and is answered without anything happening. That
-        button is the obvious thing to press when somebody has fixed whatever broke, and the only
-        alternative was hand-written SQL. A delivery in any other state is left alone: a repeat
-        of one already processed is still a duplicate.
+        GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery just
+        reads as a duplicate and nothing happens. Any other state is left alone: a repeat of one
+        already processed is still a duplicate.
         """
         result = await self._session.execute(
             update(WebhookEvent)

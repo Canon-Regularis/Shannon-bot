@@ -76,27 +76,16 @@ class ItemThreads:
         return ThreadWrite(handle, created=False)
 
     async def _open(self, target: ThreadTarget, *, name: str, content: str) -> ThreadHandle:
-        """Open a thread and attach it, replacing whatever the item pointed at before.
+        """Open a thread and attach it, out of reach of the caller's cancellation.
 
-        Creating and claiming are shielded together. The worker puts a deadline on each delivery,
-        and a deadline that expired between these two would leave a thread in Discord that no row
-        mentions, which the retry has no way to find and so opens another beside.
+        The worker deadlines every delivery and shutdown cancels outright, and either can land
+        between Discord creating the thread and the row being told about it. Nothing reconciles
+        orphans, so the retry opens a second thread beside the first.
 
-        Running it as its own task is what keeps it out of reach of the caller's cancellation.
-        That much a shield also did, and a shield was what used to be here, but keeping the work
-        alive was only half of it: the caller's await raises at once either way, and everything
-        above walked away. The worker task ended, shutdown read that as the worker having
-        stopped, and the engine was disposed and the loop closed with the claim unfinished, so
-        the thread reached Discord and no row ever mentioned it. The missing half is waiting,
-        which is what the cancellation path below does before passing the cancellation on.
-
-        Waiting on the task rather than shielding it, because the two protect equally and this
-        one leaves a failure readable. A shielded future whose caller has been cancelled has its
-        exception reported by asyncio itself, in its own words, at the moment the log is the only
-        thing anybody has; done this way the failure is ours to report, and it is reported below.
-
-        Bounded, because shutdown cannot hang on a gateway that has stopped answering. Running
-        out is the old behaviour and no worse than it.
+        Running it as its own task keeps it alive. Waiting for it on the way out is the other
+        half, since the caller's await raises immediately. A shield does the same job but lets
+        asyncio report the failure in its own words, and the shutdown log is all anybody gets.
+        The wait is bounded so a gateway that has stopped answering cannot hold the process open.
         """
         claiming = asyncio.ensure_future(self._create_and_claim(target, name=name, content=content))
         try:
@@ -138,19 +127,13 @@ class ItemThreads:
     ) -> ThreadHandle:
         """Claim the thread, and remove it again if the claim could not be written down.
 
-        A claim that never committed leaves a thread in Discord that no row mentions, and
-        nothing anywhere reconciles those: `discord_thread_id` is only ever read off a row found
-        some other way, so an id that never reached a row cannot be reached by anything. The
-        retry finds no thread, opens a second one, and the first stays in the channel taking no
-        comment, review or ping for the rest of its life.
+        Taking it back is safe because of which half failed. Discord answered or there would be
+        no thread, so the database is the part that is down and the call undoing the thread still
+        works. Nothing is claimed at this point either: the swap commits and returns, or matches
+        nothing and commits nothing.
 
-        Taking it back is both possible and right, because of which half failed. Discord answered
-        or there would be no thread; it is the database that did not, so the call that undoes it
-        is the one still working. Nothing is claimed at the point this can fire either: the swap
-        either commits and returns, or matches nothing and commits nothing.
-
-        Best effort, and quiet about it. The delivery is going to be retried on the original
-        error, which is the one worth reporting.
+        Best effort. The delivery is retried on the original error, which is the one worth
+        reporting.
         """
         try:
             return await self._claim(target, thread_id, message_id)

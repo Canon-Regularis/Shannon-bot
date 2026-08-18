@@ -9,9 +9,9 @@ class ShannonError(Exception):
 class PermanentError(ShannonError):
     """Something a retry cannot fix.
 
-    The delivery worker retries a failed handler ten times over roughly two hours, which is the
-    right answer for Discord being briefly unreachable and the wrong one for a missing
-    permission. Anything raised as this is recorded and dropped on the first attempt.
+    The worker retries a failed handler for roughly two hours, which suits Discord being briefly
+    unreachable and does nothing for a missing permission. Anything raised as this is recorded
+    and dropped on the first attempt.
     """
 
 

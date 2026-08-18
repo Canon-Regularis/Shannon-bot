@@ -1,15 +1,10 @@
 """A review request that has been answered stays answered, however late a delivery arrives.
 
-GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
-`pull_request` event saying so, so the ledger follows the review and closes the request. It used
-to do that by deleting the row, which the queue then undid: a `pull_request` delivery whose
-Discord step failed is retried with the payload it was captured with, that payload still lists
-the reviewer, and with the row gone the retry put the request back.
-
-Two things came of that, and the second is the worse one. The thread got `Review requested from
-monalisa.` posted directly under `**monalisa** approved this pull request`. And the row came back
-with `notified_at` set, which is the exact state the ledger exists to prevent, so the next genuine
-re-request found it already there and told nobody for the life of the pull request.
+GitHub drops a reviewer from `requested_reviewers` the moment they submit and sends no
+`pull_request` event saying so, so the ledger closes the request rather than deleting the row.
+Deleting is not safe: a retried `pull_request` delivery still lists the reviewer in its captured
+payload, and would put the row back with `notified_at` already set, which silences every genuine
+re-request for the life of the pull request.
 """
 
 from __future__ import annotations

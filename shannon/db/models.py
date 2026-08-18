@@ -119,10 +119,9 @@ class TrackedItem(TimestampMixin, Base):
     )
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
-    # Nothing reads this: assignments are always fetched through ItemAssignmentStore, which
-    # asks for one role at a time. It was eager loading on every single fetch of a tracked
-    # item, which is the hottest path there is. `raise` keeps the mapping for the cascade
-    # while making any accidental use an error rather than a quiet extra query.
+    # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a
+    # time. `raise` keeps the mapping for the cascade while turning any accidental use into an
+    # error instead of a quiet extra query on the hottest path there is.
     assignments: Mapped[list[ItemAssignment]] = relationship(
         back_populates="tracked_item",
         cascade="all, delete-orphan",
@@ -164,13 +163,11 @@ class MirroredNote(TimestampMixin, Base):
     """A comment or review already posted into an item's thread.
 
     The queue is at-least-once on purpose: a delivery whose status could not be written stays
-    leased, comes back when the lease runs out, and is handled again. Every other handler
-    survives that, because syncing an item upserts, swaps the thread pointer from the id it
-    read, and claims a ping before sending it. Mirroring a note had nothing of the sort and
-    simply posted it a second time.
+    leased and is handled again once the lease expires. Every other handler is idempotent under
+    that on its own; posting a note is not, so this table carries the idempotency for it.
 
-    Claimed before the post rather than recorded after it, for the same reason the ping claim
-    is: recording afterwards leaves the same gap one step further along.
+    The claim goes in before the post, never after. Recording afterwards moves the gap one step
+    along instead of closing it.
     """
 
     __tablename__ = "mirrored_notes"
@@ -221,11 +218,10 @@ class WebhookEvent(Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
 
-    # Nullable so the migration applies to a live table with nothing to backfill. Rows written
-    # before this existed have no body, and the lease requires one, so they are never picked up.
-    # none_as_null, or SQLAlchemy would store Python None as the JSON value `null`, which is a
-    # thing IS NOT NULL happily matches. The lease query leans on that check to skip rows that
-    # have no body to act on.
+    # Nullable so the migration applies to a live table with nothing to backfill; the lease
+    # requires a body, so rows written before this existed are never picked up. none_as_null is
+    # what makes that hold: without it SQLAlchemy stores Python None as the JSON value `null`,
+    # which IS NOT NULL happily matches.
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     attempts: Mapped[int] = mapped_column(nullable=False, server_default="0", default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,23 +1,16 @@
 """Remember which notes were mirrored
 
-The delivery queue is at-least-once by design. A delivery whose status could not be written
-stays leased, comes back when the lease expires, and is handled again from the top. Every other
-handler survives that: syncing an item upserts its row, swaps the thread pointer from the id it
-read rather than writing over whatever is there, and claims a ping before sending it.
+The delivery queue is at-least-once: a delivery whose status write fails stays leased, comes
+back when the lease expires, and is handled again from the top. Mirroring kept no record of
+having posted, so that replay put the same comment in the thread twice.
 
-Mirroring a comment or a review had none of that. It posted, and kept no record of having
-posted, so a status write that failed after a successful post put the same comment in the
-thread twice. Reproduced against a live database by failing the status write once and letting
-the lease run out.
-
-This is the record. It is claimed before the post and handed back if the post does not land,
-which is the same shape as `item_assignments.notified_at`, for the same reason: recording it
-afterwards would leave the identical gap one step further along.
+A row here is claimed before the post and handed back if the post does not land. Recording it
+after the post would leave the identical gap one step further along, which is why
+`item_assignments.notified_at` is claimed the same way.
 
 The key carries the kind because GitHub numbers comments and reviews separately and the two
-collide. Nothing is backfilled. An empty table means the first delivery of each existing note
-claims it, and every one of those has already been through the queue, so there is nothing left
-to post twice.
+collide. Nothing is backfilled: every existing note has already been through the queue, so an
+empty table cannot cause a repost.
 
 Revision ID: 0006
 Revises: 0005

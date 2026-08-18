@@ -121,16 +121,12 @@ class DeliveryWorker:
             try:
                 await self._handle(delivery)
             except asyncio.CancelledError:
-                # Cancelled outright, which is what happens when the grace period runs out
-                # before the delivery in hand finishes. The rest of the batch was never touched
-                # and there is no reason for it to wait out the lease as well.
-                #
-                # Best effort, and worth being plain about why: awaiting anything from inside a
-                # cancelled task returns at once, so this starts the hand-back and does not see
-                # it finish. It usually lands, because shutdown waits for this task and the loop
-                # is still running. If the loop stops first the rows simply wait out their
-                # lease, which is where they would have been anyway. The cooperative stop above
-                # is the path that does this properly, and the one taken almost every time.
+                # The grace period ran out mid-delivery. The rest of the batch was never touched,
+                # so hand it back instead of letting it sit out the lease. Best effort: awaiting
+                # from inside a cancelled task returns at once, so this starts the release
+                # without seeing it finish. It usually lands, since shutdown is still waiting on
+                # this task; if the loop closes first those rows wait out their lease, which is
+                # where they would have been anyway. The cooperative stop above is the usual path.
                 await asyncio.shield(self._queue.release(deliveries[index + 1 :]))
                 raise
         return len(deliveries)
@@ -179,11 +175,9 @@ class DeliveryWorker:
     async def _ready_or_stopped(self, wait_for_ready: ReadyCheck) -> bool:
         """Wait for Discord, and give up the moment a stop is asked for instead.
 
-        Waiting on the gateway alone means `stop` goes unnoticed until something cancels this,
-        and the only thing that does is the shutdown grace running out. So a process told to
-        stop before Discord ever answered sat out the full five seconds and was then killed,
-        every time. A gateway that is slow, refused, or misconfigured is exactly when a restart
-        is most likely, which is exactly when this was at its worst.
+        Waiting on the gateway alone leaves `stop` unnoticed until the shutdown grace runs out
+        and something cancels this, so a process asked to stop before Discord ever answered sits
+        out the whole grace period and is then killed.
 
         Returns whether Discord connected. An error from the wait is still raised: a bot that
         stopped before connecting is a real failure and the caller reports it.

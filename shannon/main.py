@@ -53,8 +53,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
 class _Shutdown:
     """Whether the process asked for what is about to happen.
 
-    A background task ending is either an emergency or a formality, and nothing about the task
-    itself says which. This is the only thing that does.
+    A background task ending is an emergency or a formality, and nothing about the task says
+    which.
     """
 
     asked: bool = False
@@ -63,15 +63,13 @@ class _Shutdown:
 def _report_exit(what: str, shutdown: _Shutdown):
     """Say why a background task stopped, when nobody asked it to.
 
-    Without this a task that dies takes its exception with it, and the endpoint carries on
-    answering while nothing behind it works.
+    A task that dies otherwise takes its exception with it while the endpoint carries on
+    answering.
 
-    Quiet once the stop has been asked for, because a clean shutdown ends these tasks the same
-    way a failure does: the worker's loop returns when it is told to, and the Discord client's
-    start returns when it is closed. Warning either way put "the delivery worker stopped without
-    an error" in the log on every normal shutdown, which is the one line meaning the process is
-    now useless, printed most often at the moment it means nothing at all. An error is still
-    reported whenever it happens, shutting down or not.
+    Quiet once a stop has been asked for, since a clean shutdown ends these tasks exactly as a
+    failure does: the worker's loop returns when told, and the Discord client's start returns
+    when closed. Warning either way meant the one line that says the process is now useless
+    appeared on every restart. Errors are still reported whichever way it is going.
     """
 
     def report(task: asyncio.Task) -> None:
@@ -89,9 +87,8 @@ def _report_exit(what: str, shutdown: _Shutdown):
 async def _safely(what: str, closing: Awaitable[None]) -> None:
     """Run one shutdown step, reporting a failure rather than raising it.
 
-    One step failing must not take the rest with it. What goes unclosed is a database pool, an
-    HTTP client and a gateway connection, and a process that cannot shut down cleanly is one an
-    orchestrator ends up killing instead.
+    One step failing must not take the rest with it: a database pool, an HTTP client and a
+    gateway connection all need closing.
     """
     try:
         await closing
@@ -102,11 +99,9 @@ async def _safely(what: str, closing: Awaitable[None]) -> None:
 async def _stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
     """Wait `grace` seconds for a task to finish on its own, then cancel it.
 
-    This watches the task rather than awaiting its result. A task that has already died takes
-    its exception with it, and adopting that here would raise out of the shutdown path: this is
-    the first thing the lifespan does when closing, so everything after it, the Discord client
-    and the engine and the HTTP client, would never be closed at all. The exception has already
-    been reported by the done callback.
+    Watches the task rather than awaiting its result. Awaiting adopts the exception of a task
+    that has already died, which would raise out of the first step of shutdown and leave
+    everything after it unclosed. The done callback has already reported it.
     """
     if task is None:
         return
@@ -127,21 +122,18 @@ class ProcessLiveness:
 
     engine: AsyncEngine
     worker_task: asyncio.Task | None = None
-    # None when no token was configured, which is the deliberate no-bot mode rather than a
-    # failure. Anything else and a finished task means the gateway has gone.
+    # None means no token was configured, which is the deliberate no-bot mode. Otherwise a
+    # finished task means the gateway has gone.
     bot_task: asyncio.Task | None = None
-    # A probe is reused for this long. The route is open to anyone who can reach the port, and
-    # a connection per request would let a flood exhaust the pool the worker runs on, which is
-    # the very thing this endpoint exists to notice.
+    # How long a probe is reused. The route is public, and a connection per request would let a
+    # flood exhaust the pool the worker runs on.
     probe_every: float = 5.0
-    # A database that has not answered in this long is not reachable in any sense the caller
-    # cares about. Without a bound, a host that accepts the connection and then goes quiet parks
-    # the probe for as long as the kernel allows, and every health check waits behind it.
+    # A host that accepts the connection and then goes quiet would otherwise park the probe for
+    # as long as the kernel allows, with every health check queued behind it.
     probe_timeout: float = 5.0
     _probed_at: float = 0.0
     _reachable: bool = False
-    # One probe at a time. Without this a burst of requests all miss the cache together and open
-    # a connection each, which is the pool exhaustion the cache is here to prevent.
+    # One probe at a time, or a burst all misses the cache together and opens a connection each.
     _probing: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def _answer_is_fresh(self) -> bool:
@@ -152,8 +144,7 @@ class ProcessLiveness:
             return self._reachable
 
         async with self._probing:
-            # Asked again holding the lock, because whoever held it before may have just answered
-            # the question this caller queued up to ask.
+            # Whoever held the lock may have just answered this.
             if self._answer_is_fresh():
                 return self._reachable
 
@@ -166,11 +157,9 @@ class ProcessLiveness:
             else:
                 self._reachable = True
 
-            # Stamped once there is an answer, never before. Stamping on the way in marks the
-            # result fresh while it is still being worked out, and every caller arriving in that
-            # window is handed `_reachable` before anything has set it. On the first probe that
-            # is its initial False, so two health checks landing together report a healthy
-            # process as down and an orchestrator restarts it for that.
+            # Stamped once there is an answer, never on the way in. Stamping first marks the
+            # result fresh while it is still being worked out, so callers arriving in that window
+            # read `_reachable` before anything has set it: on a first probe, its initial False.
             self._probed_at = time.monotonic()
             return self._reachable
 

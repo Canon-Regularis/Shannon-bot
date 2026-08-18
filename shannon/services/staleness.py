@@ -28,12 +28,8 @@ def is_stale(*, has_thread: bool, incoming: datetime | None, stored: datetime | 
     superseded it. Applying one of those would undo a rename, reopen a closed issue, or put
     back an assignee who had been removed.
 
-    Three cases deliberately are not stale:
-
-    - An item with no thread yet, because skipping there would mean it never gets one.
-    - Either timestamp missing, because there is then no evidence of staleness.
-    - Equal timestamps, because several changes inside one second share a timestamp and all of
-      them are real.
+    An item with no thread is never stale, however old the delivery, or it would never get one.
+    `is_superseded` covers what the timestamps alone do and do not prove.
 
     This assumes GitHub advances `updated_at` for every change worth mirroring. It does for
     titles, state, labels and assignees, which is everything the metadata block shows.

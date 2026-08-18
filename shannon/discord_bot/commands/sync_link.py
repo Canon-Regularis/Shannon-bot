@@ -23,11 +23,9 @@ async def run_sync_link(
     service: ManualSync,
     gate: PermissionGate,
 ) -> None:
-    """Everything /pr and /issue do. The two differ only in what they are called.
+    """Everything /pr and /issue do; the two differ only in what they are called.
 
-    Both commands were the same fifty-seven lines, so a fix to how a manual sync answers could
-    land on one kind of item and not the other. They keep their own parameter names, because
-    those are what somebody types in Discord.
+    Each keeps its own parameter name, because that is what somebody types in Discord.
     """
     if interaction.guild_id is None:
         await reply(interaction, "Run this inside a server channel.")

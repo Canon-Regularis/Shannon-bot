@@ -1,13 +1,12 @@
 """Losing a thread must not also lose what the item had become.
 
-An item with no thread is deliberately never treated as stale: skipping there would mean it
-never gets one. That bypass is only meant to say "build the thread anyway". It was also saying
-"and believe everything else this delivery tells you", so a payload captured before the item was
-last changed could put back an old title and swap the people for whoever was on it at the time.
+An item with no thread is never treated as stale, or it would never get one. That bypass means
+"build the thread anyway" and nothing more: an old payload must not put back a title that has
+since changed, nor swap the people for whoever was on it at the time.
 
-The thread pointer is cleared in more than one way, so this is not an exotic sequence: the note
-mirror lets go of a thread somebody deleted, and an item whose first thread creation failed never
-had one to begin with while its row was already committed.
+The pointer is cleared often enough for this to matter. The note mirror lets go of a thread
+somebody deleted, and an item whose first thread creation failed has a committed row and no
+thread.
 """
 
 from __future__ import annotations

@@ -547,7 +547,7 @@ handful.
   on its first run, from a single character. Any link the parser cannot read now comes back the
   same way.
 - The four webhook parsers are now checked against arbitrary generated JSON, several hundred
-  shapes each. They already held up, which is worth knowing rather than assuming: these read
+  shapes each. They already held up, checked rather than assumed: these read
   untrusted input off the network, and one that raises takes the request down with it.
 - Properties now cover the things that are easy to believe and hard to check by reading. Label
   order never changes the priority. Adding labels never lowers it. A snapshot is never stale
@@ -803,7 +803,7 @@ Naming the class in the `super()` call resolves it when the method runs rather t
 compiled, so it finds the class that exists. The whole suite now passes on 3.12 and 3.13 as well
 as 3.14, which is what the declared floor was always claiming.
 
-Worth saying how this was found: not by reading, but by running `uv sync --python 3.12` and the
+Found by running `uv sync --python 3.12` rather than by reading, and the
 suite against it, which is exactly what the CI job does and what nobody had watched it do.
 
 
@@ -1088,13 +1088,13 @@ session limit and returned nothing, so this is one finding, found by reading.
   `get_issue`, `build_issue_sync` and `manual_issue_sync` appeared nowhere in ten thousand lines
   of tests. `/pr` was covered throughout. Its twin had nothing.
 
-  The path turns out to work. That is worth saying plainly rather than dressing up: this was a
+  The path turns out to work. This was a
   test gap and not a defect, and the fix is the tests that were missing, plus the method on the
   fake that made them impossible to write. `HttpGitHubClient.get_issue` went from an entirely
   unexecuted body to 96% covered, including the case that matters most, GitHub answering the
   issues endpoint for a pull request, which must not be tracked as an issue.
 
-  Worth noting how it stayed hidden: a fake more capable than nothing but less capable than the
+  It stayed hidden because a fake more capable than nothing and less capable than the
   real thing does not fail, it silently narrows what anyone can test. The eighth look found the
   same shape in the thread gateway fake, where a comment described behaviour the fake did not
   have. This is the second time.
@@ -1129,7 +1129,7 @@ A different method, because the hunting was giving less each time: take the cove
 list every line of production code the suite never executes, and read each one to decide whether
 it is wrong or merely untested. Unlike a search, that list is finite and it ends.
 
-The answer, mostly, was untested. Which is worth recording as a result rather than glossed over:
+The answer, mostly, was untested:
 after fifteen passes the uncovered lines are almost all error and edge branches, and reading them
 found no new defect in any of them. What it did find is that the branches guarding the subtlest
 behaviour in the project had nothing watching them.
@@ -1169,7 +1169,7 @@ the job: making what is already here easier to work on.
   and a worker that has already died does not stop the Discord client, the engine and the HTTP
   client from being closed.
 
-  Writing them turned up one thing worth recording: a database that refuses the connection
+  Writing them turned up one thing: a database that refuses the connection
   surfaces as `OSError`, not as anything SQLAlchemy wraps. The lifespan catches broadly and
   reports, which is right, but it is the sort of assumption that is easy to get wrong when
   narrowing an except clause later.
@@ -1200,7 +1200,7 @@ out carefully for some paths and never asked of others.
   nothing else is syncing the same item, and three things regularly are: `/pr` runs on the bot's
   task while the worker is mid-delivery, GitHub sends several events at once for one item, and a
   second replica leases in parallel by design. The loser of the race took the whole sync down.
-  Worth saying why this survived a file named `test_concurrent_sync.py`: every test in it used an
+  It survived a file named `test_concurrent_sync.py` because every test in it used an
   item that did not exist yet, and a new item is serialised by the upsert in `get_or_create`, so
   the loser blocks until the winner commits and then sees the winner's rows. Nothing serialises
   an item that already exists, which is the case `/pr` is for. The insert settles its own
@@ -1250,7 +1250,7 @@ Same lens as the last pass, pointed at the paths it had not reached yet.
   has moved to `TrackedItemStore.raise_updated_at` where the rest of the item's SQL lives and
   where it can be tested on its own.
 
-  The first test written for this was worthless and worth saying so: six gathered syncs with
+  The first test written for this was worthless: six gathered syncs with
   descending timestamps, which passes on the broken code. Once the first one commits the
   staleness guard turns the other five away before they ever reach the write, so the interleaving
   that breaks it never happens. The test that replaced it holds two transactions open and commits
@@ -1362,7 +1362,7 @@ before it died, nothing had verified its findings, and both turned out to be rea
   the block could be made to read however the title's author liked. Anyone who can open an issue
   on the repository can write either. The escaping no longer makes an exception for links.
 
-  It is paid for and worth saying so: a URL with an underscore in it now comes out escaped and
+  It is paid for: a URL with an underscore in it now comes out escaped and
   stops being clickable inside a quoted body. That is the right way round. A quoted comment is a
   preview and a pointer rather than a copy, the real link sits at the bottom of the note where
   nothing escapes it, and the metadata block has a link field of its own.
@@ -1551,8 +1551,8 @@ nothing while passing.
 ### The queries, and a shield that said too much
 
 The schema and query lens was the one review pass that never ran, so it was done here by hand
-against a populated database rather than by reading. It found nothing, which is worth recording
-as plainly as a defect.
+against a populated database rather than by reading. It found nothing, recorded here as plainly
+as a defect would be.
 
 Every id that comes from Discord or GitHub is `bigint`; only the internal keys and the pull
 request number are 32-bit, which is what they should be. On 200,000 tracked items, 200,000
@@ -1572,7 +1572,7 @@ One thing found and fixed, in code written earlier the same day:
   nothing else; without it, the log says which item, that it was shutting down, and what went
   wrong, and the loop reports nothing at all.
 
-  Worth being straight about how this one went. The first attempt kept the shield and retrieved
+  How it went: the first attempt kept the shield and retrieved
   the inner exception, on the assumption that retrieving it was what stopped asyncio complaining.
   It was not, and the comment written to explain it was wrong; the message is keyed on the shield
   being cancelled, not on whether anybody read the result. Running it proved that, and the fix

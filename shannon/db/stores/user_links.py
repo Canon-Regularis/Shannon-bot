@@ -46,21 +46,15 @@ class UserLinkStore:
     async def link(self, *, guild_id: int, github_username: str, discord_user_id: int) -> UserLink:
         """Bind a GitHub login to a Discord account, replacing whatever either side had.
 
-        Both halves are unique within a guild, and they can be held by two different rows at
-        once. Editing one of those rows in place collides with the other, so anything holding
-        either half is cleared out first and the pairing written fresh.
+        Both halves are unique within a guild and can be held by two different rows at once, so
+        editing one in place collides with the other. Clear both, then insert.
 
-        That clearing and writing has to be one indivisible step, which is what the lock is for.
-        Two of these overlapping both find nothing to clear and both insert, and the loser hits
-        one of the two constraints. An upsert cannot settle it, because a row can conflict on
-        either half and `ON CONFLICT` takes one constraint. Retrying cannot settle it either:
-        that was tried, and it fails whenever the retries collide with each other rather than
-        with the original winner, which a third caller makes likely and a slow machine makes
-        ordinary. It was caught by a test that failed roughly one run in four.
-
-        The lock is held to the end of the transaction and taken per guild, so linking in one
-        server never waits on another. Nothing else in the schema uses advisory locks, so the
-        guild id can be the whole key.
+        The clear and the insert have to be one step. An upsert cannot make them one: a row can
+        conflict on either constraint and `ON CONFLICT` names a single one. Nor can a retry loop,
+        since the retries collide with each other and not only with the original winner. Hence
+        the advisory lock, held to the end of the transaction and keyed per guild so servers do
+        not wait on one another. Nothing else here takes advisory locks, so the guild id alone
+        is a safe key.
         """
         await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
 

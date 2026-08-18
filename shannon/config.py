@@ -67,11 +67,8 @@ class Settings(BaseSettings):
     def _lease_covers_a_whole_batch(self) -> Settings:
         """Refuse a lease shorter than the batch it has to cover.
 
-        The whole batch is leased at once and then worked one delivery at a time, so a lease
-        that lapses part way through hands rows that are still in flight to another replica,
-        and a comment gets posted twice. Three settings have to agree for that not to happen
-        and nothing made them, so raising the batch size quietly broke the invariant the
-        comments above describe.
+        A batch is leased all at once and worked one delivery at a time. If the lease lapses
+        mid-batch, another replica claims rows still in flight and the comment goes out twice.
         """
         needed = self.worker_batch_size * self.worker_delivery_timeout_seconds
         if self.worker_lease_seconds < needed:

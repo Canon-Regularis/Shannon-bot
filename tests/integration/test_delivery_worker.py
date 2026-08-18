@@ -414,12 +414,11 @@ class TestWaitingForDiscord:
     async def test_a_stop_while_still_waiting_is_obeyed_at_once(
         self, queue: WebhookDeliveryQueue
     ) -> None:
-        """Waiting on the gateway alone left `stop` unnoticed until something cancelled this.
+        """The readiness wait has to race `stop`.
 
-        The only thing that does is the shutdown grace running out, so a process told to stop
-        before Discord ever answered sat out the whole five seconds and was then killed. A
-        gateway that is slow, refused, or misconfigured is when a restart is most likely, which
-        is when this was at its worst.
+        Waiting on the gateway alone leaves nothing to end it but the shutdown grace running
+        out, so a process told to stop before Discord ever answers sits out the whole grace and
+        is then killed. A slow or misconfigured gateway is when a restart is likeliest.
         """
         worker = build_worker(queue, Exploding(failures=0), poll_interval=timedelta(seconds=0.01))
         never = asyncio.Event()

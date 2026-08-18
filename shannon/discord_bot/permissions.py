@@ -48,9 +48,7 @@ class PermissionGate:
     def allows(self, member: object, allowed: Collection[CommandRole]) -> bool:
         """Whether a member holds any of the tiers a command is open to.
 
-        Any, not all, and not the highest one: somebody carrying several roles keeps everything
-        each of them grants. A reviewer who is also a developer is a developer, so a command
-        open to developers is open to them.
+        Any, not all: several roles grant the union of what each one does.
         """
         held = self.roles_of(member)
         if CommandRole.ADMIN in held:

@@ -17,12 +17,9 @@ from shannon.services.manual_sync import SyncFailedError
 
 logger = logging.getLogger(__name__)
 
-# What the person who ran the command is told, by error type. Ordered most specific first,
-# because the first match wins and several of these share a base class.
-#
-# One table rather than a ladder in each command: five commands were each catching their own
-# subset, so an error a command had not thought of escaped after the interaction was already
-# deferred and the person saw the request simply fail with nothing said.
+# What the person who ran the command is told, by error type. Ordered most specific first: the
+# first match wins and several of these share a base class. One table for every command, so
+# nothing escapes after the interaction has been deferred and leaves the caller with silence.
 _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (UnparseableLinkError, "That link did not work. {message}"),
     (GitHubNotFoundError, "GitHub has no {noun} at that link."),

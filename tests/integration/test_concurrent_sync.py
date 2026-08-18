@@ -121,16 +121,13 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
     db_session: AsyncSession,
     pr_event,
 ) -> None:
-    """The item already exists, which is what makes this different from the tests above.
+    """Two syncs of an item that already exists, which nothing serialises.
 
     A new item is serialised by the upsert in `get_or_create`: the loser blocks on the
-    tracked_items row until the winner commits, and by the time it runs its own assignments the
-    winner's are already there to be seen. Nothing serialises an item that exists, so both
-    callers read no reviewer and both insert one, and the unique constraint takes the loser's
-    whole sync down with it.
-
-    That is not a rare shape. `/pr` exists to resync an item somebody thinks the bot missed, so
-    it gets run precisely when a delivery for that item is already in flight.
+    tracked_items row and sees the winner's assignments. An existing item has no such gate, so
+    both callers read no reviewer, both insert, and the unique constraint takes the loser's whole
+    sync down. `/pr` is run precisely when a delivery for that item is in flight, so this shape
+    is common.
     """
     service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
     await service.sync(pr_event("opened", requested_reviewers=[]))
@@ -176,16 +173,13 @@ async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
 ) -> None:
     """`github_updated_at` is what tells a late delivery from a current one.
 
-    Both syncs read the mark before either commits, which is the normal case rather than a rare
-    one: nothing serialises two syncs of an item that already exists. Whichever commits last
-    then writes a value it worked out from a read that is by then out of date, and if it is
-    carrying the older timestamp the mark moves backwards. The next genuinely late delivery
-    reads as current, and the lock step decides from this same field whether it has been
-    superseded.
+    Nothing serialises two syncs of an item that exists, so both read the mark before either
+    commits and whichever commits last writes from a read that is by then out of date. Carrying
+    the older timestamp, it drags the mark back down, and the next genuinely late delivery reads
+    as current. The lock step decides from this same field.
 
-    Interleaved on purpose rather than gathered and hoped for. Gathering them does not
-    reproduce it: once the first commits, the staleness guard turns the rest away before they
-    ever reach the write.
+    Interleaved by hand. Gathering them proves nothing: once the first commits, the staleness
+    guard turns the rest away before they reach the write.
     """
     service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
     await service.sync(pr_event("opened", updated_at="2026-08-10T12:00:00Z"))

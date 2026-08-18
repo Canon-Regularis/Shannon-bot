@@ -121,11 +121,7 @@ def _metadata(
     mentions: Mapping[str, int] | None,
     reviewers: Iterable[Actor] | None = None,
 ) -> str:
-    """The block both kinds of item share.
-
-    Only the noun and whether there is a reviewers line differ, so keeping one copy is what
-    stops the two drifting into slightly different shapes.
-    """
+    """The block both kinds of item share; only the noun and the reviewers line differ."""
     lines = [
         f"**{noun} Name:** {as_plain_text(snapshot.title) if snapshot.title else UNKNOWN}",
         f"**Type:** {noun}",
@@ -148,11 +144,7 @@ def _metadata(
 def _note(
     snapshot: CommentSnapshot | ReviewSnapshot, verb: str, mentions: Mapping[str, int] | None
 ) -> str:
-    """A comment or a review, posted under the metadata block.
-
-    The body is quoted rather than inlined so that GitHub markdown cannot restyle the thread,
-    and it is truncated because Discord messages are capped and a comment is not.
-    """
+    """A comment or a review, posted under the metadata block."""
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
     lines = [f"**{author}** {verb} {_timestamp(snapshot.created_at)}"]
@@ -191,41 +183,27 @@ _MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
 
 
 def defuse_mentions(text: str) -> str:
-    """Stop `<@1234>` resolving, leaving it reading as what was written.
+    """Stop `<@1234>` resolving; a zero-width space inside the brackets is enough.
 
-    A zero-width space inside the brackets is enough. Kept apart from the markdown escaping
-    because the two are needed in different places: text going into a code span wants this and
-    not that, since escaping there would put the backslashes on show.
-
-    Whether a mention inside a code span pings is a question about how Discord renders markdown,
-    and `allowed_mentions` is not a rendering question: it is the delivery gate, it is told to
-    honour user mentions, and it reads the content it is given. Relying on the span means
-    relying on the wrong layer, so nothing here does.
+    Separate from the markdown escaping because text going into a code span wants this and not
+    that, where backslashes would show. Do not assume the span suppresses the ping either:
+    `allowed_mentions` gates delivery off the raw content and honours user mentions.
     """
     return _MENTION.sub("<​\\1\\2>", text)
 
 
 def as_plain_text(text: str) -> str:
-    """Render GitHub-authored text as what it says, rather than as markup.
+    """Render GitHub-authored text so it displays as written.
 
-    Two separate reasons. Anyone who can comment on the repository can otherwise reach into the
-    thread: `<@1234>` in a comment body resolves to a real ping, because Discord is told to
-    honour user mentions and cannot tell the ones this bot built from the ones it is quoting.
-    And markup that arrives half-finished, or is cut in half by a preview limit, restyles
-    everything after it.
+    Anyone who can comment on the repository reaches into the thread otherwise: `<@1234>` in a
+    body resolves to a real ping, and markup that arrives half-finished, or is cut in two by the
+    preview limit, restyles everything after it.
 
-    `ignore_links=False` because the default is the opposite, and the default undoes the second
-    reason entirely. Left on, `escape_markdown` skips whatever its URL pattern matches, and that
-    pattern runs to the next space: a comment ending `https://example.com/``` ` keeps its fence,
-    opens a code block nobody closes, and swallows the rest of the message including the link
-    back to GitHub. A title ending `https://a.com/**` leaves an odd number of bold markers, and
-    bold runs past a newline, so every field below it trades its emphasis with the value beside
-    it and the block can be made to read however the author of the title likes.
-
-    It is paid for, in that a URL with an underscore comes out with the underscore escaped and
-    stops being clickable inside a quoted body. That is the right way round: this is a preview
-    and a pointer rather than a copy, `_note` puts the real GitHub link at the bottom where
-    nothing escapes it, and the metadata block has a link field of its own.
+    `ignore_links=False` overrides the default. Left on, `escape_markdown` skips whatever its URL
+    pattern matches, and that pattern runs to the next space, so a comment ending
+    `https://example.com/**` keeps its markers and takes the rest of the message with it. The
+    cost: an underscore in a URL comes out escaped and unclickable inside a quoted body, which
+    `_note` and the metadata block cover with a link of their own.
     """
     escaped = discord.utils.escape_markdown(discord.utils.escape_mentions(text), ignore_links=False)
     return defuse_mentions(escaped)

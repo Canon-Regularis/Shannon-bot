@@ -13,12 +13,9 @@ GITHUB_HOST = "github.com"
 _OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
-# Both match the pattern above and neither is a repository GitHub will ever create. They are
-# path segments with a meaning, and the name goes straight into the path of an API call made
-# with the bot's token: `/repos/{owner}/../pulls/{n}` is collapsed by the HTTP client before it
-# is sent, so the request that goes out is not the one the caller built. Refused here, at the
-# boundary where the rest of the link is already being checked, rather than left for whatever
-# the other end makes of it.
+# Both pass _REPO and neither is a name GitHub will issue. The name goes straight into an API
+# path signed with the bot's token, and the HTTP client collapses `/repos/{owner}/../pulls/{n}`
+# before sending, so the request on the wire is not the one built here.
 _NOT_REPOSITORIES = frozenset({".", ".."})
 
 _PULL_SEGMENT = "pull"

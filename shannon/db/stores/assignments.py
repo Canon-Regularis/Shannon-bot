@@ -38,20 +38,13 @@ class ItemAssignmentStore:
     ) -> None:
         """Make the stored assignments for one role match GitHub.
 
-        People no longer on the item are removed, so a reassigned pull request stops listing
-        whoever used to be on it. People already there keep their row, and with it the
-        `notified_at` that stops them being pinged twice.
+        People no longer on the item lose their row. People already there keep theirs, and with
+        it the `notified_at` that stops them being pinged twice.
 
-        The insert settles the conflict itself, because reading the existing rows and then
-        writing is only safe if nothing else is syncing the same item. Something else regularly
-        is: `/pr` runs on the bot's task while the worker is mid-delivery, GitHub sends several
-        events at once for a newly opened item, and a second replica leases in parallel by
-        design. All three have both callers find the row missing and both insert it, and the
-        loser of that race takes the whole sync down with a unique violation.
-
-        Doing nothing on conflict is the right resolution rather than a convenient one: the row
-        the other caller wrote is the row this one was about to write, and leaving theirs alone
-        keeps the `notified_at` they may already have claimed.
+        The insert settles its own conflict because two callers regularly sync one item at once:
+        `/pr` runs while the worker is mid-delivery, GitHub sends several events for a new item
+        together, and a second replica leases in parallel. Doing nothing on conflict keeps the
+        other caller's row and whatever `notified_at` they have already claimed.
         """
         wanted = {actor.login.lower() for actor in actors}
         existing = {row.github_username for row in await self.list_for(tracked_item_id, role)}
@@ -161,18 +154,11 @@ class ItemAssignmentStore:
     ) -> bool:
         """Record that the review this row asked for has been submitted.
 
-        GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
-        `pull_request` event saying so, so this used to delete the row and let a later
-        re-request insert a fresh one that would ping again.
-
-        Deleting it was too much. A `pull_request` delivery whose Discord step failed is retried
-        with the payload it was captured with, and that payload still lists the reviewer: with
-        the row gone, the retry put it back and pinged somebody to review what they had just
-        approved, and left `notified_at` set so the next genuine re-request told nobody at all.
-
-        Keeping the row and stamping it is what lets the two be told apart later. The stamp is
-        GitHub's time for the review rather than ours, because the thing it gets compared against
-        is a timestamp from a GitHub payload.
+        GitHub drops the reviewer from `requested_reviewers` on submit and sends no
+        `pull_request` event saying so. Do not delete the row instead: a retried delivery
+        replays a payload that still lists the reviewer, and would ping them to review what
+        they just approved. `reopen_if_newer` compares a later request against this stamp,
+        which is GitHub's clock, not ours.
         """
         result = await self._session.execute(
             update(ItemAssignment)

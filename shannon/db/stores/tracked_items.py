@@ -34,19 +34,14 @@ class TrackedItemStore:
     def raise_updated_at(self, item: TrackedItem, incoming: datetime) -> None:
         """Move the item's high-water mark up, and never down.
 
-        This is what tells a late delivery from a current one, so lowering it blinds the guard
-        to the next one as well, and the lock step reads the same field to decide whether it has
-        been superseded, which is the step whose mistakes do not right themselves.
+        Two syncs of one item overlap by design, so a comparison in Python decides against a
+        value already stale by commit time. GREATEST compares against the row as it stands at
+        write time. Nulls are ignored, covering an item that has never carried a timestamp.
 
-        GREATEST rather than a comparison in Python, because the value read at the top of a
-        transaction is not the value at the bottom of it. Two syncs of one item overlap by
-        design: both read the mark before either commits, and the one that commits last writes
-        whatever it worked out from a read that is by then out of date. Letting the database
-        compare against the row as it stands at write time is the only version of this that
-        holds. Nulls are ignored, which covers an item that has never carried a timestamp.
+        Lowering the mark blinds the staleness guard to the next delivery too, and the lock step
+        reads this same field to decide whether it has been superseded.
 
-        Staged rather than executed, so it goes out with the rest of the item's changes as one
-        statement rather than a second round trip.
+        Staged, not executed: it flushes with the item's other changes in one statement.
         """
         item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 

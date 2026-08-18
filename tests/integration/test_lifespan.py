@@ -73,11 +73,8 @@ class ClosingGitHub(FakeGitHubClient):
 def container_for(engine: AsyncEngine, worker: FakeWorker, github: ClosingGitHub) -> Container:
     """The real Container, with only the worker swapped.
 
-    Deliberately not a stand-in with the three attributes the lifespan happens to use today. A
-    fake narrower than the thing it replaces does not fail, it quietly stops the test covering
-    whatever gets added later, and this project has been caught by that twice already: a thread
-    gateway whose comment described behaviour it did not have, and a GitHub client missing the
-    one method that would have let anything drive /issue.
+    A hand-rolled stand-in holding the attributes the lifespan uses today would silently stop
+    covering whatever gets added tomorrow.
     """
     container = build_container(
         threads=FakeThreadGateway(),

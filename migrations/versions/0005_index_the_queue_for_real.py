@@ -1,18 +1,15 @@
 """Index the queue for the queries it actually runs
 
-Two measured plans, on a 200,000 row webhook_events:
+The lease predicate is `next_attempt_at IS NULL OR next_attempt_at <= now()`, which no b-tree
+can use, so (status, next_attempt_at) only ever contributed its leading column. That is
+selective enough on a near-empty queue. Once a few hundred deliveries are backing off, the
+planner prefers `ORDER BY id LIMIT 10` through the primary key and walks the table: 126 ms and
+24,637 buffers to return nothing, on 200,000 rows. Keep this index partial over the live rows;
+that is the only part of the predicate the planner can prove, and it stays a few kB whatever
+the table does.
 
-The lease runs every two seconds forever, and had no index it could use. The one meant to serve
-it, (status, next_attempt_at), can only ever contribute its first column, because the predicate
-says `next_attempt_at IS NULL OR next_attempt_at <= now()` and neither half is an index
-condition. While the queue is nearly empty `status` alone is selective enough and nothing looks
-wrong. Once a few hundred deliveries are backing off, the planner decides `ORDER BY id LIMIT 10`
-is cheaper through the primary key and walks the whole table: 126 ms and 24,637 buffers to
-return nothing, and it gets worse as the retention window fills. A partial index over the live
-rows is what the predicate can actually prove, and stays a few kB whatever the table does.
-
-The prune runs hourly and had nothing to go on either, so it read every row to find the handful
-past the retention window, and paid the same full scan in the hours it deletes nothing at all.
+The hourly prune had nothing to go on either and scanned every row, including in the hours it
+deletes nothing.
 
 Revision ID: 0005
 Revises: 0004

@@ -1,16 +1,11 @@
 """Every fake must offer everything the protocol it stands in for offers.
 
-There is no type checker in this project, and Protocols are structural, so nothing otherwise
-notices when a fake drifts narrower than the real thing. That is not a hypothetical: it has
-happened three times here. A thread gateway whose docstring described behaviour it did not
-have. A GitHub client with no `get_issue`, which meant nothing could drive `/issue` at all and
-the gap showed up as good coverage. A lifespan container with three of seventeen attributes.
+No type checker runs here and Protocols are structural, so a fake that drifts narrower than the
+real thing fails nothing. It removes a path from what the suite can reach, and the suite keeps
+reporting green over the hole.
 
-None of those failed a test. They quietly removed a path from what the suite could reach, which
-is worse than failing, because the suite kept reporting green over the hole.
-
-Signatures are compared as well as names. A fake that takes `thread` where the real one takes
-`thread_id` is a fake that will accept a call production would reject.
+Signatures are compared as well as names: a fake taking `thread` where the real one takes
+`thread_id` will accept a call production would reject.
 """
 
 from __future__ import annotations

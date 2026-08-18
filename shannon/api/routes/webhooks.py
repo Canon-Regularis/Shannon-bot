@@ -113,14 +113,9 @@ def _too_large() -> HTTPException:
 async def _read_within_limit(request: Request) -> bytes:
     """Read the body, giving up once it goes past what GitHub would ever send.
 
-    Counted as it arrives rather than trusted from Content-Length. Nothing obliges a client to
-    send that header, and a chunked request without one used to be read to the end whatever its
-    size: the check passed on a header that was not there, and the limit did nothing. Anyone who
-    can reach the port can do that, and they do not need the signing secret to, because the
-    signature covers the body and so cannot be checked until the body is in hand.
-
-    The declared size is still worth a look first. It costs nothing and refuses an oversized
-    delivery that is honest about itself without reading any of it.
+    The running count is the real limit; Content-Length is only a free early exit. Nothing
+    obliges a client to send that header, and the signature covers the body, so an anonymous
+    caller can stream a chunked request of any size before anything can be verified.
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:

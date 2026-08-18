@@ -51,15 +51,10 @@ class HttpGitHubClient:
             base_url=base_url,
             timeout=timeout,
             headers=_headers(token),
-            # A 301 from GitHub is a normal answer, not an outage. Renaming a repository or its
-            # owner makes every lookup of the old name a redirect, and so does moving an issue to
-            # another repository. httpx does not follow redirects unless told to, and an
-            # unfollowed one falls through to "GitHub could not be reached", so `/register` on the
-            # old link fails for good and `/pr` keeps failing until a webhook happens to arrive
-            # and correct the stored name.
-            #
-            # Safe on a request that carries a token: httpx drops the Authorization header when a
-            # redirect crosses to another origin, and keeps it when it does not.
+            # Renaming a repository or its owner turns every lookup of the old name into a 301,
+            # as does moving an issue between repositories. httpx does not follow redirects
+            # unless told to, and an unfollowed one surfaces as "GitHub could not be reached".
+            # Safe with a token: httpx drops Authorization on a cross-origin redirect.
             follow_redirects=True,
         )
 

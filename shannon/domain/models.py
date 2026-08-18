@@ -83,12 +83,7 @@ class ItemSnapshot:
 
     @property
     def priority(self) -> Priority:
-        """Priority as GitHub has it, which is a label.
-
-        The same rule for every kind of item. A pull request and an issue carrying the same
-        label meant different things before this, and the metadata block would show a pull
-        request as UNSET on the line directly above the label that set it.
-        """
+        """Priority as GitHub has it, which is a label. Same rule for every kind of item."""
         return parse_priority(self.label_names)
 
 
@@ -101,15 +96,11 @@ class PullRequestSnapshot(ItemSnapshot):
 
     @property
     def display_state(self) -> str:
-        """Open, closed, or merged.
+        """Open, closed, or merged. GitHub carries merging as a flag beside the state.
 
-        GitHub reports only open or closed and carries merging as a separate flag, so the
-        three-way answer is derived once here rather than in every caller.
-
-        `super()` is spelled out rather than left bare. A `slots=True` dataclass is rebuilt
-        into a new class by the decorator, and the bare form reads the class off a cell that
-        still points at the one it replaced, which raises on Python before 3.14. Naming the
-        class here resolves it at call time, so it finds the class that actually exists.
+        Do not shorten `super(PullRequestSnapshot, self)` to a bare `super()`: the `slots=True`
+        decorator rebuilds the class, and the bare form's closure cell still points at the one
+        it replaced, which raises on Python before 3.14.
         """
         if self.merged:
             return "merged"

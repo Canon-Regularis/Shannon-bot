@@ -132,10 +132,8 @@ class ItemNoteMirror:
     async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
         """Give a claim back, best effort.
 
-        Shielded so a cancellation arriving mid-flight cannot interrupt the hand-back itself,
-        and suppressed because a claim that cannot be released is not worth losing the original
-        failure over: the note stays unposted either way, and the original error is the one that
-        says why. This is the same shape as the ping hand-back, for the same reasons.
+        Shielded so a cancellation mid-flight cannot interrupt the hand-back. Suppressed because
+        the note stays unposted either way and the original error is the one that says why.
         """
         with contextlib.suppress(Exception):
             await asyncio.shield(self._release(tracked_item_id, note_key))

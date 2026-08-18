@@ -81,13 +81,9 @@ class Container:
     async def aclose(self) -> None:
         """Close what was opened.
 
-        The engine goes in a finally. An HTTP client that throws on the way out must not take
-        the database pool with it, which is the same trap the shutdown path fell into: one step
-        raising and every step after it silently skipped.
-
-        `aclose` is fetched rather than called outright because the protocol does not require
-        it. The real client holds a connection pool and has one, and a fake standing in for it
-        has nothing to close.
+        Engine disposal sits in the finally: an HTTP client that throws on the way out must not
+        take the database pool with it. `aclose` is looked up because GitHubClient does not
+        declare it, and fakes standing in for the real client have nothing to close.
         """
         closer = getattr(self.github, "aclose", None)
         try:

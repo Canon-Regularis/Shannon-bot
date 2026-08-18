@@ -241,14 +241,11 @@ class ItemSyncService:
             roles = self._policy.assignments(snapshot)
 
             if superseded:
-                # The item lost its thread, so one has to be built whatever the age of this
-                # delivery: an item with no thread is never treated as stale, or it would never
-                # get one. That is a reason to build the thread and not a reason to believe this
-                # payload about anything else. Adopting it would put back a title that had been
-                # changed, and swap the people for whoever was on the item at the time, which
-                # deletes the ones since added and pings the ones since removed. The metadata
-                # goes up out of date and the next delivery corrects it; a ping cannot be taken
-                # back, which is why the people are left exactly as they are.
+                # The item lost its thread, so one gets built however old this delivery is. That
+                # is no reason to believe the payload about anything else: adopting it would put
+                # back a title since changed and swap the people for whoever was on the item
+                # then, deleting the ones since added and pinging the ones since removed. Stale
+                # metadata is corrected by the next delivery; a ping cannot be taken back.
                 logger.info(
                     "rebuilding a thread for %s#%s from an old %s.%s, keeping what is stored",
                     snapshot.repository.full_name,
