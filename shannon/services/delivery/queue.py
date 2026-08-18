@@ -54,10 +54,35 @@ class Delivery:
         return f"{described} {where}" if where else described
 
 
-class DeliveryQueue(Protocol):
-    """Where deliveries wait between arriving and being acted on."""
+class DeliveryInbox(Protocol):
+    """Writing a delivery down, which is all the webhook route ever does.
+
+    Kept apart from `DeliveryQueue` so the route cannot reach a delivery it has no business
+    touching. The route runs inside GitHub's ten second budget and the worker owns everything
+    after that; giving the two the same handle would only invite the boundary to be crossed.
+    """
 
     async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool: ...
+
+
+class DeliveryQueue(Protocol):
+    """Taking deliveries and seeing them through, which is all the worker ever does.
+
+    Every method here moves a delivery towards a terminal state or hands it back. `enqueue` is
+    deliberately absent: nothing that works the queue should be able to add to it.
+    """
+
+    async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[Delivery]: ...
+
+    async def release(self, deliveries: Sequence[Delivery]) -> None: ...
+
+    async def finish(self, delivery: Delivery, status: DeliveryStatus) -> None: ...
+
+    async def retry_later(self, delivery: Delivery, *, error: str, delay: timedelta) -> None: ...
+
+    async def give_up(self, delivery: Delivery, *, error: str) -> None: ...
+
+    async def prune(self, *, keep_for: timedelta) -> int: ...
 
 
 class WebhookDeliveryQueue:

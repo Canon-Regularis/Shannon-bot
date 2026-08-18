@@ -2,19 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any, Protocol
 
 from shannon.config import Settings
 from shannon.domain.enums import DeliveryStatus
 from shannon.domain.errors import PermanentError
-from shannon.github.webhooks.events import EventRouter, WebhookOutcome
-from shannon.services.delivery.queue import Delivery, WebhookDeliveryQueue
+from shannon.github.webhooks.events import WebhookOutcome
+from shannon.services.delivery.queue import Delivery, DeliveryQueue
 
 logger = logging.getLogger(__name__)
 
 ReadyCheck = Callable[[], Awaitable[None]]
+
+
+class Dispatch(Protocol):
+    """Handing a delivery to whatever handles that event type.
+
+    Declared here rather than imported, so the worker names what it needs instead of depending
+    on the router that happens to provide it. The router satisfies this by shape.
+    """
+
+    async def dispatch(
+        self, event: str, action: str | None, payload: Mapping[str, Any]
+    ) -> WebhookOutcome: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,12 +96,12 @@ class DeliveryWorker:
 
     def __init__(
         self,
-        queue: WebhookDeliveryQueue,
-        router: EventRouter,
+        queue: DeliveryQueue,
+        dispatch: Dispatch,
         settings: WorkerSettings | None = None,
     ) -> None:
         self._queue = queue
-        self._router = router
+        self._dispatch = dispatch
         self._settings = settings or WorkerSettings()
         self._stopping = False
         # The flag is enough for the loop, which reaches a check every couple of seconds. It is
@@ -200,7 +213,7 @@ class DeliveryWorker:
     async def _handle(self, delivery: Delivery) -> None:
         try:
             outcome = await asyncio.wait_for(
-                self._router.dispatch(delivery.event_type, delivery.action, delivery.payload),
+                self._dispatch.dispatch(delivery.event_type, delivery.action, delivery.payload),
                 timeout=self._settings.delivery_timeout.total_seconds(),
             )
         except asyncio.CancelledError:

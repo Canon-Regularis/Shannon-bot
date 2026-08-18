@@ -4,11 +4,17 @@
 decides what a failure costs.
 """
 
-from shannon.services.delivery.queue import Delivery, DeliveryQueue, WebhookDeliveryQueue
+from shannon.services.delivery.queue import (
+    Delivery,
+    DeliveryInbox,
+    DeliveryQueue,
+    WebhookDeliveryQueue,
+)
 from shannon.services.delivery.worker import DeliveryWorker, ReadyCheck, WorkerSettings
 
 __all__ = [
     "Delivery",
+    "DeliveryInbox",
     "DeliveryQueue",
     "DeliveryWorker",
     "ReadyCheck",
