@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 
 import discord
 from discord import app_commands
 
 from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
 from shannon.discord_bot.responses import defer, reply
-from shannon.services.linking import InvalidGitHubUsernameError, UserLinkingService
+from shannon.services.linking import InvalidGitHubUsernameError
 
 logger = logging.getLogger(__name__)
 
 
-def build_link_command(service: UserLinkingService, gate: PermissionGate) -> app_commands.Command:
+class LinksAccounts(Protocol):
+    """Binding a GitHub login to a Discord account."""
+
+    async def link(self, *, guild_id: int, github_username: str, discord_user_id: int) -> str: ...
+
+
+def build_link_command(service: LinksAccounts, gate: PermissionGate) -> app_commands.Command:
     @app_commands.command(name="link", description="Connect a GitHub username to a Discord account")
     @app_commands.describe(
         github_username="The GitHub username to connect",

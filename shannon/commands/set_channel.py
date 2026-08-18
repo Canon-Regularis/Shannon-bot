@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 
 import discord
 from discord import app_commands
@@ -10,7 +11,7 @@ from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.threads import THREADABLE
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
-from shannon.services.channels import ChannelMappingService
+from shannon.services.channels import ChannelAssignment
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,15 @@ CHOICES = [
 ]
 
 
-def build_set_channel_command(
-    service: ChannelMappingService, gate: PermissionGate
-) -> app_commands.Command:
+class MapsChannels(Protocol):
+    """Pointing one kind of item at the channel its threads appear in."""
+
+    async def assign(
+        self, *, guild_id: int, object_type: ObjectType, channel_id: int
+    ) -> ChannelAssignment: ...
+
+
+def build_set_channel_command(service: MapsChannels, gate: PermissionGate) -> app_commands.Command:
     @app_commands.command(
         name="set_channel", description="Choose which channel a kind of GitHub item posts into"
     )

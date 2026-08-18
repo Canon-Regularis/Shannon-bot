@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 
 import discord
 from discord import app_commands
@@ -10,13 +11,21 @@ from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.threads import THREADABLE
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubError, GitHubNotFoundError
-from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.registration import RegistrationResult
 
 logger = logging.getLogger(__name__)
 
 
+class RegistersRepositories(Protocol):
+    """Binding a GitHub repository to this server."""
+
+    async def register(
+        self, *, guild_id: int, channel_id: int, link: str
+    ) -> RegistrationResult: ...
+
+
 def build_register_command(
-    service: RepositoryRegistrationService, gate: PermissionGate
+    service: RegistersRepositories, gate: PermissionGate
 ) -> app_commands.Command:
     @app_commands.command(
         name="register", description="Bind a GitHub repository to this Discord server"
