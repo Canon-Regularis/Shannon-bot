@@ -35,10 +35,10 @@ from shannon.services.delivery.queue import (
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
-    SyncThreads,
+    OpensAndLocksThreads,
+    SyncsItems,
     ThreadBinding,
 )
-from shannon.services.sync.manual import SyncsItems
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
 from shannon.services.sync.threads import ItemThreads
@@ -54,7 +54,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (OpensThreads, DiscordThreadGateway),
     (PostsToThread, DiscordThreadGateway),
     (LocksThread, DiscordThreadGateway),
-    (SyncThreads, DiscordThreadGateway),
+    (OpensAndLocksThreads, DiscordThreadGateway),
     (GitHubClient, FakeGitHubClient),
     (GitHubClient, HttpGitHubClient),
     (DeliveryInbox, InMemoryDeliveryQueue),

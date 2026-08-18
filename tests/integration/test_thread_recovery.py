@@ -14,7 +14,7 @@ from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def service(db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
-    return ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+    return build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
 
 async def stored(session: AsyncSession) -> TrackedItem:
@@ -118,7 +118,7 @@ class TestAThreadThatWasOpenedButNotWrittenTo:
         pr_event,
     ) -> None:
         threads = _EmptyOnFirstCreate()
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
         with pytest.raises(ThreadStartedEmptyError):
             await service.sync(pr_event("opened"))
@@ -132,7 +132,7 @@ class TestAThreadThatWasOpenedButNotWrittenTo:
         pr_event,
     ) -> None:
         threads = _EmptyOnFirstCreate()
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         with pytest.raises(ThreadStartedEmptyError):
             await service.sync(pr_event("opened"))
 
@@ -227,7 +227,7 @@ class TestAnIssueWhoseThreadWasDeleted:
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         first = await service.sync(issue_event("opened"))
         threads.threads.pop(first.thread_id)
 
@@ -251,7 +251,7 @@ class TestANoteOnADeletedThread:
     def issues(
         self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
     ) -> ItemSyncService:
-        return ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
     async def test_the_dead_pointer_is_dropped_and_the_note_asks_to_be_retried(
         self,
@@ -323,7 +323,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         first = await service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
         # Somebody else notices the thread is gone and lets go of it first.
@@ -347,7 +347,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
         pr_event,
     ) -> None:
         """Reporting SYNCED with no thread would finish the delivery and lose the event."""
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         first = await service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
         async with db_sessionmaker() as session, session.begin():
@@ -372,7 +372,7 @@ class TestTheStalenessWatermark:
         pr_event,
     ) -> None:
         """An item with no thread is never stale, so an old snapshot can still be applied."""
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         newest = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
         await service.sync(pr_event("edited", updated_at=newest.isoformat()))
         first = await stored(db_session)
@@ -395,7 +395,7 @@ class TestTheStalenessWatermark:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         await service.sync(pr_event("opened"))
         newer = datetime(2026, 12, 25, 9, 0, tzinfo=UTC)
 
@@ -420,7 +420,7 @@ class TestTheSlotBeingClearedMidRebuild:
         pr_event,
     ) -> None:
         threads = _ClearsTheSlotWhileCreating(db_sessionmaker)
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         first = await service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
         threads.arm(first.tracked_item_id, first.thread_id)
@@ -440,7 +440,7 @@ class TestTheSlotBeingClearedMidRebuild:
     ) -> None:
         """Unregistering mid-flight leaves nothing to attach to, and a thread nobody can reach."""
         threads = _DeletesTheItemWhileCreating(db_sessionmaker)
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
         with pytest.raises(ItemNotReadyError, match="no longer there"):
             await service.sync(pr_event("opened"))

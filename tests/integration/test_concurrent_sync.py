@@ -14,7 +14,7 @@ from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import Actor
 from shannon.domain.time import as_utc
 from shannon.services.channels import ChannelMappingService
-from shannon.services.sync.items import ItemSyncService, SyncOutcome
+from shannon.services.sync.items import SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 
@@ -33,7 +33,7 @@ async def test_two_events_for_a_new_pull_request_at_once_create_one_item(
     no tracked item yet.
     """
     threads = FakeThreadGateway()
-    service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+    service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
     results = await asyncio.gather(
         service.sync(pr_event("opened")),
@@ -53,7 +53,7 @@ async def test_two_events_for_a_new_issue_at_once_create_one_item(
     issue_event,
 ) -> None:
     threads = FakeThreadGateway()
-    service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+    service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
     results = await asyncio.gather(
         service.sync(issue_event("opened")),
@@ -73,7 +73,7 @@ async def test_a_burst_of_deliveries_still_leaves_one_item(
     pr_event,
 ) -> None:
     threads = FakeThreadGateway()
-    service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+    service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
     results = await asyncio.gather(
         *(service.sync(pr_event("edited", title=f"Title {n}")) for n in range(6)),
@@ -129,7 +129,7 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
     sync down. `/pr` is run precisely when a delivery for that item is in flight, so this shape
     is common.
     """
-    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
     await service.sync(pr_event("opened", requested_reviewers=[]))
 
     item_id = await db_session.scalar(select(TrackedItem.id))
@@ -181,7 +181,7 @@ async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
     Interleaved by hand. Gathering them proves nothing: once the first commits, the staleness
     guard turns the rest away before they reach the write.
     """
-    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
     await service.sync(pr_event("opened", updated_at="2026-08-10T12:00:00Z"))
 
     item_id = await db_session.scalar(select(TrackedItem.id))

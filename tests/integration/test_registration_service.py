@@ -11,7 +11,7 @@ from shannon.domain.models import RepositorySnapshot
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.registration import RepositoryRegistrationService
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -129,7 +129,7 @@ class TestARepositoryRenamedOnGitHub:
         db_session: AsyncSession,
         threads: FakeThreadGateway,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         # Read before expiring, or the attribute reload would be sync IO in an async test.
         repository_id = registered.id
 
@@ -149,7 +149,7 @@ class TestARepositoryRenamedOnGitHub:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         repository_id, before = registered.id, registered.updated_at
 
         await service.sync(pr_event("edited"))
@@ -166,7 +166,7 @@ class TestARepositoryRenamedOnGitHub:
         threads: FakeThreadGateway,
     ) -> None:
         """Every payload carries the name as it was when GitHub sent it, late ones included."""
-        service = ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         repository_id = registered.id
         await service.sync(_renamed_to("Shannon", at="2026-08-12T12:00:00Z"))
 

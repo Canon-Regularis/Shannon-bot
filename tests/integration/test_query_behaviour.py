@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ObjectType
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 
@@ -44,7 +44,7 @@ async def test_a_sync_never_loads_assignments_it_does_not_read(
     The relationship was eager loading on every fetch of a tracked item, which is the hottest
     path there is, for data nothing looked at.
     """
-    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     await service.sync(issue_event("opened"))
 
     log = QueryLog(db_engine)
@@ -65,7 +65,7 @@ async def test_reading_the_relationship_is_an_error_rather_than_a_silent_query(
     issue_event,
 ) -> None:
     """If someone reaches for it later, they should find out immediately."""
-    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     result = await service.sync(issue_event("opened"))
 
     async with db_sessionmaker() as session:
@@ -82,7 +82,7 @@ async def test_finding_an_item_by_number_uses_an_index(
     db_sessionmaker: async_sessionmaker,
 ) -> None:
     """Comments and reviews take this path, so it has to stay flat as a repository grows."""
-    service = ItemSyncService(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     await service.sync(issue_event("opened"))
 
     plan = await db_session.execute(
@@ -104,7 +104,7 @@ async def test_the_number_lookup_still_finds_the_right_row(
     pr_event,
     db_sessionmaker: async_sessionmaker,
 ) -> None:
-    issues = ItemSyncService(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
+    issues = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     await issues.sync(issue_event("opened"))
 
     found = await TrackedItemStore(db_session).get_by_number(

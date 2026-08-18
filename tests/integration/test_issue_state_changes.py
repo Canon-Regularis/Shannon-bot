@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Status
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 
@@ -188,7 +188,7 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
         # The reopen lands while the close is still in its Discord phase.
         await service.sync(
@@ -213,7 +213,7 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
-        service = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
 
         await service.sync(

@@ -14,7 +14,7 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 
 REPO = RepositorySnapshot(
@@ -117,19 +117,19 @@ class TestAPolicyHandedTheWrongKindOfSnapshot:
     """Nothing pairs these but the wiring, and MVP 4 adds a third kind to get wrong."""
 
     async def test_a_pull_request_policy_refuses_an_issue(self) -> None:
-        service = ItemSyncService(None, None, PullRequestPolicy())  # type: ignore[arg-type]
+        service = build_item_sync(None, None, PullRequestPolicy())  # type: ignore[arg-type]
 
         with pytest.raises(WrongPolicyError, match="PullRequestPolicy was handed a ISSUE"):
             await service.sync(ISSUE)
 
     async def test_an_issue_policy_refuses_a_pull_request(self) -> None:
-        service = ItemSyncService(None, None, IssuePolicy())  # type: ignore[arg-type]
+        service = build_item_sync(None, None, IssuePolicy())  # type: ignore[arg-type]
 
         with pytest.raises(WrongPolicyError, match="IssuePolicy was handed a PR"):
             await service.sync(PULL_REQUEST)
 
     async def test_it_names_the_item_so_the_wiring_can_be_found(self) -> None:
-        service = ItemSyncService(None, None, IssuePolicy())  # type: ignore[arg-type]
+        service = build_item_sync(None, None, IssuePolicy())  # type: ignore[arg-type]
 
         with pytest.raises(WrongPolicyError, match="Canon-Regularis/Shannon-bot#7"):
             await service.sync(PULL_REQUEST)

@@ -13,7 +13,7 @@ from shannon.discord_bot.formatting import format_reviewer_ping
 from shannon.domain.enums import ActorRole
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
@@ -214,7 +214,7 @@ class TestNobodyIsPingedTwice:
     ) -> None:
         """Claiming before posting must not swallow a ping when the post fails."""
         threads = _RefusingToPost()
-        service = ItemSyncService(
+        service = build_item_sync(
             db_sessionmaker,
             threads,
             PullRequestPolicy(),
@@ -239,7 +239,7 @@ class TestNobodyIsPingedTwice:
         pr_event,
     ) -> None:
         threads = _RefusingToPost()
-        service = ItemSyncService(
+        service = build_item_sync(
             db_sessionmaker,
             threads,
             PullRequestPolicy(),
@@ -405,7 +405,7 @@ class TestAPingInterruptedMidFlight:
 
 
 def _notifying(db_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
-    return ItemSyncService(
+    return build_item_sync(
         db_sessionmaker,
         threads,
         PullRequestPolicy(),

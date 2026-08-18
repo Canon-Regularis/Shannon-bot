@@ -8,7 +8,7 @@ from shannon.discord_bot.formatting import format_assignee_ping, format_reviewer
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
@@ -34,14 +34,14 @@ def sync_service(
     db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
 ) -> ItemSyncService:
     """Pull request sync without the notifier, for tests that are not about pinging."""
-    return ItemSyncService(db_sessionmaker, threads, PullRequestPolicy())
+    return build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
 
 
 @pytest.fixture
 def notifying_sync_service(
     db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
 ) -> ItemSyncService:
-    return ItemSyncService(
+    return build_item_sync(
         db_sessionmaker,
         threads,
         PullRequestPolicy(),
@@ -55,14 +55,14 @@ def notifying_sync_service(
 def issue_service(
     db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
 ) -> ItemSyncService:
-    return ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+    return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
 
 @pytest.fixture
 def notifying_issue_service(
     db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
 ) -> ItemSyncService:
-    return ItemSyncService(
+    return build_item_sync(
         db_sessionmaker,
         threads,
         IssuePolicy(),

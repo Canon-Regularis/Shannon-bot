@@ -13,7 +13,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ObjectType, Status
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -379,7 +379,7 @@ class TestARetryAfterTheCommentLanded:
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
-        issues = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
         mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
         failures = _FailsAfterTheNote()
@@ -398,7 +398,7 @@ class TestARetryAfterTheCommentLanded:
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
-        issues = ItemSyncService(db_sessionmaker, threads, IssuePolicy())
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
         mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
         seen: list[object] = []
