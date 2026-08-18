@@ -18,7 +18,7 @@ import pytest
 from shannon.api.routes.health import Liveness
 from shannon.discord_bot.threads import DiscordThreadGateway, ThreadGateway
 from shannon.github.client import GitHubClient, HttpGitHubClient
-from shannon.main import ProcessLiveness
+from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.delivery_queue import DeliveryQueue, WebhookDeliveryQueue
 from shannon.services.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
 from tests.fakes.github import FakeGitHubClient

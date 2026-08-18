@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from shannon.api.app import create_app
 from shannon.config import Settings
 from shannon.container import Container, build_container
-from shannon.main import _lifespan
+from shannon.runtime.lifespan import build_lifespan
 from shannon.services.worker import ReadyCheck
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -102,9 +102,9 @@ def settings_with(token: str = "") -> Settings:
     )
 
 
-async def run_lifespan(bot: Any, container: Any, settings: Settings):
+async def runbuild_lifespan(bot: Any, container: Any, settings: Settings):
     app = create_app(settings=settings)
-    return app, _lifespan(bot, container, settings)(app)
+    return app, build_lifespan(bot, container, settings)(app)
 
 
 class TestStartingUp:
@@ -115,7 +115,7 @@ class TestStartingUp:
         is why the lifespan catches broadly and reports rather than matching a type.
         """
         engine = create_async_engine("postgresql+asyncpg://nobody:nobody@localhost:1/nothing")
-        _, lifespan = await run_lifespan(
+        _, lifespan = await runbuild_lifespan(
             FakeBot(), container_for(engine, FakeWorker(), ClosingGitHub()), settings_with()
         )
 
@@ -130,7 +130,7 @@ class TestStartingUp:
     ) -> None:
         async with db_engine.begin() as connection:
             await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
-        _, lifespan = await run_lifespan(
+        _, lifespan = await runbuild_lifespan(
             FakeBot(), container_for(db_engine, FakeWorker(), ClosingGitHub()), settings_with()
         )
 
@@ -140,7 +140,7 @@ class TestStartingUp:
 
     async def test_without_a_token_the_worker_still_runs(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
-        app, lifespan = await run_lifespan(
+        app, lifespan = await runbuild_lifespan(
             FakeBot(), container_for(migrated, worker, ClosingGitHub()), settings_with()
         )
 
@@ -153,7 +153,7 @@ class TestStartingUp:
     ) -> None:
         worker = FakeWorker()
         bot = FakeBot()
-        app, lifespan = await run_lifespan(
+        app, lifespan = await runbuild_lifespan(
             bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
         )
 
@@ -168,7 +168,7 @@ class TestWhileRunning:
         self, migrated: AsyncEngine
     ) -> None:
         worker = FakeWorker()
-        app, lifespan = await run_lifespan(
+        app, lifespan = await runbuild_lifespan(
             FakeBot(connects=False),
             container_for(migrated, worker, ClosingGitHub()),
             settings_with("a-token"),
@@ -193,7 +193,7 @@ class TestShuttingDown:
         """
         worker = FakeWorker()
         bot = FakeBot()
-        _, lifespan = await run_lifespan(
+        _, lifespan = await runbuild_lifespan(
             bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
         )
 
@@ -208,7 +208,7 @@ class TestShuttingDown:
         bot = FakeBot()
         github = ClosingGitHub()
         container = container_for(migrated, worker, github)
-        _, lifespan = await run_lifespan(bot, container, settings_with("a-token"))
+        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
 
         async with lifespan:
             await asyncio.wait_for(worker.ran.wait(), timeout=2)
@@ -225,7 +225,7 @@ class TestShuttingDown:
         bot = FakeBot()
         github = ClosingGitHub()
         container = container_for(migrated, worker, github)
-        _, lifespan = await run_lifespan(bot, container, settings_with("a-token"))
+        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
 
         async with lifespan:
             await asyncio.wait_for(worker.ran.wait(), timeout=2)

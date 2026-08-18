@@ -372,7 +372,7 @@ class TestStoppingCleanly:
         fresh = build_worker(queue, Exploding(failures=0))
         assert await fresh.run_once() == 1
 
-    async def test_run_forever_returns_once_it_is_asked_to_stop(
+    async def test_run_forever_returns_once_it_is_asked_tostop(
         self, queue: WebhookDeliveryQueue
     ) -> None:
         worker = build_worker(queue, Exploding(failures=0), poll_interval=timedelta(seconds=0.01))
