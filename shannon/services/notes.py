@@ -5,7 +5,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 Renderer = Callable[[ItemNote, Mapping[str, int]], str]
 NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
 Follow = Callable[[ItemNote], Awaitable[None]]
+
+
+class MirrorsNotes(Protocol):
+    """Putting one note in its thread, which is all the handler asks for.
+
+    The item handler already takes `SyncsItems` rather than the service that satisfies it; this
+    is the same seam on the other path.
+    """
+
+    async def mirror(self, snapshot: ItemNote) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +187,7 @@ class ItemNoteMirror:
 
 
 def build_note_handler(
-    mirror: ItemNoteMirror, parse: NoteParser, *, then: Follow | None = None
+    mirror: MirrorsNotes, parse: NoteParser, *, then: Follow | None = None
 ) -> EventHandler:
     """Adapt a comment or review webhook to the mirror.
 
