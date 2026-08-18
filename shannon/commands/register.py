@@ -6,11 +6,11 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
 from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.threads import THREADABLE
-from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
-from shannon.github.errors import GitHubError, GitHubNotFoundError
+from shannon.domain.errors import ShannonError
 from shannon.services.registration import RegistrationResult
 
 logger = logging.getLogger(__name__)
@@ -56,15 +56,12 @@ def build_register_command(
                 channel_id=interaction.channel_id,
                 link=github_repo_link,
             )
-        except UnparseableLinkError as error:
-            await reply(interaction, f"That link did not work. {error.message}")
-        except GitHubNotFoundError:
-            await reply(interaction, "GitHub has no repository at that link.")
-        except DuplicateRegistrationError as error:
-            await reply(interaction, error.message)
-        except GitHubError as error:
-            logger.warning("register failed against GitHub: %s", error.message)
-            await reply(interaction, f"GitHub could not be reached. {error.message}")
+        except ShannonError as error:
+            # One table for every command, in _replies. Repeating four of its rows here meant
+            # two places to keep in step, and the wording had already been copied rather than
+            # shared.
+            logger.warning("register failed: %s", error.message)
+            await reply(interaction, reply_for(error, noun="repository"))
         else:
             await reply(
                 interaction,
