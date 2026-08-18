@@ -202,7 +202,10 @@ class TrackedSnapshot(Protocol):
     """What the sync path needs from any GitHub object it mirrors.
 
     Pull requests and issues both satisfy this, which is what lets one sync service handle
-    both. A third object type only has to satisfy it too.
+    both. A third object type only has to satisfy it too, so this lists what the sync path reads
+    and not what an implementation happens to store. `state` and `labels` are absent for that
+    reason: nothing reads them, because everything goes through `display_state`, `label_names`
+    and `priority`, which are what the two kinds of item disagree about.
     """
 
     repository: RepositorySnapshot
@@ -210,13 +213,12 @@ class TrackedSnapshot(Protocol):
     number: int
     title: str
     html_url: str
-    state: str
     author: Actor | None
     assignees: tuple[Actor, ...]
-    labels: tuple[Label, ...]
     updated_at: datetime | None
     action: str | None
     object_type: ObjectType
+    closed: bool
 
     @property
     def label_names(self) -> tuple[str, ...]: ...
