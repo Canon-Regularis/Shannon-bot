@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -62,6 +63,70 @@ def gateway_ready(bot: ShannonBot, bot_task: asyncio.Task) -> ReadyCheck:
     return connected
 
 
+@dataclass(slots=True)
+class _Running:
+    """The tasks this process started, and the flag that says whether it asked them to end."""
+
+    shutdown: Shutdown
+    worker_task: asyncio.Task
+    bot_task: asyncio.Task | None
+
+
+async def _start(
+    bot: ShannonBot, container: Container, settings: Settings, liveness: ProcessLiveness
+) -> _Running:
+    """Bring up the gateway and the worker, in that order.
+
+    The worker waits for the gateway rather than racing it. The endpoint accepts deliveries from
+    the moment the port is open, which is the point, but acting on one before Discord is
+    connected only wastes an attempt.
+    """
+    shutdown = Shutdown()
+    bot_task: asyncio.Task | None = None
+    ready: ReadyCheck | None = None
+
+    token = settings.discord_token.get_secret_value()
+    if token:
+        bot_task = asyncio.create_task(bot.start(token))
+        bot_task.add_done_callback(report_exit("Discord bot", shutdown))
+        ready = gateway_ready(bot, bot_task)
+    else:
+        # Handy for poking the webhook endpoint locally, and loud enough that nobody deploys
+        # like this by accident.
+        logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
+
+    worker_task = asyncio.create_task(container.worker.run_forever(ready))
+    worker_task.add_done_callback(report_exit("delivery worker", shutdown))
+
+    # A worker that dies takes the whole point of the process with it, and the endpoint would go
+    # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
+    liveness.worker_task = worker_task
+    liveness.bot_task = bot_task
+    return _Running(shutdown=shutdown, worker_task=worker_task, bot_task=bot_task)
+
+
+async def _close(
+    bot: ShannonBot, container: Container, settings: Settings, running: _Running
+) -> None:
+    """Take everything down, reporting a step that fails rather than abandoning the rest."""
+    # Set before anything stops, so the done callbacks can tell a task that failed from one that
+    # was told to finish.
+    running.shutdown.asked = True
+
+    # Asked to stop rather than cancelled, so the delivery in hand finishes and the rest of its
+    # batch goes back on the queue instead of sitting locked for the whole lease while the
+    # replacement process polls an empty one.
+    container.worker.stop()
+    await safely(
+        "stop the worker",
+        stop(running.worker_task, grace=settings.worker_shutdown_grace_seconds),
+    )
+    if running.bot_task is not None:
+        await safely("close the Discord client", bot.close())
+        await safely("stop the bot", stop(running.bot_task))
+    await safely("close the container", container.aclose())
+
+
 def build_lifespan(bot: ShannonBot, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -77,49 +142,11 @@ def build_lifespan(bot: ShannonBot, container: Container, settings: Settings):
 
         liveness = ProcessLiveness(container.engine)
         app.state.liveness = liveness
-        shutdown = Shutdown()
 
-        bot_task: asyncio.Task | None = None
-        ready: ReadyCheck | None = None
-        token = settings.discord_token.get_secret_value()
-        if token:
-            bot_task = asyncio.create_task(bot.start(token))
-            bot_task.add_done_callback(report_exit("Discord bot", shutdown))
-            ready = gateway_ready(bot, bot_task)
-        else:
-            # Handy for poking the webhook endpoint locally, and loud enough that nobody
-            # deploys like this by accident.
-            logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
-
-        # Deliveries are only written down by the endpoint. Without this running, they queue up
-        # and nothing reaches Discord. It waits for the bot rather than racing it: the endpoint
-        # accepts deliveries from the moment the port is open, which is the point, but acting on
-        # one before Discord is connected only wastes an attempt.
-        worker_task = asyncio.create_task(container.worker.run_forever(ready))
-        worker_task.add_done_callback(report_exit("delivery worker", shutdown))
-        # A worker that dies takes the whole point of the process with it, and the endpoint
-        # would go on answering 200 to deliveries nothing will act on. /health is what makes
-        # that visible from outside.
-        liveness.worker_task = worker_task
-        liveness.bot_task = bot_task
-
+        running = await _start(bot, container, settings, liveness)
         try:
             yield
         finally:
-            # Set before anything is stopped, so the done callbacks can tell a task that failed
-            # from one that was told to finish.
-            shutdown.asked = True
-            # Asked to stop rather than cancelled, so the delivery in hand finishes and the
-            # rest of its batch goes back on the queue instead of sitting locked for the whole
-            # lease while the replacement process polls an empty one.
-            container.worker.stop()
-            await safely(
-                "stop the worker",
-                stop(worker_task, grace=settings.worker_shutdown_grace_seconds),
-            )
-            if bot_task is not None:
-                await safely("close the Discord client", bot.close())
-                await safely("stop the bot", stop(bot_task))
-            await safely("close the container", container.aclose())
+            await _close(bot, container, settings, running)
 
     return lifespan
