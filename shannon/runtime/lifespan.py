@@ -7,6 +7,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Protocol
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -14,12 +15,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from shannon.config import Settings
 from shannon.container import Container
-from shannon.discord_bot.client import ShannonBot
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.runtime.supervision import Shutdown, report_exit, safely, stop
 from shannon.services.delivery.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
+
+
+class Gateway(Protocol):
+    """The three things this process does to the Discord connection.
+
+    Named here rather than importing the client, so starting and stopping the process does not
+    depend on discord.py. The lifespan tests already stand a fake in its place.
+    """
+
+    async def start(self, token: str) -> None: ...
+
+    async def wait_until_ready(self) -> None: ...
+
+    async def close(self) -> None: ...
 
 
 async def require_a_working_database(engine: AsyncEngine) -> None:
@@ -38,7 +52,7 @@ async def require_a_working_database(engine: AsyncEngine) -> None:
         await connection.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
 
 
-def gateway_ready(bot: ShannonBot, bot_task: asyncio.Task) -> ReadyCheck:
+def gateway_ready(bot: Gateway, bot_task: asyncio.Task) -> ReadyCheck:
     """Wait for the gateway, and give up if the bot stops trying to reach it.
 
     `wait_until_ready` waits on an event that is only ever set once a connection succeeds, so a
@@ -73,7 +87,7 @@ class _Running:
 
 
 async def _start(
-    bot: ShannonBot, container: Container, settings: Settings, liveness: ProcessLiveness
+    bot: Gateway, container: Container, settings: Settings, liveness: ProcessLiveness
 ) -> _Running:
     """Bring up the gateway and the worker, in that order.
 
@@ -105,9 +119,7 @@ async def _start(
     return _Running(shutdown=shutdown, worker_task=worker_task, bot_task=bot_task)
 
 
-async def _close(
-    bot: ShannonBot, container: Container, settings: Settings, running: _Running
-) -> None:
+async def _close(bot: Gateway, container: Container, settings: Settings, running: _Running) -> None:
     """Take everything down, reporting a step that fails rather than abandoning the rest."""
     # Set before anything stops, so the done callbacks can tell a task that failed from one that
     # was told to finish.
@@ -127,7 +139,7 @@ async def _close(
     await safely("close the container", container.aclose())
 
 
-def build_lifespan(bot: ShannonBot, container: Container, settings: Settings):
+def build_lifespan(bot: Gateway, container: Container, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
