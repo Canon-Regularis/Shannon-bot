@@ -23,7 +23,18 @@ DEFAULT_BASE_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
 
 
-class GitHubClient(Protocol):
+class LooksUpRepository(Protocol):
+    """Resolving a repository by owner and name.
+
+    Split out because that is all the link commands need of GitHub directly. Fetching the item
+    itself is a closure the wiring builds, so nothing has to hold a handle that can read every
+    pull request in order to check one repository still exists.
+    """
+
+    async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
+
+
+class GitHubClient(LooksUpRepository, Protocol):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module

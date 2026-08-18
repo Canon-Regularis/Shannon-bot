@@ -10,7 +10,7 @@ from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import DuplicateRegistrationError
-from shannon.github.client import GitHubClient
+from shannon.github.client import LooksUpRepository
 from shannon.github.urls import parse_repository_url
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class RegistrationResult:
 class RepositoryRegistrationService:
     """Binds one GitHub repository to one Discord guild."""
 
-    def __init__(self, sessionmaker: async_sessionmaker, github: GitHubClient) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker, github: LooksUpRepository) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
 
