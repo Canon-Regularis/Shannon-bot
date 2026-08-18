@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from shannon.api.dependencies import EventIntake
 from shannon.api.routes import health, webhooks
 from shannon.config import Settings, get_settings
 from shannon.github.webhooks.events import EventRouter
@@ -14,7 +15,7 @@ from shannon.services.delivery.queue import DeliveryInbox
 def create_app(
     *,
     settings: Settings | None = None,
-    event_router: EventRouter | None = None,
+    event_router: EventIntake | None = None,
     queue: DeliveryInbox | None = None,
     lifespan: Callable[[FastAPI], Any] | None = None,
 ) -> FastAPI:
