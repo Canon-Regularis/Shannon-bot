@@ -180,6 +180,11 @@ class ItemNote(Protocol):
     item_number: int
     author: Actor | None
     object_type: ObjectType | None
+    # What a renderer reads. Declared here so the seam that renders a note can say what it needs
+    # instead of taking Any and hoping.
+    body: str
+    html_url: str
+    created_at: datetime | None
 
     @property
     def note_key(self) -> str:

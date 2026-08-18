@@ -21,9 +21,9 @@ from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 
 logger = logging.getLogger(__name__)
 
-Renderer = Callable[[Any, Mapping[str, int]], str]
+Renderer = Callable[[ItemNote, Mapping[str, int]], str]
 NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
-Follow = Callable[[Any], Awaitable[None]]
+Follow = Callable[[ItemNote], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
