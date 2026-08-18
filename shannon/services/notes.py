@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 Renderer = Callable[[Any, Mapping[str, int]], str]
 NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
 Follow = Callable[[Any], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _NoteTarget:
+    """The thread a note goes into, and who to mention in it."""
+
+    tracked_item_id: int
+    thread_id: int
+    mentions: Mapping[str, int]
 
 
 class ItemNoteMirror:
@@ -45,6 +55,18 @@ class ItemNoteMirror:
 
     async def mirror(self, snapshot: ItemNote) -> bool:
         """Post the note, returning whether there was anywhere to post it."""
+        target = await self._find_thread(snapshot)
+        if target is None:
+            return False
+        return await self._post(snapshot, target)
+
+    async def _find_thread(self, snapshot: ItemNote) -> _NoteTarget | None:
+        """Which thread this note belongs in, or None if the item is not mirrored here.
+
+        Raises `ItemNotReadyError` for an item that is tracked but has no thread yet, so the
+        delivery is retried. Answering "nothing to do" would lose the note for good, because
+        nothing ever revisits a delivery that said that.
+        """
         async with self._sessionmaker() as session:
             repository = await RepositoryStore(session).get_by_github_id(
                 snapshot.repository.github_repo_id
@@ -54,7 +76,7 @@ class ItemNoteMirror:
                     "a note arrived for %s, which is not registered to any guild",
                     snapshot.repository.full_name,
                 )
-                return False
+                return None
 
             # By number, not by id. A pull request reports its issue id in comment payloads,
             # which never matches the pull request id stored against the tracked item.
@@ -69,17 +91,13 @@ class ItemNoteMirror:
                     snapshot.repository.full_name,
                     snapshot.item_number,
                 )
-                return False
+                return None
 
-            # The item is tracked but has no thread yet, which happens when its own sync is
-            # still in flight or waiting on a retry. Dropping the note here would lose it for
-            # good, because nothing ever revisits a delivery that answered "nothing to do".
             if item.discord_thread_id is None:
                 raise ItemNotReadyError(
                     f"{snapshot.repository.full_name}#{snapshot.item_number} has no thread yet"
                 )
 
-            item_id, thread_id = item.id, item.discord_thread_id
             mentions = (
                 await UserLinkStore(session).resolve_many(
                     guild_id=repository.discord_guild_id,
@@ -88,12 +106,19 @@ class ItemNoteMirror:
                 if snapshot.author
                 else {}
             )
+            return _NoteTarget(
+                tracked_item_id=item.id,
+                thread_id=item.discord_thread_id,
+                mentions=mentions,
+            )
 
+    async def _post(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
+        """Put the note in its thread, once."""
         # Claimed before the post, not recorded after it. The queue is at-least-once by design:
         # a delivery whose status could not be written stays leased, comes back when the lease
         # runs out, and is handled again from the top. Recording afterwards leaves that same gap
         # one step further along, and the gap put the same comment in the thread twice.
-        if not await self._claim(item_id, snapshot.note_key):
+        if not await self._claim(target.tracked_item_id, snapshot.note_key):
             logger.info(
                 "a note on %s#%s is already in its thread, not posting it again",
                 snapshot.repository.full_name,
@@ -102,15 +127,17 @@ class ItemNoteMirror:
             return True
 
         try:
-            await self._threads.post(thread_id=thread_id, content=self._render(snapshot, mentions))
+            await self._threads.post(
+                thread_id=target.thread_id, content=self._render(snapshot, target.mentions)
+            )
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the
             # channel and the metadata. Letting go of the dead id is what lets that happen, and
             # asking to be tried again is what gets this note into the new thread.
-            await self._hand_back(item_id, snapshot.note_key)
-            await self._forget_thread(item_id, thread_id)
+            await self._hand_back(target.tracked_item_id, snapshot.note_key)
+            await self._forget_thread(target.tracked_item_id, target.thread_id)
             raise ItemNotReadyError(
-                f"thread {thread_id} for {snapshot.repository.full_name}"
+                f"thread {target.thread_id} for {snapshot.repository.full_name}"
                 f"#{snapshot.item_number} is gone and has to be rebuilt"
             ) from error
         except BaseException:
@@ -119,7 +146,7 @@ class ItemNoteMirror:
             # is why this catches everything: the worker puts a deadline on each delivery and
             # cancels the handler where it stands, and discord.py sleeps through a rate limit
             # rather than failing, so where it stands is often exactly here.
-            await self._hand_back(item_id, snapshot.note_key)
+            await self._hand_back(target.tracked_item_id, snapshot.note_key)
             raise
 
         logger.info("mirrored a note on %s#%s", snapshot.repository.full_name, snapshot.item_number)

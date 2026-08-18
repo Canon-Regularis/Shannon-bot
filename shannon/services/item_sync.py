@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import TrackedItem
+from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
@@ -164,115 +164,142 @@ class ItemSyncService:
         return False
 
     async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | SyncResult:
+        """The database half, in one transaction: work out where this goes, then write it.
+
+        Split in two because the two halves fail differently. Resolving can decide there is
+        nothing to do at all, and writing cannot.
+        """
+        async with self._sessionmaker() as session, session.begin():
+            placement = await self._resolve(session, snapshot)
+            if isinstance(placement, SyncResult):
+                return placement
+            return await self._write(session, snapshot, placement)
+
+    async def _resolve(
+        self, session: AsyncSession, snapshot: TrackedSnapshot
+    ) -> _Placement | SyncResult:
+        """Find the repository, the channel and the item, or give a reason there is no work."""
         object_type = self._policy.object_type
 
-        async with self._sessionmaker() as session, session.begin():
-            repositories = RepositoryStore(session)
-            repository = await repositories.get_by_github_id(snapshot.repository.github_repo_id)
-            if repository is None:
-                # Not debug: a repository somebody registered going missing, or a webhook
-                # installed across an organisation, is the likeliest reason for "the bot has
-                # stopped posting" and the only place it is ever said.
-                logger.info(
-                    "%s is not registered to any guild, ignoring %s.%s",
-                    snapshot.repository.full_name,
-                    object_type.value,
-                    snapshot.action,
-                )
-                return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
-
-            channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
-            if channel is None:
-                logger.warning(
-                    "%s has no channel mapped for %s, run /set_channel",
-                    snapshot.repository.full_name,
-                    object_type.value,
-                )
-                return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
-
-            items = TrackedItemStore(session)
-            item = await items.get(
-                repository_id=repository.id,
-                object_type=object_type,
-                github_object_id=snapshot.github_object_id,
+        repository = await RepositoryStore(session).get_by_github_id(
+            snapshot.repository.github_repo_id
+        )
+        if repository is None:
+            # Not debug: a repository somebody registered going missing, or a webhook installed
+            # across an organisation, is the likeliest reason for "the bot has stopped posting"
+            # and the only place it is ever said.
+            logger.info(
+                "%s is not registered to any guild, ignoring %s.%s",
+                snapshot.repository.full_name,
+                object_type.value,
+                snapshot.action,
             )
+            return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
-            superseded = item is not None and is_superseded(
-                snapshot.updated_at, item.github_updated_at
+        channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
+        if channel is None:
+            logger.warning(
+                "%s has no channel mapped for %s, run /set_channel",
+                snapshot.repository.full_name,
+                object_type.value,
             )
+            return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
-            if superseded and item.discord_thread_id is not None:
-                logger.info(
-                    "ignoring a stale %s.%s for %s#%s",
-                    object_type.value,
-                    snapshot.action,
-                    snapshot.repository.full_name,
-                    snapshot.number,
-                )
-                return SyncResult(
-                    outcome=SyncOutcome.STALE,
-                    tracked_item_id=item.id,
-                    thread_id=item.discord_thread_id,
-                    message_id=item.discord_message_id,
-                )
+        item = await TrackedItemStore(session).get(
+            repository_id=repository.id,
+            object_type=object_type,
+            github_object_id=snapshot.github_object_id,
+        )
+        superseded = item is not None and is_superseded(snapshot.updated_at, item.github_updated_at)
 
-            # Only once the delivery is known to be current. Every payload carries the
-            # repository's name at the time it was sent, so following one from a delivery that
-            # arrived late would put the old name back and break /pr all over again.
-            await repositories.follow_rename(
-                repository,
-                repo_name=snapshot.repository.full_name,
-                repo_url=snapshot.repository.html_url,
+        if superseded and item.discord_thread_id is not None:
+            logger.info(
+                "ignoring a stale %s.%s for %s#%s",
+                object_type.value,
+                snapshot.action,
+                snapshot.repository.full_name,
+                snapshot.number,
             )
-
-            if item is None:
-                item = await items.get_or_create(
-                    repository_id=repository.id,
-                    object_type=object_type,
-                    github_object_id=snapshot.github_object_id,
-                    github_object_number=snapshot.number,
-                    github_url=snapshot.html_url,
-                    title=snapshot.title,
-                    github_state=snapshot.display_state,
-                    status=Status.NOT_REVIEWED,
-                    priority=self._policy.priority_for(snapshot, Priority.UNSET),
-                    github_updated_at=snapshot.updated_at,
-                )
-            roles = self._policy.assignments(snapshot)
-
-            if superseded:
-                # The item lost its thread, so one gets built however old this delivery is. That
-                # is no reason to believe the payload about anything else: adopting it would put
-                # back a title since changed and swap the people for whoever was on the item
-                # then, deleting the ones since added and pinging the ones since removed. Stale
-                # metadata is corrected by the next delivery; a ping cannot be taken back.
-                logger.info(
-                    "rebuilding a thread for %s#%s from an old %s.%s, keeping what is stored",
-                    snapshot.repository.full_name,
-                    snapshot.number,
-                    object_type.value,
-                    snapshot.action,
-                )
-                roles = {}
-            else:
-                self._apply(items, item, snapshot)
-                await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
-
-            logins = [actor.login for actors in roles.values() for actor in actors]
-            mentions = await UserLinkStore(session).resolve_many(
-                guild_id=repository.discord_guild_id, github_usernames=logins
-            )
-
-            return _SyncState(
+            return SyncResult(
+                outcome=SyncOutcome.STALE,
                 tracked_item_id=item.id,
-                guild_id=repository.discord_guild_id,
-                channel_id=channel.discord_channel_id,
                 thread_id=item.discord_thread_id,
                 message_id=item.discord_message_id,
-                metadata=self._policy.render(
-                    snapshot, status=item.status, priority=item.priority, mentions=mentions
-                ),
             )
+
+        return _Placement(
+            repository=repository,
+            channel_id=channel.discord_channel_id,
+            item=item,
+            superseded=superseded,
+        )
+
+    async def _write(
+        self, session: AsyncSession, snapshot: TrackedSnapshot, placement: _Placement
+    ) -> _SyncState:
+        """Bring the stored item in line with the snapshot, and render what Discord will show."""
+        object_type = self._policy.object_type
+        repositories = RepositoryStore(session)
+        items = TrackedItemStore(session)
+
+        # Only once the delivery is known to be current. Every payload carries the repository's
+        # name at the time it was sent, so following one from a delivery that arrived late would
+        # put the old name back and break /pr all over again.
+        await repositories.follow_rename(
+            placement.repository,
+            repo_name=snapshot.repository.full_name,
+            repo_url=snapshot.repository.html_url,
+        )
+
+        item = placement.item
+        if item is None:
+            item = await items.get_or_create(
+                repository_id=placement.repository.id,
+                object_type=object_type,
+                github_object_id=snapshot.github_object_id,
+                github_object_number=snapshot.number,
+                github_url=snapshot.html_url,
+                title=snapshot.title,
+                github_state=snapshot.display_state,
+                status=Status.NOT_REVIEWED,
+                priority=self._policy.priority_for(snapshot, Priority.UNSET),
+                github_updated_at=snapshot.updated_at,
+            )
+
+        roles = self._policy.assignments(snapshot)
+        if placement.superseded:
+            # The item lost its thread, so one gets built however old this delivery is. That is
+            # no reason to believe the payload about anything else: adopting it would put back a
+            # title since changed and swap the people for whoever was on the item then, deleting
+            # the ones since added and pinging the ones since removed. Stale metadata is
+            # corrected by the next delivery; a ping cannot be taken back.
+            logger.info(
+                "rebuilding a thread for %s#%s from an old %s.%s, keeping what is stored",
+                snapshot.repository.full_name,
+                snapshot.number,
+                object_type.value,
+                snapshot.action,
+            )
+            roles = {}
+        else:
+            self._apply(items, item, snapshot)
+            await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
+
+        logins = [actor.login for actors in roles.values() for actor in actors]
+        mentions = await UserLinkStore(session).resolve_many(
+            guild_id=placement.repository.discord_guild_id, github_usernames=logins
+        )
+
+        return _SyncState(
+            tracked_item_id=item.id,
+            guild_id=placement.repository.discord_guild_id,
+            channel_id=placement.channel_id,
+            thread_id=item.discord_thread_id,
+            message_id=item.discord_message_id,
+            metadata=self._policy.render(
+                snapshot, status=item.status, priority=item.priority, mentions=mentions
+            ),
+        )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
         item.title = snapshot.title
@@ -326,6 +353,20 @@ def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> Event
         return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED
 
     return handle
+
+
+@dataclass(frozen=True, slots=True)
+class _Placement:
+    """Where a snapshot belongs, once the database has been asked.
+
+    `superseded` means an older delivery reached an item that has lost its thread. The thread
+    still gets rebuilt; nothing else in the payload is believed.
+    """
+
+    repository: Repository
+    channel_id: int
+    item: TrackedItem | None
+    superseded: bool
 
 
 @dataclass(frozen=True, slots=True)
