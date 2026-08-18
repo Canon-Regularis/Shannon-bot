@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from typing import Protocol
 
-from shannon.config import Settings
 from shannon.domain.enums import CommandRole
 
 REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
@@ -11,6 +11,18 @@ REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
 # and project managers only. Somebody who holds one of those as well as Reviewer still passes,
 # because holding any listed role is what grants a command rather than holding only listed ones.
 SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
+
+
+class RoleNames(Protocol):
+    """The role names a server has configured, which is all a permission check needs.
+
+    Taking the whole of Settings here would hand the thing that decides who may run a command a
+    database URL and a bot token as well.
+    """
+
+    def role_names(self, role: CommandRole) -> frozenset[str]: ...
+
+    def role_display_names(self, role: CommandRole) -> tuple[str, ...]: ...
 
 
 class PermissionGate:
@@ -23,7 +35,7 @@ class PermissionGate:
     not a guild member at all resolves to no permissions instead of raising.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: RoleNames) -> None:
         self._settings = settings
 
     def roles_of(self, member: object) -> frozenset[CommandRole]:
