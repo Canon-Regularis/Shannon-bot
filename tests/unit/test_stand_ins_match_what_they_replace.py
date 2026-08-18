@@ -21,8 +21,10 @@ from shannon.commands.link import LinksAccounts
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels
 from shannon.commands.sync_link import SyncsByLink
+from shannon.config import Settings
 from shannon.container import Container
 from shannon.discord_bot.client import ShannonBot
+from shannon.discord_bot.permissions import RoleNames
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
     LocksThread,
@@ -42,6 +44,7 @@ from shannon.services.delivery.queue import (
 )
 from shannon.services.delivery.worker import DeliveryWorker
 from shannon.services.linking import UserLinkingService
+from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.sync.items import (
     ItemSyncService,
@@ -86,6 +89,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (RegistersRepositories, RepositoryRegistrationService),
     (MapsChannels, ChannelMappingService),
     (SyncsByLink, ManualSync),
+    (RoleNames, Settings),
+    (MirrorsNotes, ItemNoteMirror),
 ]
 
 
