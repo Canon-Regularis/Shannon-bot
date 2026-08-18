@@ -26,7 +26,7 @@ from shannon.domain.priority import parse_priority
 from shannon.domain.time import as_utc
 from shannon.github.mapping import parse_timestamp
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.sync.staleness import is_stale
+from shannon.services.sync.staleness import is_superseded
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
 
@@ -104,19 +104,21 @@ class TestTimestamps:
 
 
 class TestStaleness:
-    @given(aware, aware)
-    def test_it_is_never_stale_without_a_thread(self, a: datetime, b: datetime) -> None:
-        assert is_stale(has_thread=False, incoming=a, stored=b) is False
+    @given(aware, st.none())
+    def test_a_missing_timestamp_is_no_evidence(self, moment: datetime, nothing: None) -> None:
+        """Either side missing means there is nothing to compare, so nothing to conclude."""
+        assert is_superseded(moment, nothing) is False
+        assert is_superseded(nothing, moment) is False
 
     @given(aware)
     def test_a_snapshot_is_never_stale_against_itself(self, moment: datetime) -> None:
-        assert is_stale(has_thread=True, incoming=moment, stored=moment) is False
+        assert is_superseded(moment, moment) is False
 
     @given(aware, aware)
     def test_exactly_one_direction_is_stale(self, a: datetime, b: datetime) -> None:
         """Two different instants: one is before the other, and only one way round."""
-        forward = is_stale(has_thread=True, incoming=a, stored=b)
-        backward = is_stale(has_thread=True, incoming=b, stored=a)
+        forward = is_superseded(a, b)
+        backward = is_superseded(b, a)
 
         if a == b:
             assert not forward and not backward

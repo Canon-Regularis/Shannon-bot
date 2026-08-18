@@ -22,7 +22,6 @@ from shannon.discord_bot.threads import LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
-from shannon.domain.time import as_utc
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.policies import SyncPolicy
 from shannon.services.sync.staleness import is_superseded
@@ -181,14 +180,11 @@ class ItemSyncService:
 
         Strictly newer, because this sync has already written its own timestamp.
         """
-        if snapshot.updated_at is None:
-            return True
-
         async with self._sessionmaker() as session:
             item = await TrackedItemStore(session).get_by_id(tracked_item_id)
             stored = item.github_updated_at if item is not None else None
 
-        if stored is None or as_utc(stored) <= as_utc(snapshot.updated_at):
+        if not is_superseded(snapshot.updated_at, stored):
             return True
 
         logger.info(
