@@ -131,13 +131,6 @@ class TrackedItemStore:
             )
         return item
 
-    async def set_discord_ids(
-        self, item: TrackedItem, *, thread_id: int | None, message_id: int | None
-    ) -> None:
-        item.discord_thread_id = thread_id
-        item.discord_message_id = message_id
-        await self._session.flush()
-
     async def forget_thread(self, tracked_item_id: int, *, dead_thread_id: int) -> bool:
         """Drop a thread pointer, unless the item has already moved on to a different thread.
 

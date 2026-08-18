@@ -23,7 +23,7 @@ class ItemAssignmentStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_for(self, tracked_item_id: int, role: ActorRole) -> Sequence[ItemAssignment]:
+    async def _list_for(self, tracked_item_id: int, role: ActorRole) -> Sequence[ItemAssignment]:
         return (
             await self._session.scalars(
                 select(ItemAssignment).where(
@@ -47,7 +47,7 @@ class ItemAssignmentStore:
         other caller's row and whatever `notified_at` they have already claimed.
         """
         wanted = {actor.login.lower() for actor in actors}
-        existing = {row.github_username for row in await self.list_for(tracked_item_id, role)}
+        existing = {row.github_username for row in await self._list_for(tracked_item_id, role)}
 
         removed = existing - wanted
         if removed:
@@ -77,19 +77,6 @@ class ItemAssignmentStore:
             )
 
         await self._session.flush()
-
-    async def pending_notification(
-        self, tracked_item_id: int, role: ActorRole
-    ) -> Sequence[ItemAssignment]:
-        return (
-            await self._session.scalars(
-                select(ItemAssignment).where(
-                    ItemAssignment.tracked_item_id == tracked_item_id,
-                    ItemAssignment.role_type == role,
-                    ItemAssignment.notified_at.is_(None),
-                )
-            )
-        ).all()
 
     async def claim_notifications(self, tracked_item_id: int, role: ActorRole) -> Sequence[str]:
         """Take ownership of the pings nobody has sent yet, returning whose they are.

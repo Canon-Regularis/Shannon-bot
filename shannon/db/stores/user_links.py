@@ -18,14 +18,6 @@ class UserLinkStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get(self, *, guild_id: int, github_username: str) -> UserLink | None:
-        return await self._session.scalar(
-            select(UserLink).where(
-                UserLink.discord_guild_id == guild_id,
-                UserLink.github_username == github_username.lower(),
-            )
-        )
-
     async def resolve_many(
         self, *, guild_id: int, github_usernames: Iterable[str]
     ) -> dict[str, int]:
