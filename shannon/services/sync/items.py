@@ -58,12 +58,17 @@ class SyncResult:
         return self.outcome is SyncOutcome.SYNCED
 
 
-class SyncThreads(LocksThread, OpensThreads, Protocol):
-    """Two roles, because this service does one of them and delegates the other.
+class SyncsItems(Protocol):
+    """Mirroring one snapshot, which is all any caller of this path asks for."""
 
-    Locking is the last step of a sync and belongs here. Opening, rewriting and removing belong
-    to the binding, which this service builds by default and therefore has to be handed the
-    means to. Posting is nobody's business here, which is why it is absent.
+    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult: ...
+
+
+class OpensAndLocksThreads(LocksThread, OpensThreads, Protocol):
+    """Both thread roles, which only the wiring below needs.
+
+    The service locks and the binding opens. Nothing holds this except the function that builds
+    one from the other.
     """
 
 
@@ -96,18 +101,14 @@ class ItemSyncService:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: SyncThreads,
+        threads: LocksThread,
         policy: SyncPolicy,
+        binding: ThreadBinding,
         notifier: Notifier | None = None,
-        *,
-        binding: ThreadBinding | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
-        # Built here by default because it needs exactly what this service already has, and
-        # nothing has ever wanted a different one. The parameter exists so the seam is visible
-        # rather than buried, and so a caller that does want another can say so.
-        self._binding = binding or ItemThreads(sessionmaker, threads)
+        self._binding = binding
         self._policy = policy
         self._notifier = notifier
 
@@ -369,7 +370,24 @@ class ItemSyncService:
                 logger.info("review requested again from %s", ", ".join(reopened))
 
 
-def build_item_handler(service: ItemSyncService, parse: SnapshotParser) -> EventHandler:
+def build_item_sync(
+    sessionmaker: async_sessionmaker,
+    threads: OpensAndLocksThreads,
+    policy: SyncPolicy,
+    notifier: Notifier | None = None,
+) -> ItemSyncService:
+    """Assemble a sync service and the thread binding it drives.
+
+    The service locks threads and nothing else, so its constructor asks for nothing else. The
+    binding is what opens and rewrites them, and it needs a wider handle; composing the two is
+    this function's whole job.
+    """
+    return ItemSyncService(
+        sessionmaker, threads, policy, ItemThreads(sessionmaker, threads), notifier
+    )
+
+
+def build_item_handler(service: SyncsItems, parse: SnapshotParser) -> EventHandler:
     """Adapt a webhook event to the sync service.
 
     Only the parser differs between object types, so both kinds of event share this rather

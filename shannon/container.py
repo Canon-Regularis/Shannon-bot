@@ -33,7 +33,7 @@ from shannon.services.linking import UserLinkingService
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.sync.items import ItemSyncService, build_item_handler
+from shannon.services.sync.items import ItemSyncService, build_item_handler, build_item_sync
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
@@ -83,7 +83,7 @@ def _sync_services(
     about the two paths is shared, which is what keeps them from drifting.
     """
     return (
-        ItemSyncService(
+        build_item_sync(
             sessionmaker,
             threads,
             PullRequestPolicy(),
@@ -91,7 +91,7 @@ def _sync_services(
                 sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
             ),
         ),
-        ItemSyncService(
+        build_item_sync(
             sessionmaker,
             threads,
             IssuePolicy(),

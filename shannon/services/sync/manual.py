@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -16,15 +15,17 @@ from shannon.domain.errors import (
     UnparseableLinkError,
 )
 from shannon.domain.models import RepositoryRef, TrackedSnapshot
-from shannon.github.client import GitHubClient
+from shannon.github.client import GitHubClient, LooksUpRepository
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.sync.items import SyncOutcome, SyncResult
+from shannon.services.sync.items import SyncOutcome, SyncsItems
 
 logger = logging.getLogger(__name__)
 
 LinkParser = Callable[[str], RepositoryRef]
-Fetcher = Callable[[GitHubClient, str, str, int], Awaitable[TrackedSnapshot]]
+# Owner, name, number. The client it reads from is closed over by the wiring, so this
+# service never holds one.
+Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +38,6 @@ class ManualSyncOutcome:
 
 class SyncFailedError(ShannonError):
     """The item was fetched but Discord could not be brought in line with it."""
-
-
-class SyncsItems(Protocol):
-    """Mirroring one snapshot, which is the only thing a command asks of the sync path."""
-
-    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult: ...
 
 
 class ManualSync:
@@ -59,7 +54,7 @@ class ManualSync:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        github: GitHubClient,
+        github: LooksUpRepository,
         sync: SyncsItems,
         *,
         parse_link: LinkParser,
@@ -124,7 +119,7 @@ class ManualSync:
             # user error. Not an assert: those vanish under `python -O`.
             raise UnparseableLinkError(f"{link!r} has no {self._noun} number")
 
-        snapshot = await self._fetch(self._github, ref.owner, ref.name, ref.number)
+        snapshot = await self._fetch(ref.owner, ref.name, ref.number)
         result = await self._sync.sync(snapshot)
 
         if result.outcome is SyncOutcome.NOT_TRACKED:
@@ -152,7 +147,7 @@ def build_pull_request_sync(
         github,
         sync,
         parse_link=parse_pull_request_url,
-        fetch=lambda client, owner, name, number: client.get_pull_request(owner, name, number),
+        fetch=lambda owner, name, number: github.get_pull_request(owner, name, number),
         noun="pull request",
     )
 
@@ -165,6 +160,6 @@ def build_issue_sync(
         github,
         sync,
         parse_link=parse_issue_url,
-        fetch=lambda client, owner, name, number: client.get_issue(owner, name, number),
+        fetch=lambda owner, name, number: github.get_issue(owner, name, number),
         noun="issue",
     )
