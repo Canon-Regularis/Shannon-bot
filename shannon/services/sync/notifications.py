@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.threads import ThreadGateway
+from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ActorRole
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class ActorNotifier:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: ThreadGateway,
+        threads: PostsToThread,
         *,
         role: ActorRole,
         render: Renderer,

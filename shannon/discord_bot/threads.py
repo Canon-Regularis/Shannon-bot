@@ -37,11 +37,10 @@ class ThreadHandle:
     message_id: int | None = None
 
 
-class ThreadGateway(Protocol):
-    """Everything the sync path does to Discord.
+class OpensThreads(Protocol):
+    """Owning a thread's existence: opening one, rewriting it, taking it away.
 
-    The sync service depends on this rather than on discord.py, which is what lets it be
-    tested without a gateway connection.
+    Only the code that keeps an item pointed at exactly one thread has any business here.
     """
 
     async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle: ...
@@ -50,11 +49,30 @@ class ThreadGateway(Protocol):
         self, *, thread_id: int, message_id: int | None, name: str, content: str
     ) -> ThreadHandle: ...
 
+    async def delete(self, *, thread_id: int) -> None: ...
+
+
+class PostsToThread(Protocol):
+    """Adding a message to a thread that already exists."""
+
     async def post(self, *, thread_id: int, content: str) -> int | None: ...
+
+
+class LocksThread(Protocol):
+    """Closing a thread to further replies, or opening it again."""
 
     async def set_locked(self, *, thread_id: int, locked: bool) -> None: ...
 
-    async def delete(self, *, thread_id: int) -> None: ...
+
+class ThreadGateway(OpensThreads, PostsToThread, LocksThread, Protocol):
+    """Everything this project does to Discord threads.
+
+    The container passes one object satisfying all three roles, because one Discord client is
+    all there is. Callers name the role they use instead: the note mirror and the notifier only
+    post, the sync service only locks, and only the thread binding opens or removes anything.
+    Depending on the whole of this to call one method of it is how a collaborator ends up able
+    to delete a thread it had no reason to touch.
+    """
 
 
 def truncate_thread_name(name: str) -> str:

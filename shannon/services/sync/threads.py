@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
-from shannon.discord_bot.threads import ThreadGateway, ThreadHandle
+from shannon.discord_bot.threads import OpensThreads, ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class ItemThreads:
     deleted out from under an item, and a thread that opens but cannot be written to.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker, threads: ThreadGateway) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker, threads: OpensThreads) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
 

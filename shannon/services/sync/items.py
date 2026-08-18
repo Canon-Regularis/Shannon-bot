@@ -17,7 +17,7 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
-from shannon.discord_bot.threads import ThreadGateway
+from shannon.discord_bot.threads import LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Priority, Status
 from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
@@ -58,6 +58,15 @@ class SyncResult:
         return self.outcome is SyncOutcome.SYNCED
 
 
+class SyncThreads(LocksThread, OpensThreads, Protocol):
+    """Two roles, because this service does one of them and delegates the other.
+
+    Locking is the last step of a sync and belongs here. Opening, rewriting and removing belong
+    to the binding, which this service builds by default and therefore has to be handed the
+    means to. Posting is nobody's business here, which is why it is absent.
+    """
+
+
 class Notifier(Protocol):
     """Telling the people on an item that they are on it.
 
@@ -87,7 +96,7 @@ class ItemSyncService:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: ThreadGateway,
+        threads: SyncThreads,
         policy: SyncPolicy,
         notifier: Notifier | None = None,
         *,

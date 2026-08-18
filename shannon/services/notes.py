@@ -14,7 +14,7 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
-from shannon.discord_bot.threads import ThreadGateway
+from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.errors import ItemNotReadyError
 from shannon.domain.models import ItemNote
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
@@ -45,7 +45,7 @@ class ItemNoteMirror:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: ThreadGateway,
+        threads: PostsToThread,
         *,
         render: Renderer,
     ) -> None:
