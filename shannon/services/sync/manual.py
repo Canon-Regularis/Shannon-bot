@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -18,7 +19,7 @@ from shannon.domain.models import RepositoryRef, TrackedSnapshot
 from shannon.github.client import GitHubClient
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.sync.items import ItemSyncService, SyncOutcome
+from shannon.services.sync.items import SyncOutcome, SyncResult
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,12 @@ class SyncFailedError(ShannonError):
     """The item was fetched but Discord could not be brought in line with it."""
 
 
+class SyncsItems(Protocol):
+    """Mirroring one snapshot, which is the only thing a command asks of the sync path."""
+
+    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult: ...
+
+
 class ManualSync:
     """Backs the commands that sync one item by link.
 
@@ -53,7 +60,7 @@ class ManualSync:
         self,
         sessionmaker: async_sessionmaker,
         github: GitHubClient,
-        sync: ItemSyncService,
+        sync: SyncsItems,
         *,
         parse_link: LinkParser,
         fetch: Fetcher,
@@ -138,7 +145,7 @@ class ManualSync:
 
 
 def build_pull_request_sync(
-    sessionmaker: async_sessionmaker, github: GitHubClient, sync: ItemSyncService
+    sessionmaker: async_sessionmaker, github: GitHubClient, sync: SyncsItems
 ) -> ManualSync:
     return ManualSync(
         sessionmaker,
@@ -151,7 +158,7 @@ def build_pull_request_sync(
 
 
 def build_issue_sync(
-    sessionmaker: async_sessionmaker, github: GitHubClient, sync: ItemSyncService
+    sessionmaker: async_sessionmaker, github: GitHubClient, sync: SyncsItems
 ) -> ManualSync:
     return ManualSync(
         sessionmaker,

@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,10 +23,9 @@ from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import SyncPolicy
 from shannon.services.sync.staleness import is_superseded
-from shannon.services.sync.threads import ItemThreads, ThreadTarget
+from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +58,24 @@ class SyncResult:
         return self.outcome is SyncOutcome.SYNCED
 
 
+class Notifier(Protocol):
+    """Telling the people on an item that they are on it.
+
+    Named here because this is the only thing the sync path asks of it. Who gets told and in
+    what words is the notifier's business, not this module's.
+    """
+
+    async def notify(
+        self, *, tracked_item_id: int, thread_id: int, guild_id: int
+    ) -> tuple[str, ...]: ...
+
+
+class ThreadBinding(Protocol):
+    """Keeping one item pointed at one thread, whatever Discord does in between."""
+
+    async def write(self, target: ThreadTarget, *, name: str, content: str) -> ThreadWrite: ...
+
+
 class ItemSyncService:
     """The one path a GitHub object takes into Discord.
 
@@ -72,11 +89,16 @@ class ItemSyncService:
         sessionmaker: async_sessionmaker,
         threads: ThreadGateway,
         policy: SyncPolicy,
-        notifier: ActorNotifier | None = None,
+        notifier: Notifier | None = None,
+        *,
+        binding: ThreadBinding | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
-        self._binding = ItemThreads(sessionmaker, threads)
+        # Built here by default because it needs exactly what this service already has, and
+        # nothing has ever wanted a different one. The parameter exists so the seam is visible
+        # rather than buried, and so a caller that does want another can say so.
+        self._binding = binding or ItemThreads(sessionmaker, threads)
         self._policy = policy
         self._notifier = notifier
 
