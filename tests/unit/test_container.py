@@ -73,7 +73,7 @@ class TestWhatItWiresUp:
         """A command missing here is a command that silently stops existing in Discord."""
         container = container_with(FakeEngine(), FakeGitHubClient())
 
-        assert sorted(command.name for command in container.commands()) == [
+        assert sorted(command.name for command in container.commands) == [
             "issue",
             "link",
             "pr",
