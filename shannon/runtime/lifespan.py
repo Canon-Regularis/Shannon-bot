@@ -14,12 +14,32 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from shannon.config import Settings
-from shannon.container import Container
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.runtime.supervision import Shutdown, report_exit, safely, stop
 from shannon.services.delivery.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
+
+
+class ProcessParts(Protocol):
+    """What owning the process needs of the wiring, and nothing else.
+
+    Container satisfies this by shape, so starting and stopping does not depend on the
+    composition root or on everything it happens to hold.
+    """
+
+    engine: AsyncEngine
+    worker: RunsDeliveries
+
+    async def aclose(self) -> None: ...
+
+
+class RunsDeliveries(Protocol):
+    """The worker as the lifespan sees it: something to start and something to ask to stop."""
+
+    async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 class Gateway(Protocol):
@@ -87,7 +107,7 @@ class _Running:
 
 
 async def _start(
-    bot: Gateway, container: Container, settings: Settings, liveness: ProcessLiveness
+    bot: Gateway, container: ProcessParts, settings: Settings, liveness: ProcessLiveness
 ) -> _Running:
     """Bring up the gateway and the worker, in that order.
 
@@ -119,7 +139,9 @@ async def _start(
     return _Running(shutdown=shutdown, worker_task=worker_task, bot_task=bot_task)
 
 
-async def _close(bot: Gateway, container: Container, settings: Settings, running: _Running) -> None:
+async def _close(
+    bot: Gateway, container: ProcessParts, settings: Settings, running: _Running
+) -> None:
     """Take everything down, reporting a step that fails rather than abandoning the rest."""
     # Set before anything stops, so the done callbacks can tell a task that failed from one that
     # was told to finish.
@@ -139,7 +161,7 @@ async def _close(bot: Gateway, container: Container, settings: Settings, running
     await safely("close the container", container.aclose())
 
 
-def build_lifespan(bot: Gateway, container: Container, settings: Settings):
+def build_lifespan(bot: Gateway, container: ProcessParts, settings: Settings):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
