@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
 from shannon.discord_bot.threads import OpensThreads, ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
@@ -200,7 +200,7 @@ class ItemThreads:
         self, tracked_item_id: int, thread_id: int, message_id: int | None, *, replacing: int | None
     ) -> tuple[int | None, int | None]:
         async with self._sessionmaker() as session, session.begin():
-            return await TrackedItemStore(session).claim_thread(
+            return await ThreadPointerStore(session).claim_thread(
                 tracked_item_id,
                 thread_id=thread_id,
                 message_id=message_id,

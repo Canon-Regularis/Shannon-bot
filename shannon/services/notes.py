@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
@@ -181,7 +182,7 @@ class ItemNoteMirror:
 
     async def _forget_thread(self, tracked_item_id: int, dead_thread_id: int) -> None:
         async with self._sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).forget_thread(
+            await ThreadPointerStore(session).forget_thread(
                 tracked_item_id, dead_thread_id=dead_thread_id
             )
 

@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
-from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.domain.enums import ActorRole
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from tests.fakes.threads import FakeThreadGateway
@@ -49,7 +49,7 @@ async def forget_the_thread(container, session: AsyncSession) -> None:
     """What the note mirror does when a comment finds the thread gone."""
     item = await session.scalar(select(TrackedItem))
     async with container.sessionmaker() as writing, writing.begin():
-        await TrackedItemStore(writing).forget_thread(
+        await ThreadPointerStore(writing).forget_thread(
             item.id, dead_thread_id=item.discord_thread_id
         )
 

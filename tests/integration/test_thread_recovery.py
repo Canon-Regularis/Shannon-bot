@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
-from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
@@ -304,7 +304,7 @@ class TestANoteOnADeletedThread:
         rebuilt = await issues.sync(issue_event("edited"))
 
         async with db_sessionmaker() as session, session.begin():
-            cleared = await TrackedItemStore(session).forget_thread(
+            cleared = await ThreadPointerStore(session).forget_thread(
                 rebuilt.tracked_item_id, dead_thread_id=synced.thread_id
             )
 
@@ -328,7 +328,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
         threads.threads.pop(first.thread_id)
         # Somebody else notices the thread is gone and lets go of it first.
         async with db_sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).forget_thread(
+            await ThreadPointerStore(session).forget_thread(
                 first.tracked_item_id, dead_thread_id=first.thread_id
             )
 
@@ -351,7 +351,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
         first = await service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
         async with db_sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).forget_thread(
+            await ThreadPointerStore(session).forget_thread(
                 first.tracked_item_id, dead_thread_id=first.thread_id
             )
 
@@ -378,7 +378,7 @@ class TestTheStalenessWatermark:
         first = await stored(db_session)
         threads.threads.pop(first.discord_thread_id)
         async with db_sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).forget_thread(
+            await ThreadPointerStore(session).forget_thread(
                 first.id, dead_thread_id=first.discord_thread_id
             )
 
@@ -464,7 +464,9 @@ class _ClearsTheSlotWhileCreating(FakeThreadGateway):
     async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
         if self._item is not None:
             async with self._sessionmaker() as session, session.begin():
-                await TrackedItemStore(session).forget_thread(self._item, dead_thread_id=self._dead)
+                await ThreadPointerStore(session).forget_thread(
+                    self._item, dead_thread_id=self._dead
+                )
             self._item = None
         return await super().create(channel_id=channel_id, name=name, content=content)
 

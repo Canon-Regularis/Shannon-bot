@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -130,58 +130,3 @@ class TrackedItemStore:
                 f"tracked item for {object_type.value} {github_object_id} vanished mid-write"
             )
         return item
-
-    async def forget_thread(self, tracked_item_id: int, *, dead_thread_id: int) -> bool:
-        """Drop a thread pointer, unless the item has already moved on to a different thread.
-
-        Reported by whoever found the thread gone, which may be a step behind: another sync can
-        have rebuilt it in the meantime, and clearing the pointer then would strand the new
-        thread exactly as the old one was stranded.
-        """
-        result = await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == dead_thread_id,
-            )
-            .values(discord_thread_id=None, discord_message_id=None)
-            .execution_options(synchronize_session=False)
-        )
-        return bool(result.rowcount)
-
-    async def claim_thread(
-        self,
-        tracked_item_id: int,
-        *,
-        thread_id: int,
-        message_id: int | None,
-        replacing: int | None,
-    ) -> tuple[int | None, int | None]:
-        """Point an item at a thread, but only if it still points where the caller thinks.
-
-        Returns the ids the item ended up with, which are the caller's own only if it won.
-
-        The Discord round trip that creates a thread happens outside any transaction, so two
-        callers can both read the same starting state and both create one: the worker and `/pr`
-        race whenever somebody runs the command while an event for the same item is in flight.
-        Swapping from the exact id that was read, rather than writing unconditionally, is what
-        keeps an item pointing at one thread. `replacing` is None on first creation and the id
-        of the dead thread when rebuilding, and `IS NOT DISTINCT FROM` makes those one case.
-        """
-        await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id.is_not_distinct_from(replacing),
-            )
-            .values(discord_thread_id=thread_id, discord_message_id=message_id)
-            .execution_options(synchronize_session=False)
-        )
-        row = (
-            await self._session.execute(
-                select(TrackedItem.discord_thread_id, TrackedItem.discord_message_id).where(
-                    TrackedItem.id == tracked_item_id
-                )
-            )
-        ).one_or_none()
-        return (row[0], row[1]) if row is not None else (None, None)
