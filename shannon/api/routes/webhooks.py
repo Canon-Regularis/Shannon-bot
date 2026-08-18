@@ -7,8 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
-from shannon.api.dependencies import DeliveryQueueDep, EventRouterDep, SettingsDep
-from shannon.github.webhooks.events import EventRouter, WebhookOutcome
+from shannon.api.dependencies import (
+    DeliveryQueueDep,
+    EventIntake,
+    EventRouterDep,
+    SettingsDep,
+)
+from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.signature import SignatureResult, verify
 from shannon.services.delivery.queue import DeliveryInbox
 
@@ -69,7 +74,7 @@ async def receive_github_webhook(
 
 async def _accept(
     queue: DeliveryInbox | None,
-    event_router: EventRouter,
+    event_router: EventIntake,
     *,
     event: str,
     delivery_id: str,
