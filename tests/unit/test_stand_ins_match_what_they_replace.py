@@ -19,8 +19,16 @@ from shannon.api.routes.health import Liveness
 from shannon.discord_bot.threads import DiscordThreadGateway, ThreadGateway
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.runtime.liveness import ProcessLiveness
-from shannon.services.delivery.queue import DeliveryQueue, WebhookDeliveryQueue
+from shannon.services.delivery.queue import (
+    DeliveryInbox,
+    DeliveryQueue,
+    WebhookDeliveryQueue,
+)
+from shannon.services.sync.items import ItemSyncService, Notifier, ThreadBinding
+from shannon.services.sync.manual import SyncsItems
+from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
+from shannon.services.sync.threads import ItemThreads
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.fakes.threads import FakeThreadGateway
@@ -32,11 +40,15 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ThreadGateway, DiscordThreadGateway),
     (GitHubClient, FakeGitHubClient),
     (GitHubClient, HttpGitHubClient),
-    (DeliveryQueue, InMemoryDeliveryQueue),
+    (DeliveryInbox, InMemoryDeliveryQueue),
+    (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),
     (SyncPolicy, PullRequestPolicy),
     (SyncPolicy, IssuePolicy),
     (Liveness, ProcessLiveness),
+    (Notifier, ActorNotifier),
+    (ThreadBinding, ItemThreads),
+    (SyncsItems, ItemSyncService),
 ]
 
 
