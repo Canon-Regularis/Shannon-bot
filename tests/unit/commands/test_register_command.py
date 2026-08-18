@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import discord
 import pytest
 
+from shannon.commands.register import build_register_command
 from shannon.config import Settings
-from shannon.discord_bot.commands.register import build_register_command
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError

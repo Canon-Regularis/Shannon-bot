@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.commands.link import build_link_command
 from shannon.config import Settings
-from shannon.discord_bot.commands.link import build_link_command
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.services.linking import InvalidGitHubUsernameError
 from tests.fakes.discord_objects import (

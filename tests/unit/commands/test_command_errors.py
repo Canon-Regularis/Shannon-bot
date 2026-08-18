@@ -6,8 +6,8 @@ import discord
 import pytest
 from discord import app_commands
 
+from shannon.commands._replies import UNEXPECTED, reply_for
 from shannon.discord_bot.client import ShannonBot
-from shannon.discord_bot.commands._replies import UNEXPECTED, reply_for
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import MESSAGE_LIMIT
 from shannon.discord_bot.responses import reply
@@ -55,7 +55,7 @@ class TestTheBackstop:
     """Each command answers what it expects. This answers everything else."""
 
     async def test_an_unexpected_error_still_gets_a_reply(self) -> None:
-        bot = ShannonBot()
+        bot = ShannonBot(explain_error=reply_for)
         interaction = FakeInteraction()
 
         await bot.tree.on_error(interaction, wrapped(RuntimeError("pool exhausted")))
@@ -63,7 +63,7 @@ class TestTheBackstop:
         assert interaction.reply == UNEXPECTED
 
     async def test_a_known_error_that_escaped_gets_its_real_message(self) -> None:
-        bot = ShannonBot()
+        bot = ShannonBot(explain_error=reply_for)
         interaction = FakeInteraction()
 
         await bot.tree.on_error(interaction, wrapped(NotRegisteredError("Run /register first.")))
@@ -72,7 +72,7 @@ class TestTheBackstop:
 
     async def test_an_interaction_that_has_gone_away_is_not_worth_raising_over(self) -> None:
         """The handler raising would log a second traceback and still tell nobody."""
-        bot = ShannonBot()
+        bot = ShannonBot(explain_error=reply_for)
         interaction = FakeInteraction()
         interaction.response.send_message = _refusing
 
@@ -81,7 +81,7 @@ class TestTheBackstop:
     async def test_it_says_which_command_failed_in_the_log(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        bot = ShannonBot()
+        bot = ShannonBot(explain_error=reply_for)
         with caplog.at_level("ERROR", logger="shannon.discord_bot.client"):
             await bot.tree.on_error(FakeInteraction(), wrapped(RuntimeError("boom")))
 

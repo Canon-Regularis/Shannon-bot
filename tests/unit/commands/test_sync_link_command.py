@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.config import Settings
-from shannon.discord_bot.commands.sync_link import build_issue_command, build_pr_command
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.errors import (

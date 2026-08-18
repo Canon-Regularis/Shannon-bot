@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Callable
 
 import discord
 from discord import app_commands
 
-from shannon.discord_bot.commands._replies import reply_for
 from shannon.discord_bot.responses import reply
 
 logger = logging.getLogger(__name__)
+
+# Turns whatever a command raised into something worth showing the person who ran it. Injected
+# because the mapping knows the service errors, and nothing in this package should.
+ExplainError = Callable[[BaseException], str]
 
 
 def build_intents() -> discord.Intents:
@@ -27,7 +31,7 @@ class ShannonBot(discord.Client):
     things that use it. Composition is the container's job.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, explain_error: ExplainError) -> None:
         # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
         # otherwise ping the whole server. Only the user mentions this bot builds itself are
         # allowed to resolve.
@@ -39,6 +43,7 @@ class ShannonBot(discord.Client):
         )
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = self._command_failed
+        self._explain_error = explain_error
         self._pending: list[app_commands.Command] = []
 
     async def _command_failed(
@@ -55,7 +60,7 @@ class ShannonBot(discord.Client):
         # traceback and the person who ran the command is still left waiting. The interaction
         # may also have expired, or already been answered, and neither is worth a stack trace.
         with contextlib.suppress(discord.HTTPException):
-            await reply(interaction, reply_for(error))
+            await reply(interaction, self._explain_error(error))
 
     def install(self, *commands: app_commands.Command) -> None:
         self._pending.extend(commands)

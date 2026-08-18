@@ -111,17 +111,24 @@ sits behind a protocol, so the services layer runs in tests with only Discord an
 
 ```text
 shannon/
-  api/          FastAPI app, webhook and health routes
-  db/           models, session factory, one store per table
-  discord_bot/  gateway client, slash commands, permission gate, formatting
   domain/       enums, snapshots, errors, timezone helpers. Imports nothing else
+  db/           models, session factory, one store per table
   github/       REST client, URL parsing, signature check, payload parsers
+  discord_bot/  gateway client, thread gateway, permission gate, formatting
   services/     item sync, note mirror, review ledger, notifier, delivery queue,
                 worker, thread binding, staleness
+  api/          FastAPI app, webhook and health routes
+  commands/     the slash commands, which drive services the way the routes do
+  runtime/      liveness, task supervision, startup and shutdown
   config.py     settings
   container.py  the wiring
-  main.py       ASGI app, lifespan, worker and bot startup and shutdown
+  main.py       assembles the app and hands it to uvicorn
 ```
+
+Listed bottom up, and imports only ever run down that list. `commands/` sits beside `api/`
+rather than inside `discord_bot/` for that reason: it drives services in response to a person,
+which makes it a delivery mechanism and not an adapter. The bot is handed its error translator
+instead of importing one, which is what keeps the adapter layer from reaching upward.
 
 Bot and API share a process. The worker waits for the gateway before its first batch, since a
 delivery attempted before Discord connects only burns an attempt. Shutdown stops the worker, hands

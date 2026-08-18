@@ -6,8 +6,8 @@ import discord
 import pytest
 from discord import app_commands
 
+from shannon.commands.set_channel import build_set_channel_command
 from shannon.config import Settings
-from shannon.discord_bot.commands.set_channel import build_set_channel_command
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
@@ -168,7 +168,7 @@ async def test_running_outside_a_guild_is_refused() -> None:
 
 def test_only_the_live_object_types_are_offered() -> None:
     """Tickets arrive with GitHub Projects in MVP 4 and should not be selectable yet."""
-    from shannon.discord_bot.commands.set_channel import CHOICES
+    from shannon.commands.set_channel import CHOICES
 
     assert [c.value for c in CHOICES] == ["PR", "ISSUE"]
 
