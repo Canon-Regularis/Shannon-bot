@@ -17,8 +17,9 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
+from shannon.discord_bot.formatting import thread_name
 from shannon.discord_bot.threads import LocksThread, OpensThreads
-from shannon.domain.enums import ActorRole, Priority, Status
+from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.domain.time import as_utc
@@ -145,7 +146,7 @@ class ItemSyncService:
                 await self._threads.set_locked(thread_id=state.thread_id, locked=False)
 
         written = await self._binding.write(
-            state.target, name=self._policy.thread_name(snapshot), content=state.metadata
+            state.target, name=thread_name(snapshot), content=state.metadata
         )
         handle = written.handle
 
@@ -294,7 +295,7 @@ class ItemSyncService:
                 title=snapshot.title,
                 github_state=snapshot.display_state,
                 status=Status.NOT_REVIEWED,
-                priority=self._policy.priority_for(snapshot, Priority.UNSET),
+                priority=snapshot.priority,
                 github_updated_at=snapshot.updated_at,
             )
 
@@ -339,7 +340,7 @@ class ItemSyncService:
         item.github_object_number = snapshot.number
         item.github_state = snapshot.display_state
         item.status = self._policy.status_for(snapshot, item.status)
-        item.priority = self._policy.priority_for(snapshot, item.priority)
+        item.priority = snapshot.priority
         if snapshot.updated_at is not None:
             # An item with no thread is deliberately never treated as stale, so a snapshot older
             # than what is stored can reach here. The store is what keeps the mark from moving

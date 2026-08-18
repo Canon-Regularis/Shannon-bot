@@ -5,12 +5,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
+from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import (
     Actor,
     IssueSnapshot,
-    Label,
     PullRequestSnapshot,
     RepositorySnapshot,
 )
@@ -35,42 +34,6 @@ COMMON = {
 }
 PULL_REQUEST = PullRequestSnapshot(**COMMON)
 ISSUE = IssueSnapshot(**COMMON)
-
-
-class TestPriorityComesFromTheLabels:
-    """One rule for both kinds of item. GitHub's labels are where priority lives."""
-
-    @pytest.mark.parametrize(
-        ("label", "expected"),
-        [
-            ("high priority", Priority.HIGH),
-            ("medium priority", Priority.MEDIUM),
-            ("low priority", Priority.LOW),
-        ],
-    )
-    def test_a_labelled_pull_request_takes_its_priority_from_the_label(
-        self, label: str, expected: Priority
-    ) -> None:
-        labelled = replace(PULL_REQUEST, labels=(Label("backend"), Label(label)))
-
-        assert PullRequestPolicy().priority_for(labelled, Priority.UNSET) is expected
-
-    def test_an_unlabelled_pull_request_is_unset(self) -> None:
-        assert PullRequestPolicy().priority_for(PULL_REQUEST, Priority.UNSET) is Priority.UNSET
-
-    def test_the_two_kinds_of_item_answer_alike(self) -> None:
-        """A pull request and an issue with the same label used to disagree."""
-        labels = (Label("high priority"),)
-
-        assert PullRequestPolicy().priority_for(
-            replace(PULL_REQUEST, labels=labels), Priority.UNSET
-        ) is IssuePolicy().priority_for(replace(ISSUE, labels=labels), Priority.UNSET)
-
-    def test_removing_the_label_clears_the_priority(self) -> None:
-        """GitHub is the source of truth, so taking the label off takes the priority with it."""
-        cleared = replace(PULL_REQUEST, labels=())
-
-        assert PullRequestPolicy().priority_for(cleared, Priority.HIGH) is Priority.UNSET
 
 
 class TestWhatEachPolicyLocks:

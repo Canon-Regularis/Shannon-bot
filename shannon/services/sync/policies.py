@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from shannon.discord_bot.formatting import format_issue, format_pull_request, thread_name
+from shannon.discord_bot.formatting import format_issue, format_pull_request
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.domain.models import Actor, IssueSnapshot, PullRequestSnapshot, TrackedSnapshot
 
@@ -18,8 +18,6 @@ class SyncPolicy(Protocol):
 
     object_type: ObjectType
 
-    def thread_name(self, snapshot: TrackedSnapshot) -> str: ...
-
     def render(
         self,
         snapshot: TrackedSnapshot,
@@ -33,8 +31,6 @@ class SyncPolicy(Protocol):
 
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status: ...
 
-    def priority_for(self, snapshot: TrackedSnapshot, current: Priority) -> Priority: ...
-
     def locked(self, snapshot: TrackedSnapshot) -> bool | None:
         """Whether the thread should be locked, or None to leave it as it is."""
         ...
@@ -42,9 +38,6 @@ class SyncPolicy(Protocol):
 
 class PullRequestPolicy:
     object_type = ObjectType.PR
-
-    def thread_name(self, snapshot: PullRequestSnapshot) -> str:
-        return thread_name(snapshot)
 
     def render(
         self,
@@ -67,10 +60,6 @@ class PullRequestPolicy:
         """Closing a pull request does not move its workflow status; MVP 3 owns that."""
         return current
 
-    def priority_for(self, snapshot: PullRequestSnapshot, current: Priority) -> Priority:
-        """Pull request priority lives in the GitHub labels, exactly as an issue's does."""
-        return snapshot.priority
-
     def locked(self, snapshot: PullRequestSnapshot) -> bool | None:
         """Pull request threads are never locked automatically; MVP 3 owns that."""
         return None
@@ -78,9 +67,6 @@ class PullRequestPolicy:
 
 class IssuePolicy:
     object_type = ObjectType.ISSUE
-
-    def thread_name(self, snapshot: IssueSnapshot) -> str:
-        return thread_name(snapshot)
 
     def render(
         self,
@@ -110,10 +96,6 @@ class IssuePolicy:
         if current is Status.DONE:
             return Status.NOT_REVIEWED
         return current
-
-    def priority_for(self, snapshot: IssueSnapshot, current: Priority) -> Priority:
-        """Issue priority lives in the GitHub labels, so GitHub is the source of truth."""
-        return snapshot.priority
 
     def locked(self, snapshot: IssueSnapshot) -> bool | None:
         return snapshot.closed
