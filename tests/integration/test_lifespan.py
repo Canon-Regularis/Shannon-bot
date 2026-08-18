@@ -12,7 +12,7 @@ from shannon.api.app import create_app
 from shannon.config import Settings
 from shannon.container import Container, build_container
 from shannon.runtime.lifespan import build_lifespan
-from shannon.services.worker import ReadyCheck
+from shannon.services.delivery.worker import ReadyCheck
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 

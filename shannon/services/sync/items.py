@@ -23,10 +23,10 @@ from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.services.item_threads import ItemThreads, ThreadTarget
-from shannon.services.notifications import ActorNotifier
-from shannon.services.policies import SyncPolicy
-from shannon.services.staleness import is_superseded
+from shannon.services.sync.notifications import ActorNotifier
+from shannon.services.sync.policies import SyncPolicy
+from shannon.services.sync.staleness import is_superseded
+from shannon.services.sync.threads import ItemThreads, ThreadTarget
 
 logger = logging.getLogger(__name__)
 

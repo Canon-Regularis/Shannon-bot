@@ -8,9 +8,9 @@ from shannon.discord_bot.formatting import format_assignee_ping, format_reviewer
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.notifications import ActorNotifier
-from shannon.services.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.notifications import ActorNotifier
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository

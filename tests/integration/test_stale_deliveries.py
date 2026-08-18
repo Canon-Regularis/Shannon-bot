@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository, TrackedItem
-from shannon.services.item_sync import ItemSyncService
+from shannon.services.sync.items import ItemSyncService
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration

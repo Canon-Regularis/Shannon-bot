@@ -16,7 +16,7 @@ from shannon.container import Container
 from shannon.discord_bot.client import ShannonBot
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.runtime.supervision import Shutdown, report_exit, safely, stop
-from shannon.services.worker import ReadyCheck
+from shannon.services.delivery.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
 

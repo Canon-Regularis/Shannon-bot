@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
-from shannon.services.delivery_queue import Delivery, WebhookDeliveryQueue
+from shannon.services.delivery.queue import Delivery, WebhookDeliveryQueue
 
 pytestmark = pytest.mark.integration
 

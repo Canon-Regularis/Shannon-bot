@@ -13,7 +13,7 @@ from shannon.domain.errors import (
     UnparseableLinkError,
 )
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError
-from shannon.services.manual_sync import ManualSyncOutcome, SyncFailedError
+from shannon.services.sync.manual import ManualSyncOutcome, SyncFailedError
 from tests.fakes.discord_objects import (
     FakeGuildPermissions,
     FakeInteraction,

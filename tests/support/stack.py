@@ -13,7 +13,7 @@ from shannon.container import Container, build_container
 from shannon.db.models import WebhookEvent
 from shannon.github.client import GitHubClient
 from shannon.github.webhooks.signature import sign
-from shannon.services.worker import DeliveryWorker
+from shannon.services.delivery.worker import DeliveryWorker
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 

@@ -12,10 +12,10 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_reviewer_ping
 from shannon.domain.enums import ActorRole
 from shannon.github.webhooks.reviews import parse_review_event
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.notifications import ActorNotifier
-from shannon.services.policies import PullRequestPolicy
 from shannon.services.reviews import ReviewRequestLedger
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.notifications import ActorNotifier
+from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 

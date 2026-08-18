@@ -27,16 +27,16 @@ from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.channels import ChannelMappingService
-from shannon.services.delivery_queue import WebhookDeliveryQueue
-from shannon.services.item_sync import ItemSyncService, build_item_handler
+from shannon.services.delivery.queue import WebhookDeliveryQueue
+from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.linking import UserLinkingService
-from shannon.services.manual_sync import build_issue_sync, build_pull_request_sync
 from shannon.services.notes import ItemNoteMirror, build_note_handler
-from shannon.services.notifications import ActorNotifier
-from shannon.services.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.worker import DeliveryWorker, WorkerSettings
+from shannon.services.sync.items import ItemSyncService, build_item_handler
+from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
+from shannon.services.sync.notifications import ActorNotifier
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 
 
 @dataclass(slots=True)

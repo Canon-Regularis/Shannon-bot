@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import discord
 
-from shannon.discord_bot.formatting import MESSAGE_LIMIT
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 
 # Command replies stay ephemeral. Thread traffic is the signal; an "ok, registered" seen by
 # everyone is not.

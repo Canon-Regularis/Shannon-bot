@@ -1,11 +1,22 @@
+"""Turning a snapshot into the message Discord shows.
+
+Everything that makes the text itself safe or short lives in `safe_text`; this module decides
+what a reader sees and in what order.
+"""
+
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
-import discord
-
+from shannon.discord_bot.safe_text import (
+    EMPTY,
+    as_plain_text,
+    code_span,
+    defuse_mentions,
+    fit,
+    quote,
+)
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
     Actor,
@@ -17,15 +28,14 @@ from shannon.domain.models import (
 )
 from shannon.domain.time import as_utc
 
-EMPTY = "None"
 UNKNOWN = "Unknown"
 
-# Discord rejects anything longer than this.
-MESSAGE_LIMIT = 2000
-TRUNCATED = "\n…"
-
-# A comment is a pointer to the discussion on GitHub, not a copy of it.
-COMMENT_PREVIEW_LIMIT = 700
+_VERDICTS = {
+    "approved": "approved this pull request",
+    "changes_requested": "requested changes",
+    "commented": "left a review",
+    "dismissed": "dismissed a review",
+}
 
 
 def thread_name(snapshot: TrackedSnapshot) -> str:
@@ -102,8 +112,6 @@ def format_review(snapshot: ReviewSnapshot, mentions: Mapping[str, int] | None =
     return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions)
 
 
-# What each review verdict is called in the thread. GitHub's own words are terse enough that
-# spelling them out reads better than echoing the raw state.
 _VERDICTS = {
     "approved": "approved this pull request",
     "changes_requested": "requested changes",
@@ -138,7 +146,7 @@ def _metadata(
         f"**Tags:** {_tags(snapshot.label_names)}",
         f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
     ]
-    return _fit("\n".join(lines))
+    return fit("\n".join(lines))
 
 
 def _note(
@@ -148,65 +156,17 @@ def _note(
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
     lines = [f"**{author}** {verb} {_timestamp(snapshot.created_at)}"]
-    body = _quote(snapshot.body)
+    body = quote(snapshot.body)
     if body:
         lines.append(body)
     if snapshot.html_url:
         lines.append(f"<{snapshot.html_url}>")
-    return _fit("\n".join(lines))
+    return fit("\n".join(lines))
 
 
 def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) -> str:
     rendered = ", ".join(_person(Actor(login), mentions) for login in logins)
     return f"{lead} {rendered}." if rendered else ""
-
-
-def _quote(body: str) -> str:
-    """A comment body, made safe to drop into a Discord message.
-
-    Blockquoting alone does not stop GitHub markdown rendering: bold, code fences and mentions
-    all still resolve inside a quote. So the text is neutralised first, which also means the
-    preview can be cut anywhere without leaving a `**` open and bolding everything after it.
-    """
-    text = (body or "").strip()
-    if not text:
-        return ""
-    if len(text) > COMMENT_PREVIEW_LIMIT:
-        text = text[:COMMENT_PREVIEW_LIMIT].rstrip() + "…"
-    return "\n".join(f"> {line}" if line else ">" for line in as_plain_text(text).splitlines())
-
-
-# The one mention form that can still ping somebody. `allowed_mentions` refuses @everyone and
-# roles, and `escape_mentions` handles the bare @everyone and @here spellings, but neither
-# touches this one, and users are the category the bot is told to honour.
-_MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
-
-
-def defuse_mentions(text: str) -> str:
-    """Stop `<@1234>` resolving; a zero-width space inside the brackets is enough.
-
-    Separate from the markdown escaping because text going into a code span wants this and not
-    that, where backslashes would show. Do not assume the span suppresses the ping either:
-    `allowed_mentions` gates delivery off the raw content and honours user mentions.
-    """
-    return _MENTION.sub("<​\\1\\2>", text)
-
-
-def as_plain_text(text: str) -> str:
-    """Render GitHub-authored text so it displays as written.
-
-    Anyone who can comment on the repository reaches into the thread otherwise: `<@1234>` in a
-    body resolves to a real ping, and markup that arrives half-finished, or is cut in two by the
-    preview limit, restyles everything after it.
-
-    `ignore_links=False` overrides the default. Left on, `escape_markdown` skips whatever its URL
-    pattern matches, and that pattern runs to the next space, so a comment ending
-    `https://example.com/**` keeps its markers and takes the rest of the message with it. The
-    cost: an underscore in a URL comes out escaped and unclickable inside a quoted body, which
-    `_note` and the metadata block cover with a link of their own.
-    """
-    escaped = discord.utils.escape_markdown(discord.utils.escape_mentions(text), ignore_links=False)
-    return defuse_mentions(escaped)
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
@@ -226,22 +186,8 @@ def _tags(names: Iterable[str]) -> str:
     module goes through `as_plain_text`; this was the one that did not, and a label is named by
     anybody with triage rights on the repository.
     """
-    rendered = [_code(defuse_mentions(name)) for name in names]
+    rendered = [code_span(defuse_mentions(name)) for name in names]
     return ", ".join(rendered) if rendered else EMPTY
-
-
-def _code(text: str) -> str:
-    """Wrap a label in a code span that its own backticks cannot break out of.
-
-    GitHub allows a backtick in a label name. A single-backtick span around one closes early and
-    the rest of the line renders as prose. Markdown's own answer is a longer fence.
-    """
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * (longest + 1)
-    # A space keeps a leading or trailing backtick from touching the fence, which would merge
-    # with it. Markdown strips one space from each end when rendering.
-    padding = " " if text.startswith("`") or text.endswith("`") else ""
-    return f"{fence}{padding}{text}{padding}{fence}"
 
 
 def _timestamp(value: datetime | None) -> str:
@@ -250,29 +196,3 @@ def _timestamp(value: datetime | None) -> str:
     # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a
     # naive datetime as local time, which would shift every rendered time by the host's offset.
     return f"<t:{int(as_utc(value).timestamp())}:f>"
-
-
-def _fit(message: str) -> str:
-    """Trim to Discord's limit on a line boundary.
-
-    Each line is built balanced, so dropping whole lines leaves what remains rendering properly.
-    Cutting at an arbitrary character can land inside `**bold**` or halfway through a `<@123>`
-    mention, and the rest of the message goes with it.
-    """
-    if len(message) <= MESSAGE_LIMIT:
-        return message
-
-    budget = MESSAGE_LIMIT - len(TRUNCATED)
-    kept: list[str] = []
-    used = 0
-    for line in message.split("\n"):
-        cost = len(line) + (1 if kept else 0)
-        if used + cost > budget:
-            break
-        kept.append(line)
-        used += cost
-
-    # A single line longer than the whole limit has no boundary to cut on.
-    if not kept:
-        return message[:budget] + TRUNCATED
-    return "\n".join(kept) + TRUNCATED

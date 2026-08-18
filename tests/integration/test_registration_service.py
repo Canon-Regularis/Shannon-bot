@@ -10,9 +10,9 @@ from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkErr
 from shannon.domain.models import RepositorySnapshot
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.policies import PullRequestPolicy
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads

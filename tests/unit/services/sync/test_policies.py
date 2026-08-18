@@ -14,8 +14,8 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 
 REPO = RepositorySnapshot(
     github_repo_id=1,

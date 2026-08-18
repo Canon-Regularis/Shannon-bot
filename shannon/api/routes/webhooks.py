@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from shannon.api.dependencies import DeliveryQueueDep, EventRouterDep, SettingsDep
 from shannon.github.webhooks.events import EventRouter, WebhookOutcome
 from shannon.github.webhooks.signature import SignatureResult, verify
-from shannon.services.delivery_queue import DeliveryQueue
+from shannon.services.delivery.queue import DeliveryQueue
 
 logger = logging.getLogger(__name__)
 

@@ -13,9 +13,9 @@ from shannon.discord_bot.errors import ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.webhooks.comments import parse_comment_event
-from shannon.services.item_sync import ItemSyncService
 from shannon.services.notes import ItemNoteMirror
-from shannon.services.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 

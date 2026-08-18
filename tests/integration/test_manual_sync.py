@@ -17,8 +17,8 @@ from shannon.domain.models import (
     RepositorySnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.manual_sync import ManualSync, build_issue_sync, build_pull_request_sync
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.manual import ManualSync, build_issue_sync, build_pull_request_sync
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads

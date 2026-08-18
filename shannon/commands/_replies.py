@@ -13,7 +13,7 @@ from shannon.domain.errors import (
 )
 from shannon.github.errors import GitHubError, GitHubNotFoundError
 from shannon.services.linking import InvalidGitHubUsernameError
-from shannon.services.manual_sync import SyncFailedError
+from shannon.services.sync.manual import SyncFailedError
 
 logger = logging.getLogger(__name__)
 

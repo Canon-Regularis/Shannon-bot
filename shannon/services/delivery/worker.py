@@ -10,7 +10,7 @@ from shannon.config import Settings
 from shannon.domain.enums import DeliveryStatus
 from shannon.domain.errors import PermanentError
 from shannon.github.webhooks.events import EventRouter, WebhookOutcome
-from shannon.services.delivery_queue import Delivery, WebhookDeliveryQueue
+from shannon.services.delivery.queue import Delivery, WebhookDeliveryQueue
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from shannon.services.staleness import is_stale
+from shannon.services.sync.staleness import is_stale
 
 EARLY = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
 LATE = datetime(2026, 8, 11, 18, 0, tzinfo=UTC)

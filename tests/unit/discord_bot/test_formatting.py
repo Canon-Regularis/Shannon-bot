@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from shannon.discord_bot.formatting import MESSAGE_LIMIT, format_pull_request
+from shannon.discord_bot.formatting import format_pull_request
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
 

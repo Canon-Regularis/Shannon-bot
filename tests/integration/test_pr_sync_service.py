@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.services.item_sync import ItemSyncService, SyncOutcome, build_item_handler
+from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_handler
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 

@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ObjectType
-from shannon.services.item_sync import ItemSyncService
-from shannon.services.policies import IssuePolicy
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration

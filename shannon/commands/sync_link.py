@@ -9,7 +9,7 @@ from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import SYNC_ROLES, PermissionGate
 from shannon.discord_bot.responses import defer, reply
 from shannon.domain.errors import ShannonError
-from shannon.services.manual_sync import ManualSync
+from shannon.services.sync.manual import ManualSync
 
 logger = logging.getLogger(__name__)
 

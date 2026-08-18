@@ -15,9 +15,9 @@ from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import DeliveryStatus, ObjectType
 from shannon.github.webhooks.events import EventRouter, WebhookOutcome
 from shannon.github.webhooks.reviews import parse_review_event
-from shannon.services.delivery_queue import WebhookDeliveryQueue
+from shannon.services.delivery.queue import WebhookDeliveryQueue
+from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.worker import DeliveryWorker, WorkerSettings
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository

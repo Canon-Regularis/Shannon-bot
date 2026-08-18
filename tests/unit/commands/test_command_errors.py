@@ -9,8 +9,8 @@ from discord import app_commands
 from shannon.commands._replies import UNEXPECTED, reply_for
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.errors import DiscordGatewayError
-from shannon.discord_bot.formatting import MESSAGE_LIMIT
 from shannon.discord_bot.responses import reply
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError
 from tests.fakes.discord_objects import FakeInteraction

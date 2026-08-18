@@ -4,14 +4,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 from shannon.discord_bot.formatting import (
-    COMMENT_PREVIEW_LIMIT,
-    MESSAGE_LIMIT,
     format_assignee_ping,
     format_comment,
     format_issue,
     format_review,
     thread_name,
 )
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
     Actor,

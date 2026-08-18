@@ -18,7 +18,7 @@ from shannon.domain.models import RepositoryRef, TrackedSnapshot
 from shannon.github.client import GitHubClient
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.item_sync import ItemSyncService, SyncOutcome
+from shannon.services.sync.items import ItemSyncService, SyncOutcome
 
 logger = logging.getLogger(__name__)
 

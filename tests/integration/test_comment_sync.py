@@ -12,9 +12,9 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ObjectType, Status
 from shannon.github.webhooks.comments import parse_comment_event
-from shannon.services.item_sync import ItemSyncService
 from shannon.services.notes import ItemNoteMirror, build_note_handler
-from shannon.services.policies import IssuePolicy
+from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository

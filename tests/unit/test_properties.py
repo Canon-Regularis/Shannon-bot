@@ -6,13 +6,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from shannon.discord_bot.formatting import (
-    COMMENT_PREVIEW_LIMIT,
-    MESSAGE_LIMIT,
     format_comment,
     format_issue,
     format_pull_request,
     thread_name,
 )
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
 from shannon.discord_bot.threads import THREAD_NAME_LIMIT, truncate_thread_name
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
@@ -27,7 +26,7 @@ from shannon.domain.priority import parse_priority
 from shannon.domain.time import as_utc
 from shannon.github.mapping import parse_timestamp
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.services.staleness import is_stale
+from shannon.services.sync.staleness import is_stale
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
 

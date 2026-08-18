@@ -6,7 +6,7 @@ from fastapi import Depends, Request
 
 from shannon.config import Settings
 from shannon.github.webhooks.events import EventRouter
-from shannon.services.delivery_queue import DeliveryQueue
+from shannon.services.delivery.queue import DeliveryQueue
 
 
 def get_settings_dep(request: Request) -> Settings:

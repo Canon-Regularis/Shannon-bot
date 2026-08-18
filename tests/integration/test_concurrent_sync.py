@@ -14,8 +14,8 @@ from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import Actor
 from shannon.domain.time import as_utc
 from shannon.services.channels import ChannelMappingService
-from shannon.services.item_sync import ItemSyncService, SyncOutcome
-from shannon.services.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.items import ItemSyncService, SyncOutcome
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration

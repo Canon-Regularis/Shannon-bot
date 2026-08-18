@@ -114,9 +114,11 @@ shannon/
   domain/       enums, snapshots, errors, timezone helpers. Imports nothing else
   db/           models, session factory, one store per table
   github/       REST client, URL parsing, signature check, payload parsers
-  discord_bot/  gateway client, thread gateway, permission gate, formatting
-  services/     item sync, note mirror, review ledger, notifier, delivery queue,
-                worker, thread binding, staleness
+  discord_bot/  gateway client, thread gateway, permission gate, rendering, text safety
+  services/     sync/      one item into its thread: policies, staleness, threads,
+                           notifications, and the same job driven by a command
+                delivery/  the queue and the worker that drains it
+                notes, reviews, channels, linking, registration
   api/          FastAPI app, webhook and health routes
   commands/     the slash commands, which drive services the way the routes do
   runtime/      liveness, task supervision, startup and shutdown
