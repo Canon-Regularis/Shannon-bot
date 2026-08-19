@@ -20,11 +20,6 @@ from tests.support.stack import build_http_client, build_stack, deliver
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def threads() -> FakeThreadGateway:
-    return FakeThreadGateway()
-
-
 @pytest_asyncio.fixture
 async def client(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway

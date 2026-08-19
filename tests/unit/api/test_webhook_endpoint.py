@@ -10,11 +10,6 @@ from shannon.github.webhooks.router import EventRouter
 from tests.support.webhooks import RecordingHandler, build_client, post
 
 
-@pytest.fixture
-def handler() -> RecordingHandler:
-    return RecordingHandler()
-
-
 @pytest_asyncio.fixture
 async def client(handler: RecordingHandler) -> AsyncIterator[AsyncClient]:
     async with build_client(handler) as http_client:

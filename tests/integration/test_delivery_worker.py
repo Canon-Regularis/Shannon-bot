@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.config import Settings
 from shannon.db.models import WebhookEvent
@@ -28,11 +28,6 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def threads() -> FakeThreadGateway:
-    return FakeThreadGateway()
-
-
-@pytest.fixture
 async def client(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[DeliveryClient]:
@@ -41,11 +36,6 @@ async def client(
     await map_channel(db_session, repository, ObjectType.ISSUE, channel_id=98)
     async with build_http_client(build_stack(db_engine, threads=threads)) as http_client:
         yield http_client
-
-
-@pytest.fixture
-def queue(db_sessionmaker: async_sessionmaker) -> WebhookDeliveryQueue:
-    return WebhookDeliveryQueue(db_sessionmaker)
 
 
 async def stored(session: AsyncSession, delivery_id: str) -> WebhookEvent:
@@ -615,3 +605,39 @@ class TestAReviewLedgerWithNothingToDo:
         snapshot = parse_review_event("submitted", payloads.pull_request_review_event())
 
         await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
+
+
+class TestWhatGetsWrittenToLastError:
+    """`last_error` exists to be read by a person, so it is trimmed on the way in.
+
+    The column is Text and PostgreSQL will take any length, so nothing else enforces this. It
+    had no test at all until the limit moved out of the store and into WorkerSettings.
+    """
+
+    async def test_an_enormous_message_is_trimmed(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        async def raises(action: str, payload: Any) -> WebhookOutcome:
+            raise RuntimeError("x" * 10_000)
+
+        await enqueue(queue, "huge")
+        await build_worker(queue, raises).run_once()
+
+        event = await db_session.scalar(
+            select(WebhookEvent).where(WebhookEvent.github_delivery_id == "huge")
+        )
+        assert len(event.last_error) == WorkerSettings().error_limit
+
+    async def test_an_ordinary_message_is_left_alone(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        async def raises(action: str, payload: Any) -> WebhookOutcome:
+            raise RuntimeError("the gateway said no")
+
+        await enqueue(queue, "small")
+        await build_worker(queue, raises).run_once()
+
+        event = await db_session.scalar(
+            select(WebhookEvent).where(WebhookEvent.github_delivery_id == "small")
+        )
+        assert event.last_error == "RuntimeError: the gateway said no"

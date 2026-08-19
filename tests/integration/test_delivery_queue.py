@@ -24,11 +24,6 @@ PAYLOAD = {"action": "opened", "number": 7}
 LEASE = timedelta(minutes=5)
 
 
-@pytest.fixture
-def queue(db_sessionmaker: async_sessionmaker) -> WebhookDeliveryQueue:
-    return WebhookDeliveryQueue(db_sessionmaker)
-
-
 async def count_events(session: AsyncSession) -> int:
     return await session.scalar(select(func.count()).select_from(WebhookEvent)) or 0
 

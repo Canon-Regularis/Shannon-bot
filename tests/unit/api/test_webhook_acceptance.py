@@ -11,11 +11,6 @@ PR_OPENED = {"action": "opened", "number": 7}
 
 
 @pytest.fixture
-def handler() -> RecordingHandler:
-    return RecordingHandler()
-
-
-@pytest.fixture
 def queue() -> InMemoryDeliveryQueue:
     return InMemoryDeliveryQueue()
 
