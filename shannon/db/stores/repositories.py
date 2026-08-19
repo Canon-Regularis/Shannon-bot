@@ -21,6 +21,14 @@ class RepositoryStore:
             select(Repository).where(Repository.discord_guild_id == discord_guild_id)
         )
 
+    async def get_by_id(self, repository_id: int) -> Repository | None:
+        """The repository a row already points at.
+
+        Reading `item.repository` instead would lazy load, which an async session cannot do
+        outside its own greenlet and which fails at the point of use rather than here.
+        """
+        return await self._session.get(Repository, repository_id)
+
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:
         return await self._session.scalar(
             select(Repository).where(Repository.github_repo_id == github_repo_id)

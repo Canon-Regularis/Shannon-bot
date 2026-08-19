@@ -45,6 +45,18 @@ class TrackedItemStore:
         """
         item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 
+    async def get_by_thread(self, discord_thread_id: int) -> TrackedItem | None:
+        """Find the item a Discord thread belongs to.
+
+        The workflow commands take no argument and act on the thread they are run in, because
+        the thread is the only thing the person running one is looking at. Nothing else looks
+        an item up this way, which is why the column carries no index: one row per thread and a
+        handful of commands a day is not a query worth an index to maintain on the sync path.
+        """
+        return await self._session.scalar(
+            select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)
+        )
+
     async def get_by_number(
         self, *, repository_id: int, number: int, object_type: ObjectType
     ) -> TrackedItem | None:
