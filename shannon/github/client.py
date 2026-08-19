@@ -5,6 +5,7 @@ import logging
 import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -46,6 +47,10 @@ class GitHubClient(LooksUpRepository, Protocol):
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
+
+    async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
+
+    async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
 
 class HttpGitHubClient:
@@ -123,6 +128,37 @@ class HttpGitHubClient:
                 f"GitHub returned an unusable issue for {owner}/{name}#{number}"
             )
         return snapshot
+
+    async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
+        """Put a label on an item.
+
+        The issues endpoint serves pull requests too, so one method covers both. GitHub creates
+        a label this repository does not have yet rather than refusing, which is what lets a
+        server start using the workflow without setting five labels up by hand first.
+        """
+        await self._send(
+            "POST", f"/repos/{owner}/{name}/issues/{number}/labels", json={"labels": [label]}
+        )
+
+    async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:
+        """Take a label off an item, treating one that is not there as done.
+
+        Removals are computed from a snapshot read a moment earlier, and anything can have
+        happened since. A 404 here means the end state is the wanted one, and failing the
+        command over it would leave the caller retrying towards where they already are.
+        """
+        path = f"/repos/{owner}/{name}/issues/{number}/labels/{quote(label, safe='')}"
+        with contextlib.suppress(GitHubNotFoundError):
+            await self._send("DELETE", path)
+
+    async def _send(self, method: str, path: str, **kwargs: Any) -> None:
+        """A write, whose answer is only ever whether it worked."""
+        try:
+            response = await self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
+
+        _raise_for_status(response, path)
 
     async def _get(self, path: str) -> dict[str, Any]:
         try:

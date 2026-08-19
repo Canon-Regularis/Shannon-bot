@@ -187,6 +187,74 @@ async def test_the_client_it_builds_itself_is_the_one_it_closes() -> None:
     assert client._client.is_closed is True
 
 
+class TestWritingLabels:
+    """The only writes this bot makes to GitHub, and the record the workflow rests on."""
+
+    def _recording(self, status: int = 200):
+        seen: list[tuple[str, str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content) if request.content else None
+            seen.append((request.method, request.url.path, body))
+            return httpx.Response(status, content=json.dumps({}))
+
+        return seen, handler
+
+    async def test_adding_a_label_posts_it_to_the_issues_endpoint(self) -> None:
+        """Pull requests are served from the issues endpoint too, so one path covers both."""
+        seen, handler = self._recording()
+
+        async with client_with(handler) as client:
+            await client.add_label("acme", "widget", 7, "IN_REVIEW")
+
+        assert seen == [("POST", "/repos/acme/widget/issues/7/labels", {"labels": ["IN_REVIEW"]})]
+
+    async def test_removing_a_label_names_it_in_the_path(self) -> None:
+        seen, handler = self._recording()
+
+        async with client_with(handler) as client:
+            await client.remove_label("acme", "widget", 7, "IN_REVIEW")
+
+        assert seen == [("DELETE", "/repos/acme/widget/issues/7/labels/IN_REVIEW", None)]
+
+    async def test_a_label_with_a_space_in_it_is_encoded(self) -> None:
+        """`priority: high` is a real label style, and unencoded it changes which path is hit.
+
+        Read off `raw_path`, which is what goes on the wire. `url.path` hands back the decoded
+        form, so asserting on that would pass whether or not anything was encoded at all.
+        """
+        wire: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path.decode())
+            return httpx.Response(200, content="{}")
+
+        async with client_with(handler) as client:
+            await client.remove_label("acme", "widget", 7, "priority: high")
+
+        assert wire == ["/repos/acme/widget/issues/7/labels/priority%3A%20high"]
+
+    async def test_removing_a_label_that_is_not_there_is_not_a_failure(self) -> None:
+        """Removals are worked out from a snapshot read a moment earlier. A label somebody took
+        off in between leaves the item where the caller wanted it, so failing would have them
+        retrying towards a state they are already in."""
+        async with client_with(responds(404, {"message": "Label does not exist"})) as client:
+            await client.remove_label("acme", "widget", 7, "gone")
+
+    async def test_a_refused_write_is_reported(self) -> None:
+        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+            with pytest.raises(GitHubAuthError):
+                await client.add_label("acme", "widget", 7, "DONE")
+
+    async def test_a_write_that_never_reaches_github_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
+                await client.add_label("acme", "widget", 7, "DONE")
+
+
 def test_token_is_sent_as_a_bearer_header() -> None:
     from shannon.github.client import _headers
 
