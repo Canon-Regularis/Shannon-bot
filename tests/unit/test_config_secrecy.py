@@ -6,7 +6,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from shannon.config import Settings
+from shannon.config import Settings, get_settings
 
 # Deliberately not shaped like real credentials. A string carrying GitHub's `ghp_` prefix would
 # trip push protection and secret scanners, and the masking under test does not care what the
@@ -150,3 +150,20 @@ class TestTheLeaseCoversItsBatch:
         settings = Settings(worker_batch_size=100, worker_lease_seconds=6000)
 
         assert settings.worker_batch_size == 100
+
+
+class TestReadingSettingsOnce:
+    """`get_settings` is what wiring calls, and it had never been called by anything else."""
+
+    def test_every_caller_gets_the_same_settings(self) -> None:
+        """Two callers reading the environment separately could disagree about it.
+
+        Nothing rereads the environment mid-process today, but the container is built from this
+        and a second build picking up a different database URL is not a failure anybody would
+        see until the queries started going somewhere else.
+        """
+        get_settings.cache_clear()
+        try:
+            assert get_settings() is get_settings()
+        finally:
+            get_settings.cache_clear()

@@ -86,3 +86,16 @@ def test_denial_message_uses_configured_names() -> None:
     gate = PermissionGate(ConfiguredRoles.from_settings(Settings(role_project_manager="Leads")))
 
     assert "Leads" in gate.denial("register", REGISTER_ROLES)
+
+
+def test_denial_message_with_every_tier_blanked_names_nothing() -> None:
+    """Emptying a role setting is how a server turns a tier off, and it leaves nothing to list.
+
+    The message has to stop rather than trail off after the colon. A guild administrator still
+    gets through: that is read off Discord's own permission bit, not off a configured name.
+    """
+    gate = PermissionGate(
+        ConfiguredRoles.from_settings(Settings(role_admin="", role_project_manager=" , "))
+    )
+
+    assert gate.denial("register", REGISTER_ROLES) == "You are not allowed to use /register."

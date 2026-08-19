@@ -41,6 +41,16 @@ class TestCommentParsing:
 
         assert parse_comment_event("created", payload) is None
 
+    def test_a_comment_with_no_usable_id_is_ignored(self) -> None:
+        """The id is the note key, so a comment without one cannot be claimed before posting.
+
+        Mirroring it anyway would put it in the thread again on every retry.
+        """
+        payload = payloads.issue_comment_event()
+        payload["comment"]["id"] = None
+
+        assert parse_comment_event("created", payload) is None
+
     def test_a_payload_without_an_item_number_is_ignored(self) -> None:
         payload = payloads.issue_comment_event()
         del payload["issue"]["number"]

@@ -360,6 +360,30 @@ class TestNoteTargeting:
         assert wrong is None
 
 
+async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    threads: FakeThreadGateway,
+) -> None:
+    """`then` closes a review request, so it must not run for a note that was never read.
+
+    The check sits ahead of it deliberately. An edited comment reaches this every time, and it
+    is the one place the handler can answer without touching the database at all.
+    """
+    mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+    ran: list[object] = []
+
+    async def then(snapshot: object) -> None:
+        ran.append(snapshot)
+
+    handler = build_note_handler(mirror, parse_comment_event, then=then)
+    outcome = await handler("edited", payloads.issue_comment_event())
+
+    assert outcome == "ignored"
+    assert ran == []
+    assert threads.posts == []
+
+
 class TestARetryAfterTheCommentLanded:
     """A retry re-runs the whole handler, and posting a message cannot be undone."""
 

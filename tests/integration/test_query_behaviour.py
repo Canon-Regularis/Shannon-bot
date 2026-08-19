@@ -6,8 +6,10 @@ from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
+from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.enums import ObjectType
+from shannon.db.stores.webhook_events import WebhookEventStore
+from shannon.domain.enums import ActorRole, ObjectType
 from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy
 from tests.fakes.threads import FakeThreadGateway
@@ -114,3 +116,35 @@ async def test_the_number_lookup_still_finds_the_right_row(
     assert found is not None
     assert found.github_object_type is ObjectType.ISSUE
     assert isinstance(found, TrackedItem)
+
+
+class TestHandingBackNothing:
+    """Both stores are asked to release an empty set on paths that reach them normally.
+
+    A worker cancelled on the last delivery of its batch hands back the empty remainder, and a
+    notifier that claimed nobody releases nobody. Neither should reach the database: `IN ()` is
+    not valid SQL, and SQLAlchemy renders it as a always-false expression that costs a round
+    trip to learn nothing.
+    """
+
+    async def test_releasing_no_deliveries_sends_no_statement(
+        self, db_engine: AsyncEngine, db_session: AsyncSession
+    ) -> None:
+        log = QueryLog(db_engine)
+        try:
+            await WebhookEventStore(db_session).release([])
+        finally:
+            log.close()
+
+        assert log.statements == []
+
+    async def test_releasing_no_pings_sends_no_statement(
+        self, db_engine: AsyncEngine, db_session: AsyncSession
+    ) -> None:
+        log = QueryLog(db_engine)
+        try:
+            await ItemAssignmentStore(db_session).release_notifications(1, ActorRole.REVIEWER, [])
+        finally:
+            log.close()
+
+        assert log.statements == []
