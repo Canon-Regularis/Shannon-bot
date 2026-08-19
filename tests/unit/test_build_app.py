@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from shannon.config import Settings
-from shannon.main import build_app
+from shannon.main import build_app, configure_logging, run
 
 SETTINGS = Settings(github_webhook_secret="x")
 
@@ -57,3 +57,43 @@ def test_the_router_is_wired_to_a_handler_for_every_event(app: FastAPI) -> None:
 
 def test_the_settings_it_was_given_are_the_ones_it_uses(app: FastAPI) -> None:
     assert app.state.settings is SETTINGS
+
+
+class TestStartingTheProcess:
+    """`run` is the entry point the console script calls, and nothing had ever called it."""
+
+    def test_the_port_it_serves_on_is_the_configured_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SHANNON_API_HOST and SHANNON_API_PORT are documented settings that nothing read.
+
+        Bound to the wrong port the process comes up, answers its own health check, and takes
+        no delivery, because GitHub is posting somewhere nothing is listening.
+        """
+        served: dict[str, object] = {}
+
+        def fake_run(app: object, **kwargs: object) -> None:
+            served.update(kwargs)
+            served["app"] = app
+
+        monkeypatch.setattr("shannon.main.uvicorn.run", fake_run)
+        monkeypatch.setattr("shannon.main.get_settings", lambda: SETTINGS)
+        monkeypatch.setattr("shannon.main.configure_logging", lambda settings: None)
+
+        run()
+
+        assert served["host"] == SETTINGS.api_host
+        assert served["port"] == SETTINGS.api_port
+        assert isinstance(served["app"], FastAPI)
+
+    def test_logging_is_set_up_from_the_configured_level(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checked through basicConfig rather than by reading the root logger back, which other
+        tests in this process share and would be left holding whatever this set."""
+        configured: dict[str, object] = {}
+        monkeypatch.setattr("shannon.main.logging.basicConfig", lambda **kw: configured.update(kw))
+
+        configure_logging(Settings(log_level="warning"))
+
+        assert configured["level"] == "WARNING"
