@@ -46,29 +46,28 @@ class TrackedItemStore:
         item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 
     async def get_by_number(
-        self,
-        *,
-        repository_id: int,
-        number: int,
-        object_type: ObjectType | None = None,
+        self, *, repository_id: int, number: int, object_type: ObjectType
     ) -> TrackedItem | None:
-        """Find an item by its GitHub number.
+        """Find an item by its GitHub number and kind.
 
-        This exists because `issue_comment` payloads report the issue id even for a pull
-        request, and that never matches the pull request id stored against the tracked item.
-        The number matches for both.
+        By number because `issue_comment` payloads report the issue id even for a pull request,
+        and that never matches the pull request id stored against the tracked item. The number
+        matches for both.
 
-        `object_type` narrows it further. Issues and pull requests share one numbering sequence
-        per repository, so a number already identifies exactly one of them, but pinning the
-        type means a caller that knows what it is cannot be handed the other.
+        The kind is required rather than optional. Issues and pull requests share one numbering
+        sequence per repository, so a number already identifies exactly one of them, and every
+        caller knows which it is asking about; leaving it out would only be a way to be handed
+        the other one.
         """
-        query = select(TrackedItem).where(
-            TrackedItem.repository_id == repository_id,
-            TrackedItem.github_object_number == number,
+        return await self._session.scalar(
+            select(TrackedItem)
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_number == number,
+                TrackedItem.github_object_type == object_type,
+            )
+            .order_by(TrackedItem.id)
         )
-        if object_type is not None:
-            query = query.where(TrackedItem.github_object_type == object_type)
-        return await self._session.scalar(query.order_by(TrackedItem.id))
 
     async def get_or_create(
         self,
