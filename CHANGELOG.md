@@ -1689,3 +1689,54 @@ transaction whose `__aexit__` is a suspension point, so a cancellation delivered
 is sent and before the block returns leaves `logins` unbound, the hand-back unrun and the ping
 owed to nobody. That is a window measured in the time a commit takes to acknowledge, and it stays
 on the list rather than being called fixed.
+
+### The last six statements, and what branch coverage said afterwards
+
+Five of the six were reachable after all, and the sixth was a flaky test rather than a gap.
+
+The three refusals in `/pr` and `/issue` were written off last time as unreachable, which was
+right about the wiring and wrong about the conclusion. `ManualSync` takes its link parser, its
+fetch and its `SyncsItems` as constructor arguments, so all three can be driven at the boundary
+they exist for: a parser that drops the number, a sync reporting nothing to sync into, and a sync
+reporting success with no thread. The last one matters most, because `thread_id` becomes a channel
+link in the reply and `None` there is a message pointing at nothing.
+
+`get_or_create` raising when the row it just conflicted with is no longer there is simulated at the
+read, because the two statements are inside one method call and nothing can be interleaved between
+them from outside. What is under test is what the caller is handed: a `None` flowing on becomes an
+AttributeError several frames later with nothing in it naming the item. `on_ready` runs on every
+reconnect, when `user` is still None. `python -m shannon.main` goes through the guard at the bottom
+of the file, which the console script in pyproject does not, run by path rather than by module name
+because the module is already imported and `run_module` warns about that.
+
+The sixth was `registration.py`, which had been covered the round before and was not this time.
+Same code, same suite: eight concurrent callers reach the losing path only when the scheduler
+interleaves their checks before the first commit, which it does on most runs. Coverage that moves
+on its own is the symptom. It is arranged now rather than raced, with one session holding an
+uncommitted row so every check comes back empty and the insert stops on the unique index, and with
+PostgreSQL itself asked whether a backend is waiting on a lock rather than a sleep guessing at it.
+The burst test stays, because one winner and one row across eight callers is a different claim.
+
+Statement coverage reached 100% there, which is a weaker statement than it sounds: every line ran
+at least once, not every branch went both ways. Measured properly, four branches out of 446 had
+only ever gone one way, and two of them were worth acting on.
+
+- **An optional parameter nothing had ever left out.** `get_by_number` took
+  `object_type: ObjectType | None = None` and narrowed the query when it was given. Both callers
+  in the services and all four in the tests pass it, so the None path existed for nobody, and the
+  only thing the option bought was a way to be handed a pull request when an issue was wanted. It
+  is required now and the branch went with it.
+- **Both guards in `responses.py`, which had no test of its own.** `reply` picks between Discord's
+  two send paths and `defer` does nothing to an interaction already answered. No command reaches
+  either, since each defers once and replies once; they are there so a command doing otherwise
+  fails visibly rather than by leaving somebody at a spinner.
+- **The reload after the rename check.** The GitHub call deliberately sits between two
+  transactions, because the sync path refuses to hold one across the network, and that leaves a
+  window in which the repository can be unregistered. Reproduced by deleting the row from inside
+  the fake's `get_repository`, which is exactly where the window is.
+
+One partial branch is left and is meant to stay. The line-dropping loop in `fit` cannot exit
+normally: the function is only entered above two thousand characters, the per-line costs sum to
+exactly the length of the message, and the budget is 1998, so it always breaks. Checked by
+arithmetic rather than asserted. Restructuring working code so a tool can see that is the wrong
+way round, and the number carries the caveat instead.
