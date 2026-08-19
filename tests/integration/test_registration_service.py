@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -117,6 +119,36 @@ async def test_a_rejected_registration_leaves_no_rows_behind(
 
     mappings = (await db_session.scalars(select(ChannelMapping))).all()
     assert len(mappings) == 1
+
+
+async def test_a_burst_of_registrations_leaves_one_repository_and_no_raw_database_error(
+    service: RepositoryRegistrationService, db_session: AsyncSession
+) -> None:
+    """A double-clicked /register, or a whole team running it at once.
+
+    Every caller checks the guild and the repository before inserting, and overlapping they all
+    check before any of them commits, so they all find nothing and all insert. The database
+    settles it on the unique index, and whoever lost has to hear the same refusal they would
+    have heard a second later rather than a driver error with an index name in it.
+    """
+    results = await asyncio.gather(
+        *(service.register(guild_id=1, channel_id=10 + n, link=REPO_LINK) for n in range(8)),
+        return_exceptions=True,
+    )
+
+    unexpected = [
+        r
+        for r in results
+        if isinstance(r, BaseException) and not isinstance(r, DuplicateRegistrationError)
+    ]
+    assert unexpected == [], (
+        f"a concurrent /register raised a database error at somebody: {unexpected}"
+    )
+
+    winners = [r for r in results if not isinstance(r, BaseException)]
+    assert len(winners) == 1, f"{len(winners)} callers were told they had registered the repository"
+    assert len((await db_session.scalars(select(Repository))).all()) == 1
+    assert len((await db_session.scalars(select(ChannelMapping))).all()) == 1
 
 
 class TestARepositoryRenamedOnGitHub:
