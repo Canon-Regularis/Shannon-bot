@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
@@ -126,10 +126,9 @@ async def test_a_burst_of_registrations_leaves_one_repository_and_no_raw_databas
 ) -> None:
     """A double-clicked /register, or a whole team running it at once.
 
-    Every caller checks the guild and the repository before inserting, and overlapping they all
-    check before any of them commits, so they all find nothing and all insert. The database
-    settles it on the unique index, and whoever lost has to hear the same refusal they would
-    have heard a second later rather than a driver error with an index name in it.
+    Whether any of them actually overlaps is up to the scheduler, so this is about the outcome
+    rather than the path: one winner, one row, and nobody holding a database error. The test
+    below is the one that guarantees the losing path is taken.
     """
     results = await asyncio.gather(
         *(service.register(guild_id=1, channel_id=10 + n, link=REPO_LINK) for n in range(8)),
@@ -149,6 +148,62 @@ async def test_a_burst_of_registrations_leaves_one_repository_and_no_raw_databas
     assert len(winners) == 1, f"{len(winners)} callers were told they had registered the repository"
     assert len((await db_session.scalars(select(Repository))).all()) == 1
     assert len((await db_session.scalars(select(ChannelMapping))).all()) == 1
+
+
+async def _blocked_on_a_lock(session: AsyncSession, timeout: float = 10.0) -> bool:
+    """Wait until some backend on this database is stuck behind another one's lock.
+
+    PostgreSQL says so itself, which is what makes this a signal rather than a guess: a second
+    insert on a unique index waits on the first transaction's id until it commits or rolls back.
+    """
+    async with asyncio.timeout(timeout):
+        while True:
+            waiting = await session.scalar(
+                text(
+                    "select count(*) from pg_stat_activity "
+                    "where datname = current_database() and wait_event_type = 'Lock'"
+                )
+            )
+            if waiting:
+                return True
+            await asyncio.sleep(0.02)
+
+
+async def test_a_registration_that_commits_between_the_check_and_the_insert(
+    service: RepositoryRegistrationService,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+) -> None:
+    """The losing path, arranged rather than raced.
+
+    Somebody else's row exists but has not committed, so every check this caller makes comes
+    back empty and it inserts, which is where it stops and waits. The other transaction then
+    commits and the unique index refuses. That is a real sequence and the only one that reaches
+    the branch, and leaving it to eight concurrent callers reaches it on some runs and not on
+    others, which shows up as coverage that moves on its own.
+    """
+    async with db_sessionmaker() as blocker:
+        await blocker.begin()
+        blocker.add(
+            Repository(
+                github_repo_id=SNAPSHOT.github_repo_id,
+                repo_name=SNAPSHOT.full_name,
+                repo_url=SNAPSHOT.html_url,
+                discord_guild_id=1,
+            )
+        )
+        await blocker.flush()
+
+        racing = asyncio.create_task(service.register(guild_id=1, channel_id=10, link=REPO_LINK))
+        assert await _blocked_on_a_lock(db_session), "the second insert never reached the index"
+
+        await blocker.commit()
+
+    with pytest.raises(DuplicateRegistrationError, match="a moment ago"):
+        await racing
+
+    db_session.expire_all()
+    assert len((await db_session.scalars(select(Repository))).all()) == 1
 
 
 class TestARepositoryRenamedOnGitHub:
