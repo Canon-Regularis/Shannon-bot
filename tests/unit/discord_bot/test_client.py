@@ -63,3 +63,17 @@ async def test_installing_nothing_still_tells_discord(
     await bot.setup_hook()
 
     assert calls == 1
+
+
+async def test_the_ready_hook_survives_not_knowing_who_it_is(
+    bot: ShannonBot, caplog: pytest.LogCaptureFixture
+) -> None:
+    """discord.py calls this on every connect, including reconnects, and raising in it puts a
+    traceback in the log each time rather than the line saying the gateway is back.
+
+    `user` is None until the READY payload has been read, which is exactly when this runs.
+    """
+    with caplog.at_level("INFO", logger="shannon.discord_bot.client"):
+        await bot.on_ready()
+
+    assert "connected to Discord" in caplog.text

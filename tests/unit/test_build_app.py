@@ -11,10 +11,15 @@ does not reach the gateway until it is started.
 
 from __future__ import annotations
 
+import logging
+import runpy
+
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+import shannon.main
 from shannon.config import Settings
 from shannon.main import build_app, configure_logging, run
 
@@ -85,6 +90,29 @@ class TestStartingTheProcess:
         assert served["host"] == SETTINGS.api_host
         assert served["port"] == SETTINGS.api_port
         assert isinstance(served["app"], FastAPI)
+
+    def test_running_the_module_as_a_script_starts_the_same_thing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There are two ways in and only one of them is documented.
+
+        `uv run shannon` goes through the console script in pyproject, which is `run` and is
+        covered above. `python -m shannon.main` goes through the guard at the bottom of the
+        file, which nothing else executes.
+
+        Run by path rather than by module name: the module is already imported here, and
+        `run_module` warns that re-executing one in that state behaves unpredictably. Patched at
+        uvicorn and at logging rather than in `shannon.main`, because this gives the file a
+        fresh namespace and a patch of the imported module would not be in it.
+        """
+        started: list[object] = []
+        monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: started.append(app))
+        monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: None)
+
+        runpy.run_path(shannon.main.__file__, run_name="__main__")
+
+        assert len(started) == 1, "python -m shannon.main did not start the app"
+        assert isinstance(started[0], FastAPI)
 
     def test_logging_is_set_up_from_the_configured_level(
         self, monkeypatch: pytest.MonkeyPatch
