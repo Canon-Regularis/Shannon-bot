@@ -206,6 +206,41 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         thread = threads.threads[next(iter(threads.threads))]
         assert thread.locked is False, "an open issue was left in a thread nobody can post in"
 
+    async def test_a_reopen_landing_mid_flight_stops_the_close_locking(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        issue_event,
+    ) -> None:
+        """The other half of the window, and the half the arrival order cannot catch.
+
+        The close above was already stale when it started, so it never got past the database.
+        This one is current when it reads and is overtaken while it is talking to Discord, which
+        is the only phase of a sync that is not ordered. Locking is the last step and is decided
+        from what the snapshot said several calls ago, so without a second look the reopened
+        issue ends up in a thread nobody can post in. A stale metadata block rights itself on the
+        next delivery; a locked thread does not.
+        """
+        threads = _ReopensMidWrite()
+        service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
+        threads.during = lambda: service.sync(
+            issue_event("reopened", state="open", closed_at=None, updated_at="2026-08-01T13:00:00Z")
+        )
+
+        await service.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-01T12:00:00Z",
+                updated_at="2026-08-01T12:00:00Z",
+            )
+        )
+
+        assert threads.during_ran, "the reopen never landed, so nothing was overtaken"
+        thread = threads.threads[next(iter(threads.threads))]
+        assert thread.locked is False, "a close that had been overtaken locked the thread anyway"
+
     async def test_the_newest_close_still_locks(
         self,
         registered: Repository,
@@ -227,3 +262,23 @@ class TestLockingAfterANewerSyncHasBeenThrough:
 
         thread = threads.threads[next(iter(threads.threads))]
         assert thread.locked is True
+
+
+class _ReopensMidWrite(FakeThreadGateway):
+    """Runs another sync from inside a Discord call, which is where the window actually is.
+
+    Once only. The sync it runs writes through this same gateway, and letting that one fire the
+    hook again would recurse rather than reproduce anything.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.during = None
+        self.during_ran = False
+
+    async def update(self, **kwargs):
+        handle = await super().update(**kwargs)
+        if self.during is not None and not self.during_ran:
+            self.during_ran = True
+            await self.during()
+        return handle
