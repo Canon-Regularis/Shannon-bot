@@ -105,6 +105,39 @@ def test_a_payload_without_a_pull_request_is_ignored() -> None:
     assert parse_pull_request_event("opened", payload) is None
 
 
+def test_a_repository_with_no_usable_owner_block_falls_back_to_its_full_name() -> None:
+    """The owner is read from `owner.login` and only reconstructed when that is unusable.
+
+    No payload has ever arrived that way. The fallback is here because the alternative is
+    dropping the delivery, and a bot that goes quiet says nothing about why.
+    """
+    payload = payloads.pull_request_event("opened")
+    del payload["repository"]["owner"]
+
+    snapshot = parse_pull_request_event("opened", payload)
+
+    assert snapshot is not None
+    assert snapshot.repository.owner == "Canon-Regularis"
+
+
+def test_a_repository_with_neither_an_owner_nor_a_full_name_is_ignored() -> None:
+    payload = payloads.pull_request_event("opened")
+    del payload["repository"]["owner"]
+    payload["repository"]["full_name"] = "no-slash-here"
+
+    assert parse_pull_request_event("opened", payload) is None
+
+
+def test_a_repository_without_a_link_gets_one_built_from_its_name() -> None:
+    payload = payloads.pull_request_event("opened")
+    del payload["repository"]["html_url"]
+
+    snapshot = parse_pull_request_event("opened", payload)
+
+    assert snapshot is not None
+    assert snapshot.repository.html_url == "https://github.com/Canon-Regularis/Shannon-bot"
+
+
 def test_a_pull_request_without_an_id_is_ignored() -> None:
     payload = payloads.pull_request_event("opened")
     del payload["pull_request"]["id"]

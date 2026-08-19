@@ -94,7 +94,8 @@ def _owner_login(payload: Payload) -> str | None:
     if owner is not None:
         return owner.login
 
-    # Some payloads carry only full_name, so fall back to splitting it.
+    # Nothing read here arrives without an owner block, so this covers one that turns up
+    # malformed. Guessing the owner from full_name is recoverable; dropping the delivery is not.
     full_name = payload.get("full_name")
     if isinstance(full_name, str) and "/" in full_name:
         return full_name.split("/", 1)[0]
