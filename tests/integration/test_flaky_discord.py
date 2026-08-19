@@ -20,7 +20,8 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import ActorRole, DeliveryStatus
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.stack import build_http_client, build_stack, send
+from tests.support.signing import post
+from tests.support.stack import build_http_client, build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +90,7 @@ async def test_a_flaky_gateway_leaves_one_thread_and_no_repeated_ping(
 
     async with client:
         for n in range(DELIVERIES):
-            await send(
+            await post(
                 client,
                 "pull_request",
                 payloads.pull_request_event(
@@ -134,7 +135,7 @@ async def test_a_gateway_that_recovers_owes_nobody_a_ping(
 
     async with client:
         for n in range(DELIVERIES):
-            await send(
+            await post(
                 client,
                 "pull_request",
                 payloads.pull_request_event(

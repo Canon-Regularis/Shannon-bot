@@ -11,15 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import WebhookEvent
 from shannon.discord_bot.errors import DiscordPermissionError
-from shannon.domain.enums import DeliveryStatus, ObjectType
+from shannon.domain.enums import DeliveryStatus
 from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import map_channel, register_repository
-from tests.support.stack import DeliveryClient, build_http_client, build_stack, deliver, send
+from tests.support.signing import post
+from tests.support.stack import DeliveryClient, deliver, registered_stack
 
 pytestmark = pytest.mark.integration
 
@@ -29,9 +29,7 @@ async def client(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[DeliveryClient]:
     """The real endpoint and the real worker over a registered repository."""
-    repository = await register_repository(db_session)
-    await map_channel(db_session, repository, ObjectType.ISSUE, channel_id=98)
-    async with build_http_client(build_stack(db_engine, threads=threads)) as http_client:
+    async with registered_stack(db_engine, db_session, threads) as http_client:
         yield http_client
 
 
@@ -72,7 +70,7 @@ async def test_a_delivery_is_answered_without_discord_being_touched(
     client: DeliveryClient, threads: FakeThreadGateway
 ) -> None:
     """The endpoint's whole job now: write it down, answer, touch nothing slow."""
-    response = await send(client, "issues", payloads.issue_event("opened"))
+    response = await post(client, "issues", payloads.issue_event("opened"))
 
     assert response.json()["status"] == "accepted"
     assert threads.created == []
@@ -81,7 +79,7 @@ async def test_a_delivery_is_answered_without_discord_being_touched(
 async def test_running_the_worker_then_produces_the_thread(
     client: DeliveryClient, threads: FakeThreadGateway, db_session: AsyncSession
 ) -> None:
-    await send(client, "issues", payloads.issue_event("opened"))
+    await post(client, "issues", payloads.issue_event("opened"))
 
     assert await client.worker.run_once() == 1
 
@@ -209,7 +207,7 @@ async def test_deliveries_for_one_item_are_handled_in_order(
         payloads.issue_event("reopened", state="open", closed_at=None),
     ]
     for index, event in enumerate(events):
-        await send(client, "issues", event, delivery=f"delivery-{index}")
+        await post(client, "issues", event, delivery=f"delivery-{index}")
 
     await client.drain()
 
@@ -262,8 +260,8 @@ class TestANoteThatArrivesTooEarly:
         self, client: DeliveryClient, threads: FakeThreadGateway, db_session: AsyncSession
     ) -> None:
         threads.fail_next_create = True
-        await send(client, "issues", payloads.issue_event("opened"), delivery="item")
-        await send(client, "issue_comment", payloads.issue_comment_event(), delivery="note")
+        await post(client, "issues", payloads.issue_event("opened"), delivery="item")
+        await post(client, "issue_comment", payloads.issue_comment_event(), delivery="note")
 
         await client.worker.run_once()
 
@@ -275,8 +273,8 @@ class TestANoteThatArrivesTooEarly:
         self, client: DeliveryClient, threads: FakeThreadGateway, db_session: AsyncSession
     ) -> None:
         threads.fail_next_create = True
-        await send(client, "issues", payloads.issue_event("opened"), delivery="item")
-        await send(client, "issue_comment", payloads.issue_comment_event(), delivery="note")
+        await post(client, "issues", payloads.issue_event("opened"), delivery="item")
+        await post(client, "issue_comment", payloads.issue_comment_event(), delivery="note")
         client.worker._settings = WorkerSettings(first_backoff=timedelta(seconds=-1))
 
         await client.drain()

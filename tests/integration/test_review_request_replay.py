@@ -20,7 +20,8 @@ from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.reviews import ReviewRequestLedger
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.stack import build_http_client, build_stack, send
+from tests.support.signing import post
+from tests.support.stack import build_http_client, build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -75,7 +76,7 @@ async def test_a_delivery_retried_after_the_review_neither_pings_nor_blocks_the_
             return await real_post(**kwargs)
 
         threads.post = refuses
-        await send(
+        await post(
             client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
         )
         await container.worker.run_once()
@@ -84,7 +85,7 @@ async def test_a_delivery_retried_after_the_review_neither_pings_nor_blocks_the_
 
         # She reviews it anyway. The ledger closes the request rather than removing it.
         refusing["on"] = False
-        await send(
+        await post(
             client,
             "pull_request_review",
             payloads.pull_request_review_event("submitted"),
@@ -101,7 +102,7 @@ async def test_a_delivery_retried_after_the_review_neither_pings_nor_blocks_the_
         assert pings(threads) == [], "she was asked to review what she had already approved"
 
         # Somebody clicks re-request. This is the one moment the ledger exists for.
-        await send(
+        await post(
             client, "pull_request", requests_a_review(updated_at=RE_REQUESTED_AT), delivery="req-2"
         )
         await container.worker.run_once()
@@ -118,13 +119,13 @@ async def test_the_ordinary_request_and_review_still_work(
     client = build_http_client(container)
 
     async with client:
-        await send(
+        await post(
             client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
         )
         await container.worker.run_once()
         assert len(pings(threads)) == 1
 
-        await send(
+        await post(
             client,
             "pull_request_review",
             payloads.pull_request_review_event("submitted"),
@@ -134,7 +135,7 @@ async def test_the_ordinary_request_and_review_still_work(
         db_session.expunge_all()
         assert await reviewers(db_session) == [("monalisa", True, True)]
 
-        await send(
+        await post(
             client, "pull_request", requests_a_review(updated_at=RE_REQUESTED_AT), delivery="req-2"
         )
         await container.worker.run_once()

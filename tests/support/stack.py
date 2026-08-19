@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.api.app import create_app
 from shannon.config import Settings
 from shannon.container import Container, build_container
 from shannon.db.models import WebhookEvent
+from shannon.domain.enums import ObjectType
 from shannon.github.client import GitHubClient
-from shannon.github.webhooks.signature import sign
 from shannon.services.delivery.worker import DeliveryWorker
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
-
-SECRET = "test-webhook-secret"
+from tests.support.db import map_channel, register_repository
+from tests.support.signing import SECRET, post
 
 
 def build_stack(
@@ -81,6 +82,30 @@ class DeliveryClient:
         return str(status).lower() if status is not None else "not queued"
 
 
+@asynccontextmanager
+async def registered_stack(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    threads: FakeThreadGateway,
+    *,
+    issues_channel: int | None = 98,
+) -> AsyncIterator[DeliveryClient]:
+    """A registered repository with the whole stack over it, ready to take a delivery.
+
+    Six files were building this by hand and differed only in whether issues had a channel and
+    what had already been delivered. Those differences stay in the fixtures that care; the four
+    lines they all repeated are here.
+
+    `issues_channel=None` is the guild where nobody ran /set_channel for issues, which is the
+    case the channel fallback exists for and must stay reachable.
+    """
+    repository = await register_repository(session, guild_id=1, channel_id=99)
+    if issues_channel is not None:
+        await map_channel(session, repository, ObjectType.ISSUE, channel_id=issues_channel)
+    async with build_http_client(build_stack(engine, threads=threads)) as client:
+        yield client
+
+
 def build_http_client(container: Container) -> DeliveryClient:
     app = create_app(
         settings=container.settings,
@@ -94,27 +119,6 @@ def build_http_client(container: Container) -> DeliveryClient:
     )
 
 
-async def send(
-    client: DeliveryClient,
-    event: str,
-    payload: dict[str, Any],
-    *,
-    delivery: str = "delivery-1",
-) -> Response:
-    """Post a webhook the way GitHub does, signature and all, and stop there."""
-    body = json.dumps(payload).encode()
-    return await client.post(
-        "/webhooks/github",
-        content=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-GitHub-Event": event,
-            "X-GitHub-Delivery": delivery,
-            "X-Hub-Signature-256": sign(body, SECRET),
-        },
-    )
-
-
 async def deliver(
     client: DeliveryClient,
     event: str,
@@ -123,6 +127,6 @@ async def deliver(
     delivery: str = "delivery-1",
 ) -> Response:
     """Post a webhook and let the worker act on it, which is the whole path in one call."""
-    response = await send(client, event, payload, delivery=delivery)
+    response = await post(client, event, payload, delivery=delivery)
     await client.drain()
     return response

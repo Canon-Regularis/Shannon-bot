@@ -17,7 +17,8 @@ from shannon.db.models import MirroredNote, Repository, WebhookEvent
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.stack import build_http_client, build_stack, send
+from tests.support.signing import post
+from tests.support.stack import build_http_client, build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,7 @@ def comment_posts(threads: FakeThreadGateway) -> list[str]:
 
 
 async def with_a_thread(client, container) -> None:
-    await send(client, "pull_request", payloads.pull_request_event("opened"), delivery="pr-1")
+    await post(client, "pull_request", payloads.pull_request_event("opened"), delivery="pr-1")
     await container.worker.run_once()
 
 
@@ -55,7 +56,7 @@ async def test_a_delivery_handled_twice_posts_the_comment_once(
 
     async with client:
         await with_a_thread(client, container)
-        await send(client, "issue_comment", a_comment(), delivery="comment-1")
+        await post(client, "issue_comment", a_comment(), delivery="comment-1")
 
         real_finish, calls = container.queue.finish, {"n": 0}
 
@@ -103,7 +104,7 @@ async def test_a_post_that_fails_is_still_owed_and_arrives_on_the_retry(
             return await real_post(**kwargs)
 
         threads.post = refuses_once
-        await send(client, "issue_comment", a_comment(), delivery="comment-1")
+        await post(client, "issue_comment", a_comment(), delivery="comment-1")
 
         await container.worker.run_once()
         assert comment_posts(threads) == []
@@ -141,7 +142,7 @@ async def test_a_thread_that_was_deleted_gives_the_claim_back_too(
             return await real_post(**kwargs)
 
         threads.post = thread_is_gone
-        await send(client, "issue_comment", a_comment(), delivery="comment-1")
+        await post(client, "issue_comment", a_comment(), delivery="comment-1")
         await container.worker.run_once()
 
         held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
@@ -164,8 +165,8 @@ async def test_a_comment_and_a_review_sharing_a_number_are_different_notes(
     shared = 4242
     async with client:
         await with_a_thread(client, container)
-        await send(client, "issue_comment", a_comment(id=shared), delivery="comment-1")
-        await send(
+        await post(client, "issue_comment", a_comment(id=shared), delivery="comment-1")
+        await post(
             client,
             "pull_request_review",
             payloads.pull_request_review_event("submitted", id=shared),
