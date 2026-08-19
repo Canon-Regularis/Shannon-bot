@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 
 from hypothesis import given, settings
@@ -14,6 +15,7 @@ from shannon.discord_bot.formatting import (
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
 from shannon.discord_bot.threads import THREAD_NAME_LIMIT, truncate_thread_name
 from shannon.domain.enums import Priority, Status
+from shannon.domain.errors import UnparseableLinkError
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
@@ -24,8 +26,13 @@ from shannon.domain.models import (
 )
 from shannon.domain.priority import parse_priority
 from shannon.domain.time import as_utc
+from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
+from shannon.github.webhooks.comments import parse_comment_event
+from shannon.github.webhooks.issues import parse_issue_event
+from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.sync.staleness import is_superseded
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
@@ -76,9 +83,6 @@ class TestLinkParsing:
     @settings(max_examples=400)
     def test_it_never_raises_anything_but_its_own_error(self, link: str) -> None:
         """Whatever someone types after `/pr`, they should get an answer rather than a crash."""
-        import contextlib
-
-        from shannon.domain.errors import UnparseableLinkError
 
         for parse in (parse_pull_request_url, parse_issue_url):
             with contextlib.suppress(UnparseableLinkError):
@@ -256,35 +260,30 @@ class TestParsersAgainstArbitraryPayloads:
     @given(st.text(max_size=20), json_objects)
     @settings(max_examples=300)
     def test_the_pull_request_parser_never_raises(self, action: str, payload: dict) -> None:
-        from shannon.github.webhooks.pull_request import parse_pull_request_event
 
         parse_pull_request_event(action, payload)
 
     @given(st.text(max_size=20), json_objects)
     @settings(max_examples=300)
     def test_the_issue_parser_never_raises(self, action: str, payload: dict) -> None:
-        from shannon.github.webhooks.issues import parse_issue_event
 
         parse_issue_event(action, payload)
 
     @given(st.text(max_size=20), json_objects)
     @settings(max_examples=300)
     def test_the_comment_parser_never_raises(self, action: str, payload: dict) -> None:
-        from shannon.github.webhooks.comments import parse_comment_event
 
         parse_comment_event(action, payload)
 
     @given(st.text(max_size=20), json_objects)
     @settings(max_examples=300)
     def test_the_review_parser_never_raises(self, action: str, payload: dict) -> None:
-        from shannon.github.webhooks.reviews import parse_review_event
 
         parse_review_event(action, payload)
 
     @given(json_values)
     @settings(max_examples=300)
     def test_the_field_mappers_never_raise(self, value: object) -> None:
-        from shannon.github import mapping
 
         assert mapping.actor(value) is None or isinstance(mapping.actor(value), Actor)
         assert isinstance(mapping.actors(value), tuple)

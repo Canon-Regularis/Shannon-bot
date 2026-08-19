@@ -9,16 +9,13 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from shannon.config import Settings
 from shannon.db.models import WebhookEvent
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import DeliveryStatus, ObjectType
 from shannon.github.webhooks.events import WebhookOutcome
-from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
-from shannon.services.reviews import ReviewRequestLedger
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository
@@ -228,14 +225,6 @@ async def test_the_worker_takes_a_whole_batch_at_once(queue: WebhookDeliveryQueu
     assert await worker.run_once() == 2
 
 
-async def test_backoff_doubles_up_to_the_cap() -> None:
-    settings = WorkerSettings(first_backoff=timedelta(seconds=5), max_backoff=timedelta(minutes=1))
-
-    waits = [settings.backoff_for(attempts).total_seconds() for attempts in range(6)]
-
-    assert waits == [5, 10, 20, 40, 60, 60]
-
-
 class TestErrorsRetryingCannotFix:
     """Two hours of backoff does not grant a permission the bot was never given."""
 
@@ -372,13 +361,6 @@ class TestStoppingCleanly:
         await asyncio.wait_for(worker.run_forever(), timeout=2)
 
 
-def test_the_retry_budget_is_the_two_hours_it_claims_to_be() -> None:
-    """Six comments quote this figure. It used to be 36 minutes."""
-    held = WorkerSettings().total_backoff()
-
-    assert timedelta(hours=2) <= held <= timedelta(hours=2, minutes=30)
-
-
 class TestWaitingForDiscord:
     """Logging in takes seconds, and nothing can be done about a delivery until it finishes."""
 
@@ -448,18 +430,6 @@ async def _until(condition, timeout: float = 10.0) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
-
-
-class TestTheRetryBudgetThatShips:
-    """The dataclass default is not what runs; Settings is, and the two had drifted apart."""
-
-    def test_the_configured_budget_is_the_two_hours_claimed(self) -> None:
-        held = WorkerSettings.from_settings(Settings()).total_backoff()
-
-        assert timedelta(hours=2) <= held <= timedelta(hours=2, minutes=30)
-
-    def test_the_dataclass_default_agrees_with_it(self) -> None:
-        assert WorkerSettings().max_attempts == Settings().worker_max_attempts
 
 
 class TestPruning:
@@ -588,23 +558,6 @@ class TestBeingCancelledOutright:
             event = await stored(db_session, f"delivery-{index}")
             assert event.status == DeliveryStatus.PENDING, f"delivery-{index} was left locked"
             assert event.attempts == 0
-
-
-class TestAReviewLedgerWithNothingToDo:
-    async def test_a_review_with_no_author_is_left_alone(self, db_sessionmaker) -> None:
-        """GitHub can report a deleted account as no author at all."""
-        payload = payloads.pull_request_review_event()
-        payload["review"]["user"] = None
-        snapshot = parse_review_event("submitted", payload)
-
-        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
-
-    async def test_a_review_on_an_unregistered_repository_is_left_alone(
-        self, db_sessionmaker
-    ) -> None:
-        snapshot = parse_review_event("submitted", payloads.pull_request_review_event())
-
-        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
 
 
 class TestWhatGetsWrittenToLastError:

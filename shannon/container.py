@@ -18,6 +18,7 @@ from shannon.discord_bot.formatting import (
     format_reviewer_ping,
 )
 from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole
 from shannon.github.client import GitHubClient, HttpGitHubClient
@@ -185,5 +186,11 @@ def build_container(
         event_router=event_router,
         pr_sync=pr_sync,
         issue_sync=issue_sync,
-        commands=_commands(sessionmaker, github, PermissionGate(settings), pr_sync, issue_sync),
+        commands=_commands(
+            sessionmaker,
+            github,
+            PermissionGate(ConfiguredRoles.from_settings(settings)),
+            pr_sync,
+            issue_sync,
+        ),
     )

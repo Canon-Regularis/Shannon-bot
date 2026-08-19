@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from shannon.db.models import ItemAssignment, Repository, WebhookEvent
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import ActorRole
+from shannon.github.webhooks.reviews import parse_review_event
+from shannon.services.reviews import ReviewRequestLedger
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import build_http_client, build_stack, send
@@ -138,3 +140,20 @@ async def test_the_ordinary_request_and_review_still_work(
         await container.worker.run_once()
 
     assert len(pings(threads)) == 2, "re-requesting a review after one was given told nobody"
+
+
+class TestAReviewLedgerWithNothingToDo:
+    async def test_a_review_with_no_author_is_left_alone(self, db_sessionmaker) -> None:
+        """GitHub can report a deleted account as no author at all."""
+        payload = payloads.pull_request_review_event()
+        payload["review"]["user"] = None
+        snapshot = parse_review_event("submitted", payload)
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
+
+    async def test_a_review_on_an_unregistered_repository_is_left_alone(
+        self, db_sessionmaker
+    ) -> None:
+        snapshot = parse_review_event("submitted", payloads.pull_request_review_event())
+
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)

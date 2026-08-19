@@ -22,11 +22,6 @@ from tests.support import github_payloads as payloads
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def service(db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
-    return build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
-
-
 async def stored(session: AsyncSession) -> TrackedItem:
     session.expire_all()
     item = await session.scalar(select(TrackedItem))
@@ -40,15 +35,15 @@ class TestADeletedThread:
     async def test_the_item_gets_a_replacement_thread(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         db_session: AsyncSession,
         pr_event,
     ) -> None:
-        first = await service.sync(pr_event("opened"))
+        first = await sync_service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
 
-        second = await service.sync(pr_event("edited", title="Renamed"))
+        second = await sync_service.sync(pr_event("edited", title="Renamed"))
 
         assert second.synced
         assert second.thread_id != first.thread_id
@@ -58,29 +53,29 @@ class TestADeletedThread:
     async def test_the_replacement_carries_the_current_metadata(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        first = await service.sync(pr_event("opened"))
+        first = await sync_service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
 
-        second = await service.sync(pr_event("edited", title="Renamed"))
+        second = await sync_service.sync(pr_event("edited", title="Renamed"))
 
         assert "Renamed" in threads.metadata_of(second.thread_id)
 
     async def test_later_events_go_to_the_replacement(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        first = await service.sync(pr_event("opened"))
+        first = await sync_service.sync(pr_event("opened"))
         threads.threads.pop(first.thread_id)
-        second = await service.sync(pr_event("edited"))
+        second = await sync_service.sync(pr_event("edited"))
 
-        third = await service.sync(pr_event("edited", title="Again"))
+        third = await sync_service.sync(pr_event("edited", title="Again"))
 
         assert third.thread_id == second.thread_id
         assert third.created is False
@@ -92,14 +87,14 @@ class TestAnArchivedThread:
     async def test_an_update_reopens_it_rather_than_failing(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        first = await service.sync(pr_event("opened"))
+        first = await sync_service.sync(pr_event("opened"))
         threads.threads[first.thread_id].archived = True
 
-        second = await service.sync(pr_event("edited", title="Still moving"))
+        second = await sync_service.sync(pr_event("edited", title="Still moving"))
 
         assert second.synced
         assert second.thread_id == first.thread_id
@@ -150,14 +145,14 @@ class TestTwoSyncsRacingToOpenAThread:
     async def test_only_one_thread_stays_attached(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         db_session: AsyncSession,
         pr_event,
     ) -> None:
         results = await asyncio.gather(
-            service.sync(pr_event("opened")),
-            service.sync(pr_event("labeled")),
+            sync_service.sync(pr_event("opened")),
+            sync_service.sync(pr_event("labeled")),
             return_exceptions=True,
         )
 
@@ -169,13 +164,13 @@ class TestTwoSyncsRacingToOpenAThread:
     async def test_the_thread_that_lost_is_cleaned_up(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
         results = await asyncio.gather(
-            service.sync(pr_event("opened")),
-            service.sync(pr_event("labeled")),
+            sync_service.sync(pr_event("opened")),
+            sync_service.sync(pr_event("labeled")),
         )
 
         # Whichever lost was removed, so the channel holds exactly the one that won.
@@ -186,12 +181,12 @@ class TestTwoSyncsRacingToOpenAThread:
     async def test_a_burst_leaves_one_thread(
         self,
         registered: Repository,
-        service: ItemSyncService,
+        sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
         await asyncio.gather(
-            *(service.sync(pr_event("edited", title=f"Title {n}")) for n in range(6))
+            *(sync_service.sync(pr_event("edited", title=f"Title {n}")) for n in range(6))
         )
 
         assert len(threads.threads) == 1
