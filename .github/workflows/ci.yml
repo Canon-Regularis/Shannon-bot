@@ -81,6 +81,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
+          # Pinned because the alternative is not "no pin", it is "whatever uv released this
+          # morning". Unpinned, the action asks a raw.githubusercontent.com endpoint which
+          # version that is, on every leg of the matrix, and a build that has changed nothing
+          # can start failing on a release nobody here made. An exact version skips that
+          # question; a range does not, because the action resolves a range by asking anyway.
+          version: "0.12.0"
           enable-cache: true
           cache-dependency-glob: uv.lock
           python-version: ${{ matrix.python }}
