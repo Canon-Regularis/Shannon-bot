@@ -7,7 +7,7 @@ repository is an administrator's job and syncing a link is a developer's.
 
 from __future__ import annotations
 
-from shannon.domain.enums import CommandRole
+from shannon.discord_bot.roles import CommandRole
 
 REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
 

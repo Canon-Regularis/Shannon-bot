@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Protocol
 
-from shannon.domain.enums import CommandRole
+from shannon.discord_bot.roles import CommandRole
 
 
 class RoleNames(Protocol):

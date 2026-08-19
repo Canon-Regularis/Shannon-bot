@@ -5,8 +5,6 @@ from functools import lru_cache
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from shannon.domain.enums import CommandRole
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -78,20 +76,6 @@ class Settings(BaseSettings):
                 "can outlive its own lease"
             )
         return self
-
-    def role_display_names(self, role: CommandRole) -> tuple[str, ...]:
-        """Configured Discord role names for a permission tier, as typed."""
-        raw = {
-            CommandRole.ADMIN: self.role_admin,
-            CommandRole.PROJECT_MANAGER: self.role_project_manager,
-            CommandRole.REVIEWER: self.role_reviewer,
-            CommandRole.DEVELOPER: self.role_developer,
-        }[role]
-        return tuple(part.strip() for part in raw.split(",") if part.strip())
-
-    def role_names(self, role: CommandRole) -> frozenset[str]:
-        """The same names lowercased, for matching against a member's roles."""
-        return frozenset(name.lower() for name in self.role_display_names(role))
 
 
 @lru_cache(maxsize=1)

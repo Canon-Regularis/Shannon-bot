@@ -58,12 +58,3 @@ class DeliveryStatus(StrEnum):
     @classmethod
     def terminal(cls) -> tuple[DeliveryStatus, ...]:
         return tuple(status for status in cls if status not in cls.live())
-
-
-class CommandRole(StrEnum):
-    """Permission tiers a Discord member can hold."""
-
-    ADMIN = "ADMIN"
-    PROJECT_MANAGER = "PROJECT_MANAGER"
-    REVIEWER = "REVIEWER"
-    DEVELOPER = "DEVELOPER"
