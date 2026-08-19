@@ -1628,3 +1628,64 @@ repository with no channel mapped, when the link parsers guarantee the number an
 writes the mapping in the same transaction as the row. They stay because the thing they guard
 against is a `SyncsItems` implementation that behaves differently, which is a protocol anything
 can satisfy.
+
+### Chasing the rest of the coverage, and what it turned up instead
+
+Thirty statements were left unexecuted after the last pass. Most of the work here was writing the
+tests that reach them, which is worth listing briefly and is not the interesting part.
+
+Covered: the GitHub client's unusable pull request body, its non-object JSON body, the client it
+builds for itself rather than the one tests inject, and the local clock it falls back to when a
+proxy strips GitHub's `date` header. `/set_channel` before `/register`, which had no test at all,
+along with what `replaced` says when a type moves channel and when it has never had one. A denial
+message for a server that has blanked every role name, which has to stop rather than trail off
+after a colon. A comment with no usable id, which cannot be claimed and so cannot be posted once.
+A note whose parser refused it, where the step that closes a review request must not run either.
+`get_settings`, which wiring calls and nothing else did. Both stores being asked to release an
+empty set, asserted as sending no statement rather than as not raising. `run` using the configured
+host and port, which were documented settings that nothing read. `setup_hook`, where an installed
+command either reaches the tree or silently stops existing in Discord.
+
+Two are worth more than the line they cover.
+
+- **Locking after being overtaken mid-flight.** Only the database half of a sync is ordered. A
+  close that was already stale when it started never gets past the database, and there was a test
+  for that. A close that is current when it reads and is overtaken while it is talking to Discord
+  is a different thing, and locking is where it shows: it is the last step and it is decided from
+  a snapshot several calls old, so the reopened issue ends in a thread nobody can post in. Stale
+  metadata is corrected by the next delivery; a locked thread is not. Driven by a gateway that
+  runs the reopen from inside the Discord call, which is where the window actually is, and checked
+  by deleting the guard and watching only this test fail.
+- **A shutdown that gives up waiting, and one that fails while it waits.** Both are logged and
+  neither had ever been executed, and during shutdown the log is all anybody gets.
+
+The coverage numbers moved from 43 missed to 9. The nine left are a defensive raise for an upsert
+that returns nothing, `on_ready`, `if __name__ == "__main__"`, and the three refusals in `/pr` and
+`/issue` for states the commands cannot produce.
+
+### Two tests that stopped testing anything under load
+
+The report is what found this, not by what it covered but by what it stopped covering. A run on a
+busy machine showed `worker.py` missing the two lines a test named
+`test_the_rest_of_the_batch_is_handed_back` exists to reach, while that test passed.
+
+It waited for the worker to lease its batch with `await asyncio.sleep(0.2)`. Leasing is a database
+round trip, and on a loaded machine it outlasts any sleep short enough to be worth writing, so the
+cancellation landed before the first delivery was handed over. Every assertion in the test is
+satisfied by that too: nothing was tried, so nothing used an attempt and nothing was left locked.
+It has waited on a condition since, which is what the file's own `_until` helper was written for
+and says so in its docstring, three tests above the one that ignored it.
+
+The two reviewer ping tests had the same shape, cancelling on a fixed deadline meant to land
+inside the Discord post. Proved by making the thread creation take half a second: the cancellation
+lands before the ping is attempted, and both tests carry on passing. They now cancel when the
+gateway says the post has begun.
+
+Worth being straight about what that does and does not settle. It fixes a defect those tests
+demonstrably had. It is not established that it is the cause of the intermittent failure of
+`test_the_owed_ping_goes_out_on_the_retry` seen twice earlier, which fifteen consecutive runs
+would not reproduce. The remaining candidate is a real one: the ping claim commits inside a
+transaction whose `__aexit__` is a suspension point, so a cancellation delivered after the COMMIT
+is sent and before the block returns leaves `logins` unbound, the hand-back unrun and the ping
+owed to nobody. That is a window measured in the time a commit takes to acknowledge, and it stays
+on the list rather than being called fixed.
