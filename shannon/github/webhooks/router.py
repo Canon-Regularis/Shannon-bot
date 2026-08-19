@@ -13,7 +13,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from shannon.github.webhooks.events import (
-    PING_EVENT,
     SUPPORTED_EVENTS,
     EventHandler,
     WebhookOutcome,
@@ -53,9 +52,6 @@ class EventRouter:
     async def dispatch(
         self, event: str, action: str | None, payload: Mapping[str, Any]
     ) -> WebhookOutcome:
-        if event == PING_EVENT:
-            return WebhookOutcome.IGNORED
-
         if not is_supported(event, action):
             logger.debug("ignoring unsupported webhook %s.%s", event, action)
             return WebhookOutcome.IGNORED

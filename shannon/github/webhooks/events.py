@@ -4,8 +4,9 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Protocol
 
-# Anything not listed here arrives from GitHub the moment the webhook is configured, and is
-# matched and dropped rather than erroring. Project events belong to MVP 4.
+# Anything not listed here arrives from GitHub the moment the webhook is configured, starting
+# with the ping it sends to prove the endpoint answers, and is matched and dropped rather
+# than erroring. Project events belong to MVP 4.
 # Removals are handled alongside the additions they undo. Listing only one half would leave a
 # thread claiming someone is still assigned, or still holding a label that was taken off, until
 # some later event happened to correct it.
@@ -51,9 +52,6 @@ SUPPORTED_EVENTS: Mapping[str, frozenset[str]] = {
     "issue_comment": COMMENT_ACTIONS,
     "pull_request_review": REVIEW_ACTIONS,
 }
-
-# GitHub sends this once when a webhook is created. It carries no action and needs no work.
-PING_EVENT = "ping"
 
 
 class WebhookOutcome(StrEnum):
