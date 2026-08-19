@@ -6,17 +6,14 @@ import discord
 import pytest
 
 from shannon.commands.register import build_register_command
-from shannon.config import Settings
-from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError
 from shannon.services.registration import RegistrationResult
 from tests.fakes.discord_objects import (
-    FakeGuildPermissions,
     FakeInteraction,
     FakeMember,
-    FakeRole,
 )
+from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
 
 LINK = "https://github.com/Canon-Regularis/Shannon-bot"
 RESULT = RegistrationResult(
@@ -44,19 +41,7 @@ class StubRegistration:
 
 
 def command(service: StubRegistration):
-    return build_register_command(service, PermissionGate(Settings()))
-
-
-def project_manager() -> FakeMember:
-    return FakeMember(roles=[FakeRole("Project Manager")])
-
-
-def administrator() -> FakeMember:
-    return FakeMember(guild_permissions=FakeGuildPermissions(administrator=True))
-
-
-def developer() -> FakeMember:
-    return FakeMember(roles=[FakeRole("Developer")])
+    return build_register_command(service, default_gate())
 
 
 async def run(service: StubRegistration, member: FakeMember, link: str = LINK) -> FakeInteraction:

@@ -7,8 +7,6 @@ import pytest
 from discord import app_commands
 
 from shannon.commands.set_channel import build_set_channel_command
-from shannon.config import Settings
-from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.services.channels import ChannelAssignment
@@ -18,6 +16,7 @@ from tests.fakes.discord_objects import (
     FakeMember,
     FakeRole,
 )
+from tests.unit.commands.conftest import default_gate, project_manager
 
 
 class StubChannels:
@@ -43,7 +42,7 @@ class StubChannels:
 
 
 def command(service: StubChannels):
-    return build_set_channel_command(service, PermissionGate(Settings()))
+    return build_set_channel_command(service, default_gate())
 
 
 def choice(value: str) -> app_commands.Choice[str]:
@@ -54,10 +53,6 @@ def text_channel(channel_id: int = 4242) -> MagicMock:
     stub = MagicMock(spec=discord.TextChannel)
     stub.id = channel_id
     return stub
-
-
-def project_manager() -> FakeMember:
-    return FakeMember(roles=[FakeRole("Project Manager")])
 
 
 async def test_a_project_manager_can_map_the_issue_channel() -> None:

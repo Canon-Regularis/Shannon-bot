@@ -3,8 +3,6 @@ from __future__ import annotations
 import pytest
 
 from shannon.commands.link import build_link_command
-from shannon.config import Settings
-from shannon.discord_bot.permissions import PermissionGate
 from shannon.services.linking import InvalidGitHubUsernameError
 from tests.fakes.discord_objects import (
     FakeGuildPermissions,
@@ -12,6 +10,7 @@ from tests.fakes.discord_objects import (
     FakeMember,
     FakeRole,
 )
+from tests.unit.commands.conftest import default_gate
 
 
 class StubLinking:
@@ -33,7 +32,7 @@ class StubLinking:
 
 
 def command(service: StubLinking):
-    return build_link_command(service, PermissionGate(Settings()))
+    return build_link_command(service, default_gate())
 
 
 async def test_anyone_can_link_their_own_account() -> None:

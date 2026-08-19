@@ -3,9 +3,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.commands.sync_link import build_issue_command, build_pr_command
-from shannon.config import Settings
 from shannon.discord_bot.errors import DiscordGatewayError
-from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.errors import (
     ItemNotReadyError,
     NotRegisteredError,
@@ -18,8 +16,8 @@ from tests.fakes.discord_objects import (
     FakeGuildPermissions,
     FakeInteraction,
     FakeMember,
-    FakeRole,
 )
+from tests.unit.commands.conftest import default_gate, member_with
 
 # /pr and /issue share their whole body, so both are driven through the same tests. What used to
 # be two near-identical files could drift; this cannot. They keep their own parameter names,
@@ -54,11 +52,7 @@ class StubManualSync:
 
 
 def command(service: StubManualSync, build=build_pr_command):
-    return build(service, PermissionGate(Settings()))
-
-
-def member_with(role: str) -> FakeMember:
-    return FakeMember(roles=[FakeRole(role)])
+    return build(service, default_gate())
 
 
 async def run(
