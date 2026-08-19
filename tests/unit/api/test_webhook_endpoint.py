@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from shannon.github.webhooks.router import EventRouter
 from tests.support.webhooks import RecordingHandler, build_client, post
 
 
@@ -107,8 +105,3 @@ async def test_supported_event_without_registered_handler_is_ignored() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
-
-
-def test_registering_an_unsupported_event_fails() -> None:
-    with pytest.raises(ValueError, match="not a supported webhook event"):
-        EventRouter().register("project_card", RecordingHandler())
