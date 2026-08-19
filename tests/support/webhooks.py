@@ -8,7 +8,8 @@ from httpx import ASGITransport, AsyncClient, Response
 
 from shannon.api.app import create_app
 from shannon.config import Settings
-from shannon.github.webhooks.events import EventRouter, WebhookOutcome
+from shannon.github.webhooks.events import WebhookOutcome
+from shannon.github.webhooks.router import EventRouter
 from shannon.github.webhooks.signature import sign
 
 SECRET = "test-webhook-secret"

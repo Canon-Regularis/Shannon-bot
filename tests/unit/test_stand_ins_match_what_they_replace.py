@@ -33,7 +33,7 @@ from shannon.discord_bot.threads import (
     ThreadGateway,
 )
 from shannon.github.client import GitHubClient, HttpGitHubClient
-from shannon.github.webhooks.events import EventRouter
+from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.channels import ChannelMappingService

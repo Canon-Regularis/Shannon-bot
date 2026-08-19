@@ -22,10 +22,10 @@ from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.github.webhooks.comments import parse_comment_event
-from shannon.github.webhooks.events import EventRouter
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
+from shannon.github.webhooks.router import EventRouter
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes import health, webhooks
 from shannon.config import Settings, get_settings
-from shannon.github.webhooks.events import EventRouter
+from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import DeliveryInbox
 
 

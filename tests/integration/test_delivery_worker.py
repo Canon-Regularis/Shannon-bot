@@ -13,8 +13,9 @@ from shannon.config import Settings
 from shannon.db.models import WebhookEvent
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import DeliveryStatus, ObjectType
-from shannon.github.webhooks.events import EventRouter, WebhookOutcome
+from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.reviews import parse_review_event
+from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.reviews import ReviewRequestLedger

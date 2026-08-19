@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from shannon.github.webhooks.events import EventRouter
+from shannon.github.webhooks.router import EventRouter
 from tests.support.webhooks import RecordingHandler, build_client, post
 
 
