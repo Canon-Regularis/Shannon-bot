@@ -380,22 +380,19 @@ class TestAPingInterruptedMidFlight:
         threads = _HangingOnPost()
         service = _notifying(db_sessionmaker, threads)
 
-        # TimeoutError is what wait_for turns the cancellation into, and what the worker sees.
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(service.sync(pr_event("opened")), timeout=0.2)
+        await _cancelled_in_the_ping(service, threads, pr_event("opened"))
 
-        # The hand-back is shielded, so the cancellation returns here first and it lands a
-        # moment later on its own. That it happens is the point; that it is instant is not.
+        # The hand-back is shielded, so it commits on its own schedule rather than before the
+        # cancellation comes back. That it happens is the point; that it is instant is not.
         assert await _owed_again(db_session), "the ping was claimed and never handed back"
 
     async def test_the_owed_ping_goes_out_on_the_retry(
-        self, registered: Repository, db_sessionmaker, pr_event
+        self, registered: Repository, db_sessionmaker, db_session: AsyncSession, pr_event
     ) -> None:
         threads = _HangingOnPost()
         service = _notifying(db_sessionmaker, threads)
-        # TimeoutError is what wait_for turns the cancellation into, and what the worker sees.
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(service.sync(pr_event("opened")), timeout=0.2)
+        await _cancelled_in_the_ping(service, threads, pr_event("opened"))
+        assert await _owed_again(db_session), "the ping was claimed and never handed back"
 
         threads.hanging = False
         result = await service.sync(pr_event("opened"))
@@ -415,16 +412,39 @@ def _notifying(db_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
 
 
 class _HangingOnPost(FakeThreadGateway):
-    """A gateway whose post never returns, the way a rate-limited one behaves."""
+    """A gateway whose post never returns, the way a rate-limited one behaves.
+
+    `posting` is set on the way in, so a test can cancel once the sync has reached the ping
+    rather than after a wait it hopes is long enough.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.hanging = True
+        self.posting = asyncio.Event()
 
     async def post(self, *, thread_id: int, content: str) -> int | None:
+        self.posting.set()
         if self.hanging:
             await asyncio.sleep(60)
         return await super().post(thread_id=thread_id, content=content)
+
+
+async def _cancelled_in_the_ping(service: ItemSyncService, threads: _HangingOnPost, snapshot):
+    """Cancel a sync where the worker's deadline usually lands, which is inside the post.
+
+    Driven off the gateway rather than off a clock. Everything before the ping is several
+    database round trips and a thread creation, and on a loaded machine that outlasts a deadline
+    short enough to be worth writing, which puts the cancellation somewhere these tests are not
+    about and leaves them passing for the wrong reason. The worker uses `wait_for`, so what it
+    sees is a TimeoutError; what the notifier sees is the cancellation either way, and that is
+    the half under test here.
+    """
+    syncing = asyncio.create_task(service.sync(snapshot))
+    await asyncio.wait_for(threads.posting.wait(), timeout=10)
+    syncing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await syncing
 
 
 async def _owed_again(session: AsyncSession, timeout: float = 5.0) -> bool:

@@ -423,6 +423,27 @@ class TestWaitingForDiscord:
         await running
 
 
+async def _handed_back(
+    session: AsyncSession, delivery_ids: list[str], timeout: float = 10.0
+) -> list[int]:
+    """Wait for every named delivery to be back on the queue, and report their attempt counts.
+
+    Read out as plain numbers rather than handed back as rows: `stored` expires the session on
+    every call, so a row fetched on one pass is stale by the time the next one is fetched.
+    """
+    async with asyncio.timeout(timeout):
+        while True:
+            attempts = []
+            pending = True
+            for delivery_id in delivery_ids:
+                event = await stored(session, delivery_id)
+                pending = pending and event.status == DeliveryStatus.PENDING
+                attempts.append(event.attempts)
+            if pending:
+                return attempts
+            await asyncio.sleep(0.01)
+
+
 async def _until(condition, timeout: float = 10.0) -> None:
     """Wait for something the worker does on its own schedule, rather than guessing at a sleep."""
     async with asyncio.timeout(timeout):
@@ -531,10 +552,33 @@ class _PruneFails:
 class TestBeingCancelledOutright:
     """What happens when the grace period runs out before the delivery in hand finishes."""
 
+    async def test_the_loop_ends_cancelled_rather_than_carrying_on(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """The loop is written to survive a bad batch, which is one instruction away from
+        surviving being told to die.
+
+        `except Exception` cannot catch a cancellation, so today this holds by itself. It is
+        pinned because widening that clause is a one-word edit and the symptom is a shutdown
+        that hangs until something kills the process.
+        """
+        worker = build_worker(queue, Exploding(failures=0), poll_interval=timedelta(seconds=0.01))
+
+        running = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.1)
+        running.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert running.cancelled()
+
     async def test_the_rest_of_the_batch_is_handed_back(
         self, queue: WebhookDeliveryQueue, db_session: AsyncSession
     ) -> None:
+        started = asyncio.Event()
+
         async def hang(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+            started.set()
             await asyncio.sleep(60)
             return WebhookOutcome.PROCESSED
 
@@ -543,19 +587,22 @@ class TestBeingCancelledOutright:
             await enqueue(queue, f"delivery-{index}")
 
         running = asyncio.create_task(worker.run_once())
-        await _until(lambda: True)
-        await asyncio.sleep(0.2)
+        # Waited for rather than slept through. Leasing a batch is a database round trip, and on
+        # a loaded machine it outlasts any sleep short enough to be worth writing, which lands
+        # the cancellation before the first delivery is even handed over. The assertions below
+        # are satisfied by that too, so the test went on passing while testing nothing.
+        await asyncio.wait_for(started.wait(), timeout=10)
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
-        await asyncio.sleep(0.2)
 
         # The one in hand keeps its lease and waits it out; the untouched three come straight
         # back, rather than sitting locked while the replacement process polls an empty queue.
-        for index in range(1, 4):
-            event = await stored(db_session, f"delivery-{index}")
-            assert event.status == DeliveryStatus.PENDING, f"delivery-{index} was left locked"
-            assert event.attempts == 0
+        # Polled rather than slept through, because the hand-back is shielded and commits on its
+        # own schedule once the cancellation has already come back here.
+        attempts = await _handed_back(db_session, [f"delivery-{index}" for index in range(1, 4)])
+
+        assert attempts == [0, 0, 0], "a delivery nothing was tried on was charged an attempt"
 
 
 class TestWhatGetsWrittenToLastError:
