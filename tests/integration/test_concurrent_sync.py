@@ -10,13 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.enums import ActorRole, ObjectType
+from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.models import Actor
 from shannon.domain.time import as_utc
 from shannon.services.channels import ChannelMappingService
 from shannon.services.sync.items import SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
+from tests.support import github_payloads as payloads
 
 pytestmark = pytest.mark.integration
 
@@ -206,4 +207,46 @@ async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
     stored = await db_session.scalar(select(TrackedItem.github_updated_at))
     assert as_utc(stored) == datetime(2026, 8, 10, 18, 0, tzinfo=UTC), (
         "an older sync pushed the mark back down, so the next late delivery reads as current"
+    )
+
+
+class TestAnItemThatWentAwayBetweenTwoStatements:
+    """`get_or_create` inserts, and on a conflict reads back the row that won instead.
+
+    Both statements take their own snapshot, so a repository unregistered in the moment between
+    them leaves the insert doing nothing and the read finding nothing. Neither statement is
+    wrong and the method has nothing to return.
+
+    Simulated at the read rather than raced, because the two statements are inside one method
+    call and nothing can be interleaved between them from outside. What is under test is what
+    the caller is handed: `None` flowing on becomes an AttributeError several frames later with
+    nothing in it naming the item, so this stops there and says which item it was.
+    """
+
+    async def test_it_says_which_item_rather_than_returning_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        class _RowIsGone(TrackedItemStore):
+            async def get(self, **kwargs) -> None:
+                return None
+
+        async with db_sessionmaker() as session, session.begin():
+            store = _RowIsGone(session)
+            # A first call so the second one conflicts and takes the read-back path.
+            await _create(TrackedItemStore(session))
+
+            with pytest.raises(RuntimeError, match=f"{ObjectType.PR.value} {payloads.PR_ID}"):
+                await _create(store)
+
+
+async def _create(store: TrackedItemStore) -> TrackedItem:
+    return await store.get_or_create(
+        repository_id=1,
+        object_type=ObjectType.PR,
+        github_object_id=payloads.PR_ID,
+        github_object_number=7,
+        github_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+        title="Add the webhook endpoint",
+        github_state="open",
+        status=Status.NOT_REVIEWED,
     )
