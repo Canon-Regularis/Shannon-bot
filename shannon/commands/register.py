@@ -6,8 +6,9 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
-from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
+from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.threads import THREADABLE
 from shannon.domain.errors import ShannonError

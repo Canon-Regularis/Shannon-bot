@@ -6,7 +6,8 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.discord_bot.permissions import REGISTER_ROLES, PermissionGate
+from shannon.commands._permissions import REGISTER_ROLES
+from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
 from shannon.services.linking import InvalidGitHubUsernameError
 

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.commands._permissions import REGISTER_ROLES, SYNC_ROLES
 from shannon.config import Settings
-from shannon.discord_bot.permissions import REGISTER_ROLES, SYNC_ROLES, PermissionGate
+from shannon.discord_bot.permissions import PermissionGate
 from shannon.domain.enums import CommandRole
 from tests.fakes.discord_objects import FakeGuildPermissions, FakeMember, FakeRole
 

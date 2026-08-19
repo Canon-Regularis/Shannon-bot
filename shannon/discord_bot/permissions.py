@@ -5,13 +5,6 @@ from typing import Protocol
 
 from shannon.domain.enums import CommandRole
 
-REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
-
-# Reviewers are deliberately absent: the permissions table grants /pr and /issue to developers
-# and project managers only. Somebody who holds one of those as well as Reviewer still passes,
-# because holding any listed role is what grants a command rather than holding only listed ones.
-SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
-
 
 class RoleNames(Protocol):
     """The role names a server has configured, which is all a permission check needs.
