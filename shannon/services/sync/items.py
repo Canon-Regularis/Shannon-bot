@@ -135,8 +135,10 @@ class ItemSyncService:
         # Discord had already done.
         wants_locked = self._policy.locked(snapshot)
 
-        # Unlocking comes first, because a locked thread rejects edits and posts. Locking comes
-        # last for the same reason, by which point the thread is known to exist.
+        # Unlocking comes first and locking last, so that everything in between happens on an
+        # open thread. Not because the bot cannot write to a locked one, which it can and which
+        # `test_a_locked_thread_still_accepts_metadata_updates` pins: because a reader arriving
+        # mid-sync should never find a thread locked against a state it has not been given yet.
         if wants_locked is False and state.thread_id is not None:
             # A thread that has been deleted is rebuilt by the write below, and a new thread is
             # never locked. Letting this raise instead would stop the rebuild ever running: an

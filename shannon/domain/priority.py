@@ -47,7 +47,9 @@ def _from_label(name: str) -> Priority | None:
     if len(parts) == 1:
         return _WORDS.get(parts[0])
 
-    # "priority: high", "P1"-style prefixes, and "HIGH_PRIORITY" suffixes.
+    # "priority: high", the same shortened to "p: high" or "p-high", and "HIGH_PRIORITY"
+    # suffixes. Numbered schemes like "P1" are deliberately not read: which number means
+    # urgent is a convention that differs between teams, and guessing it wrong buries work.
     if parts[0] in _PREFIXES:
         return _WORDS.get(parts[1])
     if parts[-1] == _SUFFIX:
