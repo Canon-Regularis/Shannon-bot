@@ -60,3 +60,21 @@ class FakeGitHubClient:
             raise GitHubNotFoundError(
                 f"GitHub has nothing at /repos/{owner}/{name}/issues/{number}"
             ) from None
+
+
+class ClosingGitHub(FakeGitHubClient):
+    """Records that Container.aclose reached it, which is how closing is observed.
+
+    `raises` stages the case where the HTTP client throws on the way out and the database pool
+    must still be released.
+    """
+
+    def __init__(self, *, raises: bool = False) -> None:
+        super().__init__()
+        self.raises = raises
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+        if self.raises:
+            raise RuntimeError("the HTTP pool had already gone")

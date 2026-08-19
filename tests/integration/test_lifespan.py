@@ -13,7 +13,7 @@ from shannon.config import Settings
 from shannon.container import Container, build_container
 from shannon.runtime.lifespan import build_lifespan
 from shannon.services.delivery.worker import ReadyCheck
-from tests.fakes.github import FakeGitHubClient
+from tests.fakes.github import ClosingGitHub
 from tests.fakes.threads import FakeThreadGateway
 
 pytestmark = pytest.mark.integration
@@ -57,17 +57,6 @@ class FakeWorker:
             raise RuntimeError("the worker fell over")
         while not self.stopped:
             await asyncio.sleep(0.01)
-
-
-class ClosingGitHub(FakeGitHubClient):
-    """Records that Container.aclose reached it, which is how closing is observed here."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed = False
-
-    async def aclose(self) -> None:
-        self.closed = True
 
 
 def container_for(engine: AsyncEngine, worker: FakeWorker, github: ClosingGitHub) -> Container:
