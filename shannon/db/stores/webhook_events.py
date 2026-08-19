@@ -12,12 +12,6 @@ from sqlalchemy.sql.elements import ColumnElement
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
 
-TERMINAL = (DeliveryStatus.PROCESSED, DeliveryStatus.IGNORED, DeliveryStatus.FAILED)
-
-# A stack trace stringified from a handler can be enormous, and this column exists to be read
-# by a person.
-ERROR_LIMIT = 2000
-
 
 def _interval(value: timedelta) -> ColumnElement[timedelta]:
     """A timedelta as something the database can add to a timestamp."""
@@ -166,7 +160,7 @@ class WebhookEventStore:
                 attempts=WebhookEvent.attempts + 1,
                 next_attempt_at=func.now() + _interval(delay),
                 locked_until=None,
-                last_error=error[:ERROR_LIMIT],
+                last_error=error,
             )
         )
 
@@ -179,7 +173,7 @@ class WebhookEventStore:
                 attempts=WebhookEvent.attempts + 1,
                 processed_at=func.now(),
                 locked_until=None,
-                last_error=error[:ERROR_LIMIT],
+                last_error=error,
             )
         )
 
@@ -192,7 +186,7 @@ class WebhookEventStore:
         result = await self._session.execute(
             delete(WebhookEvent)
             .where(
-                WebhookEvent.status.in_(TERMINAL),
+                WebhookEvent.status.in_(DeliveryStatus.terminal()),
                 WebhookEvent.processed_at < func.now() - _interval(keep_for),
             )
             # Without this the ORM cannot work out which loaded objects the DELETE hit, so it

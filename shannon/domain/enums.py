@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import StrEnum
 
 
@@ -36,8 +38,10 @@ class ActorRole(StrEnum):
 class DeliveryStatus(StrEnum):
     """How far a webhook delivery has got.
 
-    PENDING and PROCESSING are the live states; the rest are terminal. FAILED means the
-    attempts ran out, and the row is kept with its reason so someone can see what happened.
+    A delivery is either still going or finished with, and which is which is asked in three
+    places: the lease, the prune, and the partial index that serves them. Answering it here
+    means adding a sixth state cannot leave one of the three behind. FAILED means the attempts
+    ran out, and the row is kept with its reason so someone can see what happened.
     """
 
     PENDING = "PENDING"
@@ -45,6 +49,15 @@ class DeliveryStatus(StrEnum):
     PROCESSED = "PROCESSED"
     IGNORED = "IGNORED"
     FAILED = "FAILED"
+
+    @classmethod
+    def live(cls) -> tuple[DeliveryStatus, ...]:
+        """Still going. Ordered, because the index predicate is built from it and compared."""
+        return (cls.PENDING, cls.PROCESSING)
+
+    @classmethod
+    def terminal(cls) -> tuple[DeliveryStatus, ...]:
+        return tuple(status for status in cls if status not in cls.live())
 
 
 class CommandRole(StrEnum):
