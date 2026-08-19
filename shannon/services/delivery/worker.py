@@ -53,6 +53,9 @@ class WorkerSettings:
     lease: timedelta = timedelta(minutes=15)
     delivery_timeout: timedelta = timedelta(seconds=60)
     retention: timedelta = timedelta(days=7)
+    # A stack trace stringified from a handler can be enormous, and `last_error` exists to be
+    # read by a person. The column is Text, so this is a readability limit and not a schema one.
+    error_limit: int = 2000
     prune_interval: timedelta = timedelta(hours=1)
 
     @classmethod
@@ -227,7 +230,7 @@ class DeliveryWorker:
                 delivery.subject,
                 error.message,
             )
-            await self._queue.give_up(delivery, error=f"{type(error).__name__}: {error}")
+            await self._queue.give_up(delivery, error=self._reason(error))
             return
         except Exception as error:
             await self._reschedule(delivery, error)
@@ -240,9 +243,14 @@ class DeliveryWorker:
             else DeliveryStatus.IGNORED,
         )
 
+    def _reason(self, error: Exception) -> str:
+        """What gets written to `last_error`, trimmed where it is written rather than where it
+        is stored, so the store carries no policy of its own."""
+        return f"{type(error).__name__}: {error}"[: self._settings.error_limit]
+
     async def _reschedule(self, delivery: Delivery, error: Exception) -> None:
         attempts = delivery.attempts + 1
-        reason = f"{type(error).__name__}: {error}"
+        reason = self._reason(error)
 
         if attempts >= self._settings.max_attempts:
             logger.error(
