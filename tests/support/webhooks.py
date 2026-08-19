@@ -1,30 +1,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient, Response
 
 from shannon.api.app import create_app
 from shannon.config import Settings
-from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.router import EventRouter
 from shannon.github.webhooks.signature import sign
+from tests.fakes.handlers import RecordingHandler
 
 SECRET = "test-webhook-secret"
-
-
-class RecordingHandler:
-    """Stands in for the sync service so route tests stay about HTTP."""
-
-    def __init__(self, outcome: WebhookOutcome = WebhookOutcome.PROCESSED) -> None:
-        self.outcome = outcome
-        self.calls: list[tuple[str, Mapping[str, Any]]] = []
-
-    async def __call__(self, action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
-        self.calls.append((action, payload))
-        return self.outcome
 
 
 def build_client(
