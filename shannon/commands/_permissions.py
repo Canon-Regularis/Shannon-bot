@@ -15,3 +15,8 @@ REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
 # and project managers only. Somebody who holds one of those as well as Reviewer still passes,
 # because holding any listed role is what grants a command rather than holding only listed ones.
 SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
+
+# Developers are the ones deliberately absent here. Status is the record of what a reviewer has
+# decided about somebody's work, and the author of that work moving it to ready for merge is the
+# review step going missing. An administrator still passes, as they do everywhere.
+WORKFLOW_ROLES = frozenset({CommandRole.REVIEWER, CommandRole.PROJECT_MANAGER})
