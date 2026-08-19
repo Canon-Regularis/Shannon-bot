@@ -27,12 +27,12 @@ class TestReadingAnError:
 
     def test_the_kind_of_item_is_named(self) -> None:
         assert reply_for(GitHubNotFoundError("gone"), noun="issue") == (
-            "GitHub has no issue at that link."
+            "GitHub could not find that issue."
         )
 
     def test_the_most_specific_match_wins(self) -> None:
         """GitHubNotFoundError is a GitHubError, and only one of the two answers is useful."""
-        assert "GitHub has no" in reply_for(GitHubNotFoundError("gone"))
+        assert "could not find" in reply_for(GitHubNotFoundError("gone"))
         assert "could not be reached" in reply_for(GitHubRateLimitError("slow down"))
 
     def test_something_unrecognised_gets_the_catch_all(self) -> None:

@@ -87,7 +87,7 @@ async def test_a_missing_item_names_the_right_kind(build, name: str, noun: str, 
 
     interaction = await run(service, member_with("Developer"), build=build)
 
-    assert interaction.reply == f"GitHub has no {noun} at that link."
+    assert interaction.reply == f"GitHub could not find that {noun}."
 
 
 @pytest.mark.parametrize(("build", "name", "noun", "path"), KINDS)

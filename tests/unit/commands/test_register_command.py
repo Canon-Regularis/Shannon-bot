@@ -100,7 +100,7 @@ async def test_a_missing_repository_is_reported_plainly() -> None:
 
     interaction = await run(service, project_manager())
 
-    assert interaction.reply == "GitHub has no repository at that link."
+    assert interaction.reply == "GitHub could not find that repository."
 
 
 async def test_a_guild_that_already_registered_is_told_so() -> None:

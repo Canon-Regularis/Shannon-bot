@@ -14,6 +14,7 @@ from shannon.domain.errors import (
 from shannon.github.errors import GitHubError, GitHubNotFoundError
 from shannon.services.linking import InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
+from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,9 @@ logger = logging.getLogger(__name__)
 # nothing escapes after the interaction has been deferred and leaves the caller with silence.
 _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (UnparseableLinkError, "That link did not work. {message}"),
-    (GitHubNotFoundError, "GitHub has no {noun} at that link."),
+    # Not "at that link": the workflow commands take no link, and a 404 there means the
+    # item has gone from GitHub since it was mirrored.
+    (GitHubNotFoundError, "GitHub could not find that {noun}."),
     (GitHubError, "GitHub could not be reached. {message}"),
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
@@ -31,6 +34,8 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (DuplicateRegistrationError, "{message}"),
     (SyncFailedError, "{message}"),
     (InvalidGitHubUsernameError, "{message}"),
+    (NotAnItemThreadError, "{message}"),
+    (WorkflowRefusedError, "{message}"),
 )
 
 # Said when nothing above matches. Deliberately vague: whatever went wrong is a bug or an
