@@ -1740,3 +1740,88 @@ normally: the function is only entered above two thousand characters, the per-li
 exactly the length of the message, and the budget is 1998, so it always breaks. Checked by
 arithmetic rather than asserted. Restructuring working code so a tool can see that is the wrong
 way round, and the number carries the caveat instead.
+
+## MVP 3: status and priority
+
+The first time this bot writes to GitHub. Everything before it read GitHub and wrote Discord, and
+the whole design rests on that being one directional, so adding a write needed more care than the
+eight commands it delivers would suggest.
+
+### Added
+
+- **Eight commands** (closes the status and priority half of the requirements)
+  - `/set_backlog`, `/set_not_reviewed`, `/set_in_review`, `/set_ready_for_merge`, `/set_done`,
+    `/set_high_priority`, `/set_med_priority`, `/set_low_priority`.
+  - None takes an argument. They act on the thread they are run in, which is the item the person
+    running one is already looking at; asking for a link as well would be asking somebody to name
+    the thing on their screen. `TrackedItemStore.get_by_number` gained a sibling, `get_by_thread`.
+  - Eight separate commands rather than one with a choice, because that is what the requirements
+    list and because Discord shows them in the picker as eight things a reviewer can do. They are
+    built from two tables in `commands/workflow.py`; the only thing that differs between them is
+    the label they set and the sentence they answer with.
+  - Reviewers and Project Managers, per the permissions table. Developers are deliberately
+    absent: status is the record of what a reviewer decided about somebody's work, and the author
+    of that work moving it to ready for merge is the review step going missing.
+
+- **A write path to GitHub** (`add_label`, `remove_label` on the client)
+  - Label names are URL encoded, which matters because `priority: high` is a real label style and
+    unencoded it changes which path is hit.
+  - A 404 on removal is treated as done rather than as failure. Removals are computed from a
+    snapshot read a moment earlier, so a label somebody else took off in between leaves the item
+    where the caller wanted it, and failing would have them retrying towards a state they are
+    already in.
+
+- **`github/labels.py`**, which decides what to take off and what to put on
+  - The hard half is removal. Priority has been read from whatever spelling a repository already
+    uses since MVP 2, so an item can be carrying `urgent` or `HIGH_PRIORITY`, and a change that
+    only writes the new label leaves the old one saying something else. Whatever `parse_priority`
+    reads is what comes off.
+  - Status is matched only on the exact written spellings, unlike priority. A repository is free
+    to have a label called `done` or `review` meaning its own thing, and reading those as
+    workflow states would move items through a process nobody asked for.
+
+### The direction that does not exist
+
+Mirroring reads GitHub and writes Discord. Nothing on that path writes back, and it must not: a
+label this bot wrote would arrive as a `labeled` delivery, sync, and be written again.
+
+That asymmetry has consequences worth stating rather than discovering. Closing an issue sets the
+stored status to DONE and locks the thread, and leaves GitHub unlabelled until somebody runs
+`/set_done`. Reopening one clears the stored status and leaves the DONE label behind until
+somebody runs another command. Neither is reconcilable without the mirror writing back, so
+neither is treated as a defect; the manual route out of both exists and is one command.
+
+The remove-then-add pair generates two deliveries, and GitHub does not guarantee their order.
+Processed backwards, the older payload's labels win and the priority reads as it was. The
+high water mark cannot break that tie, because both carry the same timestamp. This is the
+existing property of mirroring rather than anything new, and it corrects itself on the next
+delivery for the item; it is recorded because generating pairs makes it more likely to be met.
+
+### What an adversarial review of it found
+
+Six independent lenses over the new code, each finding handed to a verifier told to refute it.
+Eleven survived, ten did not. Three were defects that would have shipped.
+
+- **A closed issue silently reverted any status it was given.** `/set_backlog` on one wrote the
+  label to GitHub, stored the status, reported success, and then its own re-render called
+  `IssuePolicy.status_for`, which returns DONE for any closed snapshot, and put it straight back.
+  GitHub said BACKLOG, the database and the thread said DONE, and nothing reconciled them because
+  status is never derived from labels. Three of the six lenses found it separately. Refused now,
+  symmetrically with the open issue case that was already there: an issue's status is not this
+  service's alone to decide, so both directions of disagreement are refused rather than written.
+- **A `/set_done` whose lock failed could never be repaired.** Locking is a separate Discord
+  permission, so a server can let the bot open and edit threads and not let it close one. The
+  status was already stored as DONE by then, so the retry hit the READY_FOR_MERGE gate and was
+  refused for being exactly what the first run had made it. Nothing else locks a pull request's
+  thread, since `PullRequestPolicy.locked` returns None. Already being DONE passes the gate now,
+  and a repeat is what gets the lock a second go.
+- **It locked the thread the command was run in, not the one it wrote to.** A thread deleted
+  mid-command has the sync open a replacement, and the lock went to the dead id.
+
+Reverting all three at once fails exactly the three tests written for them and nothing else.
+
+Three comments were wrong, which matters here because they are load-bearing. `labels.py` claimed
+to strip `P1`, which `parse_priority` does not read at all, and which had just been corrected in
+`priority.py` and missed in the second place. `items.py` said a locked thread rejects edits,
+which a test three files away disproves; the ordering it justifies is still right, for a
+different reason. The 404 reply said "at that link" for eight commands that take no link.
