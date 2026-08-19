@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import Repository, TrackedItem
+from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from tests.fakes.threads import FakeThreadGateway
@@ -92,6 +93,71 @@ async def test_the_cancellation_is_still_passed_on(
 
     with pytest.raises(asyncio.CancelledError):
         await syncing
+
+
+class FailsSlowly(FakeThreadGateway):
+    """Discord takes its time and then refuses, which is a rate limit followed by a 500."""
+
+    def __init__(self, delay: float = 0.3) -> None:
+        super().__init__()
+        self.delay = delay
+        self.made_one = asyncio.Event()
+
+    async def create(self, **kwargs) -> ThreadHandle:
+        self.made_one.set()
+        await asyncio.sleep(self.delay)
+        raise DiscordGatewayError("Discord refused to create a thread")
+
+
+async def test_a_failure_during_shutdown_is_reported_in_our_own_words(
+    registered: Repository,
+    db_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing else is listening at this point, so the log is all anybody gets.
+
+    A shielded future whose caller has been cancelled has its exception reported by asyncio
+    instead, which says less and does not name the item.
+    """
+    threads = FailsSlowly()
+    container = build_stack(db_engine, threads=threads)
+
+    syncing = asyncio.create_task(container.pr_sync.sync(an_opened_pull_request()))
+    await asyncio.wait_for(threads.made_one.wait(), timeout=5)
+    with caplog.at_level("WARNING", logger="shannon.services.sync.threads"):
+        syncing.cancel()
+        await asyncio.wait({syncing})
+
+    assert "failed as it was shutting down" in caplog.text
+    assert "Discord refused to create a thread" in caplog.text
+
+
+async def test_a_gateway_that_never_answers_does_not_hold_the_process_open(
+    registered: Repository,
+    db_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait is bounded, and what it gives up on is worth saying out loud.
+
+    Ten seconds in production, cut here so the test does not take ten. A thread may or may not
+    exist in the channel at this point, and nothing will ever point at it, so the log is the
+    only trace of it there will be.
+    """
+    monkeypatch.setattr("shannon.services.sync.threads.CLAIM_GRACE_SECONDS", 0.05)
+    threads = SlowToAnswer(delay=1.0)
+    container = build_stack(db_engine, threads=threads)
+
+    syncing = asyncio.create_task(container.pr_sync.sync(an_opened_pull_request()))
+    await asyncio.wait_for(threads.made_one.wait(), timeout=5)
+    with caplog.at_level("ERROR", logger="shannon.services.sync.threads"):
+        syncing.cancel()
+        await asyncio.wait({syncing})
+
+    assert "gave up waiting for a thread to be attached" in caplog.text
+    # The claim is still going. Letting it land keeps the loop from closing under it, which is
+    # what production does not do and what makes the log line above true.
+    await asyncio.sleep(1.2)
 
 
 async def test_nothing_changes_when_nobody_cancels_anything(
