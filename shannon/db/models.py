@@ -6,7 +6,6 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     DateTime,
-    Enum,
     ForeignKey,
     Index,
     String,
@@ -18,23 +17,10 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from shannon.db.base import Base, TimestampMixin
-from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
+from shannon.db.base import Base, TimestampMixin, varchar_enum
+from shannon.domain.enums import ActorRole, DeliveryStatus, ObjectType, Priority, Status
 
-
-def _enum(python_enum: type, name: str) -> Enum:
-    """Store enums as VARCHAR plus a CHECK constraint.
-
-    Native PostgreSQL enums would need an ALTER TYPE migration every time a later MVP adds a
-    value, and MVP 3 and 4 both add to these sets.
-    """
-    return Enum(
-        python_enum,
-        name=name,
-        native_enum=False,
-        length=32,
-        values_callable=lambda enum_cls: [member.value for member in enum_cls],
-    )
+_LIVE_STATUSES = ", ".join(f"'{status.value}'" for status in DeliveryStatus.live())
 
 
 class Repository(TimestampMixin, Base):
@@ -71,7 +57,7 @@ class ChannelMapping(TimestampMixin, Base):
         ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
     )
     object_type: Mapped[ObjectType] = mapped_column(
-        _enum(ObjectType, "object_type"), nullable=False
+        varchar_enum(ObjectType, "object_type"), nullable=False
     )
     discord_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -100,7 +86,7 @@ class TrackedItem(TimestampMixin, Base):
     )
     github_object_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     github_object_type: Mapped[ObjectType] = mapped_column(
-        _enum(ObjectType, "object_type"), nullable=False
+        varchar_enum(ObjectType, "object_type"), nullable=False
     )
     github_object_number: Mapped[int] = mapped_column(nullable=False)
     github_url: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -109,10 +95,10 @@ class TrackedItem(TimestampMixin, Base):
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[Status] = mapped_column(
-        _enum(Status, "item_status"), nullable=False, default=Status.NOT_REVIEWED
+        varchar_enum(Status, "item_status"), nullable=False, default=Status.NOT_REVIEWED
     )
     priority: Mapped[Priority] = mapped_column(
-        _enum(Priority, "item_priority"), nullable=False, default=Priority.UNSET
+        varchar_enum(Priority, "item_priority"), nullable=False, default=Priority.UNSET
     )
     github_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -147,7 +133,9 @@ class ItemAssignment(TimestampMixin, Base):
     )
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
     discord_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    role_type: Mapped[ActorRole] = mapped_column(_enum(ActorRole, "actor_role"), nullable=False)
+    role_type: Mapped[ActorRole] = mapped_column(
+        varchar_enum(ActorRole, "actor_role"), nullable=False
+    )
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When the review this row asked for was submitted, in GitHub's clock rather than ours.
     # The row is kept rather than removed so a delivery captured before the review, and retried
@@ -203,7 +191,10 @@ class WebhookEvent(Base):
         Index(
             "ix_webhook_events_live",
             "id",
-            postgresql_where=text("status IN ('PENDING', 'PROCESSING')"),
+            # Built from the enum so a sixth state cannot leave the index behind. The string
+            # has to match what migration 0005 created, byte for byte, or the schema diff in
+            # test_migrations fails; that is why `live()` returns an ordered tuple.
+            postgresql_where=text(f"status IN ({_LIVE_STATUSES})"),
         ),
         # Pruning has to find the slice past the retention window without reading the rest.
         Index("ix_webhook_events_processed_at", "processed_at"),
