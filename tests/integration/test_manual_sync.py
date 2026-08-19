@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
@@ -14,11 +14,18 @@ from shannon.domain.models import (
     IssueSnapshot,
     Label,
     PullRequestSnapshot,
+    RepositoryRef,
     RepositorySnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
-from shannon.services.sync.items import ItemSyncService
-from shannon.services.sync.manual import ManualSync, build_issue_sync, build_pull_request_sync
+from shannon.github.urls import parse_pull_request_url
+from shannon.services.sync.items import ItemSyncService, SyncOutcome, SyncResult
+from shannon.services.sync.manual import (
+    ManualSync,
+    SyncFailedError,
+    build_issue_sync,
+    build_pull_request_sync,
+)
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -166,6 +173,77 @@ async def test_the_repository_name_match_ignores_case(
     assert outcome.created is True
 
 
+class TestWhenACollaboratorBreaksItsWord:
+    """The three refusals no link and no payload can produce.
+
+    Nothing in the wiring reaches them: the link parsers guarantee a number, and /register
+    writes the pull request channel mapping in the same transaction as the repository row. They
+    are here because the parser and the sync service are both injected, `SyncsItems` is a
+    protocol anything can satisfy, and a command that raised nothing would leave the person who
+    ran it looking at a spinner. Driven at the seam they guard rather than through the wiring
+    that cannot reach them.
+    """
+
+    def _manual(self, db_sessionmaker, github, sync, **overrides) -> ManualSync:
+        settings = {
+            "parse_link": parse_pull_request_url,
+            "fetch": lambda owner, name, number: github.get_pull_request(owner, name, number),
+            "noun": "pull request",
+        }
+        return ManualSync(db_sessionmaker, github, sync, **(settings | overrides))
+
+    async def test_a_parser_that_drops_the_number_is_refused_before_github(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+    ) -> None:
+        manual = self._manual(
+            db_sessionmaker,
+            github,
+            _Syncs(),
+            parse_link=lambda link: RepositoryRef(owner=payloads.OWNER, name=payloads.REPO),
+        )
+
+        with pytest.raises(UnparseableLinkError, match="has no pull request number"):
+            await manual.sync_link(guild_id=1, link=LINK)
+
+        assert github.pull_request_calls == [], "GitHub was asked for an item with no number"
+
+    async def test_nothing_to_sync_into_is_reported_as_a_missing_channel(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+    ) -> None:
+        manual = self._manual(
+            db_sessionmaker, github, _Syncs(SyncResult(outcome=SyncOutcome.NOT_TRACKED))
+        )
+
+        with pytest.raises(SyncFailedError, match="Run /set_channel first"):
+            await manual.sync_link(guild_id=1, link=LINK)
+
+    async def test_a_sync_that_reports_no_thread_is_not_reported_as_success(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+    ) -> None:
+        """`ManualSyncOutcome.thread_id` becomes a channel link in the reply, so None here is a
+        message pointing at nothing."""
+        manual = self._manual(
+            db_sessionmaker,
+            github,
+            _Syncs(SyncResult(outcome=SyncOutcome.SYNCED, tracked_item_id=1, thread_id=None)),
+        )
+
+        with pytest.raises(SyncFailedError, match="could not be mirrored"):
+            await manual.sync_link(guild_id=1, link=LINK)
+
+
+class _Syncs:
+    """A SyncsItems that answers whatever it was built with."""
+
+    def __init__(self, result: SyncResult | None = None) -> None:
+        self.result = result or SyncResult(
+            outcome=SyncOutcome.SYNCED, tracked_item_id=1, thread_id=1001
+        )
+
+    async def sync(self, snapshot: object) -> SyncResult:
+        return self.result
+
+
 class TestARenamedRepository:
     """GitHub keeps a repository's id across a rename; the stored name catches up on a webhook.
 
@@ -227,6 +305,42 @@ class TestARenamedRepository:
         await manual.sync_link(guild_id=1, link=LINK)
 
         assert github.repository_calls == []
+
+    async def test_a_repository_unregistered_while_github_was_answering(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        renamed: FakeGitHubClient,
+        moved_link: str,
+    ) -> None:
+        """The rename check reloads the row after the GitHub call, and it may be gone by then.
+
+        The call sits between two transactions on purpose, because holding one open across the
+        network is what the sync path refuses to do. That leaves a window, and unregistering is
+        the one thing that closes it. Reproduced by deleting the row from inside the fake's
+        `get_repository`, which is where the window is: nothing is contrived about the ordering,
+        only about who does the deleting.
+
+        There is nothing left to rename and nothing to raise about. The link was confirmed to be
+        the same repository by id, so the sync goes ahead on what the payload says.
+        """
+        original = renamed.get_repository
+
+        async def unregister_mid_call(owner: str, name: str):
+            answer = await original(owner, name)
+            async with db_sessionmaker() as session, session.begin():
+                await session.execute(delete(Repository))
+            return answer
+
+        renamed.get_repository = unregister_mid_call
+        manual = build_pull_request_sync(db_sessionmaker, renamed, _Syncs())
+
+        outcome = await manual.sync_link(guild_id=1, link=moved_link)
+
+        assert outcome.full_name == "Canon-Regularis/Shannon"
+        db_session.expire_all()
+        assert (await db_session.scalars(select(Repository))).all() == []
 
     async def test_a_link_to_a_genuinely_different_repository_is_still_refused(
         self,
