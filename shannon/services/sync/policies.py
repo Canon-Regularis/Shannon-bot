@@ -18,6 +18,12 @@ class SyncPolicy(Protocol):
 
     object_type: ObjectType
 
+    # Where this kind of item's threads go when nobody has mapped a channel for it. /register
+    # only ever maps pull requests, so without a fallback an issue has nowhere to go until
+    # somebody runs /set_channel, and nothing appears to be happening. None means no fallback:
+    # if it is not mapped, it is not posted.
+    channel_fallback: ObjectType | None
+
     def render(
         self,
         snapshot: TrackedSnapshot,
@@ -38,6 +44,7 @@ class SyncPolicy(Protocol):
 
 class PullRequestPolicy:
     object_type = ObjectType.PR
+    channel_fallback = None
 
     def render(
         self,
@@ -67,6 +74,7 @@ class PullRequestPolicy:
 
 class IssuePolicy:
     object_type = ObjectType.ISSUE
+    channel_fallback = ObjectType.PR
 
     def render(
         self,

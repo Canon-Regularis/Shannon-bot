@@ -225,7 +225,10 @@ class ItemSyncService:
             )
             return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
-        channel = await ChannelMappingStore(session).resolve(repository.id, object_type)
+        channels = ChannelMappingStore(session)
+        channel = await channels.get(repository.id, object_type)
+        if channel is None and self._policy.channel_fallback is not None:
+            channel = await channels.get(repository.id, self._policy.channel_fallback)
         if channel is None:
             logger.warning(
                 "%s has no channel mapped for %s, run /set_channel",
