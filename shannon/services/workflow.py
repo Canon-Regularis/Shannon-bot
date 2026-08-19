@@ -1,0 +1,295 @@
+"""Moving an item through the workflow: its status and its priority.
+
+GitHub is written first and Discord second, which the requirements ask for and which is also the
+only order that can be recovered from. The labels are the record; the stored status and the
+metadata block are a mirror of them, so a run that dies half way leaves the item correct on
+GitHub and stale here, and the next event or the next command corrects it. The other order
+leaves Discord claiming something GitHub never agreed to.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import Protocol
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from shannon.db.models import TrackedItem
+from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.discord_bot.threads import LocksThread
+from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.errors import ItemNotReadyError, ShannonError
+from shannon.domain.models import Label, TrackedSnapshot
+from shannon.github import labels
+from shannon.github.client import GitHubClient
+from shannon.services.sync.items import SyncsItems
+
+logger = logging.getLogger(__name__)
+
+# Owner, name, number.
+Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
+
+# A pull request is only finished once somebody has said it is ready to merge. The requirement
+# is about the order of a review, not about bookkeeping: marking a pull request done skips the
+# step where a reviewer says it may be merged, and locking its thread takes away the place that
+# would have been said.
+DONE_NEEDS = Status.READY_FOR_MERGE
+
+
+class NotAnItemThreadError(ShannonError):
+    """The command was run somewhere that is not a tracked item's thread."""
+
+
+class WorkflowRefusedError(ShannonError):
+    """The change is not one this item can be given right now."""
+
+
+@dataclass(frozen=True, slots=True)
+class ItemKind:
+    """How to read and re-render one kind of item.
+
+    Both halves differ by object type and neither belongs here: fetching is the client's, and
+    rendering is the sync service's. The command cannot pick between them because it only knows
+    which thread it is in, so the picking happens here.
+    """
+
+    fetch: Fetcher
+    sync: SyncsItems
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowOutcome:
+    """What the person who ran the command is told."""
+
+    full_name: str
+    number: int
+    changed: bool
+    locked: bool = False
+
+
+class LabelsItems(Protocol):
+    """Putting a label on an item and taking one off, which is all this path asks of GitHub."""
+
+    async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
+
+    async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
+
+
+class ItemWorkflow:
+    """Backs the status and priority commands.
+
+    Every one of them is the same three steps with a different label: read the item as GitHub
+    has it, put the labels right there, then bring the stored copy and the thread into line.
+    """
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        github: LabelsItems,
+        threads: LocksThread,
+        kinds: Mapping[ObjectType, ItemKind],
+    ) -> None:
+        self._sessionmaker = sessionmaker
+        self._github = github
+        self._threads = threads
+        self._kinds = kinds
+
+    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
+        """Move an item to a status, and lock its thread once it is done."""
+        found = await self._locate(thread_id)
+        snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
+        self._refuse_a_status_that_will_not_hold(found, snapshot, status)
+
+        change = labels.status_change(snapshot.label_names, status)
+        if change.nothing_to_do and found.status is status:
+            # Nothing to write, which is not the same as nothing to do. Locking is the last
+            # step of finishing an item and the likeliest to have failed on its own, so a
+            # repeat of /set_done is what gets a second go at it.
+            locked = status is Status.DONE and await self._lock(thread_id)
+            return WorkflowOutcome(found.full_name, found.number, changed=False, locked=locked)
+
+        await self._apply(found, change)
+        await self._store_status(found.tracked_item_id, status)
+        written = await self._rerender(found, snapshot, change)
+
+        locked = status is Status.DONE and await self._lock(written or thread_id)
+
+        logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
+        return WorkflowOutcome(found.full_name, found.number, changed=True, locked=locked)
+
+    async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
+        """Move an item to a priority. Nothing is locked and no status moves with it."""
+        found = await self._locate(thread_id)
+        snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
+
+        change = labels.priority_change(snapshot.label_names, priority)
+        if change.nothing_to_do:
+            return WorkflowOutcome(found.full_name, found.number, changed=False)
+
+        await self._apply(found, change)
+        await self._rerender(found, snapshot, change)
+
+        logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
+        return WorkflowOutcome(found.full_name, found.number, changed=True)
+
+    def _refuse_a_status_that_will_not_hold(
+        self, found: _Found, snapshot: TrackedSnapshot, status: Status
+    ) -> None:
+        """Refuse, rather than write a status that something else is going to overwrite.
+
+        An issue's status is not this service's alone to decide. The requirements make closing
+        an issue mean done, and the sync path enforces that on every delivery, so both
+        directions of disagreement have to be refused here: marking an open issue done, and
+        marking a closed one anything else. Writing either would put the label on GitHub,
+        report the change as made, and then have the very next render take it back.
+        """
+        if found.object_type is ObjectType.ISSUE:
+            if snapshot.closed and status is not Status.DONE:
+                raise WorkflowRefusedError(
+                    f"That issue is closed on GitHub, which is what makes it "
+                    f"{Status.DONE.value}. Reopen it there to give it another status."
+                )
+            if not snapshot.closed and status is Status.DONE:
+                raise WorkflowRefusedError(
+                    "Close the issue on GitHub to mark it done; that locks the thread too."
+                )
+            return
+
+        # A pull request is only finished once a reviewer has said it may be merged. Already
+        # being DONE passes too: that is a repeat, and a repeat is how a lock that failed on
+        # its own gets tried again.
+        if status is Status.DONE and found.status not in (DONE_NEEDS, Status.DONE):
+            raise WorkflowRefusedError(
+                f"A pull request has to be {DONE_NEEDS.value} before it can be marked "
+                f"{Status.DONE.value}. This one is {found.status.value}."
+            )
+
+    async def _apply(self, found: _Found, change: labels.LabelChange) -> None:
+        """Put the labels right on GitHub.
+
+        Removals first. The two states this can be interrupted in are an item with no status
+        label and an item with two, and the first is the one a reader can make sense of.
+        """
+        for name in change.remove:
+            await self._github.remove_label(found.owner, found.name, found.number, name)
+        if change.add:
+            await self._github.add_label(found.owner, found.name, found.number, change.add)
+
+    async def _rerender(
+        self, found: _Found, snapshot: TrackedSnapshot, change: labels.LabelChange
+    ) -> int | None:
+        """Bring the thread in line, through the same path a webhook takes.
+
+        The snapshot is carried forward with its labels corrected rather than fetched again.
+        Re-syncing the one that was read before the write would take the priority straight back
+        off the labels it no longer has, which is the change undoing itself.
+
+        Answers with the thread that was actually written to. It is usually the one the command
+        was run in, and is not when somebody deleted that thread in between: the sync opens a
+        replacement, and locking the id the command arrived on would lock nothing.
+        """
+        result = await self._kinds[found.object_type].sync.sync(_relabelled(snapshot, change))
+        return result.thread_id
+
+    async def _lock(self, thread_id: int) -> bool:
+        """Close a finished item's thread to further replies.
+
+        Last, after the metadata is written. A locked thread still takes this bot's edits, so
+        the order is not what makes it work; it is that the lock is the step most likely to be
+        refused, and everything before it is worth keeping when it is.
+        """
+        await self._threads.set_locked(thread_id=thread_id, locked=True)
+        return True
+
+    async def _store_status(self, tracked_item_id: int, status: Status) -> None:
+        """Written before the re-render, because the render reads it back off the row."""
+        async with self._sessionmaker() as session, session.begin():
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+            if item is None:
+                raise ItemNotReadyError("That item is no longer tracked here.")
+            item.status = status
+
+    async def _locate(self, thread_id: int) -> _Found:
+        """Which item this thread is, as plain values out of the session.
+
+        The repository is fetched rather than read off `item.repository`: that is a lazy
+        relationship, and an async session cannot load one on attribute access.
+        """
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_thread(thread_id)
+            repository = (
+                await RepositoryStore(session).get_by_id(item.repository_id)
+                if item is not None
+                else None
+            )
+            if item is None or repository is None:
+                raise NotAnItemThreadError(
+                    "Run this inside the thread of a pull request or issue this bot is tracking."
+                )
+            return _Found.of(item, repository.repo_name)
+
+
+def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> TrackedSnapshot:
+    gone = {name.casefold() for name in change.remove}
+    kept = [label for label in snapshot.labels if label.name.casefold() not in gone]
+    if change.add:
+        kept.append(Label(name=change.add))
+    return replace(snapshot, labels=tuple(kept))
+
+
+@dataclass(frozen=True, slots=True)
+class _Found:
+    """The item a thread belongs to, as plain values out of its session."""
+
+    tracked_item_id: int
+    object_type: ObjectType
+    full_name: str
+    number: int
+    status: Status
+
+    @property
+    def owner(self) -> str:
+        return self.full_name.split("/", 1)[0]
+
+    @property
+    def name(self) -> str:
+        return self.full_name.split("/", 1)[1]
+
+    @classmethod
+    def of(cls, item: TrackedItem, repo_name: str) -> _Found:
+        return cls(
+            tracked_item_id=item.id,
+            object_type=item.github_object_type,
+            full_name=repo_name,
+            number=item.github_object_number,
+            status=item.status,
+        )
+
+
+def build_item_workflow(
+    sessionmaker: async_sessionmaker,
+    github: GitHubClient,
+    threads: LocksThread,
+    *,
+    pr_sync: SyncsItems,
+    issue_sync: SyncsItems,
+) -> ItemWorkflow:
+    """Assemble the workflow service with a fetcher and a renderer per object type."""
+    return ItemWorkflow(
+        sessionmaker,
+        github,
+        threads,
+        {
+            ObjectType.PR: ItemKind(
+                fetch=lambda owner, name, number: github.get_pull_request(owner, name, number),
+                sync=pr_sync,
+            ),
+            ObjectType.ISSUE: ItemKind(
+                fetch=lambda owner, name, number: github.get_issue(owner, name, number),
+                sync=issue_sync,
+            ),
+        },
+    )

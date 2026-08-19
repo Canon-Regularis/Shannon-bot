@@ -35,6 +35,9 @@ class FakeThreadGateway:
         # Set by a test that needs the next thread creation to fail the way a Discord outage
         # would, so what happens to everything queued behind it can be observed.
         self.fail_next_create = False
+        # The same for locking, which is a separate permission on Discord's side: a server can
+        # let this bot open and edit threads and not let it close one.
+        self.fail_next_lock = False
         self._next_id = 1000
 
     def _allocate(self) -> int:
@@ -76,6 +79,9 @@ class FakeThreadGateway:
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
     async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+        if self.fail_next_lock:
+            self.fail_next_lock = False
+            raise DiscordGatewayError("Discord refused to lock the thread")
         thread = self.threads.get(thread_id)
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
