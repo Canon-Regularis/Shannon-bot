@@ -88,7 +88,12 @@ jobs:
       - run: uv sync --extra dev --locked
 
       - name: Test
-        run: uv run pytest -q --durations=10
+        # Coverage on one version rather than all three. The answer does not differ between
+        # them, nothing here branches on the Python version, and a floor enforced three times is
+        # three chances for one flaky test to fail the build over a number.
+        run: >-
+          uv run pytest -q --durations=10
+          ${{ matrix.python == '3.14' && '--cov' || '' }}
 
       - name: Confirm the suite still passes without a database
         # A fresh clone has no PostgreSQL, and the integration tier is supposed to skip rather

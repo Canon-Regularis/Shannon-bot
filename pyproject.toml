@@ -23,6 +23,7 @@ dev = [
     "hypothesis>=6.165.3",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.14.0",
 ]
 
@@ -52,6 +53,21 @@ filterwarnings = [
     # warning that does matter.
     "ignore:'count' is passed as positional argument:DeprecationWarning",
 ]
+
+[tool.coverage.run]
+source = ["shannon"]
+# Statements alone say every line ran, which a suite manages easily while never taking a branch
+# the other way. With this on, the figure below covers both.
+branch = true
+
+[tool.coverage.report]
+# A floor rather than a target: both are complete today, so anything under it is a regression.
+# Worth saying what it does not mean. A line running is not a behaviour being asserted, and
+# three tests here reached their subject only by luck of timing while passing either way. This
+# catches code nothing executes, which is a narrower thing than code nothing checks.
+fail_under = 100
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 line-length = 100

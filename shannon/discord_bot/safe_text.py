@@ -92,7 +92,10 @@ def fit(message: str) -> str:
     budget = MESSAGE_LIMIT - len(TRUNCATED)
     kept: list[str] = []
     used = 0
-    for line in message.split("\n"):
+    # No ordinary exit, so the branch coverage floor is told not to look for one: this is only
+    # reached above the limit, the per-line costs sum to exactly the length of the message, and
+    # the budget is smaller than that, so a line always crosses it.
+    for line in message.split("\n"):  # pragma: no branch
         cost = len(line) + (1 if kept else 0)
         if used + cost > budget:
             break
