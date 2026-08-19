@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-import pytest
-
 from shannon.api.routes.webhooks import MAX_BODY_BYTES
 from shannon.github.webhooks.signature import sign
 from tests.support.webhooks import SECRET, RecordingHandler, build_client, post
-
-
-@pytest.fixture
-def handler() -> RecordingHandler:
-    return RecordingHandler()
 
 
 async def test_missing_signature_is_rejected(handler: RecordingHandler) -> None:

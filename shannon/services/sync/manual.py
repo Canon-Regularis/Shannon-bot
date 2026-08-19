@@ -40,6 +40,18 @@ class SyncFailedError(ShannonError):
     """The item was fetched but Discord could not be brought in line with it."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Registered:
+    """What this service needs of the registered repository, carried out of its session."""
+
+    github_repo_id: int
+    full_name: str
+
+    @classmethod
+    def of(cls, repository: Repository) -> _Registered:
+        return cls(github_repo_id=repository.github_repo_id, full_name=repository.repo_name)
+
+
 class ManualSync:
     """Backs the commands that sync one item by link.
 
@@ -69,23 +81,27 @@ class ManualSync:
         self._noun = noun
 
     async def _confirm_same_repository(
-        self, repository: Repository, ref: RepositoryRef, *, guild_id: int
-    ) -> None:
+        self, registered: _Registered, ref: RepositoryRef, *, guild_id: int
+    ) -> str:
         """Settle a link that names a different repository against the id rather than the name.
 
         GitHub lets a repository be renamed and keeps its numeric id. The stored name only
         catches up when a webhook arrives, so refusing on the name alone leaves both commands
         rejecting the correct link for a repository that has only moved. This costs one API
         call, and only on the path that was about to refuse anyway.
+
+        Returns the name GitHub is using now. The GitHub call deliberately sits between the two
+        transactions rather than inside one: the sync path refuses to hold a transaction across
+        a network call, and this has no more right to.
         """
         try:
             named = await self._github.get_repository(ref.owner, ref.name)
         except GitHubNotFoundError:
             named = None
 
-        if named is None or named.github_repo_id != repository.github_repo_id:
+        if named is None or named.github_repo_id != registered.github_repo_id:
             raise RepositoryMismatchError(
-                f"This server is registered to {repository.repo_name}, not {ref.full_name}."
+                f"This server is registered to {registered.full_name}, not {ref.full_name}."
             )
 
         async with self._sessionmaker() as session, session.begin():
@@ -95,7 +111,7 @@ class ManualSync:
                 await repositories.follow_rename(
                     stored, repo_name=named.full_name, repo_url=named.html_url
                 )
-        repository.repo_name = named.full_name
+        return named.full_name
 
     async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome:
         """Fetch an item by link and mirror it into this guild's Discord channel.
@@ -106,13 +122,19 @@ class ManualSync:
         """
         ref = self._parse_link(link)
 
+        # Plain values out of the session, not the row itself. Reading an ORM object after its
+        # session closes is what forced the rename check to open a second session to reload the
+        # same row, and then to patch the detached copy so the outcome reported the new name.
         async with self._sessionmaker() as session:
-            repository = await RepositoryStore(session).get_by_guild(guild_id)
+            stored = await RepositoryStore(session).get_by_guild(guild_id)
+            registered = _Registered.of(stored) if stored is not None else None
 
-        if repository is None:
+        if registered is None:
             raise NotRegisteredError("This server has no repository yet. Run /register first.")
-        if repository.repo_name.lower() != ref.full_name.lower():
-            await self._confirm_same_repository(repository, ref, guild_id=guild_id)
+
+        full_name = registered.full_name
+        if full_name.lower() != ref.full_name.lower():
+            full_name = await self._confirm_same_repository(registered, ref, guild_id=guild_id)
 
         if ref.number is None:
             # The link parsers guarantee a number, so this is a contract breach rather than
@@ -135,7 +157,7 @@ class ManualSync:
             thread_id=result.thread_id,
             created=result.created,
             number=snapshot.number,
-            full_name=repository.repo_name,
+            full_name=full_name,
         )
 
 
