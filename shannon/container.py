@@ -9,6 +9,7 @@ from shannon.commands.link import build_link_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
+from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
 from shannon.discord_bot.formatting import (
@@ -38,6 +39,7 @@ from shannon.services.sync.items import ItemSyncService, build_item_handler, bui
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.workflow import build_item_workflow
 
 
 @dataclass(slots=True)
@@ -133,6 +135,7 @@ def _event_router(
 def _commands(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
+    threads: ThreadGateway,
     gate: PermissionGate,
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
@@ -142,12 +145,16 @@ def _commands(
     A command missing from here is one that silently stops existing in Discord, so the tuple is
     built once at wiring time rather than assembled on demand.
     """
+    workflow = build_item_workflow(
+        sessionmaker, github, threads, pr_sync=pr_sync, issue_sync=issue_sync
+    )
     return (
         build_register_command(RepositoryRegistrationService(sessionmaker, github), gate),
         build_set_channel_command(ChannelMappingService(sessionmaker), gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_link_command(UserLinkingService(sessionmaker), gate),
+        *build_workflow_commands(workflow, gate),
     )
 
 
@@ -189,6 +196,7 @@ def build_container(
         commands=_commands(
             sessionmaker,
             github,
+            threads,
             PermissionGate(ConfiguredRoles.from_settings(settings)),
             pr_sync,
             issue_sync,

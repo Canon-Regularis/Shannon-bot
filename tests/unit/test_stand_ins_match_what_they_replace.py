@@ -21,6 +21,7 @@ from shannon.commands.link import LinksAccounts
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels
 from shannon.commands.sync_link import SyncsByLink
+from shannon.commands.workflow import MovesItems
 from shannon.container import Container
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.permissions import RoleNames
@@ -58,6 +59,7 @@ from shannon.services.sync.manual import ManualSync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
 from shannon.services.sync.threads import ItemThreads
+from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
@@ -92,6 +94,9 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (RegistersRepositories, RepositoryRegistrationService),
     (MapsChannels, ChannelMappingService),
     (SyncsByLink, ManualSync),
+    (MovesItems, ItemWorkflow),
+    (LabelsItems, HttpGitHubClient),
+    (LabelsItems, FakeGitHubClient),
     (RoleNames, ConfiguredRoles),
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),

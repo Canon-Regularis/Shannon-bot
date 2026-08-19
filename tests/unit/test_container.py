@@ -66,7 +66,15 @@ class TestWhatItWiresUp:
             "link",
             "pr",
             "register",
+            "set_backlog",
             "set_channel",
+            "set_done",
+            "set_high_priority",
+            "set_in_review",
+            "set_low_priority",
+            "set_med_priority",
+            "set_not_reviewed",
+            "set_ready_for_merge",
         ]
 
     async def test_the_router_handles_every_event_the_webhook_accepts(self) -> None:
