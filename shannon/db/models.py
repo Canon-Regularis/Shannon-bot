@@ -132,7 +132,6 @@ class ItemAssignment(TimestampMixin, Base):
         ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
     )
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
-    discord_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     role_type: Mapped[ActorRole] = mapped_column(
         varchar_enum(ActorRole, "actor_role"), nullable=False
     )

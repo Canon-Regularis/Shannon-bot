@@ -137,7 +137,6 @@ async def test_notification_stamps_the_assignment_row(
     )
     assert row is not None
     assert row.notified_at is not None
-    assert row.discord_user_id == 555
 
 
 async def test_a_removed_and_re_requested_reviewer_is_pinged_again(

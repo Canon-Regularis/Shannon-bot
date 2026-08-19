@@ -76,7 +76,6 @@ class ActorNotifier:
                 await asyncio.shield(self._release(tracked_item_id, logins))
             raise
 
-        await self._record_mentions(tracked_item_id, mentions)
         logger.info("pinged %s %s on tracked item %s", self._role, logins, tracked_item_id)
         return logins
 
@@ -104,7 +103,3 @@ class ActorNotifier:
             await ItemAssignmentStore(session).release_notifications(
                 tracked_item_id, self._role, logins
             )
-
-    async def _record_mentions(self, tracked_item_id: int, mentions: Mapping[str, int]) -> None:
-        async with self._sessionmaker() as session, session.begin():
-            await ItemAssignmentStore(session).record_discord_ids(tracked_item_id, mentions)

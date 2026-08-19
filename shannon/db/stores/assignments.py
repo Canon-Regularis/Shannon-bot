@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 
 from sqlalchemy import delete, func, select, update
@@ -121,20 +121,6 @@ class ItemAssignmentStore:
             .values(notified_at=None)
             .execution_options(synchronize_session=False)
         )
-
-    async def record_discord_ids(self, tracked_item_id: int, mentions: Mapping[str, int]) -> None:
-        if not mentions:
-            return
-        for login, discord_user_id in mentions.items():
-            await self._session.execute(
-                update(ItemAssignment)
-                .where(
-                    ItemAssignment.tracked_item_id == tracked_item_id,
-                    ItemAssignment.github_username == login,
-                )
-                .values(discord_user_id=discord_user_id)
-                .execution_options(synchronize_session=False)
-            )
 
     async def mark_fulfilled(
         self, tracked_item_id: int, role: ActorRole, github_username: str, when: datetime | None
