@@ -14,8 +14,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import map_channel, register_repository
-from tests.support.stack import build_http_client, build_stack, deliver
+from tests.support.stack import deliver, registered_stack
 
 pytestmark = pytest.mark.integration
 
@@ -24,11 +23,8 @@ pytestmark = pytest.mark.integration
 async def client(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[AsyncClient]:
-    repository = await register_repository(db_session, guild_id=1, channel_id=99)
-    await map_channel(db_session, repository, ObjectType.ISSUE, channel_id=98)
-    container = build_stack(db_engine, threads=threads)
-    async with build_http_client(container) as http_client:
-        yield http_client
+    async with registered_stack(db_engine, db_session, threads) as client:
+        yield client
 
 
 async def test_an_opened_issue_creates_a_thread(

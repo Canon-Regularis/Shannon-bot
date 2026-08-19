@@ -9,11 +9,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import ItemAssignment, TrackedItem
-from shannon.domain.enums import ActorRole, ObjectType
+from shannon.domain.enums import ActorRole
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import map_channel, register_repository
-from tests.support.stack import build_http_client, build_stack, deliver
+from tests.support.stack import deliver, registered_stack
 
 pytestmark = pytest.mark.integration
 
@@ -23,12 +22,9 @@ async def tracked(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[AsyncClient]:
     """A guild with the issue already synced once, which is the state updates arrive in."""
-    repository = await register_repository(db_session, guild_id=1, channel_id=99)
-    await map_channel(db_session, repository, ObjectType.ISSUE, channel_id=98)
-    container = build_stack(db_engine, threads=threads)
-    async with build_http_client(container) as http_client:
-        await deliver(http_client, "issues", payloads.issue_event("opened"), delivery="i0")
-        yield http_client
+    async with registered_stack(db_engine, db_session, threads) as client:
+        await deliver(client, "issues", payloads.issue_event("opened"), delivery="i0")
+        yield client
 
 
 async def test_an_edit_updates_the_existing_thread(

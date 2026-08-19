@@ -13,8 +13,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ActorRole, ObjectType, Status
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import register_repository
-from tests.support.stack import build_http_client, build_stack, deliver
+from tests.support.stack import deliver, registered_stack
 
 pytestmark = pytest.mark.integration
 
@@ -23,10 +22,10 @@ pytestmark = pytest.mark.integration
 async def client(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[AsyncClient]:
-    await register_repository(db_session, guild_id=1, channel_id=99)
-    container = build_stack(db_engine, threads=threads)
-    async with build_http_client(container) as http_client:
-        yield http_client
+    # No issue channel: this file is only about pull requests, and mapping one would hide the
+    # case the fallback exists for.
+    async with registered_stack(db_engine, db_session, threads, issues_channel=None) as client:
+        yield client
 
 
 async def test_an_opened_pull_request_creates_a_thread(
