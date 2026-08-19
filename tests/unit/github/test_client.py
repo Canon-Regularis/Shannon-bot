@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -161,6 +162,31 @@ async def test_unusable_repository_body_raises_unavailable() -> None:
             await client.get_repository("owner", "repo")
 
 
+async def test_unusable_pull_request_body_raises_unavailable() -> None:
+    """The repository half read fine, so the failure is the pull request itself."""
+    body = {"base": {"repo": payloads.repository()}, "number": None}
+
+    async with client_with(responds(200, body)) as client:
+        with pytest.raises(GitHubUnavailableError, match="unusable pull request"):
+            await client.get_pull_request(payloads.OWNER, payloads.REPO, 7)
+
+
+async def test_a_json_body_that_is_not_an_object_raises_unavailable() -> None:
+    """Valid JSON, wrong shape. A list gets past `response.json()` and past nothing after it."""
+    async with client_with(responds(200, ["not", "an", "object"])) as client:
+        with pytest.raises(GitHubUnavailableError, match="unexpected body"):
+            await client.get_repository("owner", "repo")
+
+
+async def test_the_client_it_builds_itself_is_the_one_it_closes() -> None:
+    """Every other test here injects a client, which this deliberately does not own."""
+    client = HttpGitHubClient(token="t")
+
+    await client.aclose()
+
+    assert client._client.is_closed is True
+
+
 def test_token_is_sent_as_a_bearer_header() -> None:
     from shannon.github.client import _headers
 
@@ -217,6 +243,30 @@ class TestHowLongToWait:
                 await client.get_repository("owner", "repo")
 
         assert caught.value.retry_after == 12
+
+    @pytest.mark.parametrize("date", [None, "the fourteenth of never"])
+    async def test_without_a_usable_date_the_wait_is_measured_on_our_clock(
+        self, date: str | None
+    ) -> None:
+        """GitHub's `date` is the clock the reset moment was measured on, when it sends one.
+
+        A proxy that strips it, or sends something unparseable, leaves the local clock as the
+        only one there is. Close enough is the most that can be claimed: the two clocks are not
+        the same clock, which is the whole reason the header is preferred.
+        """
+        headers = {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": str(int(time.time()) + 90),
+        }
+        if date is not None:
+            headers["date"] = date
+
+        async with client_with(responds(403, {"message": "rate limited"}, headers)) as client:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await client.get_repository("owner", "repo")
+
+        assert caught.value.retry_after is not None
+        assert 85 <= caught.value.retry_after <= 90
 
     async def test_neither_header_means_no_answer(self) -> None:
         async with client_with(
