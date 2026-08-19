@@ -1582,3 +1582,49 @@ Known and not acted on: `mirrored_notes` and `item_assignments` grow without eve
 unlike `webhook_events`. A note row is about sixty bytes and cannot be needed once its delivery
 has aged out of the seven day retention window, so pruning it is safe and easy whenever the size
 starts to matter. It does not yet.
+
+### What the coverage report had to say
+
+The suite had never been measured, only counted. Running it under coverage put 98% of production
+statements on a line that some test executes, which is a better number than expected and not the
+point: the useful part was the 43 that nothing reaches, read one at a time to ask whether each was
+unreachable by design or untested by accident.
+
+Most were the first. Guard clauses that return early on an empty list, the `raise` that passes a
+cancellation along, `setup_hook` and `on_ready`, which need a live gateway. Four were not.
+
+- **A branch in `EventRouter.dispatch` that could not fire and would have done nothing if it had.**
+  It answered `ignored` for GitHub's `ping`, which reads as though the ping is handled there. It is
+  not: `ping` is absent from `SUPPORTED_EVENTS`, so `will_act_on` refuses it before the route ever
+  records a delivery, `register` refuses to take a handler for it, and the very next line in
+  `dispatch` returns the same `ignored` for anything unsupported. Three separate reasons it never
+  runs, and no behaviour behind it. Proved before removing it, by making the branch raise and
+  running the whole suite: 952 passed. Gone, along with the constant it was the only reader of.
+  The two endpoint tests that post a ping and expect `ignored` still pass and are where that
+  behaviour belongs.
+- **The two guards below it, which can fire, and had no tests.** They look like the same
+  duplication and are not, because the route and the worker ask at different times. The route
+  checks before a delivery is written down; the worker dispatches it minutes or a deploy later.
+  Take an action off the supported list, or stop registering a handler, and the deliveries already
+  in the queue arrive at exactly these two lines. Raising there would spend sixteen attempts and
+  two hours of backoff on work this version of the bot is never going to do. Two tests now, named
+  for the deploy rather than for the branch.
+- **The race in `/register` had a comment but no test.** Two people running it at the same moment
+  both get past the checks for an existing guild and an existing repository, because neither has
+  committed, and the database settles it on the unique index. The loser has to hear a refusal
+  rather than a driver error with an index name in it. Eight concurrent callers, following the
+  shape the `/link` test already uses: exactly one is told it registered, one row and one channel
+  mapping exist, and nobody sees anything they cannot act on. Checked it reaches the branch by
+  making the branch raise, which failed three of the eight.
+- **A fallback in the repository parser, and a comment that oversold it.** It reconstructs the
+  owner by splitting `full_name` when the owner block has no usable login, and the comment said
+  "some payloads carry only full_name", which is not something any payload read here does. The
+  fallback is worth keeping, because guessing the owner is recoverable and dropping the delivery
+  is not, but that is the reason and it now says so.
+
+Left alone and worth naming, so the next pass does not go looking: `/pr` and `/issue` each carry
+two refusals for states the commands cannot produce, one for a link with no number and one for a
+repository with no channel mapped, when the link parsers guarantee the number and `/register`
+writes the mapping in the same transaction as the row. They stay because the thing they guard
+against is a `SyncsItems` implementation that behaves differently, which is a protocol anything
+can satisfy.
