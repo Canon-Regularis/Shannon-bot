@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
 from shannon.domain.enums import ObjectType
-from shannon.domain.time import as_utc
-from shannon.services.projects import BoardItem
+from shannon.github import mapping
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,29 @@ CONTENT_TYPES: dict[str, ObjectType] = {
     "Issue": ObjectType.ISSUE,
     "PullRequest": ObjectType.PR,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class BoardItem:
+    """One card on a board, as this service needs it.
+
+    Not GitHub's response shape. The client turns whatever GitHub sends into this, so a change
+    to their JSON is a change to one parser rather than to any of the logic below.
+    """
+
+    item_id: int
+    title: str
+    column: str | None
+    html_url: str
+    kind: ObjectType = ObjectType.TICKET
+    updated_at: datetime | None = None
+    # GitHub's id for the issue or pull request the card wraps, which is the id that item was
+    # already stored under when its own webhook arrived. None for a draft, which wraps nothing.
+    content_id: int | None = None
+
+    @property
+    def is_draft(self) -> bool:
+        return self.kind is ObjectType.TICKET
 
 
 class ReadsJson(Protocol):
@@ -103,12 +126,18 @@ class HttpProjectBoards:
             and row.get("name") in (TITLE_FIELD, STATUS_FIELD)
             and isinstance(field_id := row.get("id"), int)
         )
-        if not any(isinstance(row, Mapping) and row.get("name") == STATUS_FIELD for row in rows):
+        if not found:
+            # Not remembered. An answer with no Status field is either a board that renamed it,
+            # which somebody has to fix, or a response that arrived wrong, which the next read
+            # may well get right. Caching the empty answer would blank every column on the board
+            # until the process restarted, and there is no way to tell the two cases apart.
             logger.warning(
-                "project %s has no field called %r, so no card can carry a status",
+                "project %s answered with no %r field, so no card can carry a status",
                 project_number,
                 STATUS_FIELD,
             )
+            return ()
+
         self._fields[key] = found
         return found
 
@@ -155,7 +184,7 @@ def parse_item(payload: Any, project_number: int) -> BoardItem | None:
         # pull request has one, and its own thread already shows it.
         html_url=_text(content.get("html_url"))
         or f"https://github.com/users/{_owner_of(payload)}/projects/{project_number}",
-        updated_at=_moment(payload.get("updated_at")),
+        updated_at=mapping.parse_timestamp(payload.get("updated_at")),
         # What the card wraps, by GitHub's id for it, which is the same id the tracked item was
         # stored under when its own webhook arrived. None for a draft, which wraps nothing.
         content_id=content.get("id") if isinstance(content.get("id"), int) else None,
@@ -206,12 +235,3 @@ def _owner_of(payload: Mapping[str, Any]) -> str:
     if isinstance(url, str) and "/users/" in url:
         return url.split("/users/", 1)[1].split("/", 1)[0]
     return "unknown"
-
-
-def _moment(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
-    except ValueError:
-        return None

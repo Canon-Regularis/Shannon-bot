@@ -58,6 +58,14 @@ class GitHubClient(LooksUpRepository, Protocol):
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
+    # Untyped bodies, for the project endpoints, which answer with arrays and are parsed by a
+    # module that checks every field it touches. Declared here because the wiring hands this
+    # same object to the board reader, and a stand-in that satisfied the protocol without them
+    # would build a container that fails on the first poll rather than at the seam.
+    async def get_json(self, path: str, **params: Any) -> Any: ...
+
+    def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]: ...
+
 
 class HttpGitHubClient:
     def __init__(
