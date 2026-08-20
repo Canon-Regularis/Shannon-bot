@@ -29,6 +29,15 @@ class RepositoryStore:
         """
         return await self._session.get(Repository, repository_id)
 
+    async def only_one(self) -> Repository | None:
+        """The registered repository, whichever it is.
+
+        One per guild is a unique constraint rather than a convention, and this process serves
+        one guild, so asking without a key is asking the only question there is. Ordered so that
+        a deployment which somehow holds two answers the same way twice rather than alternating.
+        """
+        return await self._session.scalar(select(Repository).order_by(Repository.id))
+
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:
         return await self._session.scalar(
             select(Repository).where(Repository.github_repo_id == github_repo_id)

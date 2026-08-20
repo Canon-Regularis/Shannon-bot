@@ -81,6 +81,32 @@ class TrackedItemStore:
             .order_by(TrackedItem.id)
         )
 
+    async def mirrored_state(
+        self, *, repository_id: int, object_type: ObjectType
+    ) -> dict[int, tuple[datetime | None, int | None]]:
+        """When each item of one kind was last seen, and whether it reached Discord.
+
+        For the poller, which is handed a whole board every minute and has to work out which of
+        it moved. Three columns rather than whole rows, and one query rather than one per card:
+        the answer is compared and thrown away, and a board can be long.
+
+        The thread is here because the timestamp alone is not enough to decide. A row is written
+        and committed before the Discord call that gives it a thread, so an item can be recorded
+        as current while nobody can see it, and a poller comparing only timestamps would never
+        look at it again.
+        """
+        rows = await self._session.execute(
+            select(
+                TrackedItem.github_object_id,
+                TrackedItem.github_updated_at,
+                TrackedItem.discord_thread_id,
+            ).where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == object_type,
+            )
+        )
+        return {row[0]: (row[1], row[2]) for row in rows.all()}
+
     async def get_or_create(
         self,
         *,
