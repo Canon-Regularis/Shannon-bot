@@ -100,6 +100,7 @@ class ItemWorkflow:
     async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done."""
         found = await self._locate(thread_id)
+        self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
         self._refuse_a_status_that_will_not_hold(found, snapshot, status)
 
@@ -123,6 +124,7 @@ class ItemWorkflow:
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
         """Move an item to a priority. Nothing is locked and no status moves with it."""
         found = await self._locate(thread_id)
+        self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
 
         change = labels.priority_change(snapshot.label_names, priority)
@@ -134,6 +136,20 @@ class ItemWorkflow:
 
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
         return WorkflowOutcome(found.full_name, found.number, changed=True)
+
+    def _refuse_a_kind_it_cannot_move(self, found: _Found) -> None:
+        """Refuse a thread whose item this service has no way to write to.
+
+        A project ticket is a draft card on a board. It has no repository page and no labels, so
+        there is nothing here to set: its status is the column it sits in, and the board is where
+        that gets changed. Without this the dict lookup below raises KeyError, which reaches the
+        person who ran the command as "Something went wrong here" and the log as a traceback.
+        """
+        if found.object_type not in self._kinds:
+            raise WorkflowRefusedError(
+                f"That thread is a project {found.object_type.value.lower()}, which has no "
+                "GitHub labels to set. Move its card on the board instead."
+            )
 
     def _refuse_a_status_that_will_not_hold(
         self, found: _Found, snapshot: TrackedSnapshot, status: Status
