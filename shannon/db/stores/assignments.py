@@ -145,28 +145,6 @@ class ItemAssignmentStore:
         )
         return bool(result.rowcount)
 
-    async def mark_all_fulfilled(
-        self, tracked_item_id: int, role: ActorRole, when: datetime | None
-    ) -> int:
-        """Close every open request of one role on an item, answering how many that was.
-
-        For teams, where the sibling that names one row cannot be used: a team's request is
-        answered by any of its members reviewing, and no payload says who belongs to which team.
-        Already-closed rows are left alone so that the stamp keeps saying when the request was
-        first answered rather than when it was last looked at.
-        """
-        result = await self._session.execute(
-            update(ItemAssignment)
-            .where(
-                ItemAssignment.tracked_item_id == tracked_item_id,
-                ItemAssignment.role_type == role,
-                ItemAssignment.fulfilled_at.is_(None),
-            )
-            .values(fulfilled_at=when or func.now())
-            .execution_options(synchronize_session=False)
-        )
-        return result.rowcount or 0
-
     async def reopen_if_newer(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None
     ) -> Sequence[str]:

@@ -50,20 +50,19 @@ class ReviewRequestLedger:
             if item is None:
                 return
 
-            assignments = ItemAssignmentStore(session)
-            cleared = await assignments.mark_fulfilled(
-                item.id, ActorRole.REVIEWER, snapshot.author.login, snapshot.created_at
-            )
-            # Every team asked, not the reviewer's own. GitHub dismisses a team's request when a
-            # member of it reviews and says so in no payload, and nothing here can tell which
-            # teams somebody belongs to without asking, which would be a call per review.
+            # Only the reviewer's own row. A team's request is closed by GitHub dropping it from
+            # `requested_teams`, which deletes the row on the next delivery, and that is the whole
+            # mechanism a team needs.
             #
-            # So this closes them all, and is deliberately wrong in one direction: a team whose
-            # member did not review is closed early and goes untold about a re-request. The other
-            # direction pings a team about work already reviewed, and this module already picked
-            # a side on that, in the same words, for a person.
-            await assignments.mark_all_fulfilled(
-                item.id, ActorRole.REVIEWER_TEAM, snapshot.created_at
+            # An earlier version stamped every team row here on the reasoning that a team can be
+            # answered by any member and no payload says which. It was wrong twice over. The
+            # double ping it meant to prevent cannot happen, because `replace` leaves an existing
+            # row alone and a row that has been pinged keeps its `notified_at`. And the stamp it
+            # wrote made the row look like an answered request, so `reopen_if_newer` cleared both
+            # stamps on the next ordinary event with a later timestamp and pinged the role again,
+            # once per review round, for a request nobody had answered or re-made.
+            cleared = await ItemAssignmentStore(session).mark_fulfilled(
+                item.id, ActorRole.REVIEWER, snapshot.author.login, snapshot.created_at
             )
 
         if cleared:
