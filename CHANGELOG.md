@@ -2041,3 +2041,52 @@ the table and analyses it now, which is the size the test was always about.
 That makes three tests this stage that passed for reasons unconnected to what they claimed, and a
 fourth that waited on a fixed sleep for two poll cycles and stopped testing anything under load.
 The pattern is worth naming: a green suite says the code does what the tests do, not what they say.
+
+### Teams, and the two defects that came with them
+
+A review can be asked of a GitHub team, and until now that request reached nobody. Only
+`requested_reviewers` was read; `requested_teams` was not. Fixing it needed two halves at once,
+because a team recorded without somewhere to look up who it is on Discord's side is a row nothing
+can ever close.
+
+So `team_links` maps a team to a Discord role, `/link_team` writes it, and `ActorRole.REVIEWER_TEAM`
+keeps teams apart from people. Apart because the two are told in different words off different
+tables, and closed by different rules. Role mentions had to be allowed for any of it to deliver,
+which is safe for a reason worth stating: every scrap of GitHub-authored text goes through
+`defuse_mentions`, which breaks `<@&123>` as well as `<@123>`, so the only live mentions in any
+message are the ones this bot built. `everyone` stays off, because nothing it builds is addressed
+to everyone.
+
+A review of the result found two things, both mine, both an hour old.
+
+- **A team was re-pinged once per review round.** Closing every team's request when anybody
+  submitted a review left rows stamped that GitHub had never dismissed, and `reopen_if_newer`
+  cannot tell that stamp from a genuine re-request. The next ordinary event with a later timestamp,
+  a label or an edit, cleared both stamps and pinged the role again for a request nobody had
+  answered or re-made. Reproduced before fixing: one ping became three.
+
+  The reasoning behind that code was wrong in both directions. The double ping it was written to
+  prevent cannot happen, because `replace` leaves an existing row alone and a row that has been
+  pinged keeps its `notified_at`. And the comment claiming the cost was "a team goes untold about a
+  re-request" had it backwards: it was told again, repeatedly. A team's request is closed by GitHub
+  dropping it from `requested_teams`, which deletes the row, and that is the whole mechanism needed.
+
+- **A team could be impersonated.** Putting teams into the assignments mapping meant team slugs
+  were passed to the user link store, which maps GitHub logins to accounts. `/link` has no gate and
+  asks GitHub nothing when somebody claims a name for themselves, so any member could `/link
+  security` and then appear as, and be pinged as, the `security` team on every pull request in the
+  server. Slugs and logins are separate namespaces on GitHub and collisions are ordinary; this one
+  is claimable on purpose. Both halves needed closing, since a team colliding with somebody
+  genuinely on the item would still have rendered as them.
+
+### What a green suite did not say
+
+Six tests this stage passed for reasons unconnected to their names. One asserted teams were dropped
+and so pinned the gap in place. One reached its branch by a path that never touched the code it was
+named for. Two waited on a fixed sleep and stopped testing anything under load. One read the query
+planner's mood on a table holding one row. One cancelled a loop where the clause it tested could
+not fire.
+
+Every one of them was green, and the suite was at a hundred per cent of statements and branches
+throughout. What actually found things was reading downstream of a change, a coverage number
+refusing to move after it should have, and reviewers told to refute rather than confirm.

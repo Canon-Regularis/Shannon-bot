@@ -52,6 +52,60 @@ uv run shannon
 Startup refuses to open the port until the database answers and has been migrated. Without a
 Discord token it still serves the endpoint and works the queue, and warns that it is doing so.
 
+## Connecting it to GitHub and Discord
+
+Neither side is configured by this repository, and the bot cannot do either for you.
+
+**The GitHub webhook.** Repository settings, Webhooks, Add webhook. The payload URL is wherever
+this is deployed plus `/webhooks/github`, the content type is `application/json`, and the secret is
+the same string as `SHANNON_GITHUB_WEBHOOK_SECRET`. An unset secret answers 500 to every delivery
+rather than waving them through, so a mismatch shows up at once rather than quietly.
+
+Choose individual events, and choose these four:
+
+```text
+Pull requests
+Issues
+Issue comments
+Pull request reviews
+```
+
+Anything else is answered `ignored` without a row, so subscribing to more costs nothing but noise.
+GitHub's Recent Deliveries page is the first place to look when nothing appears in Discord: 401 is
+a wrong secret, 500 is an unset one, and a 200 answering `ignored` means the event arrived and this
+bot does not act on it.
+
+**The Discord bot.** In the Developer Portal, under Bot, turn on the **Server Members** intent.
+Turning a GitHub login into somebody this server can ping needs it, and the client asks for it at
+startup, so without it the bot will not connect at all. Invite it with the `bot` and
+`applications.commands` scopes and these permissions:
+
+```text
+View Channels
+Send Messages
+Send Messages in Threads
+Create Public Threads
+Manage Threads
+```
+
+`Manage Threads` is the one that is easy to miss and fails late. Everything works until an issue
+closes or somebody runs `/set_done`, and then the lock is refused; it is a separate permission from
+the ones that open and write to a thread.
+
+**Then, in the server, in this order.**
+
+```text
+/register <github_repo_link>          binds the repository, PR threads land in this channel
+/set_channel issues #channel          where issue threads go
+/set_channel project tickets #channel only if a board is being mirrored
+/link <github_username>               once per person, so pings become mentions
+/link_team <team> @role               so a review asked of a team reaches somebody
+```
+
+Only `/register` has to come first. Issues fall back to the pull request channel until they are
+given one of their own; project tickets do not, so a board stays unmirrored until `/set_channel`
+names a channel for them.
+
 ## Configuration
 
 Read from the environment with a `SHANNON_` prefix, or from `.env`. Everything has a default and
@@ -106,11 +160,18 @@ Retention bounds it and the payload goes with the row.
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/link <github_username> [member]` | anyone for themselves, Admin or Project Manager for someone else | Connects a GitHub login to a Discord account so pings become mentions |
+| `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
+| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Reviewer, Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
+| `/set_high_priority` `/set_med_priority` `/set_low_priority` | Reviewer, Project Manager | Same, for priority |
 
 Guild only, replies always ephemeral. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
+
+The eight workflow commands take no argument and act on the thread they are run in, which is the
+item you are looking at. Status and priority live as labels on the repository, and each is single
+valued: setting one takes the previous one off, in whatever spelling the repository was using.
 
 ## Architecture
 
