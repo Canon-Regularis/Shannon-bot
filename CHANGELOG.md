@@ -1825,3 +1825,176 @@ to strip `P1`, which `parse_priority` does not read at all, and which had just b
 `priority.py` and missed in the second place. `items.py` said a locked thread rejects edits,
 which a test three files away disproves; the ordering it justifies is still right, for a
 different reason. The 404 reply said "at that link" for eight commands that take no link.
+
+## MVP 4: project boards
+
+The requirements name three webhook events for this, and none of them can fire. Establishing that
+before writing anything was most of the work, and it changed the shape of the rest.
+
+### The events are dead, and the replacements do not reach us
+
+Projects (classic) was sunset on GitHub.com on 23 August 2024, its REST API on 1 April 2025, and
+it was removed from Enterprise Server in 3.17; the last release that had it went end of life on
+1 July 2026. So `project_card.created` and `project_card.moved` cannot arrive. `project_card.updated`
+was never a valid action even while classic existed: the five were `converted`, `created`,
+`deleted`, `edited` and `moved`.
+
+All three are still documented, with an availability line and full action lists, which is a
+leftover in the published schema rather than a promise. A bot subscribed to them receives nothing,
+for ever, with no error, and that is exactly what would have been built.
+
+The replacements are `projects_v2`, `projects_v2_item` and `projects_v2_status_update`, and they
+are organisation scope only. A repository webhook receives none of them. A project owned by a user
+account emits none of them at all, and `Canon-Regularis` is a user account, so there is no event to
+subscribe to and no configuration that creates one.
+
+### So the board is polled
+
+GitHub shipped a REST API for Projects v2 in September 2025, and unlike the webhooks it covers
+user-owned projects. `ProjectPoller` reads the board on a timer beside the delivery worker. The
+cost is latency, bounded by the interval; the saving is that a personal board and an organisation
+one work on one code path with no second webhook to install.
+
+The board answers with every card every time, so the work is deciding which of them moved, and
+most of what is tested here is what does not happen: an unchanged board is not mirrored again, one
+card per thread however often it is read, and nothing at all when no board is configured.
+
+### Added
+
+- **A third object type.** `TicketSnapshot` satisfies `TrackedSnapshot` with nothing added, which
+  is the open/closed property this codebase claimed months ago finally cashing out. `TicketPolicy`
+  renders the three-line block the requirements give a ticket: name, link, status, and none of the
+  eight other rows, because a draft card has none of them and empty fields read as data missing
+  rather than data absent.
+- **`domain/board.py`**, mapping a column name to a status. Deliberately more forgiving than the
+  label matcher and for the opposite reason: a label namespace is shared with whatever else a
+  repository labels things, so `done` there may mean anything, while a Status column is a small set
+  somebody chose to describe this workflow. GitHub's own default template, `Todo` / `In Progress` /
+  `Done`, is understood, so the board most people point this at first needs no configuration.
+- **Cards that wrap an issue or a pull request** move the thread that item already has, through
+  `ItemWorkflow.set_status`, which is the path a person takes with `/set_in_review`. Never a second
+  thread. Decided by comparing statuses rather than timestamps, because a card and an issue keep
+  two different clocks and a card edited for any other reason must not re-assert a status.
+- **`/set_channel` offers tickets**, and they have no fallback channel unlike issues. An issue with
+  nowhere to go is a mistake; draft cards appearing uninvited in the pull request channel would be
+  a surprise.
+- **Thread naming moved onto `SyncPolicy`.** It was a module function producing `#7 Title`, and a
+  ticket has no number, so it would have read `#0 Title`.
+
+No migration. `github_object_type` is a varchar rather than a native enum precisely so a later
+object type costs nothing, and `test_migrations` diffing the applied schema against the models
+passes untouched.
+
+### Verified rather than assumed
+
+The token available could not read projects, so the response shapes came from GitHub's published
+OpenAPI description rather than from prose or from a live call. All eight user-project routes exist
+as built and `content_type` is exactly `Issue | PullRequest | DraftIssue`.
+
+It caught a real defect. The items endpoint has no `page` parameter: pagination is by a cursor in
+the Link header. Asking for page two by number is not an error, it is silently the first page
+again, so a board of more than a hundred cards would have been read fifty times over and every card
+mirrored fifty times. Paging follows the Link header now, bounded, because the cursor is opaque and
+a header pointing at itself is indistinguishable from a real next page.
+
+One trap survives being documented only by example: for a single-select field, `value.name` is an
+object rather than a string, unlike every other name in that API. Read as a string it returns None
+and every card looks statusless, with no error anywhere. Both shapes are accepted.
+
+### What an adversarial review of it found
+
+Four lenses, each finding handed to a verifier told to refute it. Nine survived, five did not.
+
+- **A draft could be recorded and then never shown, indefinitely.** The sync path commits the row,
+  timestamp included, before it calls Discord. A thread creation that failed left a row that looked
+  current with nothing to show for it, and a filter comparing only timestamps skipped it on every
+  later poll. Nothing else rescues a draft: an issue gets another webhook, a draft has only this.
+  The filter reads the thread as well as the timestamp now.
+- **Every workflow command raised `KeyError` in a ticket thread.** The thread lookup does not filter
+  by kind and the workflow registers only pull requests and issues, so `/set_in_review` in a ticket
+  thread hit a bare dict lookup, reaching the user as "Something went wrong here" and the log as a
+  traceback. It refuses in words now, and says the true thing: a draft has no labels, move its card.
+- **One bad card took the rest of the poll with it.** The wrapped half isolated each card and the
+  draft half did not, and drafts run first, so a single card Discord refused skipped every later
+  draft and the entire wrapped half, none of which had anything wrong with them.
+- **A `content_type` that was not a string ended the poll.** A dict lookup on an unhashable key
+  raises rather than answering None.
+- `_VERDICTS` was defined twice in `formatting.py`, which predates all of this.
+
+Reverting the three behavioural fixes fails exactly the three tests written for them.
+
+### Still open
+
+Nothing here has run against a real board. The parser is checked against GitHub's schema and every
+field is guarded, but a shape that differs would show as an unread card rather than an error, which
+is the failure mode worth knowing about before the first live poll.
+
+## MVP 5: re-planning and refactorisation
+
+Two halves, and the second one is a list rather than a change: a survey of where the built thing
+and the written thing have drifted apart, which is a set of decisions rather than defects.
+
+### The board stopped overruling commands
+
+The worst thing this pass found, and it was a week old rather than a year. `_move_tracked`
+compared a card's column against the item's stored status and acted whenever the two differed.
+That answers the wrong question. A reviewer running `/set_ready_for_merge` on a pull request whose
+card still sat in `In Progress` had the decision reverted by the next poll, silently, inside the
+interval, because from where the poller stood a standing disagreement and a fresh move look
+identical.
+
+It compares against the column it last saw now, which is what migration `0009` is for. Three
+decisions inside that, none of them forced:
+
+- **First sight fills a blank and never overwrites a decision.** With no remembered column, the
+  board applies its status only if the item is still NOT_REVIEWED, which is nobody's opinion. If
+  somebody has already set one, the column is recorded and left alone. That is what stops a board
+  added after the fact from undoing work that predates it.
+- **A refused move is still recorded.** A closed issue refuses anything but DONE, but the card did
+  move; remembering only the moves that worked would repeat the same complaint every poll for the
+  life of the process.
+- **Columns compare trimmed and case-folded**, so renaming `Done` to `done` is not a move.
+
+### Refactorisation
+
+- **The layering rule was broken, by MVP 4.** `github/projects.py` imported `BoardItem` from
+  `services/projects.py`, and `github/` sits below `services/`. That is the one architectural
+  invariant this codebase has. `BoardItem` lives in the adapter now and the service imports
+  downward; the whole package was checked for other upward imports and has none.
+- **`GitHubClient` did not declare two methods the wiring depends on.** The container hands that
+  object to the board reader, which calls `get_json` and `get_pages`. A stand-in satisfying the
+  protocol built a container that died on the first poll instead of failing at the seam, which is
+  exactly what the conformance table exists to prevent, and it caught the gap the moment the
+  protocol grew.
+- **Two timestamp parsers in one package.** `mapping.parse_timestamp` already existed; MVP 4 wrote
+  a second one doing the same thing.
+- **A GitHub outage was logged as a board disagreement.** Every GitHub and Discord failure is a
+  ShannonError, so catching that alone reported an outage as forty cards with unsuitable columns.
+- **A bad `fields` response was cached for ever.** One wrong answer left every card on the board
+  with no column until the process restarted, and nothing distinguishes that from a board whose
+  Status field was genuinely renamed. Failures are not remembered now.
+
+### The drift, as a list of decisions
+
+Recorded rather than acted on, because each is a choice about what the product is.
+
+Where the code looks wrong: review requests aimed at a GitHub **team** store nobody and ping
+nobody, because only `requested_reviewers` is read and not `requested_teams`. Issue blocks omit
+the `Reviewers:` line the output format lists for every item. `ActorRole.PROJECT_MANAGER` exists in
+the enum and the CHECK constraint and is never written, though the spec says the table stores
+project managers.
+
+Where the specification is stale: `item_assignments.discord_user_id` was dropped in `0008` as a
+copy of `user_links`; `webhook_events` became a leased queue and grew five columns; `tracked_items`
+grew four; `item_assignments` grew the two claim stamps that stop a double ping; `mirrored_notes`
+and `user_links` are whole tables the list never mentions, each added because a specific bug
+demanded it; and `Priority.UNSET` is a fourth value because an item with no priority label has to
+be something.
+
+Genuinely either way: a guild administrator passes every command gate, where the spec grants Admin
+only `/register`. Roles are never pinged, because `allowed_mentions` sets `roles=False` so that
+GitHub-authored text cannot reach `@everyone`, and turning bot-authored role pings on means a
+narrower rule rather than removing that one. The metadata block carries a `State:` line the output
+format does not list. And a status label somebody sets by hand on GitHub is never read back, so the
+duplex claim in the Goal holds for board columns and for commands but not for a label typed
+directly.

@@ -73,6 +73,8 @@ at the door.
 | `SHANNON_LOG_LEVEL` | `INFO` | Uppercased, not validated |
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
+| `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | The project board to mirror, by the number in its URL. Zero means none |
+| `SHANNON_PROJECT_POLL_SECONDS` | `60.0` | How often that board is read |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
 | `SHANNON_WORKER_BATCH_SIZE` | `10` | |
 | `SHANNON_WORKER_MAX_ATTEMPTS` | `16` | Roughly two hours of backoff before a delivery is dropped |
@@ -81,6 +83,12 @@ at the door.
 | `SHANNON_WORKER_DELIVERY_TIMEOUT_SECONDS` | `60.0` | Deadline on one delivery |
 | `SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS` | `5.0` | |
 | `SHANNON_DELIVERY_RETENTION_DAYS` | `7` | How long finished deliveries and their payloads are kept |
+
+A project board is read on a timer rather than delivered. GitHub sends `projects_v2` webhooks
+for organisation projects only and none at all for a personal account's, and the `project_card`
+events the requirements name belong to Projects (classic), which was sunset in August 2024. The
+token needs project read access, and the board's tickets need a channel: they have no fallback,
+so `/set_channel project tickets` is what turns the mirror on.
 
 One rule spans fields: `worker_lease_seconds` must cover `worker_batch_size *
 worker_delivery_timeout_seconds`, or construction fails. A lease expiring mid-batch would let a

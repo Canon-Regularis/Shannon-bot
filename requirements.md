@@ -186,12 +186,27 @@ issues.closed
 issues.reopened
 issues.labeled
 issues.assigned
-project_card.created
-project_card.moved
-project_card.updated
 issue_comment.created
 pull_request_review.submitted
 ```
+
+Project boards are read rather than delivered. This section previously named
+`project_card.created`, `project_card.moved` and `project_card.updated`, and none of the three can
+fire: they belong to Projects (classic), which GitHub sunset on 23 August 2024, whose REST API was
+sunset on 1 April 2025, and which was removed from GitHub Enterprise Server in 3.17. The last
+release that still contained it went end of life on 1 July 2026. `project_card.updated` was never
+a valid action even while classic existed; the five were `converted`, `created`, `deleted`,
+`edited` and `moved`.
+
+They are still documented on GitHub's webhook page, complete with an availability line, which is
+a leftover in the published schema rather than a promise. A bot subscribed to them receives
+nothing, for ever, with no error.
+
+The replacement events are `projects_v2`, `projects_v2_item` and `projects_v2_status_update`, and
+they are **organisation scope only**. A repository webhook receives none of them, and a project
+owned by a user account emits none of them at all. Since this bot registers against a repository
+owned by a personal account, there is no event to subscribe to, so the board is polled through the
+Projects v2 REST API instead. See `shannon/services/projects.py`.
 
 ---
 
