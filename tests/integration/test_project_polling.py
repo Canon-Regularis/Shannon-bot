@@ -420,10 +420,22 @@ async def test_cancelling_the_loop_ends_it_rather_than_being_swallowed(
     being told to die. `except Exception` cannot catch a cancellation today, so this holds by
     itself; it is pinned because widening that clause is a one-word edit and the symptom is a
     shutdown that hangs until something kills the process."""
-    poller = poller_for(FakeBoard(card()))
+    reading = asyncio.Event()
+    board = FakeBoard(card())
+
+    async def block(owner: str, project_number: int):
+        reading.set()
+        await asyncio.sleep(60)
+        return []
+
+    board.list_board_items = block
+    poller = poller_for(board)
 
     running = asyncio.create_task(poller.run_forever())
-    await asyncio.sleep(0.05)
+    # Cancelled while it is reading the board, not while it is waiting out the interval. The
+    # wait sits outside the try, so a cancellation there leaves by a different door and this
+    # passes without the clause it is named for ever running.
+    await asyncio.wait_for(reading.wait(), timeout=5)
     running.cancel()
 
     with pytest.raises(asyncio.CancelledError):
