@@ -103,6 +103,11 @@ class TrackedItem(TimestampMixin, Base):
     github_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The board column as of the last poll that looked at this item. Null means never seen. The
+    # poller needs to know whether a card MOVED, and comparing its column against the stored
+    # status answers a different question: it cannot tell a card that has just been dragged from
+    # one that has sat still while somebody set the status from Discord.
+    project_column: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
     # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a

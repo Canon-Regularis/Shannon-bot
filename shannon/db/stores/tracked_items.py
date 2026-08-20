@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,6 +106,20 @@ class TrackedItemStore:
             )
         )
         return {row[0]: (row[1], row[2]) for row in rows.all()}
+
+    async def remember_column(self, tracked_item_id: int, column: str | None) -> None:
+        """Record the board column this item was last seen in.
+
+        Written whether or not the column was acted on. What it answers is "has the board moved
+        since we looked", and that has to be true even when the move was one the item could not
+        take, or the same refusal repeats on every poll for ever.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(TrackedItem.id == tracked_item_id)
+            .values(project_column=column)
+            .execution_options(synchronize_session=False)
+        )
 
     async def get_or_create(
         self,
