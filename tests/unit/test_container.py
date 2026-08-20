@@ -64,6 +64,7 @@ class TestWhatItWiresUp:
         assert sorted(command.name for command in container.commands) == [
             "issue",
             "link",
+            "link_team",
             "pr",
             "register",
             "set_backlog",

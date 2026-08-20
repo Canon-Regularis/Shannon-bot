@@ -6,17 +6,20 @@ from discord import app_commands
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from shannon.commands.link import build_link_command
+from shannon.commands.link_team import build_link_team_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
+from shannon.db.stores.team_links import TeamLinkStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
     format_comment,
     format_review,
     format_reviewer_ping,
+    format_team_ping,
 )
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
@@ -32,12 +35,17 @@ from shannon.github.webhooks.router import EventRouter
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
-from shannon.services.linking import UserLinkingService
+from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.sync.items import ItemSyncService, build_item_handler, build_item_sync
+from shannon.services.sync.items import (
+    ItemSyncService,
+    Notifier,
+    build_item_handler,
+    build_item_sync,
+)
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
@@ -80,6 +88,34 @@ class Container:
             await self.engine.dispose()
 
 
+@dataclass(frozen=True, slots=True)
+class _Both:
+    """Two notifiers behind the one seam the sync path has for notifying.
+
+    A pull request can have people and teams asked for a review, and the two are told in
+    different words off different tables. Composing them here keeps `ItemSyncService` asking one
+    thing one question, which is what let a second kind of reviewer be added without touching it.
+    """
+
+    people: Notifier
+    teams: Notifier
+
+    async def notify(
+        self, *, tracked_item_id: int, thread_id: int, guild_id: int
+    ) -> tuple[str, ...]:
+        told = await self.people.notify(
+            tracked_item_id=tracked_item_id, thread_id=thread_id, guild_id=guild_id
+        )
+        told_teams = await self.teams.notify(
+            tracked_item_id=tracked_item_id, thread_id=thread_id, guild_id=guild_id
+        )
+        return (*told, *told_teams)
+
+
+def _both(people: Notifier, teams: Notifier) -> Notifier:
+    return _Both(people, teams)
+
+
 def _sync_services(
     sessionmaker: async_sessionmaker, threads: ThreadGateway
 ) -> tuple[ItemSyncService, ItemSyncService]:
@@ -93,8 +129,17 @@ def _sync_services(
             sessionmaker,
             threads,
             PullRequestPolicy(),
-            ActorNotifier(
-                sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+            _both(
+                ActorNotifier(
+                    sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+                ),
+                ActorNotifier(
+                    sessionmaker,
+                    threads,
+                    role=ActorRole.REVIEWER_TEAM,
+                    render=format_team_ping,
+                    mentions=TeamLinkStore,
+                ),
             ),
         ),
         build_item_sync(
@@ -154,6 +199,7 @@ def _commands(
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_link_command(UserLinkingService(sessionmaker), gate),
+        build_link_team_command(TeamLinkingService(sessionmaker), gate),
         *build_workflow_commands(workflow, gate),
     )
 
