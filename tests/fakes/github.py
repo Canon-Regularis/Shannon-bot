@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import replace
+from typing import Any
 
 from shannon.domain.models import (
     IssueSnapshot,
@@ -43,6 +45,9 @@ class FakeGitHubClient:
             for key, snapshot in store.items()
         }
         self.label_calls: list[tuple[str, tuple[str, int], str]] = []
+        # Bodies for the untyped endpoints, keyed by path, and what was asked of them.
+        self.bodies: dict[str, Any] = {}
+        self.json_calls: list[tuple[str, dict[str, Any]]] = []
         self.error: Exception | None = None
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
@@ -106,6 +111,24 @@ class FakeGitHubClient:
         """
         self.labels[key] = list(names)
         self._restate(key)
+
+    async def get_json(self, path: str, **params: Any) -> Any:
+        """Whatever this fake was told to answer with at a path, or an empty list.
+
+        Here because the protocol declares it, which is the point of the conformance table: the
+        wiring hands this same object to the project board reader, so a fake without these
+        builds a container that dies on the first poll rather than failing at the seam.
+        """
+        self.json_calls.append((path, params))
+        if self.error is not None:
+            raise self.error
+        return self.bodies.get(path, [])
+
+    async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
+        self.json_calls.append((path, params))
+        if self.error is not None:
+            raise self.error
+        yield self.bodies.get(path, [])
 
     def _restate(self, key: tuple[str, int]) -> None:
         """Put the labels back on the stored snapshot, so a later fetch agrees with the writes.
