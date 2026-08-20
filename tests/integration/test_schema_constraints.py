@@ -172,3 +172,18 @@ async def test_deleting_repository_cascades(db_session: AsyncSession) -> None:
     db_session.expunge_all()
 
     assert await db_session.get(TrackedItem, item.id) is None
+
+
+def test_every_table_is_truncated_between_tests() -> None:
+    """A table missing from the list leaks rows into the next test.
+
+    That is not a loud failure: it is a test that passes or fails according to what ran before
+    it, which is the hardest kind to find. `team_links` was added and left out, and the symptom
+    was a team resolving to a role no test in that file had linked.
+    """
+    from shannon.db.base import Base
+    from tests.integration.conftest import TABLES
+
+    assert set(TABLES) == set(Base.metadata.tables), (
+        "the truncation list and the schema have drifted apart"
+    )

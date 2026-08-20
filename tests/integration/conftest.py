@@ -36,12 +36,15 @@ from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.db import map_channel, register_repository
 
+# Every table, and it has to stay every table: one left out here is one whose rows survive into
+# the next test, which shows up as a test passing or failing according to what ran before it.
 TABLES = (
     "item_assignments",
     "mirrored_notes",
     "tracked_items",
     "channel_mappings",
     "user_links",
+    "team_links",
     "webhook_events",
     "repositories",
 )
