@@ -255,7 +255,10 @@ class TestTheLoop:
         poller = poller_for(board)
 
         running = asyncio.create_task(poller.run_forever())
-        await asyncio.sleep(0.1)
+        # Waited for rather than slept through. A read is a database round trip and a fake call,
+        # and on a loaded machine two of them do not fit inside any sleep short enough to write,
+        # so a fixed wait here passes when the box is quiet and fails when it is not.
+        await _until(lambda: len(board.reads) > 1)
         poller.stop()
         await asyncio.wait_for(running, timeout=5)
 
@@ -669,3 +672,95 @@ class TestWhenSomethingElseGoesWrongMidPoll:
         )
 
         assert await poller_for(board).run_once() == 0
+
+
+class TestASecondReviewFound:
+    """A move that failed for a bad reason must not be written off as seen."""
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_a_move_that_failed_is_tried_again_when_github_recovers(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        github_client: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """The column used to be written before the move was attempted, so a rate limit or a 500
+        left the card recorded in its new column with the old status, and no later poll ever
+        looked at it again. Nothing else rederives a status from a board."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        poller = poller_for(board)
+        github_client.error = GitHubUnavailableError("GitHub is down")
+
+        assert await poller.run_once() == 0
+
+        github_client.error = None
+        assert await poller.run_once() == 1, "the failed move was written off as seen"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.READY_FOR_MERGE
+
+    async def test_a_card_whose_status_was_cleared_is_still_remembered(
+        self, mirrored_pr: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """Null means never seen. Writing null for a card somebody cleared the Status of would
+        put it back to never seen, which re-arms the first-look guard and drops the next move."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column=None)]
+        await poller.run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.project_column == "", "a cleared column was stored as never seen"
+
+    async def test_a_cleared_column_does_not_re_arm_the_first_look_guard(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """The whole point of the distinction: after a clear, the next real move still lands."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column=None)]
+        await poller.run_once()
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Backlog")]
+
+        assert await poller.run_once() == 1, "the move after a cleared column was dropped"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.BACKLOG
+
+
+async def _until(condition, timeout: float = 10.0) -> None:
+    """Wait for something the poller does on its own schedule, rather than guessing at a sleep."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)

@@ -156,14 +156,11 @@ class ProjectPoller:
             if _same_column(item.column, tracked.column):
                 continue
 
-            # Recorded before it is acted on, and whether or not it can be. A move the item
-            # cannot take is still a move, and remembering only the successful ones would repeat
-            # the same refusal on every poll for the rest of the process's life.
-            await self._remember_column(tracked.tracked_item_id, item.column)
-
             wanted = status_from_column(item.column)
             if wanted is None or wanted is tracked.status:
+                await self._remember_column(tracked.tracked_item_id, item.column)
                 continue
+
             if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
                 # First sight of this card. The board fills in an item nobody has said anything
                 # about; it does not get to overwrite a decision somebody already made, because
@@ -174,32 +171,46 @@ class ProjectPoller:
                     tracked.status.value,
                     item.column,
                 )
+                await self._remember_column(tracked.tracked_item_id, item.column)
                 continue
 
             try:
                 await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
             except WorkflowRefusedError as refusal:
                 # A status the item cannot hold, such as anything but DONE on a closed issue.
-                # The board is allowed to disagree with GitHub; it is not allowed to win.
+                # The board is allowed to disagree with GitHub; it is not allowed to win. This is
+                # a final answer rather than a bad moment, so the move is written off as seen and
+                # the same complaint is not made again on every poll for ever.
                 logger.info(
                     "board column %r does not apply to %s: %s",
                     item.column,
                     item.title,
                     refusal.message,
                 )
+                await self._remember_column(tracked.tracked_item_id, item.column)
                 continue
             except ShannonError as error:
-                # Anything else is GitHub or Discord failing, which is not the board disagreeing
-                # about anything. Logged as what it is and at the level it deserves, or an
-                # outage reads in the log as forty cards with unsuitable columns.
+                # GitHub or Discord having a bad moment, which is not an answer about anything.
+                # The column is deliberately NOT recorded: remembering it here would mark the
+                # move as seen while it never happened, and since nothing else ever rederives a
+                # status from a board, the card would sit in its new column for ever with the
+                # old status and no poll would look at it again.
                 logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
                 continue
+
+            await self._remember_column(tracked.tracked_item_id, item.column)
             moved += 1
         return moved
 
     async def _remember_column(self, tracked_item_id: int, column: str | None) -> None:
+        """Record where the card was, storing the empty string for a card with no column at all.
+
+        Null has to keep meaning one thing, and it already means never seen. Writing null for a
+        card whose Status somebody cleared would put it back to never seen, which re-arms the
+        first-look guard and quietly drops the next real move.
+        """
         async with self._sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).remember_column(tracked_item_id, column)
+            await TrackedItemStore(session).remember_column(tracked_item_id, column or "")
 
     async def _tracked(self, repository_id: int, item: BoardItem) -> _Tracked | None:
         async with self._sessionmaker() as session:
