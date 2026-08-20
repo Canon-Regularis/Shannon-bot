@@ -36,12 +36,19 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> app_comm
             await reply(interaction, "Run this inside a server channel.")
             return
 
-        target = member or interaction.user
-        # Anyone may claim their own GitHub account. Speaking for someone else is a
-        # project manager's call.
-        if target.id != interaction.user.id and not gate.allows(interaction.user, REGISTER_ROLES):
+        # Every link, not only the ones made on somebody else's behalf.
+        #
+        # Claiming your own account used to be ungated, on the reasoning that it is yours to
+        # claim. Nothing checked that it was: GitHub is never asked, so anybody could take any
+        # login and from then on receive every mention meant for it in this server, in the
+        # metadata block and in every ping. That is the same route by which somebody could have
+        # become a review team before teams were given a table of their own, and the honest fix
+        # is the same one, which is that a person who speaks for the server does the pointing.
+        if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, gate.denial("link", REGISTER_ROLES))
             return
+
+        target = member or interaction.user
 
         await defer(interaction)
         try:
