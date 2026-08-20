@@ -243,3 +243,28 @@ class UserLink(TimestampMixin, Base):
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class TeamLink(TimestampMixin, Base):
+    """Maps a GitHub team to a Discord role within one guild.
+
+    The sibling of `user_links`, and separate from it because the two halves are different kinds
+    of thing: a login belongs to one person and a slug belongs to a group, and Discord mentions
+    them with different syntax. Folding them into one table would mean a column that is a user id
+    on some rows and a role id on others, which is the shape that makes a query have to ask which
+    kind of row it is looking at.
+
+    Only one uniqueness rule, unlike `user_links`. A slug maps to one role, but two GitHub teams
+    pointing at one Discord role is a reasonable thing to want: a server may have a single
+    `@reviewers` role that several teams should reach.
+    """
+
+    __tablename__ = "team_links"
+    __table_args__ = (
+        UniqueConstraint("discord_guild_id", "github_team", name="uq_team_links_guild_team"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    github_team: Mapped[str] = mapped_column(String(255), nullable=False)
+    discord_role_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

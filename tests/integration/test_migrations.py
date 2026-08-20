@@ -58,6 +58,7 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
         "item_assignments",
         "mirrored_notes",
         "repositories",
+        "team_links",
         "tracked_items",
         "user_links",
         "webhook_events",
