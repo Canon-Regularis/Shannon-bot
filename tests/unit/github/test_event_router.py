@@ -20,7 +20,7 @@ from tests.fakes.handlers import RecordingHandler
 
 def test_registering_an_unsupported_event_fails() -> None:
     with pytest.raises(ValueError, match="not a supported webhook event"):
-        EventRouter().register("project_card", RecordingHandler())
+        EventRouter().register("star", RecordingHandler())
 
 
 async def test_an_action_no_longer_acted_on_never_reaches_the_handler() -> None:

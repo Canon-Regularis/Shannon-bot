@@ -29,7 +29,7 @@ async def test_supported_event_reaches_its_handler(
 async def test_unsupported_event_is_ignored_without_error(
     client: AsyncClient, handler: RecordingHandler
 ) -> None:
-    response = await post(client, "project_card", {"action": "created"})
+    response = await post(client, "star", {"action": "created"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"

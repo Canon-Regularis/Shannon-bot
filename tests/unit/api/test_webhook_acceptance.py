@@ -73,7 +73,7 @@ async def test_an_unsupported_action_is_never_queued(queue: InMemoryDeliveryQueu
 
 async def test_an_unsupported_event_is_never_queued(queue: InMemoryDeliveryQueue) -> None:
     async with build_client(RecordingHandler(), queue=queue) as client:
-        await post(client, "project_card", {"action": "created"}, delivery="delivery-a")
+        await post(client, "star", {"action": "created"}, delivery="delivery-a")
 
     assert queue.enqueued == []
 
