@@ -161,13 +161,24 @@ async def test_running_outside_a_guild_is_refused() -> None:
     assert interaction.reply == "Run this inside a server channel."
 
 
-def test_only_the_live_object_types_are_offered() -> None:
-    """Tickets arrive with GitHub Projects in MVP 4 and should not be selectable yet."""
+def test_every_kind_this_bot_mirrors_can_be_given_a_channel() -> None:
+    """All three now. Tickets were held back until there was a project board to fill them.
+
+    Tickets matter most here of the three: pull requests get a channel from /register and issues
+    fall back to it, but a ticket with no mapping has nowhere to go at all.
+    """
     from shannon.commands.set_channel import CHOICES
 
-    assert [c.value for c in CHOICES] == ["PR", "ISSUE"]
+    assert [c.value for c in CHOICES] == ["PR", "ISSUE", "TICKET"]
 
 
-@pytest.mark.parametrize("value", ["PR", "ISSUE"])
+@pytest.mark.parametrize("value", ["PR", "ISSUE", "TICKET"])
 def test_every_offered_choice_is_a_real_object_type(value: str) -> None:
     assert ObjectType(value)
+
+
+def test_nothing_this_bot_mirrors_is_left_off_the_list() -> None:
+    """The other direction, so a fourth kind cannot be added and quietly left unmappable."""
+    from shannon.commands.set_channel import CHOICES
+
+    assert {c.value for c in CHOICES} == {kind.value for kind in ObjectType}

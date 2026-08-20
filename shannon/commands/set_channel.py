@@ -16,10 +16,12 @@ from shannon.services.channels import ChannelAssignment
 
 logger = logging.getLogger(__name__)
 
-# Tickets arrive with GitHub Projects in MVP 4, so only the two live types are offered.
+# All three kinds this bot mirrors. Tickets have no fallback channel, unlike issues, so a board
+# that nobody has mapped a channel for stays unmirrored until somebody runs this.
 CHOICES = [
     app_commands.Choice(name="pull requests", value=ObjectType.PR.value),
     app_commands.Choice(name="issues", value=ObjectType.ISSUE.value),
+    app_commands.Choice(name="project tickets", value=ObjectType.TICKET.value),
 ]
 
 
