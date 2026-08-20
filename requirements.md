@@ -139,11 +139,18 @@ MEDIUM
 LOW
 ```
 
+Stored alongside them is `UNSET`, which is not a fourth priority but the absence of the three. An
+item carries no priority label until somebody gives it one, and that state has to be nameable.
+
 ---
 
 ## Discord Output Format
 
-For every synced PR / issue, the bot must generate a Discord message (in the relevant thread) with:
+For every synced PR / issue, the bot must generate a Discord message (in the relevant thread) with
+the fields below. Two differences from the list as first written: a `State:` line carries GitHub's
+own open, closed or merged, which the status field does not, and the `Reviewers:` line is omitted
+for issues, because GitHub issues have no reviewers and a row that always reads `None` is noise
+rather than information.
 
 ```text
 PR / issue Name:
@@ -212,6 +219,12 @@ Projects v2 REST API instead. See `shannon/services/projects.py`.
 
 ## Required Database Tables
 
+Two more exist than are listed here, each because a specific failure demanded it. `user_links`
+holds the GitHub login to Discord account pairing, which pinging needs somewhere to read from
+before an assignment row exists. `mirrored_notes` records which comments and reviews have already
+been posted, because the delivery queue is at-least-once and putting a comment in a thread is the
+one step that cannot be undone.
+
 ### repositories
 
 Stores linked GitHub repositories.
@@ -248,30 +261,58 @@ id
 repository_id
 github_object_id
 github_object_type
+github_object_number
 github_url
-discord_message_id
-discord_thread_id
+title
+github_state
 status
 priority
+github_updated_at
+project_column
+discord_message_id
+discord_thread_id
 created_at
 updated_at
 ```
 
+The last five were not in the original list and each was added for a reason worth keeping.
+`github_object_number` is how a comment or a review finds its item, because those payloads report
+an issue id even for a pull request. `github_updated_at` is the high water mark that stops a late
+delivery undoing a newer one. `project_column` is the board column as of the last poll, which is
+what tells a card that has moved from one that merely disagrees with a status somebody set.
+
 ### item_assignments
 
-Stores assignees, reviewers, authors, and project managers.
+Stores assignees, reviewers and authors. Project managers are not among them: that is a Discord
+permission tier, and no fact about a pull request or an issue produces one, so the role was
+removed from `ActorRole` rather than left as a value nothing could ever write.
+
+A requested team is stored here too, as an ordinary row whose `github_username` is the team slug.
+It is named in the thread like anybody else; it cannot be mentioned, because `/link` binds a
+GitHub login to a Discord account and a team has no login to bind.
 
 ```text
 id
 tracked_item_id
 github_username
-discord_user_id
 role_type
+notified_at
+fulfilled_at
 created_at
 updated_at
 ```
 
+`discord_user_id` was here and was dropped in migration `0008`. It was a copy of
+`user_links.discord_user_id`, which is the authoritative table and is read at render time anyway,
+so the column could only ever hold a stale duplicate. `notified_at` and `fulfilled_at` are the two
+claim stamps that stop somebody being pinged twice for one request.
+
 ### webhook_events
+
+Not a log of what has happened. It is a leased work queue, and became one because GitHub allows an
+endpoint ten seconds and never redelivers a delivery it recorded as failed, so the route writes the
+delivery down and answers while a worker does everything slow behind it. That is why it carries the
+payload, an attempt count, a backoff, a lease and the last error alongside the columns below.
 
 Stores processed webhook events.
 
