@@ -114,6 +114,28 @@ class IssueSnapshot(ItemSnapshot):
     object_type: ObjectType = field(default=ObjectType.ISSUE, init=False)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TicketSnapshot(ItemSnapshot):
+    """A draft item on a GitHub project board, which belongs to no repository of its own.
+
+    The requirements give it a block of three lines against the eleven a pull request gets, and
+    that is the shape of the thing rather than an omission: a draft has a title, a place on a
+    board, and nothing else. No author, no assignees, no labels, no state, so the inherited
+    fields keep their empty defaults and `priority` reads UNSET off an empty label list.
+
+    `repository` is the one the guild registered, not one the ticket belongs to. It is carried
+    because resolving a Discord guild goes through a repository row and there is no other route,
+    which is a constraint of the schema rather than a claim about where the ticket lives.
+    """
+
+    # What the board says, as a column name rather than one of our own statuses. The mapping
+    # between the two is a policy decision and is made where the policies are.
+    column: str | None = None
+    project_number: int | None = None
+
+    object_type: ObjectType = field(default=ObjectType.TICKET, init=False)
+
+
 @dataclass(frozen=True, slots=True)
 class CommentSnapshot:
     """A GitHub comment, and the number of the item it was left on.
