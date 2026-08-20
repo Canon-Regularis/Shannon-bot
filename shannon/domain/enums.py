@@ -27,12 +27,20 @@ class Priority(StrEnum):
 
 
 class ActorRole(StrEnum):
-    """How a GitHub user relates to a tracked item."""
+    """How a GitHub user relates to a tracked item.
+
+    Only what GitHub can tell us. `PROJECT_MANAGER` was here and is gone: it is a Discord
+    permission tier, and there is no fact about a pull request or an issue that produces one, so
+    nothing ever wrote it and nothing could have. The tier still exists where it belongs, as
+    `CommandRole` in `discord_bot/roles.py`.
+
+    Removing it needs no migration. `role_type` is a plain varchar with no constraint, which
+    `varchar_enum` explains, and no row can hold a value nothing ever wrote.
+    """
 
     AUTHOR = "AUTHOR"
     ASSIGNEE = "ASSIGNEE"
     REVIEWER = "REVIEWER"
-    PROJECT_MANAGER = "PROJECT_MANAGER"
 
 
 class DeliveryStatus(StrEnum):
