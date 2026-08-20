@@ -35,15 +35,29 @@ def command(service: StubLinking):
     return build_link_command(service, default_gate())
 
 
-async def test_anyone_can_link_their_own_account() -> None:
+async def test_a_project_manager_can_link_themselves() -> None:
+    """The member argument still defaults to the caller. What changed is who may call it."""
     service = StubLinking()
-    me = FakeMember(id=42)
+    me = FakeMember(id=42, roles=[FakeRole("Project Manager")])
     interaction = FakeInteraction(guild_id=1, user=me)
 
     await command(service).callback(interaction, "octocat")
 
     assert service.calls == [{"guild_id": 1, "github_username": "octocat", "discord_user_id": 42}]
     assert "Linked GitHub user octocat to <@42>" in interaction.reply
+
+
+async def test_claiming_a_login_for_yourself_is_no_longer_ungated() -> None:
+    """It used to be, on the reasoning that your account is yours to claim. Nothing checked that
+    it was: GitHub is never asked, so anybody could take any login and receive every mention
+    meant for it in the server."""
+    service = StubLinking()
+    interaction = FakeInteraction(guild_id=1, user=FakeMember(id=42))
+
+    await command(service).callback(interaction, "torvalds")
+
+    assert service.calls == []
+    assert "You need one of these roles to use /link" in interaction.reply
 
 
 async def test_linking_someone_else_needs_a_project_manager() -> None:
@@ -83,7 +97,9 @@ async def test_a_bad_username_is_reported() -> None:
     service = StubLinking(
         error=InvalidGitHubUsernameError("'not a name' is not a GitHub username.")
     )
-    interaction = FakeInteraction(guild_id=1, user=FakeMember(id=42))
+    interaction = FakeInteraction(
+        guild_id=1, user=FakeMember(id=42, roles=[FakeRole("Project Manager")])
+    )
 
     await command(service).callback(interaction, "not a name")
 
@@ -104,7 +120,9 @@ async def test_running_outside_a_guild_is_refused() -> None:
 async def test_the_username_reaches_the_service_as_typed(given: str) -> None:
     """Trimming is the service's job, so the command must not quietly do its own."""
     service = StubLinking()
-    interaction = FakeInteraction(guild_id=1, user=FakeMember(id=42))
+    interaction = FakeInteraction(
+        guild_id=1, user=FakeMember(id=42, roles=[FakeRole("Project Manager")])
+    )
 
     await command(service).callback(interaction, given)
 
