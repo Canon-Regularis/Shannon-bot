@@ -24,6 +24,7 @@ from shannon.domain.models import (
     IssueSnapshot,
     PullRequestSnapshot,
     ReviewSnapshot,
+    TicketSnapshot,
     TrackedSnapshot,
 )
 from shannon.domain.time import as_utc
@@ -84,6 +85,24 @@ def format_issue(
     return _metadata(snapshot, noun="Issue", status=status, priority=priority, mentions=mentions)
 
 
+def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> str:
+    """Render the block at the top of a ticket's thread.
+
+    Three lines, which is what the requirements ask for and all a draft item has to say. The
+    other blocks carry an author, assignees and tags; a draft on a board has none of those, and
+    a row of empty fields would read as data missing rather than data absent.
+
+    `priority` and `mentions` are accepted and ignored, because the policies all render through
+    one signature and a ticket has nobody to mention.
+    """
+    lines = [
+        f"**Ticket Name:** {as_plain_text(snapshot.title) if snapshot.title else UNKNOWN}",
+        f"**GitHub Link:** {snapshot.html_url}",
+        f"**Status:** {status.value}",
+    ]
+    return fit("\n".join(lines))
+
+
 def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
     """Announce newly requested reviewers.
 
@@ -110,14 +129,6 @@ def format_review(snapshot: ReviewSnapshot, mentions: Mapping[str, int] | None =
     the verdict alone is the point.
     """
     return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions)
-
-
-_VERDICTS = {
-    "approved": "approved this pull request",
-    "changes_requested": "requested changes",
-    "commented": "left a review",
-    "dismissed": "dismissed a review",
-}
 
 
 def _metadata(
