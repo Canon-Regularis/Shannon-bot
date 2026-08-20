@@ -66,7 +66,7 @@ def format_pull_request(
         status=status,
         priority=priority,
         mentions=mentions,
-        reviewers=snapshot.reviewers,
+        reviewers=snapshot.review_requests,
     )
 
 

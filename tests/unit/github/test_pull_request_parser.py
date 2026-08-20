@@ -249,7 +249,8 @@ def test_a_team_review_request_joins_the_people_already_asked() -> None:
     snapshot = parse_pull_request_event("review_requested", payload)
 
     assert snapshot is not None
-    assert sorted(r.login for r in snapshot.reviewers) == ["backend", "monalisa"]
+    assert [r.login for r in snapshot.reviewers] == ["monalisa"]
+    assert [r.login for r in snapshot.reviewer_teams] == ["backend"]
 
 
 def test_closed_carries_the_state_through() -> None:
@@ -327,7 +328,8 @@ class TestAReviewAskedOfATeam:
 
         snapshot = parse_pull_request_event("opened", payload)
 
-        assert [r.login for r in snapshot.reviewers] == ["backend-team"]
+        assert [r.login for r in snapshot.reviewer_teams] == ["backend-team"]
+        assert snapshot.reviewers == (), "a team was recorded as a person to ping"
 
     def test_people_and_teams_are_both_carried(self) -> None:
         payload = payloads.pull_request_event("opened")
@@ -335,20 +337,22 @@ class TestAReviewAskedOfATeam:
 
         snapshot = parse_pull_request_event("opened", payload)
 
-        assert sorted(r.login for r in snapshot.reviewers) == ["backend-team", "monalisa"]
+        assert [r.login for r in snapshot.reviewers] == ["monalisa"]
+        assert [r.login for r in snapshot.reviewer_teams] == ["backend-team"]
+        assert sorted(r.login for r in snapshot.review_requests) == ["backend-team", "monalisa"]
 
     def test_the_slug_is_preferred_over_the_display_name(self) -> None:
         """A name is a display string somebody can change; the slug is the stable handle."""
         payload = payloads.pull_request_event("opened", requested_reviewers=[])
         payload["pull_request"]["requested_teams"] = [{"slug": "core", "name": "Core Team"}]
 
-        assert parse_pull_request_event("opened", payload).reviewers[0].login == "core"
+        assert parse_pull_request_event("opened", payload).reviewer_teams[0].login == "core"
 
     def test_a_team_with_only_a_name_still_counts(self) -> None:
         payload = payloads.pull_request_event("opened", requested_reviewers=[])
         payload["pull_request"]["requested_teams"] = [{"name": "Core Team"}]
 
-        assert parse_pull_request_event("opened", payload).reviewers[0].login == "Core Team"
+        assert parse_pull_request_event("opened", payload).reviewer_teams[0].login == "Core Team"
 
     def test_a_team_asked_by_the_event_itself_is_folded_in(self) -> None:
         """`review_requested` names whoever was just added at the top level, and for a team that
@@ -358,7 +362,7 @@ class TestAReviewAskedOfATeam:
 
         snapshot = parse_pull_request_event("review_requested", payload)
 
-        assert [r.login for r in snapshot.reviewers] == ["security"]
+        assert [r.login for r in snapshot.reviewer_teams] == ["security"]
 
     def test_a_team_already_on_the_list_is_not_doubled(self) -> None:
         payload = payloads.pull_request_event("review_requested", requested_reviewers=[])
@@ -367,11 +371,11 @@ class TestAReviewAskedOfATeam:
 
         snapshot = parse_pull_request_event("review_requested", payload)
 
-        assert [r.login for r in snapshot.reviewers] == ["security"]
+        assert [r.login for r in snapshot.reviewer_teams] == ["security"]
 
     @pytest.mark.parametrize("teams", [None, "nope", [], [{}], [{"slug": ""}], [7]])
     def test_anything_that_is_not_a_team_is_ignored(self, teams: object) -> None:
         payload = payloads.pull_request_event("opened", requested_reviewers=[])
         payload["pull_request"]["requested_teams"] = teams
 
-        assert parse_pull_request_event("opened", payload).reviewers == ()
+        assert parse_pull_request_event("opened", payload).reviewer_teams == ()

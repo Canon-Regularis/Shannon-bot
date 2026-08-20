@@ -52,10 +52,13 @@ def _with_event_reviewer(
     holding the person who was just taken off, and folding that in would put them straight
     back.
     """
-    requested = mapping.actor(payload.get("requested_reviewer")) or mapping.team(
-        payload.get("requested_team")
-    )
-    if requested is None or any(r.login == requested.login for r in snapshot.reviewers):
-        return snapshot
+    person = mapping.actor(payload.get("requested_reviewer"))
+    if person is not None:
+        if any(r.login == person.login for r in snapshot.reviewers):
+            return snapshot
+        return replace(snapshot, reviewers=(*snapshot.reviewers, person))
 
-    return replace(snapshot, reviewers=(*snapshot.reviewers, requested))
+    asked = mapping.team(payload.get("requested_team"))
+    if asked is None or any(t.login == asked.login for t in snapshot.reviewer_teams):
+        return snapshot
+    return replace(snapshot, reviewer_teams=(*snapshot.reviewer_teams, asked))

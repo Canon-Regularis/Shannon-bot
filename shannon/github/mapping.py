@@ -177,8 +177,8 @@ def pull_request(
 
     return PullRequestSnapshot(
         **shared,
-        reviewers=actors(payload.get("requested_reviewers"))
-        + teams(payload.get("requested_teams")),
+        reviewers=actors(payload.get("requested_reviewers")),
+        reviewer_teams=teams(payload.get("requested_teams")),
         # A closed pull request that was merged says so either way round, depending on which
         # endpoint or event it came from.
         merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
