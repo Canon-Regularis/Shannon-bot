@@ -30,6 +30,7 @@ class ProcessParts(Protocol):
 
     engine: AsyncEngine
     worker: RunsDeliveries
+    poller: PollsABoard
 
     async def aclose(self) -> None: ...
 
@@ -38,6 +39,21 @@ class RunsDeliveries(Protocol):
     """The worker as the lifespan sees it: something to start and something to ask to stop."""
 
     async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class PollsABoard(Protocol):
+    """The project poller as the lifespan sees it, which is the worker's shape exactly.
+
+    A board is asked rather than delivered, because GitHub sends no project webhook for a
+    personal account, so this is a second long-lived task beside the worker rather than another
+    handler behind the queue.
+    """
+
+    enabled: bool
+
+    async def run_forever(self) -> None: ...
 
     def stop(self) -> None: ...
 
@@ -104,6 +120,7 @@ class _Running:
     shutdown: Shutdown
     worker_task: asyncio.Task
     bot_task: asyncio.Task | None
+    poller_task: asyncio.Task | None = None
 
 
 async def _start(
@@ -132,11 +149,20 @@ async def _start(
     worker_task = asyncio.create_task(container.worker.run_forever(ready))
     worker_task.add_done_callback(report_exit("delivery worker", shutdown))
 
+    # Only when a board was configured. Starting a task that returns at once would have the done
+    # callback report the poller as having stopped, on every boot, for everybody not using one.
+    poller_task: asyncio.Task | None = None
+    if container.poller.enabled:
+        poller_task = asyncio.create_task(container.poller.run_forever())
+        poller_task.add_done_callback(report_exit("project poller", shutdown))
+
     # A worker that dies takes the whole point of the process with it, and the endpoint would go
     # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
-    return _Running(shutdown=shutdown, worker_task=worker_task, bot_task=bot_task)
+    return _Running(
+        shutdown=shutdown, worker_task=worker_task, bot_task=bot_task, poller_task=poller_task
+    )
 
 
 async def _close(
@@ -151,9 +177,14 @@ async def _close(
     # batch goes back on the queue instead of sitting locked for the whole lease while the
     # replacement process polls an empty one.
     container.worker.stop()
+    container.poller.stop()
     await safely(
         "stop the worker",
         stop(running.worker_task, grace=settings.worker_shutdown_grace_seconds),
+    )
+    await safely(
+        "stop the project poller",
+        stop(running.poller_task, grace=settings.worker_shutdown_grace_seconds),
     )
     if running.bot_task is not None:
         await safely("close the Discord client", bot.close())

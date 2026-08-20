@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # A GitHub project board to mirror, by the number in its URL. Zero means none, which is the
+    # default because a project is opt in and polling one nobody asked for would spend API calls
+    # on nothing. Polled rather than delivered: GitHub sends projects_v2 webhooks for
+    # organisation projects only, and a personal account gets no such event at all, so a timer
+    # is the only mechanism that works for both.
+    github_project_number: int = Field(default=0, ge=0)
+    project_poll_seconds: float = Field(default=60.0, gt=0)
+
     # The webhook endpoint only writes a delivery down; these govern the worker that then acts
     # on it. The defaults ride out roughly two hours of Discord being unreachable.
     worker_poll_seconds: float = Field(default=2.0, gt=0)

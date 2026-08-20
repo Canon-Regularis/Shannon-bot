@@ -222,3 +222,53 @@ class TestShuttingDown:
 
         assert bot.closed is True, "the Discord client was left open"
         assert github.closed is True, "the engine and HTTP client were left open"
+
+
+class FakePoller:
+    """A project poller with the shape the lifespan uses, and a switch for whether it runs."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self.stopped = False
+        self.ran = asyncio.Event()
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    async def run_forever(self) -> None:
+        self.ran.set()
+        while not self.stopped:
+            await asyncio.sleep(0.01)
+
+
+class TestTheProjectPoller:
+    """Started only when a board was configured, and stopped whether it was or not.
+
+    Zero means no board, which is the default, so most deployments never start this at all.
+    Starting a task that returned at once would have the done callback report the poller as
+    having stopped on every boot, for everybody not using one.
+    """
+
+    async def test_a_configured_board_is_polled(self, migrated: AsyncEngine) -> None:
+        worker, poller = FakeWorker(), FakePoller(enabled=True)
+        container = container_for(migrated, worker, ClosingGitHub())
+        container.poller = poller
+
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+        async with lifespan:
+            await asyncio.wait_for(poller.ran.wait(), timeout=5)
+
+        assert poller.stopped is True
+
+    async def test_no_board_means_no_task_at_all(self, migrated: AsyncEngine) -> None:
+        worker, poller = FakeWorker(), FakePoller(enabled=False)
+        container = container_for(migrated, worker, ClosingGitHub())
+        container.poller = poller
+
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+        async with lifespan:
+            await asyncio.wait_for(worker.ran.wait(), timeout=5)
+
+        assert not poller.ran.is_set(), "a board nobody configured was polled anyway"
+        # Still told to stop: the flag costs nothing and means shutdown has one path, not two.
+        assert poller.stopped is True

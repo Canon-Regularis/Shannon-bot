@@ -34,6 +34,7 @@ from shannon.discord_bot.threads import (
     ThreadGateway,
 )
 from shannon.github.client import GitHubClient, HttpGitHubClient
+from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
@@ -47,6 +48,7 @@ from shannon.services.delivery.queue import (
 from shannon.services.delivery.worker import DeliveryWorker
 from shannon.services.linking import UserLinkingService
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
+from shannon.services.projects import ReadsBoards
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.sync.items import (
     ItemSyncService,
@@ -57,7 +59,12 @@ from shannon.services.sync.items import (
 )
 from shannon.services.sync.manual import ManualSync
 from shannon.services.sync.notifications import ActorNotifier
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, SyncPolicy
+from shannon.services.sync.policies import (
+    IssuePolicy,
+    PullRequestPolicy,
+    SyncPolicy,
+    TicketPolicy,
+)
 from shannon.services.sync.threads import ItemThreads
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.github import FakeGitHubClient
@@ -82,6 +89,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (DeliveryQueue, WebhookDeliveryQueue),
     (SyncPolicy, PullRequestPolicy),
     (SyncPolicy, IssuePolicy),
+    (SyncPolicy, TicketPolicy),
     (Liveness, ProcessLiveness),
     (Notifier, ActorNotifier),
     (ThreadBinding, ItemThreads),
@@ -97,6 +105,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (MovesItems, ItemWorkflow),
     (LabelsItems, HttpGitHubClient),
     (LabelsItems, FakeGitHubClient),
+    (ReadsBoards, HttpProjectBoards),
     (RoleNames, ConfiguredRoles),
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),

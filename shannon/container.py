@@ -23,6 +23,7 @@ from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole
 from shannon.github.client import GitHubClient, HttpGitHubClient
+from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
@@ -33,13 +34,14 @@ from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.linking import UserLinkingService
 from shannon.services.notes import ItemNoteMirror, build_note_handler
+from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.items import ItemSyncService, build_item_handler, build_item_sync
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
-from shannon.services.workflow import build_item_workflow
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
+from shannon.services.workflow import ItemWorkflow, build_item_workflow
 
 
 @dataclass(slots=True)
@@ -57,6 +59,7 @@ class Container:
     github: GitHubClient
     queue: WebhookDeliveryQueue
     worker: DeliveryWorker
+    poller: ProjectPoller
     event_router: EventRouter
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
@@ -135,8 +138,8 @@ def _event_router(
 def _commands(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
-    threads: ThreadGateway,
     gate: PermissionGate,
+    workflow: ItemWorkflow,
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
 ) -> tuple[app_commands.Command, ...]:
@@ -145,9 +148,6 @@ def _commands(
     A command missing from here is one that silently stops existing in Discord, so the tuple is
     built once at wiring time rather than assembled on demand.
     """
-    workflow = build_item_workflow(
-        sessionmaker, github, threads, pr_sync=pr_sync, issue_sync=issue_sync
-    )
     return (
         build_register_command(RepositoryRegistrationService(sessionmaker, github), gate),
         build_set_channel_command(ChannelMappingService(sessionmaker), gate),
@@ -180,6 +180,9 @@ def build_container(
     )
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
+    workflow = build_item_workflow(
+        sessionmaker, github, threads, pr_sync=pr_sync, issue_sync=issue_sync
+    )
     queue = WebhookDeliveryQueue(sessionmaker)
     event_router = _event_router(sessionmaker, threads, pr_sync, issue_sync)
 
@@ -190,14 +193,22 @@ def build_container(
         github=github,
         queue=queue,
         worker=DeliveryWorker(queue, event_router, WorkerSettings.from_settings(settings)),
+        poller=ProjectPoller(
+            sessionmaker,
+            HttpProjectBoards(github),
+            build_item_sync(sessionmaker, threads, TicketPolicy()),
+            workflow,
+            project_number=settings.github_project_number,
+            interval=settings.project_poll_seconds,
+        ),
         event_router=event_router,
         pr_sync=pr_sync,
         issue_sync=issue_sync,
         commands=_commands(
             sessionmaker,
             github,
-            threads,
             PermissionGate(ConfiguredRoles.from_settings(settings)),
+            workflow,
             pr_sync,
             issue_sync,
         ),
