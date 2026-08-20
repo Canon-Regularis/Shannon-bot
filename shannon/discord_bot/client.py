@@ -33,12 +33,19 @@ class ShannonBot(discord.Client):
 
     def __init__(self, *, explain_error: ExplainError) -> None:
         # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
-        # otherwise ping the whole server. Only the user mentions this bot builds itself are
-        # allowed to resolve.
+        # otherwise ping the whole server.
+        #
+        # Roles are allowed because a review asked of a GitHub team is announced as a mention of
+        # the Discord role somebody linked to it, and a role that cannot resolve is a ping that
+        # reaches nobody. That is safe here and not merely tolerable: every scrap of
+        # GitHub-authored text goes through `defuse_mentions` on the way in, which puts a
+        # zero-width space inside the brackets of `<@&123>` as well as `<@123>`, so the only live
+        # mentions in any message this bot sends are the ones it built. `everyone` stays off,
+        # because nothing this bot builds is ever addressed to everyone.
         super().__init__(
             intents=build_intents(),
             allowed_mentions=discord.AllowedMentions(
-                everyone=False, roles=False, users=True, replied_user=False
+                everyone=False, roles=True, users=True, replied_user=False
             ),
         )
         self.tree = app_commands.CommandTree(self)
