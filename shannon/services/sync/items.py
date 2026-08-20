@@ -318,7 +318,16 @@ class ItemSyncService:
             self._apply(items, item, snapshot)
             await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
 
-        logins = [actor.login for actors in roles.values() for actor in actors]
+        # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
+        # and `/link` lets anybody bind a name to their own account without GitHub being asked
+        # whether it is theirs, so asking the account map about a slug is how somebody becomes
+        # the `security` team in the reviewers line of every pull request in the server.
+        logins = [
+            actor.login
+            for role, actors in roles.items()
+            if role is not ActorRole.REVIEWER_TEAM
+            for actor in actors
+        ]
         mentions = await UserLinkStore(session).resolve_many(
             guild_id=placement.repository.discord_guild_id, github_usernames=logins
         )

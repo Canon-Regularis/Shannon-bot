@@ -66,7 +66,8 @@ def format_pull_request(
         status=status,
         priority=priority,
         mentions=mentions,
-        reviewers=snapshot.review_requests,
+        reviewers=snapshot.reviewers,
+        teams=snapshot.reviewer_teams,
     )
 
 
@@ -160,6 +161,7 @@ def _metadata(
     priority: Priority,
     mentions: Mapping[str, int] | None,
     reviewers: Iterable[Actor] | None = None,
+    teams: Iterable[Actor] = (),
 ) -> str:
     """The block both kinds of item share; only the noun and the reviewers line differ."""
     lines = [
@@ -171,7 +173,11 @@ def _metadata(
         f"**Assignees:** {_people(snapshot.assignees, mentions)}",
     ]
     if reviewers is not None:
-        lines.append(f"**Reviewers:** {_people(reviewers, mentions)}")
+        # Teams named plainly and never looked up in `mentions`, which maps logins to accounts.
+        # A slug that happens to match a login is not that person, and rendering one as the other
+        # would put somebody's name against a team they have nothing to do with.
+        asked = [*(_person(person, mentions) for person in reviewers), *(t.login for t in teams)]
+        lines.append(f"**Reviewers:** {', '.join(asked) if asked else EMPTY}")
     lines += [
         f"**Status:** {status.value}",
         f"**Priority:** {priority.value}",
