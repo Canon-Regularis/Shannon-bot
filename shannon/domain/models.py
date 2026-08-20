@@ -90,23 +90,19 @@ class ItemSnapshot:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PullRequestSnapshot(ItemSnapshot):
     reviewers: tuple[Actor, ...] = ()
-    # Teams asked for a review, kept apart from the people asked rather than mixed in with them.
-    # A team is shown in the reviewers line like anybody else, and that is where the value is.
-    # What it is not is somebody to ping: `/link` binds a GitHub login to a Discord account and a
-    # team has no login to bind, so a ping could only ever be its name in plain text. Against
-    # that, a row in `item_assignments` cannot be told apart from a person's, and the stamp that
-    # stops a retried delivery pinging a reviewer about work they already reviewed is set by the
-    # login of whoever submitted, which is never a team. Recording one would reintroduce exactly
-    # the double ping that stamp exists to prevent, for a message worth almost nothing.
+    # Teams asked for a review, carried apart from the people asked rather than among them.
+    #
+    # Apart all the way down, and each half of that was learned the hard way. They are told in
+    # different words, because Discord writes a role mention differently from a person's and a
+    # slug rendered as a login resolves to nobody. They are looked up in a different table,
+    # because `/link` lets anybody bind a name to their own account without GitHub being asked,
+    # so a slug looked up among logins is how somebody becomes the `security` team. And they are
+    # closed by a different rule: a person's request ends when they submit a review, a team's
+    # when GitHub drops it from `requested_teams`, which deletes the row.
     reviewer_teams: tuple[Actor, ...] = ()
     merged: bool = False
 
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
-
-    @property
-    def review_requests(self) -> tuple[Actor, ...]:
-        """Everybody asked for a review, people and teams alike, for anything that only shows."""
-        return (*self.reviewers, *self.reviewer_teams)
 
     @property
     def display_state(self) -> str:
