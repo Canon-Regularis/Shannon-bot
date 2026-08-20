@@ -83,9 +83,16 @@ async def test_finding_an_item_by_number_uses_an_index(
     issue_event,
     db_sessionmaker: async_sessionmaker,
 ) -> None:
-    """Comments and reviews take this path, so it has to stay flat as a repository grows."""
+    """Comments and reviews take this path, so it has to stay flat as a repository grows.
+
+    Explained against a populated table, and analysed first. On one row a sequential scan really
+    is cheaper and PostgreSQL is right to choose it, so a plan taken there says nothing about
+    what happens at size and flips according to whether autovacuum has got round to the table
+    yet. The number below is far past the point where the choice stops being a close call.
+    """
     service = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     await service.sync(issue_event("opened"))
+    await _fill_with_items(db_session, registered.id, count=2000)
 
     plan = await db_session.execute(
         text(
@@ -148,3 +155,25 @@ class TestHandingBackNothing:
             log.close()
 
         assert log.statements == []
+
+
+async def _fill_with_items(session: AsyncSession, repository_id: int, *, count: int) -> None:
+    """Enough rows that an index is unambiguously the cheaper way in, and statistics to prove it.
+
+    Inserted in one statement rather than through the service: what is under test is the shape of
+    the query, and two thousand round trips would make this the slowest test in the suite for no
+    extra confidence.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO tracked_items ("
+            "  repository_id, github_object_id, github_object_type, github_object_number,"
+            "  github_url, title, github_state, status, priority"
+            ") SELECT :repository_id, 900000 + n, 'ISSUE', 900000 + n,"
+            "  'https://example.invalid/' || n, 'Filler ' || n, 'open', 'NOT_REVIEWED', 'UNSET'"
+            " FROM generate_series(1, :count) AS n"
+        ),
+        {"repository_id": repository_id, "count": count},
+    )
+    await session.commit()
+    await session.execute(text("ANALYZE tracked_items"))
