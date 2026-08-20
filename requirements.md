@@ -417,6 +417,12 @@ Can:
 /register <github_repo_link>
 ```
 
+In practice a guild administrator passes every gate, not only this one. Refusing them the others
+would be theatre: an administrator can give themselves any role in the server in two clicks, so a
+check they can walk around is an inconvenience rather than a control. It also keeps a freshly
+registered server usable, where nobody has set the four role names up yet and there would
+otherwise be no one able to run anything.
+
 ### Important Detail
 
 If `/pr <pr_link>` / `issue <issue_link` is duplicated in a channel, then the channel should be overwritten with the new link. 
