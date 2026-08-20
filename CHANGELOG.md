@@ -1978,11 +1978,10 @@ decisions inside that, none of them forced:
 
 Recorded rather than acted on, because each is a choice about what the product is.
 
-Where the code looks wrong: review requests aimed at a GitHub **team** store nobody and ping
-nobody, because only `requested_reviewers` is read and not `requested_teams`. Issue blocks omit
-the `Reviewers:` line the output format lists for every item. `ActorRole.PROJECT_MANAGER` exists in
-the enum and the CHECK constraint and is never written, though the spec says the table stores
-project managers.
+Three of those were acted on rather than recorded, and the section below says what happened to
+them. Issue blocks still omit the `Reviewers:` line the output format lists for every item, which
+was left alone deliberately: GitHub issues have no reviewers and a row that always reads `None` is
+noise rather than information, so `requirements.md` records the difference instead.
 
 Where the specification is stale: `item_assignments.discord_user_id` was dropped in `0008` as a
 copy of `user_links`; `webhook_events` became a leased queue and grew five columns; `tracked_items`
@@ -1998,3 +1997,47 @@ narrower rule rather than removing that one. The metadata block carries a `State
 format does not list. And a status label somebody sets by hand on GitHub is never read back, so the
 duplex claim in the Goal holds for board columns and for commands but not for a label typed
 directly.
+
+
+### The three that were acted on
+
+- **A review asked of a GitHub team reached nobody.** Only `requested_reviewers` was read, so a
+  pull request whose only reviewer was a team stored nothing and said nothing. Teams are read now
+  and shown in the reviewers line, and they are deliberately not given assignment rows. A team
+  cannot be mentioned, because `/link` binds a GitHub login to a Discord account and a team has
+  none, so a ping could only ever be its name in plain text. Against that, a team row is
+  indistinguishable from a person's, and `fulfilled_at` is set by the login of whoever submitted
+  the review, which is never a team, so the stamp that stops a retried delivery pinging somebody
+  about work they already reviewed would be inert. A review of this found the worse half: with
+  the row never fulfilled, a re-request of that team pings nobody at all, because `replace` sees
+  an unchanged set, `reopen_if_newer` has no stamp to clear and `claim_notifications` skips a row
+  already notified. Closing a team request properly needs a membership lookup no payload carries.
+- **`ActorRole.PROJECT_MANAGER` is gone.** It is a Discord permission tier, and no fact about a
+  pull request or an issue produces one, so nothing ever wrote it and nothing could have. No
+  migration: `role_type` is a plain varchar with no constraint, which is what `varchar_enum`
+  exists to explain, and no row can hold a value nothing ever wrote. An earlier draft of this
+  section said there was a CHECK constraint. There is not.
+- **The specification now matches the schema**, table by table, with the reason beside each
+  column the original list did not have.
+
+### And two the same review found in the fix before it
+
+- **The board move was recorded before it was attempted.** Written to justify the refusal case,
+  where a closed issue will never accept BACKLOG and re-complaining every poll is pointless, and
+  wrongly applied to every failure. A rate limit or a 500 is not a refusal, and marking the move
+  as seen meant no later poll looked at that card again, because nothing else ever rederives a
+  status from a board. The column is written on the terminal paths and not on the retryable one.
+- **Null meant two things.** Never seen and seen-with-no-column both stored null, so clearing a
+  card's Status put it back to never seen, re-armed the first-look guard and dropped the next
+  real move. The empty string means seen with no column.
+
+### One test that was measuring the weather
+
+`test_finding_an_item_by_number_uses_an_index` ran EXPLAIN against a table holding one row. On one
+row a sequential scan really is cheaper and PostgreSQL is right to choose it, so the assertion held
+only while the table had no statistics and flipped whenever autovacuum reached it first. It fills
+the table and analyses it now, which is the size the test was always about.
+
+That makes three tests this stage that passed for reasons unconnected to what they claimed, and a
+fourth that waited on a fixed sleep for two poll cycles and stopped testing anything under load.
+The pattern is worth naming: a green suite says the code does what the tests do, not what they say.
