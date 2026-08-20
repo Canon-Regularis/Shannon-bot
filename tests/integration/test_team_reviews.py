@@ -129,15 +129,17 @@ class TestTellingATeam:
 
 
 class TestClosingATeamsRequest:
-    async def test_a_submitted_review_closes_every_open_team_request(
+    async def test_a_review_leaves_the_team_rows_alone(
         self,
         registered: Repository,
         notifying: ItemSyncService,
         db_sessionmaker: async_sessionmaker,
         db_session: AsyncSession,
     ) -> None:
-        """GitHub dismisses a team's request when one of its members reviews and says so in no
-        payload, and nothing here can tell who belongs to which team without asking."""
+        """A team's request is closed by GitHub dropping it, which deletes the row on the next
+        delivery. Stamping it here instead made it look like an answered request, and the next
+        ordinary event reopened it and pinged the role for something nobody had asked twice.
+        """
         await notifying.sync(asked_of("backend", "design"))
         review = parse_review_event("submitted", payloads.pull_request_review_event("submitted"))
 
@@ -150,7 +152,27 @@ class TestClosingATeamsRequest:
             )
         ).all()
         assert len(rows) == 2
-        assert all(row.fulfilled_at is not None for row in rows), "a team request stayed open"
+        assert all(row.fulfilled_at is None for row in rows), "a team request was closed early"
+
+    async def test_a_team_that_github_drops_loses_its_row(
+        self,
+        registered: Repository,
+        notifying: ItemSyncService,
+        db_session: AsyncSession,
+    ) -> None:
+        """Which is the whole mechanism a team needs: no row, no claim, and a fresh row with a
+        fresh ping if the team is ever asked again."""
+        await notifying.sync(asked_of("backend", "design"))
+
+        await notifying.sync(asked_of("backend"))
+
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER_TEAM)
+            )
+        ).all()
+        assert [row.github_username for row in rows] == ["backend"]
 
     async def test_a_replayed_request_does_not_ping_the_team_again(
         self,
@@ -238,3 +260,84 @@ class TestLinkingATeam:
         self, db_session: AsyncSession
     ) -> None:
         assert await TeamLinkStore(db_session).resolve_many(guild_id=1, github_usernames=[]) == {}
+
+
+class TestATeamIsNotToldTwice:
+    """The failure a review found: closing a request nobody answered makes it reopenable."""
+
+    async def test_an_unrelated_event_after_a_review_does_not_ping_the_team_again(
+        self,
+        registered: Repository,
+        notifying: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """A review by one person closed every team's request, including teams GitHub never
+        dismissed. The stamp then made those rows look like answered requests, so the next
+        ordinary event with a later timestamp reopened them and pinged the role again, once per
+        review round, for a request that was never answered and never re-made.
+        """
+        await notifying.sync(asked_of("backend", "design"))
+        review = parse_review_event("submitted", payloads.pull_request_review_event("submitted"))
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(review)
+        before = told(threads)
+
+        # Any handled action with a newer timestamp. Labelling is the most ordinary there is.
+        later = payloads.pull_request_event(
+            "labeled", updated_at="2026-08-12T09:00:00Z", requested_reviewers=[]
+        )
+        later["pull_request"]["requested_teams"] = [{"slug": "backend"}, {"slug": "design"}]
+        moved = parse_pull_request_event("labeled", later)
+        assert moved is not None
+        await notifying.sync(moved)
+
+        assert told(threads) == before, "an unrelated event re-pinged a team"
+
+
+class TestATeamIsNotAPerson:
+    """A slug and a login are separate namespaces on GitHub, and one of them is claimable here.
+
+    `/link` binds a GitHub name to a Discord account with no gate when somebody claims it for
+    themselves, and GitHub is never asked whether the name is theirs. So a member can link
+    `security` to themselves, and if a team slug were ever looked up in the account map they
+    would appear as, and be pinged as, the `security` team on every pull request in the server.
+    """
+
+    async def test_a_team_is_never_rendered_as_a_linked_person(
+        self,
+        registered: Repository,
+        notifying: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+    ) -> None:
+        from shannon.services.linking import UserLinkingService
+
+        await UserLinkingService(db_sessionmaker).link(
+            guild_id=1, github_username="security", discord_user_id=424242
+        )
+
+        await notifying.sync(asked_of("security"))
+
+        thread = threads.created[0]
+        block = thread.messages[thread.metadata_message_id]
+        assert "**Reviewers:** security" in block
+        assert "<@424242>" not in block, "a team was rendered as somebody who claimed its name"
+
+    async def test_a_team_is_never_pinged_as_a_linked_person(
+        self,
+        registered: Repository,
+        notifying: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The ping reads the team map, which only /link_team writes, and that one is gated."""
+        from shannon.services.linking import UserLinkingService
+
+        await UserLinkingService(db_sessionmaker).link(
+            guild_id=1, github_username="security", discord_user_id=424242
+        )
+
+        await notifying.sync(asked_of("security"))
+
+        assert "Review requested from security." in posts(threads)
+        assert not any("<@424242>" in body for body in posts(threads))
