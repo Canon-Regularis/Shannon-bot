@@ -341,3 +341,23 @@ class TestATeamIsNotAPerson:
 
         assert "Review requested from security." in posts(threads)
         assert not any("<@424242>" in body for body in posts(threads))
+
+
+async def test_re_pointing_a_team_moves_its_timestamp(
+    db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+) -> None:
+    """An upsert does not fire SQLAlchemy's `onupdate`, so a row re-pointed at a new role kept
+    the timestamp of the first link and read as untouched since."""
+    from shannon.db.models import TeamLink
+
+    service = TeamLinkingService(db_sessionmaker)
+    await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
+    db_session.expire_all()
+    first = (await db_session.scalars(select(TeamLink))).one().updated_at
+
+    await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE + 1)
+
+    db_session.expire_all()
+    row = (await db_session.scalars(select(TeamLink))).one()
+    assert row.discord_role_id == ROLE + 1
+    assert row.updated_at > first, "the row was changed and still reads as untouched"

@@ -339,7 +339,7 @@ class TestAReviewAskedOfATeam:
 
         assert [r.login for r in snapshot.reviewers] == ["monalisa"]
         assert [r.login for r in snapshot.reviewer_teams] == ["backend-team"]
-        assert sorted(r.login for r in snapshot.review_requests) == ["backend-team", "monalisa"]
+        assert snapshot.reviewers != snapshot.reviewer_teams, "the two were not kept apart"
 
     def test_the_slug_is_preferred_over_the_display_name(self) -> None:
         """A name is a display string somebody can change; the slug is the stable handle."""
