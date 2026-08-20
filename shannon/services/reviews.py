@@ -50,8 +50,20 @@ class ReviewRequestLedger:
             if item is None:
                 return
 
-            cleared = await ItemAssignmentStore(session).mark_fulfilled(
+            assignments = ItemAssignmentStore(session)
+            cleared = await assignments.mark_fulfilled(
                 item.id, ActorRole.REVIEWER, snapshot.author.login, snapshot.created_at
+            )
+            # Every team asked, not the reviewer's own. GitHub dismisses a team's request when a
+            # member of it reviews and says so in no payload, and nothing here can tell which
+            # teams somebody belongs to without asking, which would be a call per review.
+            #
+            # So this closes them all, and is deliberately wrong in one direction: a team whose
+            # member did not review is closed early and goes untold about a re-request. The other
+            # direction pings a team about work already reviewed, and this module already picked
+            # a side on that, in the same words, for a person.
+            await assignments.mark_all_fulfilled(
+                item.id, ActorRole.REVIEWER_TEAM, snapshot.created_at
             )
 
         if cleared:

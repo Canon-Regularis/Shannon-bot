@@ -112,6 +112,27 @@ def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
     return _ping("Review requested from", logins, mentions)
 
 
+def format_team_ping(teams: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
+    """Announce a review asked of a team, as a role mention where the server has linked one.
+
+    A separate renderer rather than a flag on the reviewer one, because Discord writes the two
+    with different syntax and getting it wrong is silent: `<@123>` for a role id resolves to
+    nobody and renders as a broken mention rather than as an error.
+    """
+    rendered = ", ".join(_role(name, mentions) for name in teams)
+    return f"Review requested from {rendered}." if rendered else ""
+
+
+def _role(team: str, mentions: Mapping[str, int] | None) -> str:
+    """A linked team as a role mention, and an unlinked one as its plain name.
+
+    The same bargain the people renderer makes: somebody nobody has linked is still named, so the
+    thread records who GitHub asked for even when the server has not run /link_team for them.
+    """
+    discord_role_id = (mentions or {}).get(team.lower())
+    return f"<@&{discord_role_id}>" if discord_role_id else team
+
+
 def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
     """Announce newly assigned people, on the same terms as the reviewer ping."""
     return _ping("Assigned to", logins, mentions)

@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -15,6 +16,22 @@ from shannon.domain.enums import ActorRole
 logger = logging.getLogger(__name__)
 
 Renderer = Callable[[Sequence[str], Mapping[str, int]], str]
+
+
+class ResolvesMentions(Protocol):
+    """Turning the names on an item into something Discord will notify.
+
+    Injected rather than imported, because there are two of these and neither is more the real
+    one: a login resolves to an account and a team slug resolves to a role. What differs is the
+    table read and the syntax the renderer writes, and neither is this class's business.
+    """
+
+    async def resolve_many(
+        self, *, guild_id: int, github_usernames: Sequence[str]
+    ) -> Mapping[str, int]: ...
+
+
+Mentions = Callable[[AsyncSession], ResolvesMentions]
 
 
 class ActorNotifier:
@@ -35,11 +52,13 @@ class ActorNotifier:
         *,
         role: ActorRole,
         render: Renderer,
+        mentions: Mentions = UserLinkStore,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
         self._role = role
         self._render = render
+        self._mentions = mentions
 
     async def notify(
         self, *, tracked_item_id: int, thread_id: int, guild_id: int
@@ -93,7 +112,7 @@ class ActorNotifier:
             )
             if not logins:
                 return (), {}
-            mentions = await UserLinkStore(session).resolve_many(
+            mentions = await self._mentions(session).resolve_many(
                 guild_id=guild_id, github_usernames=logins
             )
         return logins, mentions

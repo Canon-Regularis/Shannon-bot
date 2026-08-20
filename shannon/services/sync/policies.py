@@ -79,6 +79,7 @@ class PullRequestPolicy:
             ActorRole.AUTHOR: [snapshot.author] if snapshot.author else [],
             ActorRole.ASSIGNEE: snapshot.assignees,
             ActorRole.REVIEWER: snapshot.reviewers,
+            ActorRole.REVIEWER_TEAM: snapshot.reviewer_teams,
         }
 
     def status_for(self, snapshot: PullRequestSnapshot, current: Status) -> Status:

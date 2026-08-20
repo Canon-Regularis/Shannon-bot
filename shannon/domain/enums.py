@@ -34,13 +34,19 @@ class ActorRole(StrEnum):
     nothing ever wrote it and nothing could have. The tier still exists where it belongs, as
     `CommandRole` in `discord_bot/roles.py`.
 
-    Removing it needs no migration. `role_type` is a plain varchar with no constraint, which
-    `varchar_enum` explains, and no row can hold a value nothing ever wrote.
+    Neither the removal nor the addition below needs a migration. `role_type` is a plain varchar
+    with no constraint, which `varchar_enum` explains, and no row can hold a value nothing ever
+    wrote.
     """
 
     AUTHOR = "AUTHOR"
     ASSIGNEE = "ASSIGNEE"
     REVIEWER = "REVIEWER"
+    # A team asked for a review, kept apart from the people asked. Apart because the two are
+    # told in different words and closed by different rules: a person's request is answered when
+    # they submit a review, and a team's is answered when any of its members does, which no
+    # payload identifies. Sharing one role would leave a team row that nothing could ever close.
+    REVIEWER_TEAM = "REVIEWER_TEAM"
 
 
 class DeliveryStatus(StrEnum):
