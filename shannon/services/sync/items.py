@@ -17,7 +17,6 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
-from shannon.discord_bot.formatting import thread_name
 from shannon.discord_bot.threads import LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import WrongPolicyError
@@ -147,7 +146,7 @@ class ItemSyncService:
                 await self._threads.set_locked(thread_id=state.thread_id, locked=False)
 
         written = await self._binding.write(
-            state.target, name=thread_name(snapshot), content=state.metadata
+            state.target, name=self._policy.thread_name(snapshot), content=state.metadata
         )
         handle = written.handle
 

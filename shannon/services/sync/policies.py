@@ -3,9 +3,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from shannon.discord_bot.formatting import format_issue, format_pull_request
+from shannon.discord_bot import formatting
+from shannon.domain.board import status_from_column
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
-from shannon.domain.models import Actor, IssueSnapshot, PullRequestSnapshot, TrackedSnapshot
+from shannon.domain.models import (
+    Actor,
+    IssueSnapshot,
+    PullRequestSnapshot,
+    TicketSnapshot,
+    TrackedSnapshot,
+)
 
 
 class SyncPolicy(Protocol):
@@ -41,6 +48,15 @@ class SyncPolicy(Protocol):
         """Whether the thread should be locked, or None to leave it as it is."""
         ...
 
+    def thread_name(self, snapshot: TrackedSnapshot) -> str:
+        """What the item's Discord thread is called.
+
+        Here rather than in the renderer because it is the one piece of the thread that is not
+        the metadata block, and because a ticket has no number to lead with while the other two
+        are found in a channel list by theirs.
+        """
+        ...
+
 
 class PullRequestPolicy:
     object_type = ObjectType.PR
@@ -54,7 +70,9 @@ class PullRequestPolicy:
         priority: Priority,
         mentions: Mapping[str, int],
     ) -> str:
-        return format_pull_request(snapshot, status=status, priority=priority, mentions=mentions)
+        return formatting.format_pull_request(
+            snapshot, status=status, priority=priority, mentions=mentions
+        )
 
     def assignments(self, snapshot: PullRequestSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         return {
@@ -71,6 +89,9 @@ class PullRequestPolicy:
         """Pull request threads are never locked automatically; MVP 3 owns that."""
         return None
 
+    def thread_name(self, snapshot: PullRequestSnapshot) -> str:
+        return formatting.thread_name(snapshot)
+
 
 class IssuePolicy:
     object_type = ObjectType.ISSUE
@@ -84,7 +105,9 @@ class IssuePolicy:
         priority: Priority,
         mentions: Mapping[str, int],
     ) -> str:
-        return format_issue(snapshot, status=status, priority=priority, mentions=mentions)
+        return formatting.format_issue(
+            snapshot, status=status, priority=priority, mentions=mentions
+        )
 
     def assignments(self, snapshot: IssueSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Issues have no reviewers, so that role is never written for them."""
@@ -107,3 +130,50 @@ class IssuePolicy:
 
     def locked(self, snapshot: IssueSnapshot) -> bool | None:
         return snapshot.closed
+
+    def thread_name(self, snapshot: IssueSnapshot) -> str:
+        return formatting.thread_name(snapshot)
+
+
+class TicketPolicy:
+    """A draft item on a project board, which is a thing with a name and a column and no more.
+
+    No channel fallback, unlike issues. An issue with nowhere to go is a mistake, because
+    /register maps pull requests and forgetting /set_channel is easy; a board is something
+    somebody chose to mirror, and putting draft items into the pull request channel uninvited
+    would be a surprise rather than a kindness.
+    """
+
+    object_type = ObjectType.TICKET
+    channel_fallback = None
+
+    def render(
+        self,
+        snapshot: TicketSnapshot,
+        *,
+        status: Status,
+        priority: Priority,
+        mentions: Mapping[str, int],
+    ) -> str:
+        return formatting.format_ticket(snapshot, status=status)
+
+    def assignments(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        """Nobody. A draft item carries no author, assignee or reviewer to record or to ping."""
+        return {}
+
+    def status_for(self, snapshot: TicketSnapshot, current: Status) -> Status:
+        """The board is the source: its column is the status, and moving the card is the change.
+
+        A column nobody has taught us leaves the status where it was. Falling back to a default
+        would move real work backwards every time the board is read.
+        """
+        return status_from_column(snapshot.column) or current
+
+    def locked(self, snapshot: TicketSnapshot) -> bool | None:
+        """Left alone. A board column is not a closed state, and a ticket that moves back out of
+        Done would be locked in a thread nobody could answer in."""
+        return None
+
+    def thread_name(self, snapshot: TicketSnapshot) -> str:
+        """No number in front. A draft item has none, and the board is where it is found."""
+        return snapshot.title.strip() or "Untitled ticket"
