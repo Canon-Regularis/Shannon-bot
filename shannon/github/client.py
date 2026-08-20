@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from collections.abc import AsyncIterator
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
+
+# How far a paged read will follow the Link header. At a hundred rows a page this is more
+# than any board or list this bot reads, and it is the only thing standing between a
+# self-referential cursor and a loop that never ends.
+MAX_PAGES = 50
 
 
 class LooksUpRepository(Protocol):
@@ -159,6 +165,61 @@ class HttpGitHubClient:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
         _raise_for_status(response, path)
+
+    async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
+        """Every page of a list endpoint, following GitHub's own Link header.
+
+        The project endpoints paginate by cursor rather than by page number: there is no `page`
+        parameter, and the cursor for the next page is only ever given in the Link header. Asking
+        for page two by number is not an error, it is silently the first page again, so a caller
+        that counted pages would read the same cards over and over and mirror each of them twice.
+
+        Following the header rather than building the next URL, because the cursor is opaque and
+        the shape of it is GitHub's business.
+        """
+        url: str | None = path
+        for _ in range(MAX_PAGES):
+            if url is None:
+                return
+            try:
+                response = await self._client.get(url, params=params or None)
+            except httpx.HTTPError as exc:
+                raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
+
+            _raise_for_status(response, path)
+            try:
+                yield response.json()
+            except ValueError as exc:
+                raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
+
+            # The next URL carries the cursor already, so the original parameters must not be
+            # sent again beside it.
+            url = response.links.get("next", {}).get("url")
+            params = {}
+        else:
+            # A Link header that points at itself, or a list that never ends, would otherwise
+            # keep this reading for as long as the process lives. Bounded rather than trusted:
+            # the cursor is opaque, so there is nothing to inspect to tell the two apart.
+            logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
+
+    async def get_json(self, path: str, **params: Any) -> Any:
+        """Whatever GitHub answers at a path, list or object alike.
+
+        The typed readers above each know what they asked for and refuse anything else. The
+        project endpoints answer with arrays and are parsed by a module that checks every field
+        it touches, so this hands the body over as it came and leaves the judging to them.
+        """
+        try:
+            response = await self._client.get(path, params=params or None)
+        except httpx.HTTPError as exc:
+            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
+
+        _raise_for_status(response, path)
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
     async def _get(self, path: str) -> dict[str, Any]:
         try:

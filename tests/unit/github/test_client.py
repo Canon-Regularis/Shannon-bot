@@ -9,7 +9,7 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
-from shannon.github.client import HttpGitHubClient
+from shannon.github.client import MAX_PAGES, HttpGitHubClient
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
@@ -253,6 +253,141 @@ class TestWritingLabels:
         async with client_with(handler) as client:
             with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
                 await client.add_label("acme", "widget", 7, "DONE")
+
+
+class TestPagingThroughAList:
+    """The project endpoints paginate by a cursor in the Link header and have no page number.
+
+    Asking for page two by number is not an error, it is silently the first page again, so a
+    client that counted pages would read a long board over and over and mirror every card on it
+    as many times as it looped.
+    """
+
+    def _pages(self, *bodies: object):
+        seen: list[dict[str, str]] = []
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.url.params))
+            index = calls["n"]
+            calls["n"] += 1
+            headers = (
+                {"Link": f'<https://api.github.com/next?after=cursor{index}>; rel="next"'}
+                if index < len(bodies) - 1
+                else {}
+            )
+            return httpx.Response(200, content=json.dumps(bodies[index]), headers=headers)
+
+        return seen, handler
+
+    async def test_it_follows_the_link_header_to_the_end(self) -> None:
+        _, handler = self._pages([{"id": 1}], [{"id": 2}], [{"id": 3}])
+
+        async with client_with(handler) as client:
+            pages = [page async for page in client.get_pages("/items", per_page=100)]
+
+        assert pages == [[{"id": 1}], [{"id": 2}], [{"id": 3}]]
+
+    async def test_the_original_parameters_are_not_repeated_after_the_first_page(self) -> None:
+        """The next URL already carries the cursor. Sending the first request's parameters
+        beside it is how a caller ends up asking for the same page again."""
+        seen, handler = self._pages([{"id": 1}], [{"id": 2}])
+
+        async with client_with(handler) as client:
+            [page async for page in client.get_pages("/items", per_page=100)]
+
+        assert seen[0] == {"per_page": "100"}
+        assert "per_page" not in seen[1]
+
+    async def test_one_page_is_one_request(self) -> None:
+        seen, handler = self._pages([{"id": 1}])
+
+        async with client_with(handler) as client:
+            pages = [page async for page in client.get_pages("/items")]
+
+        assert len(pages) == 1
+        assert len(seen) == 1
+
+    async def test_a_page_that_will_not_parse_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html>maintenance</html>")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="non-JSON"):
+                [page async for page in client.get_pages("/items")]
+
+    async def test_a_refused_page_is_reported(self) -> None:
+        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+            with pytest.raises(GitHubAuthError):
+                [page async for page in client.get_pages("/items")]
+
+    async def test_a_page_that_never_arrives_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
+                [page async for page in client.get_pages("/items")]
+
+    async def test_a_cursor_that_points_at_itself_does_not_read_for_ever(self) -> None:
+        """The cursor is opaque, so there is nothing to inspect that would tell a real next page
+        from a Link header looping back. Bounded rather than trusted."""
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(
+                200,
+                content="[]",
+                headers={"Link": '<https://api.github.com/items?after=same>; rel="next"'},
+            )
+
+        async with client_with(handler) as client:
+            pages = [page async for page in client.get_pages("/items")]
+
+        assert len(pages) == MAX_PAGES
+        assert len(seen) == MAX_PAGES
+
+
+class TestFetchingAnyJson:
+    """`get_json` hands the body over as it came, for endpoints that answer with arrays."""
+
+    async def test_a_list_body_comes_back_as_a_list(self) -> None:
+        async with client_with(responds(200, [{"id": 1}, {"id": 2}])) as client:
+            assert await client.get_json("/fields") == [{"id": 1}, {"id": 2}]
+
+    async def test_parameters_are_sent(self) -> None:
+        seen: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.url.params))
+            return httpx.Response(200, content="[]")
+
+        async with client_with(handler) as client:
+            await client.get_json("/items", per_page=100, fields="1,2")
+
+        assert seen == [{"per_page": "100", "fields": "1,2"}]
+
+    async def test_a_non_json_body_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html>nope</html>")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="non-JSON"):
+                await client.get_json("/fields")
+
+    async def test_a_refusal_is_reported(self) -> None:
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            with pytest.raises(GitHubNotFoundError):
+                await client.get_json("/fields")
+
+    async def test_a_body_that_never_arrives_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
+                await client.get_json("/fields")
 
 
 def test_token_is_sent_as_a_bearer_header() -> None:
