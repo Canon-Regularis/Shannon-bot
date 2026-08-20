@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,7 +63,10 @@ class TeamLinkStore:
             )
             .on_conflict_do_update(
                 constraint="uq_team_links_guild_team",
-                set_={"discord_role_id": discord_role_id},
+                # `updated_at` by hand. `TimestampMixin` carries an `onupdate`, and SQLAlchemy
+                # fires that for an UPDATE it built, not for the `set_` of an upsert, so without
+                # this a team pointed at a new role keeps the timestamp of the first one.
+                set_={"discord_role_id": discord_role_id, "updated_at": func.now()},
             )
             .returning(TeamLink)
         )
