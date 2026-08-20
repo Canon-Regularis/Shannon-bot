@@ -12,7 +12,7 @@ from shannon.domain.errors import (
     UnparseableLinkError,
 )
 from shannon.github.errors import GitHubError, GitHubNotFoundError
-from shannon.services.linking import InvalidGitHubUsernameError
+from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 
@@ -34,6 +34,7 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (DuplicateRegistrationError, "{message}"),
     (SyncFailedError, "{message}"),
     (InvalidGitHubUsernameError, "{message}"),
+    (InvalidGitHubTeamError, "{message}"),
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),
 )
