@@ -44,14 +44,17 @@ def _with_event_reviewer(
 ) -> PullRequestSnapshot:
     """Fold `review_requested`'s top-level reviewer into the reviewer list.
 
-    GitHub puts the person just added at the top level of the event, and their appearance in
-    `pull_request.requested_reviewers` is not guaranteed for team requests.
+    GitHub puts whoever was just added at the top level of the event, as `requested_reviewer` for
+    a person and `requested_team` for a team, and their appearance in the list on the pull request
+    is not guaranteed. Both are folded in, because a review asked of a team is a review asked.
 
     Only ever called for `review_requested`. `review_request_removed` carries the same field
     holding the person who was just taken off, and folding that in would put them straight
     back.
     """
-    requested = mapping.actor(payload.get("requested_reviewer"))
+    requested = mapping.actor(payload.get("requested_reviewer")) or mapping.team(
+        payload.get("requested_team")
+    )
     if requested is None or any(r.login == requested.login for r in snapshot.reviewers):
         return snapshot
 

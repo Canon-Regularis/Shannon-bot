@@ -54,6 +54,36 @@ def actors(payloads: Any) -> tuple[Actor, ...]:
     return tuple(item for item in parsed if item is not None)
 
 
+def team(payload: Any) -> Actor | None:
+    """A GitHub team asked for a review, read as though it were a person.
+
+    A team is not a user: it has a slug and a name where an account has a login, and no id in the
+    space user ids come from. Carrying it as an Actor anyway is what lets one review request mean
+    one thing all the way through, so a team is recorded, shown in the reviewers line and told
+    about in the thread on exactly the same path a person is.
+
+    What it cannot be is mentioned. `/link` binds a GitHub login to a Discord account, and a team
+    has no login to bind, so a team resolves to no mention and is named in plain text. That is
+    what the renderer already does for anybody nobody has linked, so it needs no special case.
+
+    The slug is preferred over the name because it is the stable, URL-safe handle; the name is a
+    display string somebody can change.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    handle = payload.get("slug") or payload.get("name")
+    if not isinstance(handle, str) or not handle:
+        return None
+    return Actor(login=handle)
+
+
+def teams(payloads: Any) -> tuple[Actor, ...]:
+    if not isinstance(payloads, Iterable) or isinstance(payloads, str | bytes | Mapping):
+        return ()
+    parsed = (team(item) for item in payloads)
+    return tuple(item for item in parsed if item is not None)
+
+
 def labels(payloads: Any) -> tuple[Label, ...]:
     if not isinstance(payloads, Iterable) or isinstance(payloads, str | bytes | Mapping):
         return ()
@@ -147,7 +177,8 @@ def pull_request(
 
     return PullRequestSnapshot(
         **shared,
-        reviewers=actors(payload.get("requested_reviewers")),
+        reviewers=actors(payload.get("requested_reviewers"))
+        + teams(payload.get("requested_teams")),
         # A closed pull request that was merged says so either way round, depending on which
         # endpoint or event it came from.
         merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
