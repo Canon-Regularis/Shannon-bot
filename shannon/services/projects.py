@@ -29,37 +29,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.models import Repository
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.board import status_from_column
+from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import ShannonError
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
+from shannon.github.projects import BoardItem
 from shannon.services.sync.items import SyncsItems
+from shannon.services.workflow import WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class BoardItem:
-    """One card on a board, as this service needs it.
-
-    Not GitHub's response shape. The client turns whatever GitHub sends into this, so a change
-    to their JSON is a change to one parser rather than to any of the logic below.
-    """
-
-    item_id: int
-    title: str
-    column: str | None
-    html_url: str
-    kind: ObjectType = ObjectType.TICKET
-    updated_at: datetime | None = None
-    # GitHub's id for the issue or pull request the card wraps, which is the id that item was
-    # already stored under when its own webhook arrived. None for a draft, which wraps nothing.
-    content_id: int | None = None
-
-    @property
-    def is_draft(self) -> bool:
-        return self.kind is ObjectType.TICKET
 
 
 class ReadsBoards(Protocol):
@@ -159,34 +138,68 @@ class ProjectPoller:
         path a person takes with /set_in_review, so the label on GitHub and the block in Discord
         cannot end up disagreeing about a status the board decided.
 
-        Decided by comparing statuses rather than timestamps. A card's `updated_at` and an
-        issue's are two different clocks measuring two different things, and a card edited for
-        any other reason would otherwise re-assert a status nobody moved.
+        Acting on a MOVE, not on a disagreement. Those are different questions and answering the
+        wrong one is what made the board win every argument: a reviewer setting a pull request to
+        ready for merge, on a card still sitting in `In Progress`, had the decision reverted
+        within the interval, silently, because all the poller could see was that the two did not
+        match. It compares against the column it last saw instead, so a card nobody has touched
+        says nothing at all.
         """
         moved = 0
         for item in wrapped:
-            wanted = status_from_column(item.column)
-            if wanted is None or item.content_id is None:
+            if item.content_id is None:
                 continue
 
             tracked = await self._tracked(board.repository_id, item)
-            if tracked is None or tracked.thread_id is None or tracked.status is wanted:
+            if tracked is None or tracked.thread_id is None:
+                continue
+            if _same_column(item.column, tracked.column):
+                continue
+
+            # Recorded before it is acted on, and whether or not it can be. A move the item
+            # cannot take is still a move, and remembering only the successful ones would repeat
+            # the same refusal on every poll for the rest of the process's life.
+            await self._remember_column(tracked.tracked_item_id, item.column)
+
+            wanted = status_from_column(item.column)
+            if wanted is None or wanted is tracked.status:
+                continue
+            if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
+                # First sight of this card. The board fills in an item nobody has said anything
+                # about; it does not get to overwrite a decision somebody already made, because
+                # from here the two are indistinguishable and only one of them was deliberate.
+                logger.info(
+                    "leaving %s at %s: the board says %r but this is the first look at its card",
+                    item.title,
+                    tracked.status.value,
+                    item.column,
+                )
                 continue
 
             try:
                 await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
-            except ShannonError as error:
+            except WorkflowRefusedError as refusal:
                 # A status the item cannot hold, such as anything but DONE on a closed issue.
                 # The board is allowed to disagree with GitHub; it is not allowed to win.
                 logger.info(
                     "board column %r does not apply to %s: %s",
                     item.column,
                     item.title,
-                    error.message,
+                    refusal.message,
                 )
+                continue
+            except ShannonError as error:
+                # Anything else is GitHub or Discord failing, which is not the board disagreeing
+                # about anything. Logged as what it is and at the level it deserves, or an
+                # outage reads in the log as forty cards with unsuitable columns.
+                logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
                 continue
             moved += 1
         return moved
+
+    async def _remember_column(self, tracked_item_id: int, column: str | None) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).remember_column(tracked_item_id, column)
 
     async def _tracked(self, repository_id: int, item: BoardItem) -> _Tracked | None:
         async with self._sessionmaker() as session:
@@ -195,7 +208,9 @@ class ProjectPoller:
                 object_type=item.kind,
                 github_object_id=item.content_id,
             )
-            return _Tracked(row.discord_thread_id, row.status) if row is not None else None
+            if row is None:
+                return None
+            return _Tracked(row.id, row.discord_thread_id, row.status, row.project_column)
 
     async def run_forever(self) -> None:
         """Read the board until asked to stop.
@@ -254,8 +269,19 @@ class ProjectPoller:
 class _Tracked:
     """What the poller needs of an item that is already mirrored, out of its session."""
 
+    tracked_item_id: int
     thread_id: int | None
     status: Status
+    column: str | None
+
+
+def _same_column(seen: str | None, remembered: str | None) -> bool:
+    """Whether a card is where the last poll left it.
+
+    Compared the way the column is read: trimmed and case-folded, so a board renaming `Done` to
+    `done` is not a move and does not restate a status nobody changed.
+    """
+    return normalise(seen or "") == normalise(remembered or "")
 
 
 def _has_moved(item: BoardItem, stored: datetime | None, thread_id: int | None) -> bool:

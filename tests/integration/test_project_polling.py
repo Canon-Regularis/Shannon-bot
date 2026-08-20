@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.github.errors import GitHubUnavailableError
 from shannon.services.projects import BoardItem, ProjectPoller
 from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
@@ -395,10 +396,15 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         # The workflow re-reads the item from GitHub rather than trusting the stored copy, so
         # GitHub is where it has to be closed for the refusal to be the real one.
         github_client.issues[(REPO_FULL, 12)] = closed
-        board = FakeBoard(wraps(ObjectType.ISSUE, closed.github_object_id, column="Backlog"))
+        # Seen in Done first, which is where a closed issue belongs, so the refusal below comes
+        # from a move rather than from the first look at a card nobody had recorded.
+        board = FakeBoard(wraps(ObjectType.ISSUE, closed.github_object_id, column="Done"))
+        poller = poller_for(board)
+        await poller.run_once()
 
+        board.items = [wraps(ObjectType.ISSUE, closed.github_object_id, column="Backlog")]
         with caplog.at_level("INFO", logger="shannon.services.projects"):
-            moved = await poller_for(board).run_once()
+            moved = await poller.run_once()
 
         assert moved == 0
         assert "does not apply" in caplog.text
@@ -475,3 +481,191 @@ class TestWhatAReviewFound:
 
         with pytest.raises(WorkflowRefusedError, match="Move its card on the board"):
             await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+
+class TestTheBoardDoesNotOverruleACommand:
+    """The board moves things; it does not get to win an argument it was not part of.
+
+    Before this, `_move_tracked` compared the card's column against the item's stored status and
+    acted whenever they differed. A reviewer running /set_ready_for_merge on a pull request whose
+    card still sat in `In Progress` had the decision reverted by the next poll, silently, inside
+    the interval, because a standing disagreement and a fresh move looked identical from here.
+    """
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_a_card_that_has_not_moved_leaves_a_command_alone(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        thread_id = threads.created[0].thread_id
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+
+        assert await poller.run_once() == 0, "the board overruled a command"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.READY_FOR_MERGE
+
+    async def test_a_card_that_does_move_is_still_followed(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """The other half. Ignoring a genuine move would be the same defect the other way up."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Backlog")]
+
+        assert await poller.run_once() == 1
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.BACKLOG
+
+    async def test_the_first_look_fills_in_an_item_nobody_has_decided_about(
+        self, mirrored_pr: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """A freshly mirrored pull request is NOT_REVIEWED, which is nobody's opinion."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+
+        assert await poller_for(board).run_once() == 1
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.IN_REVIEW
+
+    async def test_the_first_look_does_not_overwrite_a_decision(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A board added after the fact must not undo what was decided before it existed."""
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Backlog"))
+
+        with caplog.at_level("INFO", logger="shannon.services.projects"):
+            assert await poller_for(board).run_once() == 0
+
+        assert "first look at its card" in caplog.text
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.READY_FOR_MERGE
+
+    async def test_a_move_the_item_cannot_take_is_not_asked_about_again(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        poller_for,
+        github_client: FakeGitHubClient,
+        issue_event,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A refusal is still a move. Remembering only what worked would repeat the same
+        complaint on every poll for the life of the process."""
+        closed = issue_event("closed", state="closed", closed_at="2026-08-11T12:00:00Z")
+        await build_item_sync(db_sessionmaker, threads, IssuePolicy()).sync(closed)
+        github_client.issues[(REPO_FULL, 12)] = closed
+        board = FakeBoard(wraps(ObjectType.ISSUE, closed.github_object_id, column="Done"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        # The move that gets refused. Recorded anyway, so the next poll sees no move at all.
+        board.items = [wraps(ObjectType.ISSUE, closed.github_object_id, column="Backlog")]
+        await poller.run_once()
+
+        with caplog.at_level("INFO", logger="shannon.services.projects"):
+            await poller.run_once()
+
+        assert "does not apply" not in caplog.text, "it complained about the same card twice"
+
+
+class TestWhenSomethingElseGoesWrongMidPoll:
+    """A failure that is not the board disagreeing must not be reported as if it were."""
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_a_github_outage_is_not_logged_as_a_column_mismatch(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        github_client: FakeGitHubClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Every GitHub and Discord failure is a ShannonError, so catching that alone reported an
+        outage as forty cards with unsuitable columns."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        github_client.error = GitHubUnavailableError("GitHub is down")
+
+        with caplog.at_level("INFO", logger="shannon.services.projects"):
+            moved = await poller_for(board).run_once()
+
+        assert moved == 0
+        assert "could not move" in caplog.text
+        assert "does not apply" not in caplog.text, "an outage was reported as a bad column"
+
+    async def test_a_card_wrapping_nothing_identifiable_is_passed_over(
+        self, board_channel: None, poller_for
+    ) -> None:
+        """`content_id` is the only handle on what a card wraps. Without it there is no row to
+        find, and a card that reached here without one is one the parser could not read."""
+        board = FakeBoard(
+            BoardItem(
+                item_id=800,
+                kind=ObjectType.ISSUE,
+                title="A card with no content id",
+                column="Done",
+                html_url="https://github.com/x",
+                content_id=None,
+            )
+        )
+
+        assert await poller_for(board).run_once() == 0
