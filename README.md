@@ -98,7 +98,7 @@ the ones that open and write to a thread.
 /register <github_repo_link>          binds the repository, PR threads land in this channel
 /set_channel issues #channel          where issue threads go
 /set_channel project tickets #channel only if a board is being mirrored
-/link <github_username>               once per person, so pings become mentions
+/link <github_username> @member        once per person, so pings become mentions
 /link_team <team> @role               so a review asked of a team reaches somebody
 ```
 
@@ -159,7 +159,7 @@ Retention bounds it and the payload goes with the row.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/link <github_username> [member]` | anyone for themselves, Admin or Project Manager for someone else | Connects a GitHub login to a Discord account so pings become mentions |
+| `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Reviewer, Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Reviewer, Project Manager | Same, for priority |
@@ -168,6 +168,10 @@ Guild only, replies always ephemeral. Role names are configured strings, matched
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
+
+Linking is a project manager's job, both halves of it. Claiming your own account used to be
+ungated, on the reasoning that it is yours to claim, and nothing checked that it was: GitHub is
+never asked, so anybody could take any login and receive every mention meant for it in this server.
 
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single

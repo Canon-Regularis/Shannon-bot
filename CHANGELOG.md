@@ -2090,3 +2090,20 @@ not fire.
 Every one of them was green, and the suite was at a hundred per cent of statements and branches
 throughout. What actually found things was reading downstream of a change, a coverage number
 refusing to move after it should have, and reviewers told to refute rather than confirm.
+
+
+### Linking is a project manager's job now
+
+`/link` gated the case where somebody linked an account on another member's behalf and left the
+self-claim ungated, on the reasoning that your own account is yours to claim. Nothing checked that
+it was. GitHub is never asked whether the login belongs to the person typing it, so anybody in the
+server could run `/link torvalds` on themselves and from then on receive every mention meant for
+that login: the reviewer ping, the assignee ping, and the mention in every metadata block.
+
+It is the same route by which somebody could have become a review team before teams were given a
+table of their own, and it is closed the same way, which is that a person who speaks for the server
+does the pointing. The `member` argument still defaults to the caller, so a project manager linking
+themselves types no more than before. What changed is who may call it at all.
+
+Real verification would mean asking GitHub whether the account is theirs, which means OAuth and a
+consent screen, and that is a different piece of work from a slash command.
