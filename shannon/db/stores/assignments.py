@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,12 +34,22 @@ class ItemAssignmentStore:
         ).all()
 
     async def replace(
-        self, *, tracked_item_id: int, role: ActorRole, actors: Iterable[Actor]
+        self,
+        *,
+        tracked_item_id: int,
+        role: ActorRole,
+        actors: Iterable[Actor],
+        as_of: datetime | None = None,
     ) -> None:
         """Make the stored assignments for one role match GitHub.
 
         People no longer on the item lose their row. People already there keep theirs, and with
         it the `notified_at` that stops them being pinged twice.
+
+        `as_of` is when GitHub says this payload was current, and it is what a new row records as
+        the moment its request was made. Only on insert: a row that survives is the same request
+        it always was, and moving its stamp forward on every unrelated event would erase the one
+        thing that says how old it is.
 
         The insert settles its own conflict because two callers regularly sync one item at once:
         `/pr` runs while the worker is mid-delivery, GitHub sends several events for a new item
@@ -69,6 +79,7 @@ class ItemAssignmentStore:
                             "tracked_item_id": tracked_item_id,
                             "github_username": login,
                             "role_type": role,
+                            "requested_at": as_of,
                         }
                         for login in added
                     ]
@@ -132,21 +143,33 @@ class ItemAssignmentStore:
         replays a payload that still lists the reviewer, and would ping them to review what
         they just approved. `reopen_if_newer` compares a later request against this stamp,
         which is GitHub's clock, not ours.
+
+        Never onto a request made since the review. This handler runs before its Discord post and
+        again on every retry of the delivery, so a re-request made during a review delivery's
+        backoff was closed a second time by the next attempt: the stamp read as an answered
+        request, and the next ordinary event with a later timestamp reopened it and pinged for an
+        ask nobody had made. `requested_at` is the row saying how old it is, on the same clock the
+        review's own timestamp is on.
         """
+        submitted = when or func.now()
         result = await self._session.execute(
             update(ItemAssignment)
             .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
                 ItemAssignment.role_type == role,
                 ItemAssignment.github_username == github_username.lower(),
+                or_(
+                    ItemAssignment.requested_at.is_(None),
+                    ItemAssignment.requested_at <= submitted,
+                ),
             )
-            .values(fulfilled_at=when or func.now())
+            .values(fulfilled_at=submitted)
             .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)
 
     async def reopen_request(
-        self, tracked_item_id: int, role: ActorRole, logins: Iterable[str]
+        self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None
     ) -> Sequence[str]:
         """Hand back the ping on a request that has just been made again.
 
@@ -161,11 +184,14 @@ class ItemAssignmentStore:
         Only rows that were told, because a request nobody has been told about yet is already
         owed its ping and clearing an empty stamp says nothing.
 
-        Whether the ask is a new one is the caller's question, not this one's: the payload has
-        to be newer than the item, and only the sync path knows what the item was before it.
+        And only where the payload is newer than the request the row already holds, which is what
+        makes a replayed delivery harmless: it carries the timestamp it always did. Both sides of
+        that are GitHub's clock. A row with no stamp at all predates the column, and is reopened
+        rather than refused: one repeated ping during the deployment that adds it beats a
+        re-request that tells nobody for the life of every pull request already open.
         """
         wanted = [login.lower() for login in logins]
-        if not wanted:
+        if not wanted or as_of is None:
             return ()
         return (
             await self._session.scalars(
@@ -175,8 +201,12 @@ class ItemAssignmentStore:
                     ItemAssignment.role_type == role,
                     ItemAssignment.github_username.in_(wanted),
                     ItemAssignment.notified_at.is_not(None),
+                    or_(
+                        ItemAssignment.requested_at.is_(None),
+                        ItemAssignment.requested_at < as_of,
+                    ),
                 )
-                .values(fulfilled_at=None, notified_at=None)
+                .values(fulfilled_at=None, notified_at=None, requested_at=as_of)
                 .returning(ItemAssignment.github_username)
                 .execution_options(synchronize_session=False)
             )
@@ -191,7 +221,9 @@ class ItemAssignmentStore:
         the reviewer on it and a timestamp later than the review that closed the last request.
         A payload older than the review is a delivery catching up, and is left alone.
 
-        Both stamps are cleared, because a reopened request has to be able to ping again.
+        Both stamps are cleared, because a reopened request has to be able to ping again, and
+        the row records that it is now a request of this payload's age rather than the one the
+        review closed.
         """
         wanted = [login.lower() for login in logins]
         if not wanted or as_of is None:
@@ -206,7 +238,7 @@ class ItemAssignmentStore:
                     ItemAssignment.fulfilled_at.is_not(None),
                     ItemAssignment.fulfilled_at < as_of,
                 )
-                .values(fulfilled_at=None, notified_at=None)
+                .values(fulfilled_at=None, notified_at=None, requested_at=as_of)
                 .returning(ItemAssignment.github_username)
                 .execution_options(synchronize_session=False)
             )

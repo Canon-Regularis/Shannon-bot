@@ -4,7 +4,6 @@ import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -23,7 +22,7 @@ from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.policies import SyncPolicy
-from shannon.services.sync.staleness import is_newer, is_superseded
+from shannon.services.sync.staleness import is_superseded
 from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
@@ -238,6 +237,15 @@ class ItemSyncService:
             )
             return SyncResult(outcome=SyncOutcome.NOT_TRACKED)
 
+        # Held for the rest of the transaction, because everything below is decided from what
+        # this read says and then written. Two syncs of one item overlap by design: `/pr` runs
+        # while the worker is mid-delivery, GitHub sends several events for one item at once, and
+        # a second replica leases in parallel. Without the lock both read the row before either
+        # commits, so both answer "not superseded" and the one carrying the older payload writes
+        # its whole snapshot over the newer one, down to deleting a reviewer's row and its
+        # `notified_at` and putting back somebody the newer payload had removed, who is then
+        # pinged again. The row a new item is created from is not there to lock yet, which is
+        # what `get_or_create`'s own conflict handling is for.
         item = await TrackedItemStore(session).get(
             repository_id=repository.id,
             object_type=object_type,
@@ -299,12 +307,6 @@ class ItemSyncService:
                 github_updated_at=snapshot.updated_at,
             )
 
-        # Where GitHub's clock had this item before this payload, read before `_apply` swaps the
-        # attribute for the SQL expression that raises it. It is what separates an event from a
-        # second copy of the same event: both name whoever was asked at the top level, and only
-        # the copy carries a timestamp the item has already been brought up to.
-        seen_at = item.github_updated_at
-
         roles = self._policy.assignments(snapshot)
         if placement.superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
@@ -322,12 +324,18 @@ class ItemSyncService:
             roles = {}
         else:
             self._apply(items, item, snapshot)
-            await self._store_people(session, item.id, roles, snapshot, seen_at)
+            await self._store_people(session, item.id, roles, snapshot)
 
         # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
         # and `/link` lets anybody bind a name to their own account without GitHub being asked
-        # whether it is theirs, so asking the account map about a slug is how somebody becomes
-        # the `security` team in the reviewers line of every pull request in the server.
+        # whether it is theirs, so a member can claim `security` and the account map cannot tell
+        # that from the real thing.
+        #
+        # Belt and braces, and worth saying which is which. The renderer is what actually keeps a
+        # claimed slug out of a thread: it names teams plainly and never looks one up here. This
+        # keeps the slug out of the map in the first place, so that a later reader of it cannot
+        # reopen the hole by looking up something by name without knowing which namespace it came
+        # from. Deleting it changes nothing today, which is exactly why it needs saying.
         logins = [
             actor.login
             for role, actors in roles.items()
@@ -368,7 +376,6 @@ class ItemSyncService:
         tracked_item_id: int,
         roles: Mapping[ActorRole, Sequence[Actor]],
         snapshot: TrackedSnapshot,
-        seen_at: datetime | None,
     ) -> None:
         """Make the stored people match the payload, and reopen anything it asks for again.
 
@@ -379,21 +386,24 @@ class ItemSyncService:
         Two ways of being asked again, because there are two ways a request ends. One is closed
         here, by a review we were told about, and its stamp is what a later payload is measured
         against. The other is closed by GitHub alone and never announced, and the only evidence
-        of it is this event naming the party at the top level. That evidence is only worth
-        acting on once: a delivery replayed says the same thing, so the payload has to be newer
-        than the item was before it, or a retry pings everybody a second time.
+        of it is this event naming the party at the top level. That evidence is only worth acting
+        on once, and the row is what says whether it already has been: it carries the age of the
+        request it represents, so a delivery replayed measures equal against it and a genuine
+        second ask does not.
         """
         as_of = snapshot.updated_at
         assignments = ItemAssignmentStore(session)
-        asked = self._policy.asked_again(snapshot) if is_newer(as_of, seen_at) else {}
+        asked = self._policy.asked_again(snapshot)
         for role, actors in roles.items():
-            await assignments.replace(tracked_item_id=tracked_item_id, role=role, actors=actors)
+            await assignments.replace(
+                tracked_item_id=tracked_item_id, role=role, actors=actors, as_of=as_of
+            )
             reopened = [
                 *await assignments.reopen_if_newer(
                     tracked_item_id, role, [actor.login for actor in actors], as_of
                 ),
                 *await assignments.reopen_request(
-                    tracked_item_id, role, [actor.login for actor in asked.get(role, ())]
+                    tracked_item_id, role, [actor.login for actor in asked.get(role, ())], as_of
                 ),
             ]
             if reopened:

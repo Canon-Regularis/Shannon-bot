@@ -143,18 +143,105 @@ async def test_the_ordinary_request_and_review_still_work(
     assert len(pings(threads)) == 2, "re-requesting a review after one was given told nobody"
 
 
+async def test_a_review_delivery_retried_after_a_re_request_does_not_close_it(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """The other way round from the test above, and the one a review found.
+
+    `build_note_handler` runs the ledger before the Discord post and again on every retry, and a
+    review delivery has sixteen attempts across roughly two hours to be retried in. A re-request
+    made inside that window was closed again by the next attempt, with the review's own
+    timestamp, and the next ordinary event with a later one then read that stamp as an answered
+    request, cleared it and pinged a third time for the second ask.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+    review = parse_review_event("submitted", payloads.pull_request_review_event("submitted"))
+
+    async with client:
+        await post(
+            client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
+        )
+        await container.worker.run_once()
+        await ReviewRequestLedger(container.sessionmaker).fulfilled(review)
+
+        await post(
+            client, "pull_request", requests_a_review(updated_at=RE_REQUESTED_AT), delivery="req-2"
+        )
+        await container.worker.run_once()
+        assert len(pings(threads)) == 2, "the second ask told nobody"
+
+        # The review delivery is attempted again, which is all a retry does.
+        await ReviewRequestLedger(container.sessionmaker).fulfilled(review)
+
+        # Any handled action with a later timestamp. Labelling is the most ordinary there is.
+        await post(
+            client,
+            "pull_request",
+            payloads.pull_request_event("labeled", updated_at="2026-08-13T09:00:00Z"),
+            delivery="lab-1",
+        )
+        await container.worker.run_once()
+
+    assert len(pings(threads)) == 2, "an ordinary event pinged them again for a request still open"
+    db_session.expunge_all()
+    assert await reviewers(db_session) == [("monalisa", True, False)]
+
+
 class TestAReviewLedgerWithNothingToDo:
-    async def test_a_review_with_no_author_is_left_alone(self, db_sessionmaker) -> None:
+    """Three ways in which there is nothing for the ledger to close.
+
+    Each has to reach the guard it is named for, and say what happened to the request it left
+    alone. Neither held before: the author one ran against a repository nobody had registered, so
+    it returned two guards early and went on passing with the author guard deleted, and neither
+    asserted anything at all, so any of them could have closed a request and still been green.
+    """
+
+    @pytest.fixture
+    async def asked(self, registered: Repository, db_engine: AsyncEngine):
+        """A pull request carrying one open review request, for the ledger to leave alone."""
+        container = build_stack(db_engine, threads=FakeThreadGateway())
+        client = build_http_client(container)
+        async with client:
+            await post(
+                client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
+            )
+            await container.worker.run_once()
+        return container
+
+    async def test_a_review_with_no_author_is_left_alone(self, asked, db_session) -> None:
         """GitHub can report a deleted account as no author at all."""
         payload = payloads.pull_request_review_event()
         payload["review"]["user"] = None
-        snapshot = parse_review_event("submitted", payload)
 
-        await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
+        await ReviewRequestLedger(asked.sessionmaker).fulfilled(
+            parse_review_event("submitted", payload)
+        )
+
+        db_session.expunge_all()
+        assert await reviewers(db_session) == [("monalisa", True, False)]
+
+    async def test_a_review_by_somebody_who_was_never_asked_is_left_alone(
+        self, asked, db_session
+    ) -> None:
+        """Anybody with read access can review a pull request without being asked to, and the
+        request that is open belongs to somebody else."""
+        payload = payloads.pull_request_review_event()
+        payload["review"]["user"] = payloads.user("hubot", 100)
+
+        await ReviewRequestLedger(asked.sessionmaker).fulfilled(
+            parse_review_event("submitted", payload)
+        )
+
+        db_session.expunge_all()
+        assert await reviewers(db_session) == [("monalisa", True, False)]
 
     async def test_a_review_on_an_unregistered_repository_is_left_alone(
-        self, db_sessionmaker
+        self, db_sessionmaker, db_session
     ) -> None:
         snapshot = parse_review_event("submitted", payloads.pull_request_review_event())
 
         await ReviewRequestLedger(db_sessionmaker).fulfilled(snapshot)
+
+        assert await reviewers(db_session) == []

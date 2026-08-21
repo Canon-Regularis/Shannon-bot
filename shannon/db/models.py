@@ -149,6 +149,12 @@ class ItemAssignment(TimestampMixin, Base):
         varchar_enum(ActorRole, "actor_role"), nullable=False
     )
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When GitHub says the request this row represents was made. The other two stamps are on our
+    # clock and say what we did about the row; this one is on GitHub's and says what the row is,
+    # which is the only thing that can tell a request made again from the same request arriving
+    # twice, or stop a review closing a request that came after it. Null on rows written before
+    # it existed, and read as no evidence rather than as an answer.
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When the review this row asked for was submitted, in GitHub's clock rather than ours.
     # The row is kept rather than removed so a delivery captured before the review, and retried
     # after it, cannot resurrect the request and ping somebody to review what they just approved.

@@ -19,19 +19,3 @@ def is_superseded(incoming: datetime | None, stored: datetime | None) -> bool:
     if incoming is None or stored is None:
         return False
     return as_utc(incoming) < as_utc(stored)
-
-
-def is_newer(incoming: datetime | None, stored: datetime | None) -> bool:
-    """Whether this snapshot carries a change the stored item has not been brought up to yet.
-
-    Strictly later, which is the difference from `is_superseded` and the whole reason to ask.
-    A delivery replayed after a failure carries the timestamp the item was already raised to,
-    and telling that apart from a change made since is what stops the second copy of an event
-    being acted on as though it were a second event.
-
-    Both sides are GitHub's clock. Comparing one of them against ours would make the answer
-    depend on how far apart two machines' idea of now had drifted.
-    """
-    if incoming is None or stored is None:
-        return False
-    return as_utc(incoming) > as_utc(stored)
