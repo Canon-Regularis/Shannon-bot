@@ -2107,3 +2107,70 @@ themselves types no more than before. What changed is who may call it at all.
 
 Real verification would mean asking GitHub whether the account is theirs, which means OAuth and a
 consent screen, and that is a different piece of work from a slash command.
+
+### Running it with no Discord, and what fell out
+
+Nothing here came from the test suite. The app was assembled through `build_app`, given its real
+lifespan, a real database and a real signed delivery, and run with no Discord token, which is the
+documented no-bot mode. A pull request arrived, the worker picked it up, and every attempt failed
+with `AttributeError: '_MissingSentinel' object has no attribute 'is_set'`.
+
+That is discord.py's internals talking. It is not an `HTTPException`, so it went straight past the
+translation that turns Discord's errors into this project's, and the worker retried an unreadable
+internal error sixteen times and wrote it into `last_error` for somebody to puzzle over. Every
+operation on a thread resolves a channel first, so the guard goes there: a client that has never
+connected refuses with a gateway error, which is retryable, because a bot that has dropped usually
+comes back and the delivery should be waiting when it does.
+
+### Six ways one card could stop the board, and one request that told nobody
+
+A round of adversarial review, with each finding handed to a second reader told to refute it. Five
+of the six survived that and one was narrowed; the sixth was found by reading the same code again
+afterwards. Together they are two shapes, and both are worth naming because neither shows up as a
+failure anybody would notice.
+
+**A poll that stops half way stops for good.** `run_forever` catches everything and waits out the
+interval, which is right, but it means a card that raises where nobody wrote a branch ends
+`run_once` in the middle and takes the cards behind it and the whole wrapped half with it. Nothing
+is recorded, so the next poll reads the same board and stops at the same card. The board mirror is
+off for the life of the process and the only sign of it is one traceback a minute.
+
+- A draft card's Title is free text with no cap on GitHub's side, unlike an issue's, which GitHub
+  holds to 256 characters. Anything past 512 does not fit `tracked_items.title` and raises out of
+  the flush as a `DBAPIError`, which is not a `ShannonError` and so missed the per-card handling.
+  Board text is now cut to what the row holds before it is written.
+- The same for a Status column past 128 characters. The board's Status field is matched by name and
+  never by type, so what arrives can be free text somebody pasted in. Cut at the same place, before
+  the comparison rather than at the write, so what is compared next poll is what was stored.
+- Both halves of the poll now handle a card that fails in a way nobody wrote a branch for: logged
+  whole, with the traceback, and the board carries on to the next card.
+
+**Progress written down for a step that failed.** Nothing raises and nothing is logged as an error.
+A run gets half way, records the half it did, and the next poll reads that half as the whole.
+
+- A card dragged to Done whose thread Discord then refused to lock. The status is stored in the
+  middle of `set_status` and the lock is last, so the retry the poller deliberately left open was
+  already dead: the next poll saw the status matching and wrote the move off as seen. A finished
+  pull request kept an open thread for ever, and nothing else locks one. The column, not the
+  status, is the record of a move having been carried through, so a card whose column says
+  otherwise now goes round again.
+- A draft whose thread edit was refused. The row is committed before the Discord call, on purpose,
+  and a webhook delivery that fails after it is retried by the worker. A card has no worker: it
+  comes back only when GitHub's timestamp beats the stored one, and the failed sync had just made
+  those equal. The mark is now put back when the mirror does not happen.
+- A card the sync refused was counted as mirrored, because only a raise counted as failure. A
+  repository with no channel mapped for tickets has every poll report the whole board mirrored,
+  for ever, directly under the warning saying the opposite.
+
+**A team asked for a review twice is told once.** GitHub drops a team from `requested_teams` the
+moment any member submits a review, and sends no `pull_request` event saying so. The row survives
+with its ping stamped, so the next ask arrives with the list exactly as it was, `replace` leaves the
+row alone, and nobody is told. There is no escape either: `synchronize` is not a handled action, so
+a round of review, fixes and re-request produces no delivery that would have deleted the row.
+
+The fix is the field GitHub sends for exactly this. A `review_requested` event names the party at
+the top level, and GitHub only sends one for a party that was not already requested, so being named
+there means the last request is over and this is a new one. Acted on once: the payload has to be
+newer than the item was before it, or a replayed delivery pings everybody a second time. Both sides
+of that comparison are GitHub's clock, never ours. A person has the same hole whenever the review
+event never reaches us, and it closes the same way.
