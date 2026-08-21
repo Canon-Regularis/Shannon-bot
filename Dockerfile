@@ -44,8 +44,16 @@ USER shannon
 
 EXPOSE 8000
 
-# A plain TCP connect, because the service deliberately exposes no health route.
+# The health route, not a TCP connect. There is one, and the comment here used to say there was
+# not: `/health` answers 503 when the database is unreachable or the worker has died, which is the
+# whole reason it exists. A socket that opens proves only that uvicorn is listening, and uvicorn
+# goes on listening perfectly well with a dead worker behind it and a queue that only grows, so
+# the image reported healthy at exactly the moment the service reported that it was not, and CI's
+# image job reads this check rather than the route.
+#
+# urllib rather than curl, which is not in the slim base image. A non-2xx raises, which is what
+# makes the exit status right without any parsing.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-    CMD python -c "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
 CMD ["python", "-m", "shannon.main"]
