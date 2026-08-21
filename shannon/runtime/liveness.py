@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy import text
@@ -22,6 +23,9 @@ class ProcessLiveness:
     # None means no token was configured, which is the deliberate no-bot mode. Otherwise a
     # finished task means the gateway has gone.
     bot_task: asyncio.Task | None = None
+    # Whether the client has actually reached the gateway, which the task being alive does not
+    # say. None when there is no bot to ask.
+    gateway_is_ready: Callable[[], bool] | None = None
     # How long a probe is reused. The route is public, and a connection per request would let a
     # flood exhaust the pool the worker runs on.
     probe_every: float = 5.0
@@ -70,5 +74,16 @@ class ProcessLiveness:
         after connecting leaves the worker running and leasing while every Discord call fails.
         Reporting only the worker would call that healthy, which is exactly the case this
         endpoint was added for.
+
+        Asking the client and not only the task, because discord.py reconnects for ever by
+        design: a gateway outage or blocked egress leaves `start()` running and the connection
+        never made, so the task stays alive and said nothing was wrong while every delivery
+        failed against a client with no session. A reconnection in progress reads as not
+        connected for as long as it lasts, which is the honest answer and what the health
+        check's own start period and retries are for.
         """
-        return self.bot_task is None or not self.bot_task.done()
+        if self.bot_task is None:
+            return True
+        if self.bot_task.done():
+            return False
+        return self.gateway_is_ready is None or self.gateway_is_ready()

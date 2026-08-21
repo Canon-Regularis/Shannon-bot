@@ -20,6 +20,11 @@ from shannon.services.delivery.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
 
+# How long the startup database check waits before giving up. Long enough for a cold connection
+# and a first query on a loaded server, short enough that an orchestrator sees a process that
+# failed to start rather than one that never answers.
+STARTUP_CHECK_SECONDS = 15.0
+
 
 class ProcessParts(Protocol):
     """What owning the process needs of the wiring, and nothing else.
@@ -69,6 +74,8 @@ class Gateway(Protocol):
 
     async def wait_until_ready(self) -> None: ...
 
+    def is_ready(self) -> bool: ...
+
     async def close(self) -> None: ...
 
 
@@ -79,8 +86,15 @@ async def require_a_working_database(engine: AsyncEngine) -> None:
     has never been migrated still reaches "startup complete" and passes a health check, while
     every delivery is accepted and then fails behind it. Failing here stops the process with
     something an operator can act on.
+
+    Deadlined, because nothing else here is. asyncpg's sixty seconds bound the handshake and not
+    the query, so a server that accepts the connection and then goes quiet, whether a primary that
+    fails over once the socket is up, a black-holed route, or anything holding the table, leaves
+    this waiting for as long as the kernel keeps retrying. Uvicorn opens no listening socket until
+    startup returns and reads a signal only afterwards, so for all of that the process serves
+    nothing, answers no health check, and cannot be asked to stop.
     """
-    async with engine.connect() as connection:
+    async with asyncio.timeout(STARTUP_CHECK_SECONDS), engine.connect() as connection:
         # Reading alembic_version proves the database answers and that migrations have been
         # applied at least once. It does not prove they are at head; doing that would mean
         # loading the Alembic environment into the running app, which is not worth it for a
@@ -160,6 +174,9 @@ async def _start(
     # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
+    # Asked only when there is a bot. `is_ready` is safe at any point in a client's life: it
+    # checks the sentinel before the event.
+    liveness.gateway_is_ready = bot.is_ready if bot_task is not None else None
     return _Running(
         shutdown=shutdown, worker_task=worker_task, bot_task=bot_task, poller_task=poller_task
     )

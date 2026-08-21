@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from shannon.api.app import create_app
 from shannon.config import Settings
 from shannon.container import Container, build_container
+from shannon.runtime import lifespan as lifespan_module
 from shannon.runtime.lifespan import build_lifespan
 from shannon.services.delivery.worker import ReadyCheck
 from tests.fakes.github import ClosingGitHub
@@ -22,19 +23,28 @@ pytestmark = pytest.mark.integration
 class FakeBot:
     """Enough of ShannonBot for the lifespan: it starts, it becomes ready, it closes."""
 
-    def __init__(self, *, connects: bool = True) -> None:
+    def __init__(self, *, connects: bool = True, reaches_the_gateway: bool = True) -> None:
         self.connects = connects
+        # A client that keeps trying and never arrives, which is what discord.py does on its own
+        # for an outage or blocked egress: `start` runs on and the connection is never made.
+        self.reaches_the_gateway = reaches_the_gateway
+        self.started = False
         self.closed = False
         self._ready = asyncio.Event()
 
     async def start(self, token: str) -> None:
+        self.started = True
         if not self.connects:
             raise RuntimeError("Improper token has been passed")
-        self._ready.set()
+        if self.reaches_the_gateway:
+            self._ready.set()
         await asyncio.sleep(3600)
 
     async def wait_until_ready(self) -> None:
         await self._ready.wait()
+
+    def is_ready(self) -> bool:
+        return self._ready.is_set()
 
     async def close(self) -> None:
         self.closed = True
@@ -127,6 +137,37 @@ class TestStartingUp:
             async with lifespan:
                 pass
 
+    async def test_a_database_that_goes_quiet_stops_startup_rather_than_parking_it(
+        self, monkeypatch: pytest.MonkeyPatch, migrated: AsyncEngine
+    ) -> None:
+        """asyncpg's own sixty seconds bound the handshake, not the query, so a server that takes
+        the connection and then answers nothing left this waiting for as long as the kernel kept
+        retrying. Uvicorn opens no socket until startup returns and reads a signal only after,
+        so for all of that the process served nothing and could not be told to stop.
+        """
+        monkeypatch.setattr(lifespan_module, "STARTUP_CHECK_SECONDS", 0.05)
+
+        class NeverAnswers:
+            def connect(self):
+                return self
+
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        # The outer bound only stops this test hanging for ever if the deadline is not there.
+        # What says the deadline fired is that it fired a hundred times sooner, so the elapsed
+        # time is the assertion: `wait_for` raises the same TimeoutError and proves nothing.
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                lifespan_module.require_a_working_database(NeverAnswers()), timeout=5
+            )
+
+        assert asyncio.get_running_loop().time() - started < 1, "it waited on the outer bound"
+
     async def test_without_a_token_the_worker_still_runs(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
         app, lifespan = await runbuild_lifespan(
@@ -153,6 +194,24 @@ class TestStartingUp:
 
 
 class TestWhileRunning:
+    async def test_a_gateway_still_trying_to_connect_is_not_reported_as_connected(
+        self, migrated: AsyncEngine
+    ) -> None:
+        """discord.py reconnects for ever rather than giving up, so an outage or blocked egress
+        leaves `start()` running and the connection never made. Answering on the task being
+        alive called that healthy, which is the one state the endpoint exists to report.
+        """
+        bot = FakeBot(connects=True, reaches_the_gateway=False)
+        worker = FakeWorker()
+        app, lifespan = await runbuild_lifespan(
+            bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
+        )
+
+        async with lifespan:
+            await asyncio.sleep(0.1)
+            assert bot.started, "the bot never got as far as trying"
+            assert app.state.liveness.bot_connected() is False, "a bot that never arrived"
+
     async def test_a_gateway_that_never_connects_is_reported_unhealthy(
         self, migrated: AsyncEngine
     ) -> None:

@@ -292,6 +292,43 @@ class TestANoteThatArrivesTooEarly:
         assert (await stored(db_session, "stranger")).status == DeliveryStatus.IGNORED
 
 
+class TestWhenTheQueueItselfFails:
+    """The one step in a batch that nothing handed back.
+
+    Everything a handler raises is dealt with inside `_handle`. What escapes it is the write that
+    records the outcome. That the delivery itself comes round again is the documented contract,
+    which `test_a_delivery_handled_twice_posts_the_comment_once` pins and which the claim before
+    a post is there to make safe. What was not intended is the rest of the batch going with it:
+    up to nine deliveries nothing had touched sat marked PROCESSING under a live lease, invisible
+    to this worker and any other, until it lapsed a quarter of an hour later.
+    """
+
+    async def test_the_rest_of_the_batch_comes_back_rather_than_sitting_out_the_lease(
+        self, queue: WebhookDeliveryQueue, db_session: AsyncSession
+    ) -> None:
+        for delivery_id in ("a", "b", "c"):
+            await enqueue(queue, delivery_id)
+
+        class RefusesToRecord(WebhookDeliveryQueue):
+            async def finish(self, delivery, status) -> None:
+                raise RuntimeError("the database went away")
+
+        worker = build_worker(RefusesToRecord(queue._sessionmaker), Exploding(failures=0))
+
+        # Still raised. Deciding whether to carry on belongs to `run_forever`, and a caller
+        # running one batch at a time has to be able to see that the write did not land.
+        with pytest.raises(RuntimeError):
+            await worker.run_once()
+
+        db_session.expire_all()
+        for delivery_id in ("a", "b", "c"):
+            event = await stored(db_session, delivery_id)
+            assert event.status == DeliveryStatus.PENDING, (
+                f"{delivery_id} was left leased for the rest of its lease"
+            )
+            assert event.locked_until is None
+
+
 class TestStoppingCleanly:
     """A redeploy must not park a leased batch until its lease runs out."""
 
@@ -410,6 +447,32 @@ class TestWaitingForDiscord:
 
         with pytest.raises(RuntimeError):
             await asyncio.wait_for(worker.run_forever(never_connects), timeout=2)
+
+    async def test_a_gateway_that_never_connects_does_not_park_the_queue_for_ever(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """discord.py reconnects for ever by design, so a gateway outage leaves `start()` running
+        and `wait_until_ready()` unfired. The wait here had no end, so the worker sat in it for
+        the life of the process: nothing leased, nothing pruned, and a task still alive for
+        `/health` to call healthy. It goes ahead without Discord instead, and every delivery then
+        fails with a retryable gateway error that says so.
+        """
+        handler = Exploding(failures=0)
+        worker = build_worker(
+            queue,
+            handler,
+            poll_interval=timedelta(seconds=0.01),
+            gateway_wait=timedelta(seconds=0.05),
+        )
+        await enqueue(queue, "delivery-a")
+
+        async def never_answers() -> None:
+            await asyncio.Event().wait()
+
+        running = asyncio.create_task(worker.run_forever(never_answers))
+        await _until(lambda: handler.calls == 1)
+        worker.stop()
+        await asyncio.wait_for(running, timeout=5)
 
     async def test_without_a_check_it_starts_at_once(self, queue: WebhookDeliveryQueue) -> None:
         """No token means no bot to wait for, and the queue should still be worked."""
