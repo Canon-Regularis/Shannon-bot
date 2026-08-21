@@ -116,6 +116,25 @@ def test_the_example_env_file_holds_no_real_credentials() -> None:
         assert value == "" or value.startswith("your-"), f"{name} looks like a real value"
 
 
+def test_the_example_env_file_names_every_setting() -> None:
+    """The file says to copy it and fill it in, so a setting it leaves out is a feature nobody
+    setting the bot up will find. `SHANNON_GITHUB_PROJECT_NUMBER` was the one that mattered: it
+    defaults to zero, zero means the board is never read, and the whole board mirror was
+    therefore invisible to anybody who started from this file.
+    """
+    from pathlib import Path
+
+    example = Path(__file__).parents[2] / ".env.example"
+    named = {
+        line.partition("=")[0].strip()
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if line.startswith("SHANNON_") and "=" in line
+    }
+    wanted = {f"SHANNON_{field.upper()}" for field in Settings.model_fields}
+
+    assert not wanted - named, f"missing from .env.example: {sorted(wanted - named)}"
+
+
 def test_no_credential_reaches_the_api_response_model() -> None:
     """The settings object lives on app.state, so anything that serialises it must stay safe."""
     payload = json.loads(Settings(discord_token=BOT_TOKEN).model_dump_json())
