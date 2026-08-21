@@ -22,6 +22,14 @@ from shannon.domain.enums import ActorRole, DeliveryStatus, ObjectType, Priority
 
 _LIVE_STATUSES = ", ".join(f"'{status.value}'" for status in DeliveryStatus.live())
 
+# How much of a tracked item's text the row will hold. Named because text that came from
+# somewhere else has to be cut to fit before it is written, and a width written down twice is a
+# width that drifts. GitHub caps an issue title at 256, but a project board's draft card has no
+# cap at all, and a Status column is whatever somebody typed.
+TITLE_WIDTH = 512
+URL_WIDTH = 512
+COLUMN_WIDTH = 128
+
 
 class Repository(TimestampMixin, Base):
     __tablename__ = "repositories"
@@ -89,8 +97,8 @@ class TrackedItem(TimestampMixin, Base):
         varchar_enum(ObjectType, "object_type"), nullable=False
     )
     github_object_number: Mapped[int] = mapped_column(nullable=False)
-    github_url: Mapped[str] = mapped_column(String(512), nullable=False)
-    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    github_url: Mapped[str] = mapped_column(String(URL_WIDTH), nullable=False)
+    title: Mapped[str] = mapped_column(String(TITLE_WIDTH), nullable=False)
     github_state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -107,7 +115,7 @@ class TrackedItem(TimestampMixin, Base):
     # poller needs to know whether a card MOVED, and comparing its column against the stored
     # status answers a different question: it cannot tell a card that has just been dragged from
     # one that has sat still while somebody set the status from Discord.
-    project_column: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_column: Mapped[str | None] = mapped_column(String(COLUMN_WIDTH), nullable=True)
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
     # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a

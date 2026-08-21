@@ -15,11 +15,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.github.errors import GitHubUnavailableError
 from shannon.services.projects import BoardItem, ProjectPoller
-from shannon.services.sync.items import build_item_sync
+from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 from shannon.services.workflow import (
     ItemWorkflow,
@@ -769,6 +769,224 @@ class TestASecondReviewFound:
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
         assert item.status is Status.BACKLOG
+
+
+class TestOneCardTakingTheWholeBoardWithIt:
+    """A poll reads the whole board, and used to act on all of it or on none of it.
+
+    Every failure here has the same shape. A card that raises where nobody wrote a branch ends
+    `run_once` half way, so the cards behind it and the wrapped half after them are skipped, and
+    since nothing was recorded the next poll reads the same board and stops at the same card. It
+    does not right itself and it does not degrade: the feature is off, for the life of the
+    process, and the only sign of it is one traceback a minute.
+    """
+
+    @pytest.fixture
+    async def mirrored(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+        issue_event,
+    ) -> tuple[int, int]:
+        """A pull request and an issue, both already mirrored from their own webhooks."""
+        pull = pr_event("opened")
+        issue = issue_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(pull)
+        await build_item_sync(db_sessionmaker, threads, IssuePolicy()).sync(issue)
+        return pull.github_object_id, issue.github_object_id
+
+    async def test_a_draft_wider_than_its_row_is_cut_rather_than_ending_the_poll(
+        self, board_channel: None, poller_for, db_session: AsyncSession
+    ) -> None:
+        """GitHub caps an issue title at 256 characters, comfortably inside the row. A draft
+        card's Title is a free text field with no cap at all, so a card anybody with write
+        access can make raised out of the flush, past the per-card handling, and killed the
+        board mirror until somebody happened to edit that one card.
+        """
+        board = FakeBoard(
+            card(item_id=901, title="A" * (TITLE_WIDTH + 200)),
+            card(item_id=902, title="An ordinary card"),
+        )
+
+        mirrored = await poller_for(board).run_once()
+
+        assert mirrored == 2, "one wide card took the cards behind it with it"
+        assert {len(row.title) for row in await stored_tickets(db_session)} == {
+            TITLE_WIDTH,
+            len("An ordinary card"),
+        }
+
+    async def test_a_status_column_wider_than_its_row_is_cut_and_the_card_behind_it_still_moves(
+        self, mirrored: tuple[int, int], poller_for, db_session: AsyncSession
+    ) -> None:
+        """The board's Status is matched by field name and never by field type, so what reaches
+        here can be free text somebody pasted in. The card behind it is the point: this half of
+        the poll had no per-card handling at all, so the first raise ended the lot.
+        """
+        pull, issue = mirrored
+        wide = "Backlog " + "z" * 400
+        board = FakeBoard(
+            wraps(ObjectType.PR, pull, column=wide, item_id=701),
+            wraps(ObjectType.ISSUE, issue, column="In Progress", item_id=702),
+        )
+
+        assert await poller_for(board).run_once() == 1, "a wide column took the next card with it"
+
+        db_session.expire_all()
+        rows = (await db_session.scalars(select(TrackedItem).order_by(TrackedItem.id))).all()
+        by_type = {row.github_object_type: row for row in rows}
+        assert by_type[ObjectType.PR].project_column == wide[:COLUMN_WIDTH]
+        assert by_type[ObjectType.ISSUE].status is Status.IN_REVIEW
+
+    async def test_a_card_the_sync_refused_is_not_counted_as_mirrored(
+        self, registered: Repository, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """Tickets have no channel fallback, so a board configured before anybody ran
+        `/set_channel` mirrors nothing at all. Counting the attempt had every poll report a
+        board being mirrored, for ever, directly under the warning saying the opposite.
+        """
+        board = FakeBoard(card(item_id=901), card(item_id=902))
+
+        assert await poller_for(board).run_once() == 0
+        assert threads.created == []
+
+    async def test_a_draft_the_sync_did_not_expect_to_fail_on_is_still_only_one_card(
+        self,
+        board_channel: None,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        workflow: ItemWorkflow,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Not every failure is a ShannonError. The one that got here first was a card too wide
+        for its column, which arrives as a DBAPIError out of the flush.
+        """
+        sync = ExplodingSync()
+        board = FakeBoard(card(item_id=901), card(item_id=902))
+        poller = ProjectPoller(
+            db_sessionmaker, board, sync, workflow, project_number=PROJECT, interval=0.01
+        )
+
+        with caplog.at_level("ERROR", logger="shannon.services.projects"):
+            assert await poller.run_once() == 0
+
+        assert sync.calls == 2, "the first surprise took the card behind it with it"
+        assert "could not mirror the card" in caplog.text
+
+    async def test_a_move_the_workflow_did_not_expect_to_fail_on_is_still_only_one_card(
+        self,
+        mirrored: tuple[int, int],
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        pull, issue = mirrored
+        moves = ExplodingWorkflow()
+        board = FakeBoard(
+            wraps(ObjectType.PR, pull, column="In Progress", item_id=701),
+            wraps(ObjectType.ISSUE, issue, column="In Progress", item_id=702),
+        )
+        poller = ProjectPoller(
+            db_sessionmaker,
+            board,
+            build_item_sync(db_sessionmaker, threads, TicketPolicy()),
+            moves,
+            project_number=PROJECT,
+            interval=0.01,
+        )
+
+        with caplog.at_level("ERROR", logger="shannon.services.projects"):
+            assert await poller.run_once() == 0
+
+        assert moves.calls == 2, "the first surprise took the card behind it with it"
+        assert "could not move the card" in caplog.text
+
+
+class TestProgressRecordedForAStepThatFailed:
+    """The other shape a permanently wrong card takes, and the harder one to see.
+
+    Nothing raises out of the poll and nothing is logged as an error. A run gets half way, writes
+    down the half it did, and the next poll reads that half as the whole and skips the card. The
+    board and Discord then disagree for ever about an item nobody will touch again.
+    """
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_a_move_to_done_whose_lock_was_refused_locks_on_the_next_poll(
+        self, mirrored_pr: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """Locking is a separate permission on Discord's side and the last step of finishing an
+        item, so it is the likeliest of them to fail on its own. The status was already written
+        by then, and matching statuses used to end the card: a finished pull request kept an
+        open thread for ever, and no poll ever looked at it again.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
+        threads.fail_next_lock = True
+        assert await poller.run_once() == 0
+
+        thread_id = threads.created[0].thread_id
+        assert threads.threads[thread_id].locked is False
+
+        assert await poller.run_once() == 1, "the lock nobody got round to was written off as done"
+        assert threads.threads[thread_id].locked is True
+
+    async def test_a_draft_whose_thread_edit_was_refused_is_mirrored_again(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The row is committed before the Discord call that shows it, deliberately, and a
+        delivery that fails after it is retried by the worker. A card has no worker: it comes
+        back only when GitHub's timestamp beats the stored one, and the failed sync had just
+        made those equal.
+        """
+        board = FakeBoard(card())
+        poller = poller_for(board)
+        await poller.run_once()
+        thread_id = threads.created[0].thread_id
+
+        board.items = [card(title="Write the poller, properly", at="2026-08-21T10:00:00Z")]
+        threads.fail_next_update = True
+        assert await poller.run_once() == 0
+
+        assert await poller.run_once() == 1, "a refused edit left the thread wrong for ever"
+        assert threads.threads[thread_id].name == "Write the poller, properly"
+
+
+class ExplodingSync:
+    """A sync that fails the way nobody wrote a branch for, counting how often it was asked."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def sync(self, snapshot) -> SyncResult:
+        self.calls += 1
+        raise RuntimeError("something nobody wrote a branch for")
+
+
+class ExplodingWorkflow:
+    """The same, for the half of the poll that moves an item somebody else already mirrored."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def set_status(self, *, thread_id: int, status: Status) -> object:
+        self.calls += 1
+        raise RuntimeError("something nobody wrote a branch for")
 
 
 async def _until(condition, timeout: float = 10.0) -> None:

@@ -26,7 +26,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from shannon.db.models import Repository
+from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, URL_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.board import normalise, status_from_column
@@ -117,18 +117,58 @@ class ProjectPoller:
         seen = await self._mirrored(board.repository_id)
         mirrored = 0
         for item in drafts:
-            if not _has_moved(item, *seen.get(item.item_id, (None, None))):
+            stored, thread_id = seen.get(item.item_id, (None, None))
+            if not _has_moved(item, stored, thread_id):
                 continue
             try:
-                await self._sync.sync(self._snapshot(board, item))
+                result = await self._sync.sync(self._snapshot(board, item))
             except ShannonError as error:
                 # One card at a time, the way the wrapped half already does it. Without this a
                 # single card Discord refuses takes the rest of the drafts with it and the
                 # wrapped half after them, none of which had anything wrong.
                 logger.warning("could not mirror the card %r: %s", item.title, error.message)
+                await self._forget_the_mirror(board, item, stored)
                 continue
-            mirrored += 1
+            except Exception:
+                # Anything the sync path did not expect, a card too wide for its column being
+                # the one that got here first. Logged whole, because a surprise is a defect and
+                # the traceback is what says where; caught, because `run_forever` swallows it
+                # identically and takes every card after this one with it, on every poll, for
+                # as long as the process lives.
+                logger.exception("could not mirror the card %r", item.title)
+                await self._forget_the_mirror(board, item, stored)
+                continue
+
+            # What the sync did, not merely that it returned. A repository with no channel
+            # mapped for tickets answers with NOT_TRACKED on every card of every poll, and
+            # counting those reports a board being mirrored while nothing is written.
+            if result.synced:
+                mirrored += 1
         return mirrored
+
+    async def _forget_the_mirror(
+        self, board: _Board, item: BoardItem, stored: datetime | None
+    ) -> None:
+        """Put the card's timestamp back to what it was before the sync that failed.
+
+        The database half of a sync commits before the Discord half runs, so a refused thread
+        edit leaves the card recorded as current and its thread showing the state before the
+        move. Nothing else revisits a draft, and the card is only offered again when GitHub's
+        timestamp beats the stored one, which the failed sync just made equal. Without this the
+        thread stays wrong until somebody edits the card on GitHub.
+
+        Nothing to put back when there was nothing stored: a card with no timestamp, or with no
+        thread, is offered again anyway.
+        """
+        if stored is None:
+            return
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).forget_mirror(
+                repository_id=board.repository_id,
+                object_type=ObjectType.TICKET,
+                github_object_id=item.item_id,
+                to=stored,
+            )
 
     async def _move_tracked(self, board: _Board, wrapped: Sequence[BoardItem]) -> int:
         """A card wrapping an issue or a pull request moves the thread that item already has.
@@ -147,62 +187,84 @@ class ProjectPoller:
         """
         moved = 0
         for item in wrapped:
-            if item.content_id is None:
-                continue
-
-            tracked = await self._tracked(board.repository_id, item)
-            if tracked is None or tracked.thread_id is None:
-                continue
-            if _same_column(item.column, tracked.column):
-                continue
-
-            wanted = status_from_column(item.column)
-            if wanted is None or wanted is tracked.status:
-                await self._remember_column(tracked.tracked_item_id, item.column)
-                continue
-
-            if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
-                # First sight of this card. The board fills in an item nobody has said anything
-                # about; it does not get to overwrite a decision somebody already made, because
-                # from here the two are indistinguishable and only one of them was deliberate.
-                logger.info(
-                    "leaving %s at %s: the board says %r but this is the first look at its card",
-                    item.title,
-                    tracked.status.value,
-                    item.column,
-                )
-                await self._remember_column(tracked.tracked_item_id, item.column)
-                continue
-
             try:
-                await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
-            except WorkflowRefusedError as refusal:
-                # A status the item cannot hold, such as anything but DONE on a closed issue.
-                # The board is allowed to disagree with GitHub; it is not allowed to win. This is
-                # a final answer rather than a bad moment, so the move is written off as seen and
-                # the same complaint is not made again on every poll for ever.
-                logger.info(
-                    "board column %r does not apply to %s: %s",
-                    item.column,
-                    item.title,
-                    refusal.message,
-                )
-                await self._remember_column(tracked.tracked_item_id, item.column)
-                continue
-            except ShannonError as error:
-                # GitHub or Discord having a bad moment, which is not an answer about anything.
-                # The column is deliberately NOT recorded: remembering it here would mark the
-                # move as seen while it never happened, and since nothing else ever rederives a
-                # status from a board, the card would sit in its new column for ever with the
-                # old status and no poll would look at it again.
-                logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
-                continue
-
-            await self._remember_column(tracked.tracked_item_id, item.column)
-            moved += 1
+                moved += await self._move_one(board, item)
+            except Exception:
+                # The same bargain the draft half makes, for the same reason. Everything below
+                # is per-card already; this is only about the failures nobody wrote a branch
+                # for, which would otherwise end the poll and repeat for ever.
+                logger.exception("could not move the card %r", item.title)
         return moved
 
-    async def _remember_column(self, tracked_item_id: int, column: str | None) -> None:
+    async def _move_one(self, board: _Board, item: BoardItem) -> int:
+        """Act on one card, answering with whether it moved anything."""
+        if item.content_id is None:
+            return 0
+
+        tracked = await self._tracked(board.repository_id, item)
+        if tracked is None or tracked.thread_id is None:
+            return 0
+
+        column = _fits(item.column)
+        if _same_column(column, tracked.column):
+            return 0
+
+        wanted = status_from_column(column)
+        if wanted is None or (wanted is tracked.status and tracked.column is None):
+            # A column nobody has taught us, or the first look at a card that already agrees
+            # with its item. Neither is a move to carry out, and both have to be written down
+            # or the same card is looked at again on every poll for ever.
+            await self._remember_column(tracked.tracked_item_id, column)
+            return 0
+
+        if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
+            # First sight of this card. The board fills in an item nobody has said anything
+            # about; it does not get to overwrite a decision somebody already made, because
+            # from here the two are indistinguishable and only one of them was deliberate.
+            logger.info(
+                "leaving %s at %s: the board says %r but this is the first look at its card",
+                item.title,
+                tracked.status.value,
+                column,
+            )
+            await self._remember_column(tracked.tracked_item_id, column)
+            return 0
+
+        # A card that has moved before goes through even where the status already matches.
+        # Setting a status is several steps and the stored one is written in the middle of them:
+        # a card dragged to Done whose thread Discord then refused to lock comes back here with
+        # the status already DONE and the lock still owed, and skipping on that reads the half
+        # that succeeded as the whole. The column is the record of a move having been carried
+        # through, and it says this one was not. Repeating a status nothing changed costs one
+        # read of the item and writes nothing, which is what makes it safe to send round again.
+        try:
+            await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
+        except WorkflowRefusedError as refusal:
+            # A status the item cannot hold, such as anything but DONE on a closed issue.
+            # The board is allowed to disagree with GitHub; it is not allowed to win. This is
+            # a final answer rather than a bad moment, so the move is written off as seen and
+            # the same complaint is not made again on every poll for ever.
+            logger.info(
+                "board column %r does not apply to %s: %s",
+                column,
+                item.title,
+                refusal.message,
+            )
+            await self._remember_column(tracked.tracked_item_id, column)
+            return 0
+        except ShannonError as error:
+            # GitHub or Discord having a bad moment, which is not an answer about anything.
+            # The column is deliberately NOT recorded: remembering it here would mark the
+            # move as seen while it never happened, and since nothing else ever rederives a
+            # status from a board, the card would sit in its new column for ever with the
+            # old status and no poll would look at it again.
+            logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
+            return 0
+
+        await self._remember_column(tracked.tracked_item_id, column)
+        return 1
+
+    async def _remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record where the card was, storing the empty string for a card with no column at all.
 
         Null has to keep meaning one thing, and it already means never seen. Writing null for a
@@ -210,7 +272,7 @@ class ProjectPoller:
         first-look guard and quietly drops the next real move.
         """
         async with self._sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).remember_column(tracked_item_id, column or "")
+            await TrackedItemStore(session).remember_column(tracked_item_id, column)
 
     async def _tracked(self, repository_id: int, item: BoardItem) -> _Tracked | None:
         async with self._sessionmaker() as session:
@@ -266,8 +328,11 @@ class ProjectPoller:
             # A card has no number of its own, so the board's is carried instead. It is what a
             # reader of the row has to go on to find where the thing came from.
             number=self._project_number,
-            title=item.title,
-            html_url=item.html_url,
+            # Cut to what the row holds. A draft card's Title is a free text field with no cap
+            # on GitHub's side, unlike an issue's, and one card too wide for the column ends the
+            # whole poll rather than that one card.
+            title=item.title[:TITLE_WIDTH],
+            html_url=item.html_url[:URL_WIDTH],
             state="open",
             updated_at=item.updated_at,
             action="polled",
@@ -284,6 +349,18 @@ class _Tracked:
     thread_id: int | None
     status: Status
     column: str | None
+
+
+def _fits(column: str | None) -> str:
+    """The card's column, cut to what the row will hold, and never null.
+
+    A board's Status is whatever somebody typed into a field named Status, and the field does
+    not have to be a single select at all: the poller matches it by name. A value wider than the
+    row raises out of the flush, past the per-card handling, and stalls the board behind that
+    one card. Cutting here rather than at the write is what keeps the comparison honest, since
+    what is compared next poll is what was stored.
+    """
+    return (column or "")[:COLUMN_WIDTH]
 
 
 def _same_column(seen: str | None, remembered: str | None) -> bool:

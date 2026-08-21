@@ -38,6 +38,9 @@ class FakeThreadGateway:
         # The same for locking, which is a separate permission on Discord's side: a server can
         # let this bot open and edit threads and not let it close one.
         self.fail_next_lock = False
+        # And for rewriting a thread that already exists, which is what a card that moves after
+        # its first mirror needs.
+        self.fail_next_update = False
         self._next_id = 1000
 
     def _allocate(self) -> int:
@@ -65,6 +68,10 @@ class FakeThreadGateway:
     async def update(
         self, *, thread_id: int, message_id: int | None, name: str, content: str
     ) -> ThreadHandle:
+        if self.fail_next_update:
+            self.fail_next_update = False
+            raise DiscordGatewayError("Discord refused to update the thread")
+
         thread = self._wake(thread_id)
 
         wanted = truncate_thread_name(name)

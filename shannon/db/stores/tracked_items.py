@@ -107,7 +107,7 @@ class TrackedItemStore:
         )
         return {row[0]: (row[1], row[2]) for row in rows.all()}
 
-    async def remember_column(self, tracked_item_id: int, column: str | None) -> None:
+    async def remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record the board column this item was last seen in.
 
         Written whether or not the column was acted on. What it answers is "has the board moved
@@ -118,6 +118,31 @@ class TrackedItemStore:
             update(TrackedItem)
             .where(TrackedItem.id == tracked_item_id)
             .values(project_column=column)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def forget_mirror(
+        self, *, repository_id: int, object_type: ObjectType, github_object_id: int, to: datetime
+    ) -> None:
+        """Put the high-water mark back, for a sync that wrote the row and then failed.
+
+        The row is committed before the Discord call that shows it, so a refused thread edit
+        leaves the item recorded as current with nothing to show for it. That is recoverable
+        for anything GitHub sends again, and drafts are the one thing it does not: a card only
+        comes back to the poller when its timestamp is newer than the stored one, and the failed
+        sync just made those equal. Lowering the mark is what puts the card back in the queue.
+
+        Deliberately not `raise_updated_at`, which exists to stop the mark moving backwards.
+        This is the one caller that means to.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == object_type,
+                TrackedItem.github_object_id == github_object_id,
+            )
+            .values(github_updated_at=as_utc(to))
             .execution_options(synchronize_session=False)
         )
 
