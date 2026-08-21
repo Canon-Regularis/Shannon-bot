@@ -221,14 +221,16 @@ rather than abandoning the rest.
 | `mirrored_notes` | Comments and reviews already posted, claimed before posting so a retry cannot repeat one |
 | `webhook_events` | The queue: payload, status, attempts, backoff, lease, last error |
 | `user_links` | GitHub login to Discord account, per server |
+| `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 
 Enums are `VARCHAR`, not native PostgreSQL types, so adding a status needs no `ALTER TYPE`. Worth
 knowing that they are unconstrained in the database: the mapping asks for a `CHECK` and SQLAlchemy
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0007`. A test applies them to an empty database and diffs the result
-against the models, so the two cannot drift apart.
+Alembic revisions `0001` to `0011`. A test applies them to an empty database and diffs the result
+against the models, so the two cannot drift apart, and another compares this section against what
+is on disk, because both the range and the table above had already gone stale once.
 
 Nothing prunes except `webhook_events`. `mirrored_notes` grows by one row per comment and review
 and has no cleanup path.
