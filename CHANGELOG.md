@@ -2174,3 +2174,113 @@ there means the last request is over and this is a new one. Acted on once: the p
 newer than the item was before it, or a replayed delivery pings everybody a second time. Both sides
 of that comparison are GitHub's clock, never ours. A person has the same hole whenever the review
 event never reaches us, and it closes the same way.
+
+### A second hunt, and the four lenses the first one never finished
+
+The first sweep lost seven of its thirteen readers to a session limit, including the ones for
+races, hostile input, data integrity and vacuous tests. This ran those again, plus a reader whose
+only job was to attack the fixes above, and each finding went to a second reader told to refute it.
+Eight survived. Four of them are named below; the rest were already closed by the work above, and
+one of those was found twice, independently, which is the first time anything here has been.
+
+**A request has an age, and nothing recorded it.** Two of the eight were the same missing fact.
+A review request row carried when we pinged and when a review closed it, both on our clock, and
+nothing said when the request itself was made. So:
+
+- A `pull_request_review` delivery runs the ledger before its Discord post and again on every
+  retry, and it has sixteen attempts across two hours to be retried in. A re-request made inside
+  that window was closed a second time by the next attempt, with the review's own timestamp. The
+  stamp then read as an answered request, and the next label or edit reopened it and pinged for an
+  ask nobody had made.
+- Telling a re-request from the same delivery arriving twice was done by comparing the payload
+  against the tracked item's high-water mark, which is a question about the item and not about the
+  row. GitHub sends one delivery per party asked and gives them the same second, so one review
+  request naming two people raised the mark on the first and the second read it as a replay: the
+  party named second was never pinged.
+
+`item_assignments.requested_at` is the fact both were guessing at, on GitHub's clock so that both
+sides of every comparison are on the same one. Set when the row is written and moved forward when
+the request is made again; a review will not close a request younger than itself, and a re-request
+older than the row is a replay. The item-level proxy is gone.
+
+**A finished pull request could never be discussed again.** `/set_done` locks the thread, and
+nothing anywhere unlocked one: `PullRequestPolicy.locked` returns None on every sync, so the only
+lock a pull request ever gets is that one and no webhook was ever going to lift it. Moving it back
+out of DONE is allowed, and `/set_in_review` wrote the label, moved the stored status, reported
+success, and left the thread shut. It gives the thread back now, and only when DONE is on one side
+of the move or the other, so an ordinary status change still costs no call to Discord.
+
+**A sync decides it is current before anything is locked, and still does.** The staleness check
+reads the item's mark and acts on it several statements later, under read committed, which gives no
+snapshot stability inside a transaction. Two syncs of one item overlap by design — `/pr` beside the
+worker, several events for one item at once, a second replica — so both read the mark before either
+commits, both answer "not superseded", and neither takes the stale exit. The one carrying the older
+payload then writes its whole snapshot over the newer one, down to deleting a reviewer's row with
+its `notified_at` and putting back somebody the newer payload had removed, who is then pinged again.
+
+Confirmed and left open, which is worth recording along with why. Holding the row across the
+decision with `SELECT ... FOR UPDATE` fixes it in three lines and was written, measured and taken
+back out: the suite has a latent hang where a task cancelled mid-sync leaves its transaction open,
+and the `TRUNCATE` every test starts with then waits on it. That hang exists either way — a run
+with no lock at all still produced one — but an exclusive row lock on the busiest row of the sync
+path made it far likelier, taking the suite from ten minutes and one stall to twenty-three minutes
+and two. Trading a dependable gate for a race that needs a coincidence of milliseconds in one
+particular direction, and costs one duplicate mention and a Reviewers line the next event repairs,
+is the wrong way round. Doing it properly means deciding at write time rather than at read time —
+making the writes conditional on the mark they were computed from — which is a piece of design, not
+a patch to append to a long session.
+
+**Two more from the same session, found by hand.** A board read hands the same card back more than
+once whenever a cursor pages through a list somebody is editing, and the draft half mirrored every
+copy, because the stored state is read once for the whole board and never written to. And a spent
+GitHub rate limit was polled straight through: the client already works out when the window
+reopens, and nothing read it, so the poller went back every interval for the whole window — worse
+than wasted, since GitHub lengthens a secondary limit for requests made during one.
+
+### What the tests were not saying
+
+Two tests were found passing for reasons unconnected to their names, both by mutating the code
+they were named for and watching them stay green.
+
+`test_a_review_with_no_author_is_left_alone` ran against a repository nobody had registered, so it
+returned two guards before the one it was named for and went on passing with that guard deleted.
+It asserted nothing at all, as did the two beside it, so any of them could have closed a request
+and stayed green. All three have a real open request in front of them now and say what happened to
+it.
+
+`test_github_is_written_before_discord` failed every GitHub call, including the read that comes
+first — at which point nothing has been attempted and the order it is named for is never
+exercised. It passed with the label write moved after the re-render. The refusal is on the write
+now, and it checks that Discord was left alone.
+
+A third was accurate and is not a defect: nothing pins the sync path's team-slug filter, because
+the renderer names teams plainly and never looks one up in the account map, so deleting the filter
+changes no behaviour today. It is defence in depth and its comment now says so rather than
+claiming to be the thing standing in the way.
+
+### Ruled out
+
+Recorded because they were checked properly and are worth not checking again. Every migration
+round-trips: applied to head, taken down to base and back up, `alembic check` finds nothing and the
+schema is byte-identical to a fresh one. The four webhook parsers were given 7368 mutated bodies —
+every field of every real payload replaced with each of twenty-three hostile values, and separately
+deleted — and raised nothing. The endpoint's own limits hold over real sockets, as does redirect
+following, Link-header pagination and the rate-limit classification. `.env.example` was missing
+four settings, one of them the number that turns the board mirror on, so a guard now compares it
+against the settings object.
+
+### A hang in the test suite, found by running it
+
+Not a defect in the bot. Three full runs in a row each ended with one or two tests erroring at
+setup with a `TimeoutError`, and a different test each time, which is what says the fault is not in
+the test that reports it.
+
+Every test starts by truncating all eight tables, and `TRUNCATE` needs an exclusive lock on each of
+them. Anything still holding a lock on `tracked_items` blocks it, and several tests cancel a task
+part way through a sync: the task stops, the connection is never handed back, and its transaction
+stays open until the connection is collected. The next test then waits on it, for as long as that
+takes — one run spent twenty-three minutes inside a single fixture.
+
+Recorded rather than fixed. It is a real source of flakiness and it will be hit again in CI, but
+the fix belongs with whoever decides how the fixtures should hand connections back, and guessing at
+that here would trade a slow suite for a red one.
