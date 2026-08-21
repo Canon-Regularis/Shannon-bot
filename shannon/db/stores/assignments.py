@@ -145,6 +145,43 @@ class ItemAssignmentStore:
         )
         return bool(result.rowcount)
 
+    async def reopen_request(
+        self, tracked_item_id: int, role: ActorRole, logins: Iterable[str]
+    ) -> Sequence[str]:
+        """Hand back the ping on a request that has just been made again.
+
+        `reopen_if_newer` covers the request a review closed here, by measuring a later payload
+        against the stamp that closed it. This covers the one nothing here ever closed. GitHub
+        drops a team from `requested_teams` the moment any member submits, and sends no
+        `pull_request` event saying so, so the row survives with its ping already stamped. The
+        next ask of that team arrives with the list unchanged, `replace` leaves the row alone,
+        and the moment the whole feature exists for passes in silence. The same holds for a
+        person whose review event never reached us.
+
+        Only rows that were told, because a request nobody has been told about yet is already
+        owed its ping and clearing an empty stamp says nothing.
+
+        Whether the ask is a new one is the caller's question, not this one's: the payload has
+        to be newer than the item, and only the sync path knows what the item was before it.
+        """
+        wanted = [login.lower() for login in logins]
+        if not wanted:
+            return ()
+        return (
+            await self._session.scalars(
+                update(ItemAssignment)
+                .where(
+                    ItemAssignment.tracked_item_id == tracked_item_id,
+                    ItemAssignment.role_type == role,
+                    ItemAssignment.github_username.in_(wanted),
+                    ItemAssignment.notified_at.is_not(None),
+                )
+                .values(fulfilled_at=None, notified_at=None)
+                .returning(ItemAssignment.github_username)
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
+
     async def reopen_if_newer(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None
     ) -> Sequence[str]:

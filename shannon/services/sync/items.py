@@ -23,7 +23,7 @@ from shannon.domain.errors import WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.policies import SyncPolicy
-from shannon.services.sync.staleness import is_superseded
+from shannon.services.sync.staleness import is_newer, is_superseded
 from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,12 @@ class ItemSyncService:
                 github_updated_at=snapshot.updated_at,
             )
 
+        # Where GitHub's clock had this item before this payload, read before `_apply` swaps the
+        # attribute for the SQL expression that raises it. It is what separates an event from a
+        # second copy of the same event: both name whoever was asked at the top level, and only
+        # the copy carries a timestamp the item has already been brought up to.
+        seen_at = item.github_updated_at
+
         roles = self._policy.assignments(snapshot)
         if placement.superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
@@ -316,7 +322,7 @@ class ItemSyncService:
             roles = {}
         else:
             self._apply(items, item, snapshot)
-            await self._store_people(session, item.id, roles, as_of=snapshot.updated_at)
+            await self._store_people(session, item.id, roles, snapshot, seen_at)
 
         # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
         # and `/link` lets anybody bind a name to their own account without GitHub being asked
@@ -361,21 +367,35 @@ class ItemSyncService:
         session: AsyncSession,
         tracked_item_id: int,
         roles: Mapping[ActorRole, Sequence[Actor]],
-        *,
-        as_of: datetime | None,
+        snapshot: TrackedSnapshot,
+        seen_at: datetime | None,
     ) -> None:
         """Make the stored people match the payload, and reopen anything it asks for again.
 
         `as_of` is when GitHub says this payload was current. A request already closed by a
         review is only reopened by a payload newer than that review, which is what separates
         somebody clicking re-request from a delivery that has been retrying since before it.
+
+        Two ways of being asked again, because there are two ways a request ends. One is closed
+        here, by a review we were told about, and its stamp is what a later payload is measured
+        against. The other is closed by GitHub alone and never announced, and the only evidence
+        of it is this event naming the party at the top level. That evidence is only worth
+        acting on once: a delivery replayed says the same thing, so the payload has to be newer
+        than the item was before it, or a retry pings everybody a second time.
         """
+        as_of = snapshot.updated_at
         assignments = ItemAssignmentStore(session)
+        asked = self._policy.asked_again(snapshot) if is_newer(as_of, seen_at) else {}
         for role, actors in roles.items():
             await assignments.replace(tracked_item_id=tracked_item_id, role=role, actors=actors)
-            reopened = await assignments.reopen_if_newer(
-                tracked_item_id, role, [actor.login for actor in actors], as_of
-            )
+            reopened = [
+                *await assignments.reopen_if_newer(
+                    tracked_item_id, role, [actor.login for actor in actors], as_of
+                ),
+                *await assignments.reopen_request(
+                    tracked_item_id, role, [actor.login for actor in asked.get(role, ())]
+                ),
+            ]
             if reopened:
                 logger.info("review requested again from %s", ", ".join(reopened))
 

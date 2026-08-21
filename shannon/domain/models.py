@@ -100,6 +100,15 @@ class PullRequestSnapshot(ItemSnapshot):
     # closed by a different rule: a person's request ends when they submit a review, a team's
     # when GitHub drops it from `requested_teams`, which deletes the row.
     reviewer_teams: tuple[Actor, ...] = ()
+
+    # Who this very event asked, as opposed to who is on the pull request. GitHub names them at
+    # the top level of a `review_requested` payload and nowhere else, and it only sends one for a
+    # party that was not already requested, which makes it the only thing that separates "asked
+    # again" from "still asked" when the list either side is identical. Carried apart the way the
+    # two lists are, because which of them was asked decides which role's row is reopened.
+    person_asked_now: Actor | None = None
+    team_asked_now: Actor | None = None
+
     merged: bool = False
 
     object_type: ObjectType = field(default=ObjectType.PR, init=False)

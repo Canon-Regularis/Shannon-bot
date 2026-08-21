@@ -42,11 +42,16 @@ def parse_pull_request_event(action: str, payload: Mapping[str, Any]) -> PullReq
 def _with_event_reviewer(
     snapshot: PullRequestSnapshot, payload: Mapping[str, Any]
 ) -> PullRequestSnapshot:
-    """Fold `review_requested`'s top-level reviewer into the reviewer list.
+    """Fold `review_requested`'s top-level reviewer into the reviewer list, and record it.
 
     GitHub puts whoever was just added at the top level of the event, as `requested_reviewer` for
     a person and `requested_team` for a team, and their appearance in the list on the pull request
     is not guaranteed. Both are folded in, because a review asked of a team is a review asked.
+
+    Kept as well as folded in. Whether the list changed cannot answer "was this asked again": a
+    team GitHub silently dropped when a member reviewed is back in the list by the time the
+    re-request arrives, so the payload is identical to the one that asked the first time. The
+    top-level name is what says which party this event is about.
 
     Only ever called for `review_requested`. `review_request_removed` carries the same field
     holding the person who was just taken off, and folding that in would put them straight
@@ -54,11 +59,16 @@ def _with_event_reviewer(
     """
     person = mapping.actor(payload.get("requested_reviewer"))
     if person is not None:
-        if any(r.login == person.login for r in snapshot.reviewers):
-            return snapshot
-        return replace(snapshot, reviewers=(*snapshot.reviewers, person))
+        reviewers = snapshot.reviewers
+        if not any(r.login == person.login for r in reviewers):
+            reviewers = (*reviewers, person)
+        return replace(snapshot, reviewers=reviewers, person_asked_now=person)
 
     asked = mapping.team(payload.get("requested_team"))
-    if asked is None or any(t.login == asked.login for t in snapshot.reviewer_teams):
+    if asked is None:
         return snapshot
-    return replace(snapshot, reviewer_teams=(*snapshot.reviewer_teams, asked))
+
+    teams = snapshot.reviewer_teams
+    if not any(t.login == asked.login for t in teams):
+        teams = (*teams, asked)
+    return replace(snapshot, reviewer_teams=teams, team_asked_now=asked)

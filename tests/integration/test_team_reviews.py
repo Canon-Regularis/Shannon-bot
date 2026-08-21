@@ -35,11 +35,25 @@ pytestmark = pytest.mark.integration
 ROLE = 777000
 
 
-def asked_of(*teams: str, people: list[dict] | None = None):
+def asked_of(
+    *teams: str,
+    people: list[dict] | None = None,
+    now: str | None = None,
+    at: str | None = None,
+):
+    """A `review_requested` body.
+
+    `now` is the team GitHub names at the top level, which is the one this event asked for. Left
+    out by default so the tests that are not about that keep the payload they had.
+    """
     payload = payloads.pull_request_event(
         "review_requested", requested_reviewers=people if people is not None else []
     )
     payload["pull_request"]["requested_teams"] = [{"slug": slug} for slug in teams]
+    if at is not None:
+        payload["pull_request"]["updated_at"] = at
+    if now is not None:
+        payload["requested_team"] = {"slug": now}
     snapshot = parse_pull_request_event("review_requested", payload)
     assert snapshot is not None
     return snapshot
@@ -292,6 +306,82 @@ class TestATeamIsNotToldTwice:
         await notifying.sync(moved)
 
         assert told(threads) == before, "an unrelated event re-pinged a team"
+
+
+class TestAskingATeamAgain:
+    """The gap left by closing a team's request only when GitHub drops it from the list.
+
+    GitHub drops a team the moment any member submits a review, and sends no `pull_request`
+    event saying so. Nothing here deletes the row, so the next ask of that team arrives with
+    the list exactly as it was, `replace` leaves the row alone with its ping still stamped, and
+    nobody is told. There is no escape from it either: `synchronize` is not handled, so a round
+    of review, fixes and re-request produces no delivery that would have deleted the row.
+
+    What separates the second ask from the first is the team GitHub names at the top level of a
+    `review_requested` event, which it only sends for a party that was not already requested.
+    """
+
+    async def test_a_team_asked_again_is_told_again(
+        self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
+    ) -> None:
+        await notifying.sync(asked_of("backend", now="backend", at="2026-08-10T12:00:00Z"))
+
+        await notifying.sync(asked_of("backend", now="backend", at="2026-08-12T09:00:00Z"))
+
+        assert told(threads) == 2, "the second ask of a team told nobody"
+
+    async def test_the_same_delivery_arriving_twice_tells_them_once(
+        self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
+    ) -> None:
+        """Deliveries are at least once, so the payload that asked is also the payload a retry
+        replays. It says the same thing both times, and only the timestamp says which is which.
+        """
+        asked = asked_of("backend", now="backend", at="2026-08-10T12:00:00Z")
+        await notifying.sync(asked)
+
+        await notifying.sync(asked)
+
+        assert told(threads) == 1, "a replayed delivery pinged the team a second time"
+
+    async def test_a_team_nobody_asked_again_is_left_alone(
+        self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
+    ) -> None:
+        """One event asks for one party. The other teams on the pull request are still waiting
+        on the request they were already given, and clearing their stamp would ping them for
+        somebody else's ask.
+        """
+        await notifying.sync(
+            asked_of("backend", "design", now="backend", at="2026-08-10T12:00:00Z")
+        )
+        before = told(threads)
+
+        await notifying.sync(asked_of("backend", "design", now="design", at="2026-08-12T09:00:00Z"))
+
+        assert told(threads) == before + 1, "the ask for one team was spread across both"
+
+    async def test_a_person_asked_again_with_no_review_to_show_for_it_is_told_again(
+        self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
+    ) -> None:
+        """A person's request is normally closed by the review event that answers it, and a
+        later payload measured against that stamp reopens it. When that event never arrives, a
+        person has the same hole a team does, and closes it the same way.
+        """
+        monalisa = [payloads.user("monalisa", 3)]
+        await notifying.sync(asked_of(people=monalisa, at="2026-08-10T12:00:00Z"))
+
+        await notifying.sync(asked_of(people=monalisa, at="2026-08-12T09:00:00Z"))
+        told_without_the_top_level_name = told(threads)
+
+        payload = payloads.pull_request_event(
+            "review_requested", requested_reviewers=monalisa, updated_at="2026-08-13T09:00:00Z"
+        )
+        payload["requested_reviewer"] = payloads.user("monalisa", 3)
+        again = parse_pull_request_event("review_requested", payload)
+        assert again is not None
+        await notifying.sync(again)
+
+        assert told_without_the_top_level_name == 1, "an ordinary event re-pinged a reviewer"
+        assert told(threads) == 2
 
 
 class TestATeamIsNotAPerson:

@@ -42,6 +42,15 @@ class SyncPolicy(Protocol):
 
     def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]: ...
 
+    def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        """Who this event has just asked for, as opposed to who is on the item.
+
+        Separate from `assignments` because the two answer different questions. That one is a
+        list to be matched; this one is an event, and an event is the only thing that can tell a
+        request made again from a request never withdrawn.
+        """
+        ...
+
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status: ...
 
     def locked(self, snapshot: TrackedSnapshot) -> bool | None:
@@ -82,6 +91,16 @@ class PullRequestPolicy:
             ActorRole.REVIEWER_TEAM: snapshot.reviewer_teams,
         }
 
+    def asked_again(self, snapshot: PullRequestSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        """Whoever `review_requested` named at the top level, under the role they were asked as.
+
+        Empty for every other action, because no other payload carries one.
+        """
+        return {
+            ActorRole.REVIEWER: [snapshot.person_asked_now] if snapshot.person_asked_now else [],
+            ActorRole.REVIEWER_TEAM: ([snapshot.team_asked_now] if snapshot.team_asked_now else []),
+        }
+
     def status_for(self, snapshot: PullRequestSnapshot, current: Status) -> Status:
         """Closing a pull request does not move its workflow status; MVP 3 owns that."""
         return current
@@ -116,6 +135,10 @@ class IssuePolicy:
             ActorRole.AUTHOR: [snapshot.author] if snapshot.author else [],
             ActorRole.ASSIGNEE: snapshot.assignees,
         }
+
+    def asked_again(self, snapshot: IssueSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        """Nothing. An issue has no reviewers, so nothing about one can be asked twice."""
+        return {}
 
     def status_for(self, snapshot: IssueSnapshot, current: Status) -> Status:
         """A closed issue is done, and reopening one undoes that.
@@ -160,6 +183,10 @@ class TicketPolicy:
 
     def assignments(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Nobody. A draft item carries no author, assignee or reviewer to record or to ping."""
+        return {}
+
+    def asked_again(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        """Nothing, for the same reason: there is nobody on a card to ask."""
         return {}
 
     def status_for(self, snapshot: TicketSnapshot, current: Status) -> Status:
