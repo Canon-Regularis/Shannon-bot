@@ -61,8 +61,11 @@ def forum_channel(created: MagicMock, created_message: MagicMock) -> MagicMock:
     return stub
 
 
-def client_with(channel: object) -> MagicMock:
+def client_with(channel: object, *, ready: bool = True) -> MagicMock:
     stub = MagicMock(spec=discord.Client)
+    # Set explicitly. Left to the mock it answers with a truthy Mock, which is the right answer
+    # by accident and would keep answering it if the gateway stopped asking.
+    stub.is_ready = MagicMock(return_value=ready)
     stub.get_channel = MagicMock(return_value=channel)
     stub.fetch_channel = AsyncMock(return_value=channel)
     return stub
@@ -393,3 +396,63 @@ class TestRefusedIsNotGone:
     async def test_a_missing_thread_is_not_permanent(self) -> None:
         """It is a signal to rebuild, which is work rather than a dead end."""
         assert not issubclass(ThreadNotFoundError, PermanentError)
+
+
+class TestBeforeTheGatewayIsConnected:
+    """Every operation reaches into the client's cache and then its websocket.
+
+    On a client that has never connected, or one that has dropped, discord.py answers that from
+    its internals with `AttributeError: '_MissingSentinel' object has no attribute 'is_set'`,
+    which is not an `HTTPException` and so walks straight past the translation this module does.
+    The worker then retried an internal error for two hours and wrote it into `last_error` for
+    somebody to puzzle over. Found by running the real process with no token, which is a thing
+    the README says is supported; every test in this file uses a mock that is always connected.
+    """
+
+    @pytest.mark.parametrize(
+        ("what", "call"),
+        [
+            ("create", lambda g: g.create(channel_id=10, name="n", content="c")),
+            ("update", lambda g: g.update(thread_id=1, message_id=2, name="n", content="c")),
+            ("post", lambda g: g.post(thread_id=1, content="c")),
+            ("set_locked", lambda g: g.set_locked(thread_id=1, locked=True)),
+        ],
+    )
+    async def test_it_says_so_rather_than_leaking_an_internal_error(self, what, call) -> None:
+        gateway = DiscordThreadGateway(client_with(thread(), ready=False))
+
+        with pytest.raises(DiscordGatewayError, match="not connected"):
+            await call(gateway)
+
+    async def test_it_is_worth_retrying_rather_than_giving_up(self) -> None:
+        """A bot that has dropped usually comes back, and the delivery should be waiting when it
+        does. A PermanentError here would throw the work away on the first attempt."""
+        gateway = DiscordThreadGateway(client_with(thread(), ready=False))
+
+        with pytest.raises(DiscordGatewayError) as caught:
+            await gateway.post(thread_id=1, content="c")
+
+        assert not isinstance(caught.value, PermanentError)
+
+    async def test_tidying_up_stays_best_effort(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`delete` removes a thread nobody is going to write to, and says so rather than
+        failing. A disconnected gateway must not turn that into a failure either."""
+        gateway = DiscordThreadGateway(client_with(thread(), ready=False))
+
+        with caplog.at_level("WARNING", logger="shannon.discord_bot.threads"):
+            await gateway.delete(thread_id=1)
+
+        assert "could not remove the stranded thread" in caplog.text
+
+    async def test_nothing_is_asked_of_a_client_that_cannot_answer(self) -> None:
+        client = client_with(thread(), ready=False)
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway_for(client).create(channel_id=10, name="n", content="c")
+
+        client.get_channel.assert_not_called()
+        client.fetch_channel.assert_not_awaited()
+
+
+def gateway_for(client: MagicMock) -> DiscordThreadGateway:
+    return DiscordThreadGateway(client)

@@ -214,7 +214,27 @@ class DiscordThreadGateway:
         replacement = await thread.send(content)
         return replacement.id
 
+    def _require_a_connection(self) -> None:
+        """Refuse before touching a client that has nothing behind it.
+
+        Every operation here resolves a channel or a thread first, and both reach into the
+        client's cache and then its websocket. On a client that has never connected, or one that
+        has dropped, that surfaces as `AttributeError: '_MissingSentinel' object has no attribute
+        'is_set'` out of discord.py's internals, which is not a `discord.HTTPException` and so
+        goes straight past the translation below. The worker then retries an obscure internal
+        error for two hours and writes it into `last_error` for somebody to puzzle over.
+
+        `is_ready` is safe to ask at any point in a client's life: it checks the sentinel before
+        the event. A gateway error rather than a permanent one, because a bot that has dropped
+        usually comes back, and the delivery should be waiting when it does.
+        """
+        if not self._client.is_ready():
+            raise DiscordGatewayError(
+                "the Discord gateway is not connected, so nothing can be read or written yet"
+            )
+
     async def _channel(self, channel_id: int) -> discord.abc.GuildChannel:
+        self._require_a_connection()
         channel = self._client.get_channel(channel_id)
         if channel is None:
             try:
@@ -234,6 +254,7 @@ class DiscordThreadGateway:
         as a missing thread would have a temporary loss of access delete the item's record of
         its thread and open a replacement, orphaning everything already mirrored into it.
         """
+        self._require_a_connection()
         channel = self._client.get_channel(thread_id)
         if channel is None:
             try:
