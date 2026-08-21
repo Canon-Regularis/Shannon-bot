@@ -24,7 +24,8 @@ services:
     build: .
     command: ["alembic", "upgrade", "head"]
     environment:
-      SHANNON_DATABASE_URL: ${SHANNON_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}}
+      # Not read from .env, deliberately. See the note on the app service below.
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
     depends_on:
       db:
         condition: service_healthy
@@ -38,7 +39,15 @@ services:
     environment:
       # Inside the compose network the database is reached by service name on 5432. The 5433
       # mapping above is for reaching it from the host.
-      SHANNON_DATABASE_URL: ${SHANNON_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}}
+      #
+      # Written out rather than interpolated from the environment, which is what it used to do and
+      # which made the documented install impossible: Compose reads ./.env for interpolation, the
+      # README says to start with `cp .env.example .env`, and that file carries the host's
+      # localhost:5433 URL. So `${SHANNON_DATABASE_URL:-...}` never fell back to the default and
+      # handed both containers their own loopback, where nothing is listening. `migrate` died on
+      # connection refused and `app` waited on it for ever. This is the one setting whose value
+      # inside the network is not the value outside it, so it is the one the file decides.
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shannon}:${POSTGRES_PASSWORD:-shannon}@db:5432/${POSTGRES_DB:-shannon}
     ports:
       - "8000:8000"
     depends_on:
