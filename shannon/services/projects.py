@@ -34,11 +34,17 @@ from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import ShannonError
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
+from shannon.github.errors import GitHubRateLimitError
 from shannon.github.projects import BoardItem
 from shannon.services.sync.items import SyncsItems
 from shannon.services.workflow import WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
+
+# The longest GitHub's own primary rate limit window runs, which resets hourly. A `retry-after`
+# past that is a header nobody meant, and sitting one out would take the feature off for the rest
+# of the day on the strength of a number nothing here can check.
+RATE_LIMIT_CEILING = 3600
 
 
 class ReadsBoards(Protocol):
@@ -116,7 +122,19 @@ class ProjectPoller:
         """
         seen = await self._mirrored(board.repository_id)
         mirrored = 0
+        done: set[int] = set()
         for item in drafts:
+            if item.item_id in done:
+                # A board is read a page at a time by cursor, and a cursor is not a snapshot:
+                # GitHub says outright that a list edited while it is being paged through can
+                # hand the same row back on two pages, which is what a board somebody is
+                # dragging cards around on is. `seen` is read once for the whole board and not
+                # written to, so the second copy still reads as unmirrored and syncs again,
+                # rewriting a thread nothing had changed.
+                logger.info("the board listed the card %r more than once", item.title)
+                continue
+            done.add(item.item_id)
+
             stored, thread_id = seen.get(item.item_id, (None, None))
             if not _has_moved(item, stored, thread_id):
                 continue
@@ -207,6 +225,15 @@ class ProjectPoller:
 
         column = _fits(item.column)
         if _same_column(column, tracked.column):
+            if tracked.column is None:
+                # Nothing moved and nothing was ever seen look the same here, and a card added
+                # to a board carries no Status until somebody picks one, so this is what most
+                # cards look like on the poll that first meets them. Passing over without
+                # writing the column down leaves it null, null means never seen, and the
+                # first-look guard below is still armed when a Status is finally set: the move
+                # that sets it is read as a first look and dropped, and the column matches from
+                # then on so no later poll revisits it.
+                await self._remember_column(tracked.tracked_item_id, column)
             return 0
 
         wanted = status_from_column(column)
@@ -293,22 +320,35 @@ class ProjectPoller:
         readable the next, and a poller that dies takes the feature with it until a restart.
         """
         while not self._stopping:
+            wait = self._interval
             try:
                 await self.run_once()
             except asyncio.CancelledError:
                 raise
+            except GitHubRateLimitError as limit:
+                # GitHub answers a spent limit with the moment the window reopens, and reading
+                # the board again inside that window cannot succeed. On the interval alone this
+                # is a full board read a minute for as long as the limit lasts, which is worse
+                # than wasted: GitHub lengthens a secondary limit for requests made during one.
+                # The longer of the two, so a header asking for no wait cannot talk the poller
+                # out of its own interval.
+                wait = max(wait, min(limit.retry_after or 0, RATE_LIMIT_CEILING))
+                logger.warning(
+                    "GitHub's rate limit is spent, waiting %ss before reading the board again",
+                    int(wait),
+                )
             except Exception:
                 logger.exception("could not read the project board, carrying on")
-            await self._wait()
+            await self._wait(wait)
 
-    async def _wait(self) -> None:
-        """Sleep the interval, or wake at once if a stop arrives.
+    async def _wait(self, seconds: float) -> None:
+        """Sleep, or wake at once if a stop arrives.
 
         Waiting on the sleep alone would leave a shutdown sitting out the whole interval, and at
         a minute that is far longer than the grace period allows.
         """
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._stopped.wait(), timeout=self._interval)
+            await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
 
     async def _registered(self) -> _Board | None:
         async with self._sessionmaker() as session:

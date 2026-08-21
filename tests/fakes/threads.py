@@ -28,6 +28,10 @@ class FakeThreadGateway:
         self.threads: dict[int, FakeThread] = {}
         self.created: list[FakeThread] = []
         self.posts: list[tuple[int, str]] = []
+        # Every rewrite of an existing thread, whether or not anything about it changed. A rename
+        # only records a new name, so it cannot show a thread being written twice with the same
+        # content, which is what a card mirrored twice looks like.
+        self.updates: list[int] = []
         self.renames: list[tuple[int, str]] = []
         self.locks: list[tuple[int, bool]] = []
         self.deleted: list[int] = []
@@ -73,6 +77,7 @@ class FakeThreadGateway:
             raise DiscordGatewayError("Discord refused to update the thread")
 
         thread = self._wake(thread_id)
+        self.updates.append(thread_id)
 
         wanted = truncate_thread_name(name)
         if thread.name != wanted:

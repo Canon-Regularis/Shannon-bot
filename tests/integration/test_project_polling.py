@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
-from shannon.github.errors import GitHubUnavailableError
+from shannon.github.errors import GitHubRateLimitError, GitHubUnavailableError
 from shannon.services.projects import BoardItem, ProjectPoller
 from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
@@ -194,6 +194,22 @@ class TestNotDoingWorkTwice:
         assert len(threads.created) == 1
         assert len(threads.renames) + len(threads.posts) == edits_after_first
 
+    async def test_a_card_the_board_lists_twice_is_mirrored_once(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """A cursor is not a snapshot. GitHub pages a list by cursor and says outright that one
+        edited while it is being read can hand the same row back on two pages, which is exactly
+        what a board being dragged about during a poll is. The stored state is read once for the
+        whole board, so the second copy still reads as unmirrored.
+        """
+        board = FakeBoard(card(), card())
+
+        mirrored = await poller_for(board).run_once()
+
+        assert mirrored == 1, "one card listed twice was mirrored twice"
+        assert len(threads.created) == 1
+        assert threads.updates == [], "a thread nothing had changed was rewritten"
+
     async def test_a_card_that_moved_is_synced_again(
         self, board_channel: None, poller_for, db_session: AsyncSession
     ) -> None:
@@ -263,6 +279,30 @@ class TestTheLoop:
         await asyncio.wait_for(running, timeout=5)
 
         assert len(board.reads) > 1, "it gave up after the first failure"
+
+    async def test_a_spent_rate_limit_is_waited_out_rather_than_polled_through(
+        self, board_channel: None, poller_for
+    ) -> None:
+        """GitHub answers a spent limit with the moment the window reopens, and the client
+        already works that out and hands it over. Nothing read it, so the poller went back every
+        interval for the whole window: a full board read a minute that cannot succeed, and for a
+        secondary limit GitHub lengthens the block for every request made during one.
+
+        The sleep below is not waiting for something to happen, which is why it is a sleep. It
+        gives the failure two hundred intervals of room to appear in, against a wait of thirty
+        seconds, and the point is that nothing happens in it.
+        """
+        board = FakeBoard(card())
+        board.error = GitHubRateLimitError("GitHub rate limit reached", retry_after=30)
+        poller = poller_for(board)
+
+        running = asyncio.create_task(poller.run_forever())
+        await _until(lambda: len(board.reads) >= 1)
+        await asyncio.sleep(0.2)
+        poller.stop()
+        await asyncio.wait_for(running, timeout=5)
+
+        assert len(board.reads) == 1, "it read the board again inside the window GitHub named"
 
     async def test_a_stop_does_not_wait_out_the_interval(
         self,
@@ -724,6 +764,38 @@ class TestASecondReviewFound:
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
         assert item.status is Status.READY_FOR_MERGE
+
+    async def test_a_card_first_seen_with_no_status_is_still_remembered(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """A card added to a board carries no Status until somebody picks one, so this is what
+        most cards look like on the poll that first sees them.
+
+        Nothing moved and nothing was ever seen look identical at the top of the loop, so the
+        card was passed over without its column being written down. That leaves the column null,
+        null means never seen, and the first-look guard is still armed when the Status is finally
+        set: the move that sets it is read as a first look at the card and dropped, and no later
+        poll revisits it because the column then matches.
+        """
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+        poller = poller_for(FakeBoard(wraps(ObjectType.PR, mirrored_pr, column=None)))
+        assert await poller.run_once() == 0
+
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Backlog"))
+
+        assert await poller_for(board).run_once() == 1, "the first real move was written off"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.BACKLOG
 
     async def test_a_card_whose_status_was_cleared_is_still_remembered(
         self, mirrored_pr: int, poller_for, db_session: AsyncSession
