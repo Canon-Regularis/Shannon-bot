@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
+
 from shannon.discord_bot.formatting import format_pull_request
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.enums import Priority, Status
@@ -217,6 +219,20 @@ def test_a_label_containing_a_backtick_keeps_its_code_span() -> None:
 
     # Padding goes on both ends because markdown only strips a space from each side as a pair.
     assert fields["Tags"] == "`` needs `review` ``, `bug`"
+
+
+@pytest.mark.parametrize("label", ["a``b", "a```b", "```", "``````x", "`" * 20])
+def test_a_label_cannot_open_a_code_block_in_the_metadata(label: str) -> None:
+    """Markdown answers a backtick inside a span with a longer fence, and Discord does not read
+    it that way: three backticks there open a code BLOCK. A label carrying two of them turned
+    the Tags line into a block, and one carrying three closed that block early and left the rest
+    of the message rendering as whatever came after it.
+    """
+    labelled = replace(SNAPSHOT, labels=(Label(label),))
+
+    message = format_pull_request(labelled, status=Status.NOT_REVIEWED)
+
+    assert "```" not in message, f"{label!r} put a code block fence in the metadata"
 
 
 def test_a_label_cannot_smuggle_a_working_mention_into_the_thread() -> None:

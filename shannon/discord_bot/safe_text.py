@@ -65,12 +65,23 @@ def as_plain_text(text: str) -> str:
     return defuse_mentions(escaped)
 
 
+_BACKTICK_RUN = re.compile(r"``+")
+
+
 def code_span(text: str) -> str:
     """Wrap a label in a code span that its own backticks cannot break out of.
 
     GitHub allows a backtick in a label name. A single-backtick span around one closes early and
-    the rest of the line renders as prose. Markdown's own answer is a longer fence.
+    the rest of the line renders as prose. Markdown's own answer is a longer fence, and that is
+    where Discord parts company with the spec: three backticks there open a code BLOCK, not a
+    longer inline span, so a label carrying two of them turned one metadata line into a block,
+    and one carrying three closed that block early and left the rest of the message to render as
+    whatever came next.
+
+    So the fence never grows past two, and runs inside the text are broken up instead. A
+    zero-width space is the same trick the mention defusing uses, and costs a reader nothing.
     """
+    text = _BACKTICK_RUN.sub(lambda run: "​".join(run.group(0)), text)
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * (longest + 1)
     # A space keeps a leading or trailing backtick from touching the fence, which would merge
