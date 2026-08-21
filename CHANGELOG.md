@@ -31,8 +31,12 @@ Issues #2 to #26.
   - One repository per guild comes from a unique `discord_guild_id`. `github_repo_id` is unique
     too, so an inbound webhook resolves to exactly one guild. The side effect is that a
     repository cannot be registered in two servers at once.
-  - Enums are stored as `VARCHAR` plus a `CHECK` constraint, not native PostgreSQL enums, so
-    later MVPs can add status and priority values without an `ALTER TYPE` migration.
+  - Enums are stored as `VARCHAR` rather than native PostgreSQL enums, so later MVPs can add
+    status and priority values without an `ALTER TYPE` migration. Written here at the time as
+    "`VARCHAR` plus a `CHECK` constraint", which was never true of what the migration produced:
+    `create_constraint` has defaulted to False since SQLAlchemy 1.4, so no CHECK is emitted and
+    the column takes any string that fits. `varchar_enum` says so and the README says so; this
+    line did not, and a later stage removed an enum value on the strength of it being true.
   - `user_links` is not in the original requirements table list. It was added because reviewer
     pinging needs a GitHub login to Discord account mapping and no other table holds one.
 
@@ -294,7 +298,7 @@ Issues #2 to #26.
 Issues #27 to #53. No migration: `tracked_items.github_object_type`,
 `channel_mappings.object_type` and `tracked_items.priority` already carried `ISSUE` and priority
 values, so MVP 1's schema absorbed MVP 2 unchanged. That is the payback for choosing `VARCHAR`
-plus `CHECK` over native PostgreSQL enums.
+over native PostgreSQL enums.
 
 ### Changed
 
@@ -2212,29 +2216,29 @@ of the move or the other, so an ordinary status change still costs no call to Di
 
 **A sync decides it is current before anything is locked, and still does.** The staleness check
 reads the item's mark and acts on it several statements later, under read committed, which gives no
-snapshot stability inside a transaction. Two syncs of one item overlap by design — `/pr` beside the
-worker, several events for one item at once, a second replica — so both read the mark before either
+snapshot stability inside a transaction. Two syncs of one item overlap by design, whether `/pr`
+beside the worker, several events for one item at once, or a second replica, so both read the mark
+before either
 commits, both answer "not superseded", and neither takes the stale exit. The one carrying the older
 payload then writes its whole snapshot over the newer one, down to deleting a reviewer's row with
 its `notified_at` and putting back somebody the newer payload had removed, who is then pinged again.
 
 Confirmed and left open, which is worth recording along with why. Holding the row across the
-decision with `SELECT ... FOR UPDATE` fixes it in three lines and was written, measured and taken
-back out: the suite has a latent hang where a task cancelled mid-sync leaves its transaction open,
-and the `TRUNCATE` every test starts with then waits on it. That hang exists either way — a run
-with no lock at all still produced one — but an exclusive row lock on the busiest row of the sync
-path made it far likelier, taking the suite from ten minutes and one stall to twenty-three minutes
-and two. Trading a dependable gate for a race that needs a coincidence of milliseconds in one
-particular direction, and costs one duplicate mention and a Reviewers line the next event repairs,
-is the wrong way round. Doing it properly means deciding at write time rather than at read time —
-making the writes conditional on the mark they were computed from — which is a piece of design, not
-a patch to append to a long session.
+decision with `SELECT ... FOR UPDATE` fixes it in three lines, and it was written, measured and
+taken back out again. The measurement was the problem: the run carrying it was three times slower
+than the run without, and two tests failed in a fixture, so it looked as though an exclusive lock
+on the busiest row of the sync path was starving the suite. That reading was wrong, and is
+corrected below. What remains true is that nobody has since measured the lock on a quiet machine,
+and a change to the ordering of every sync in the process is not one to leave in on the strength of
+a measurement already known to be bad. Doing it properly means deciding at write time rather than
+at read time, making the writes conditional on the mark they were computed from, which is a piece
+of design rather than a patch to append to a long session.
 
 **Two more from the same session, found by hand.** A board read hands the same card back more than
 once whenever a cursor pages through a list somebody is editing, and the draft half mirrored every
 copy, because the stored state is read once for the whole board and never written to. And a spent
 GitHub rate limit was polled straight through: the client already works out when the window
-reopens, and nothing read it, so the poller went back every interval for the whole window — worse
+reopens, and nothing read it, so the poller went back every interval for the whole window, worse
 than wasted, since GitHub lengthens a secondary limit for requests made during one.
 
 ### What the tests were not saying
@@ -2249,7 +2253,7 @@ and stayed green. All three have a real open request in front of them now and sa
 it.
 
 `test_github_is_written_before_discord` failed every GitHub call, including the read that comes
-first — at which point nothing has been attempted and the order it is named for is never
+first, at which point nothing has been attempted and the order it is named for is never
 exercised. It passed with the label write moved after the re-render. The refusal is on the write
 now, and it checks that Discord was left alone.
 
@@ -2262,25 +2266,98 @@ claiming to be the thing standing in the way.
 
 Recorded because they were checked properly and are worth not checking again. Every migration
 round-trips: applied to head, taken down to base and back up, `alembic check` finds nothing and the
-schema is byte-identical to a fresh one. The four webhook parsers were given 7368 mutated bodies —
-every field of every real payload replaced with each of twenty-three hostile values, and separately
-deleted — and raised nothing. The endpoint's own limits hold over real sockets, as does redirect
+schema is byte-identical to a fresh one. The four webhook parsers were given 7368 mutated bodies,
+every field of every real payload replaced with each of twenty-three hostile values and separately
+deleted, and raised nothing. The endpoint's own limits hold over real sockets, as does redirect
 following, Link-header pagination and the rate-limit classification. `.env.example` was missing
 four settings, one of them the number that turns the board mirror on, so a guard now compares it
 against the settings object.
 
-### A hang in the test suite, found by running it
+## A third hunt, over ground the first two never touched
 
-Not a defect in the bot. Three full runs in a row each ended with one or two tests erroring at
-setup with a `TimeoutError`, and a different test each time, which is what says the fault is not in
-the test that reports it.
+Six lenses again, none of them repeats: the delivery queue and the worker's lifecycle, process
+startup and shutdown, the pure domain layer attacked with invariants rather than examples, what
+actually reaches a Discord message, at-least-once end to end, and whether what is documented is
+what happens. Ten findings survived a reader told to refute them, and none was refuted. Nine are
+fixed below. The tenth is recorded at the end.
 
-Every test starts by truncating all eight tables, and `TRUNCATE` needs an exclusive lock on each of
-them. Anything still holding a lock on `tracked_items` blocks it, and several tests cancel a task
-part way through a sync: the task stops, the connection is never handed back, and its transaction
-stays open until the connection is collected. The next test then waits on it, for as long as that
-takes — one run spent twenty-three minutes inside a single fixture.
+### The documented install did not work
 
-Recorded rather than fixed. It is a real source of flakiness and it will be hit again in CI, but
-the fix belongs with whoever decides how the fixtures should hand connections back, and guessing at
-that here would trade a slow suite for a red one.
+`docker compose up` could not bring the stack up after the README's own first step. Compose reads
+`./.env` for interpolation, the README says to begin with `cp .env.example .env`, and that file
+carries the host's `localhost:5433` database URL. So `${SHANNON_DATABASE_URL:-...@db:5432/...}`
+never reached its default and handed both containers their own loopback, where nothing is
+listening: `migrate` died on connection refused and `app` waited on it for ever. The one setting
+whose value inside the network is not the value outside it is now written out rather than
+interpolated, and `docker compose config` was read back both with and without a `.env` to prove it.
+
+### The image reported healthy at the moment the service reported it was not
+
+The Dockerfile's HEALTHCHECK was a bare TCP connect, under a comment claiming the service exposes
+no health route. It does, it answers 503 when the database is unreachable or the worker has died,
+and that is the whole reason it exists. A socket that opens proves only that uvicorn is listening,
+and uvicorn goes on listening with a dead worker behind it and a queue that only grows. CI's image
+job polls container health, so this was the check that actually decided. It calls `/health` now,
+through urllib rather than curl, which the slim base image does not carry.
+
+### Three ways the process could stop doing its job and say nothing
+
+- **The worker waited for Discord for ever.** discord.py reconnects by design, so an outage,
+  blocked egress or a handshake that never completes leaves `start()` running and the connection
+  never made. The worker sat in the pre-loop wait for the life of the process: nothing leased,
+  nothing pruned. It goes ahead without Discord after five minutes now, and every delivery then
+  fails with a retryable gateway error that says why. A queue draining slowly with a visible reason
+  beats one that never moves.
+- **`/health` called that healthy.** Both it and the gateway check answered on the bot's task not
+  having finished, which is true of a client retrying for ever. It asks the client whether it has
+  actually arrived.
+- **The startup database check had no deadline.** asyncpg's sixty seconds bound the handshake, not
+  the query, so a server that accepts the connection and then goes quiet left the lifespan blocked
+  before `yield`. Uvicorn opens no listening socket until startup returns and reads a signal only
+  afterwards, so the process served nothing, answered no health check, and could not be told to
+  stop. Fifteen seconds now, then it fails with something an operator can act on.
+
+### A batch nobody handed back
+
+Everything a handler can raise is dealt with inside `_handle`. What escapes it is the write that
+records the outcome. That the delivery itself comes round again when that write fails is the
+documented contract, `mirrored_notes` exists to make it safe, and a test pins it, so that half is
+left exactly as it was. What was not intended is the rest of the batch going with it: up to nine
+deliveries nothing had touched sat marked PROCESSING under a live lease, invisible to this worker
+and to any other, until it lapsed a quarter of an hour later.
+
+They are handed back now, from the failing delivery onward, and the error still comes out of
+`run_once` so that deciding whether to carry on stays with `run_forever`. Because `release` only
+moves rows still marked PROCESSING, a write that did commit is left alone and one that did not
+comes back for another go. Worth recording that the first attempt at this swallowed the error as
+well, and the test that already pinned the contract is what caught it.
+
+### The priority commands never converged on a repository that spells its labels in lowercase
+
+`status_change` compares case-folded and `priority_change` did not, in the same module. GitHub's own
+stock labels are lowercase, and it matches a label name without regard to case, so an item carrying
+`high` had that label read as stale purely for its case: it came off, `HIGH` went on, and the add
+re-attached the very label just removed. The item still read `high`, the next run of the command did
+the same two writes again, and every one of them answered "is now HIGH priority" for an item that
+had been HIGH all along. Beside it, the re-render appended the label being added even when the item
+already carried it, so a pull request holding `HIGH` and `urgent` rendered its tag twice, and which
+of the two happened depended on the order GitHub returned the labels in.
+
+### And the README described a schema it no longer had
+
+Seven tables where there are eight, `team_links` missing although the same README documents the
+command that needs it, and a revision range stopping at `0007` with eleven on disk. Three of the
+README's claims are restatements of things the tree already decides, so three tests now compare
+them against the tree: every table on the metadata, every setting on the object, and the revision
+range against the files. The changelog's own claim that enums carry a `CHECK` constraint is
+corrected too. They never have: `create_constraint` has defaulted to False since SQLAlchemy 1.4,
+`varchar_enum` says so, the README says so, and a later stage had already removed an enum value on
+the strength of the opposite being true.
+
+### Left alone, on purpose
+
+`fit` drops from the first line that will not fit rather than skipping it and keeping the shorter
+lines below, so a very long field costs the fields under it. That is what "trim on a line boundary"
+means, a test pins the prefix, and the alternative leaves a hole in the middle of a block whose
+trailing marker says it was cut at the end. Recorded rather than changed, because it is a judgement
+somebody already made and wrote down.
