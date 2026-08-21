@@ -86,6 +86,26 @@ class TestPriority:
         assert change.remove == ("urgent",)
         assert change.add == "HIGH"
 
+    @pytest.mark.parametrize("existing", ["high", "High", "HIGH", "  high  "])
+    def test_the_priority_it_already_has_is_left_alone_whatever_its_case(
+        self, existing: str
+    ) -> None:
+        """GitHub's own stock labels are lowercase, and it matches a label name without regard to
+        case. Reading `high` as stale purely for its case took it off and put `HIGH` on, which
+        re-attached the same label, so the item still read `high` and the next run of the command
+        did it all again and answered "is now HIGH priority" every time.
+        """
+        change = labels.priority_change([existing], Priority.HIGH)
+
+        assert change.nothing_to_do, f"{existing!r} was rewritten for its case alone"
+
+    def test_a_differently_cased_label_still_comes_off_for_a_different_priority(self) -> None:
+        """The case rule must not swallow the reason this function exists."""
+        change = labels.priority_change(["high"], Priority.LOW)
+
+        assert change.remove == ("high",)
+        assert change.add == "LOW"
+
     def test_status_labels_are_left_alone(self) -> None:
         change = labels.priority_change(["IN_REVIEW", "low"], Priority.HIGH)
 

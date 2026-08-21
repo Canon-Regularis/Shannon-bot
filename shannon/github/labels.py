@@ -86,9 +86,20 @@ def priority_change(current: Iterable[str], wanted: Priority) -> LabelChange:
     or `HIGH_PRIORITY`, and leaving one of those behind means the item still reads HIGH after
     being set to LOW. Whatever `parse_priority` reads is what comes off, which is the only rule
     that cannot leave the two disagreeing.
+
+    Case-folded, the way `status_change` above compares. GitHub's own stock labels are lowercase
+    and a repository that spells this one `high` was carrying a label this read as stale purely
+    for its case: it came off and `HIGH` went on, and since GitHub matches a label name without
+    regard to case, the add re-attached the very label just removed. So the item still read
+    `high`, the next run of the command did the same two writes again, and every one of them
+    answered "is now HIGH priority" for an item that had been HIGH all along.
     """
     names = list(current)
-    stale = tuple(name for name in names if _is_priority(name) and name.strip() != wanted.value)
+    stale = tuple(
+        name
+        for name in names
+        if _is_priority(name) and name.strip().casefold() != wanted.value.casefold()
+    )
     already = parse_priority(names) is wanted and not stale
     return LabelChange(remove=stale, add="" if already else PRIORITY_LABELS[wanted])
 

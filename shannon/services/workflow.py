@@ -263,9 +263,17 @@ class ItemWorkflow:
 
 
 def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> TrackedSnapshot:
+    """The snapshot as it will be once the change lands, without asking GitHub again.
+
+    Only appends a label the item is not already carrying. An item can hold two labels the same
+    reader answers for, such as `HIGH` beside `urgent` or two statuses at once, and the change then
+    strips one and adds the canonical name, which the item already had. Appending it regardless
+    rendered the tag twice in the thread, and which of the two happened depended on the order
+    GitHub returned the labels in, so the same item state produced different blocks.
+    """
     gone = {name.casefold() for name in change.remove}
     kept = [label for label in snapshot.labels if label.name.casefold() not in gone]
-    if change.add:
+    if change.add and change.add.casefold() not in {label.name.casefold() for label in kept}:
         kept.append(Label(name=change.add))
     return replace(snapshot, labels=tuple(kept))
 

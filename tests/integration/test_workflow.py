@@ -270,6 +270,26 @@ class TestSettingAPriority:
         assert "HIGH" not in github.labels[REPO_KEY]
         assert "LOW" in github.labels[REPO_KEY]
 
+    async def test_a_synonym_does_not_leave_the_thread_showing_the_tag_twice(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """An item can carry two labels one reader answers for. The change strips the synonym and
+        adds the canonical name, which the item already had, and appending it regardless rendered
+        the tag twice, and only for one of the two orders GitHub might have listed them in.
+        """
+        github.set_labels(REPO_KEY, ["HIGH", "urgent"])
+
+        await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+        tags = next(
+            line for line in threads.metadata_of(thread_id).splitlines() if "**Tags:**" in line
+        )
+        assert tags.count("`HIGH`") == 1, f"the tag was rendered more than once: {tags}"
+
     async def test_a_repeated_command_takes_no_action(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
     ) -> None:
