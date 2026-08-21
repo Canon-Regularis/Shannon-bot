@@ -109,14 +109,25 @@ class ItemWorkflow:
             # Nothing to write, which is not the same as nothing to do. Locking is the last
             # step of finishing an item and the likeliest to have failed on its own, so a
             # repeat of /set_done is what gets a second go at it.
-            locked = status is Status.DONE and await self._lock(thread_id)
+            locked = status is Status.DONE and await self._set_lock(thread_id, True)
             return WorkflowOutcome(found.full_name, found.number, changed=False, locked=locked)
 
         await self._apply(found, change)
         await self._store_status(found.tracked_item_id, status)
         written = await self._rerender(found, snapshot, change)
 
-        locked = status is Status.DONE and await self._lock(written or thread_id)
+        # Touched only when DONE is on one side of the move or the other, so an ordinary status
+        # change still costs no Discord call. Moving OUT of DONE has to give the thread back:
+        # `PullRequestPolicy.locked` returns None on every sync, so the lock `/set_done` takes is
+        # the only one a pull request ever gets and nothing else was ever going to lift it. The
+        # commands to move it back are all allowed and all reported success, and left the thread
+        # shut against the discussion they had just reopened.
+        wants_lock = status is Status.DONE
+        locked = (
+            await self._set_lock(written or thread_id, wants_lock)
+            if wants_lock or found.status is Status.DONE
+            else False
+        )
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(found.full_name, found.number, changed=True, locked=locked)
@@ -210,15 +221,18 @@ class ItemWorkflow:
         result = await self._kinds[found.object_type].sync.sync(_relabelled(snapshot, change))
         return result.thread_id
 
-    async def _lock(self, thread_id: int) -> bool:
-        """Close a finished item's thread to further replies.
+    async def _set_lock(self, thread_id: int, locked: bool) -> bool:
+        """Close a finished item's thread to further replies, or open it again.
 
         Last, after the metadata is written. A locked thread still takes this bot's edits, so
         the order is not what makes it work; it is that the lock is the step most likely to be
         refused, and everything before it is worth keeping when it is.
+
+        Answers with what was asked for rather than with what Discord did, because a refusal
+        raises here and never reaches the caller.
         """
-        await self._threads.set_locked(thread_id=thread_id, locked=True)
-        return True
+        await self._threads.set_locked(thread_id=thread_id, locked=locked)
+        return locked
 
     async def _store_status(self, tracked_item_id: int, status: Status) -> None:
         """Written before the re-render, because the render reads it back off the row."""

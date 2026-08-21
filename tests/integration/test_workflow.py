@@ -94,17 +94,59 @@ class TestSettingAStatus:
         assert (await stored(db_session)).status is Status.IN_REVIEW
 
     async def test_github_is_written_before_discord(
-        self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
     ) -> None:
         """The requirement, and the only order that is recoverable.
 
         GitHub refusing has to leave Discord untouched, or the thread claims a status the
         repository never agreed to and nothing later corrects it.
+
+        The refusal is on the label WRITE, not on everything. Failing every call fails the read
+        that comes first, at which point nothing has been attempted and the order this is named
+        for is never exercised: the same test passed with the write moved after the re-render.
         """
-        github.error = GitHubUnavailableError("GitHub is down")
+        github.write_error = GitHubUnavailableError("GitHub is down")
+        before = threads.metadata_of(thread_id)
 
         with pytest.raises(GitHubUnavailableError):
             await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert github.label_calls, "it did not get as far as writing a label"
+        assert threads.metadata_of(thread_id) == before, "Discord was told about a refused write"
+        assert threads.locks == []
+        assert (await stored(db_session)).status is Status.NOT_REVIEWED
+
+    async def test_moving_a_pull_request_out_of_done_gives_its_thread_back(
+        self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
+    ) -> None:
+        """Nothing else was ever going to. `PullRequestPolicy.locked` returns None on every sync,
+        so the lock `/set_done` takes is the only one a pull request gets, and every command to
+        move it back out of DONE wrote the label, moved the stored status, reported success and
+        left the thread shut against the discussion it had just reopened.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        assert threads.threads[thread_id].locked is True
+
+        outcome = await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert outcome.locked is False
+        assert threads.threads[thread_id].locked is False, "it stayed shut"
+
+    async def test_a_status_change_with_no_done_on_either_side_leaves_the_lock_alone(
+        self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
+    ) -> None:
+        """Giving a thread back is worth a call to Discord; saying nothing changed is not."""
+        before = list(threads.locks)
+
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert threads.locks == before
 
     async def test_a_failed_write_leaves_the_stored_status_alone(
         self,

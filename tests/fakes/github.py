@@ -49,6 +49,10 @@ class FakeGitHubClient:
         self.bodies: dict[str, Any] = {}
         self.json_calls: list[tuple[str, dict[str, Any]]] = []
         self.error: Exception | None = None
+        # Raised by the label writes alone, leaving the reads working. `error` fails every
+        # call including the read that comes first, which is no use for showing what a
+        # refused WRITE leaves behind: nothing has happened yet when the read fails.
+        self.write_error: Exception | None = None
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -87,6 +91,8 @@ class FakeGitHubClient:
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         key = (f"{owner}/{name}".lower(), number)
         self.label_calls.append(("add", key, label))
+        if self.write_error is not None:
+            raise self.write_error
         if self.error is not None:
             raise self.error
         self.labels.setdefault(key, []).append(label)
@@ -95,6 +101,8 @@ class FakeGitHubClient:
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:
         key = (f"{owner}/{name}".lower(), number)
         self.label_calls.append(("remove", key, label))
+        if self.write_error is not None:
+            raise self.write_error
         if self.error is not None:
             raise self.error
         self.labels[key] = [
