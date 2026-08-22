@@ -2214,7 +2214,7 @@ out of DONE is allowed, and `/set_in_review` wrote the label, moved the stored s
 success, and left the thread shut. It gives the thread back now, and only when DONE is on one side
 of the move or the other, so an ordinary status change still costs no call to Discord.
 
-**A sync decides it is current before anything is locked, and still does.** The staleness check
+**A sync decided it was current before anything was locked.** The staleness check
 reads the item's mark and acts on it several statements later, under read committed, which gives no
 snapshot stability inside a transaction. Two syncs of one item overlap by design, whether `/pr`
 beside the worker, several events for one item at once, or a second replica, so both read the mark
@@ -2223,16 +2223,19 @@ commits, both answer "not superseded", and neither takes the stale exit. The one
 payload then writes its whole snapshot over the newer one, down to deleting a reviewer's row with
 its `notified_at` and putting back somebody the newer payload had removed, who is then pinged again.
 
-Confirmed and left open, which is worth recording along with why. Holding the row across the
-decision with `SELECT ... FOR UPDATE` fixes it in three lines, and it was written, measured and
-taken back out again. The measurement was the problem: the run carrying it was three times slower
-than the run without, and two tests failed in a fixture, so it looked as though an exclusive lock
-on the busiest row of the sync path was starving the suite. That reading was wrong, and is
-corrected below. What remains true is that nobody has since measured the lock on a quiet machine,
-and a change to the ordering of every sync in the process is not one to leave in on the strength of
-a measurement already known to be bad. Doing it properly means deciding at write time rather than
-at read time, making the writes conditional on the mark they were computed from, which is a piece
-of design rather than a patch to append to a long session.
+The read holds the row now, so the second one in sees what the first wrote and decides against
+that instead. A new item has no row to lock yet, which is what `get_or_create`'s own conflict
+handling was already for.
+
+Worth recording how nearly this went the other way. The same three lines were written once before
+and taken straight back out: the run carrying them was three times slower than the run without and
+two tests failed in a fixture, so it read as an exclusive lock on the busiest row of the sync path
+starving the suite. That was wrong. The failures were `asyncpg.connect` giving up after sixty
+seconds, which is connection pressure and not lock contention, and the pressure was several test
+runs and eighteen review agents sharing one PostgreSQL. Measured again on a quiet machine the
+locked suite is 8:13 against 11:02 for the unlocked one, which is to say the difference was never
+there at all. The lesson is the cheaper one: a measurement taken on a busy machine is not a
+measurement, and a fix should not be abandoned on the strength of one.
 
 **Two more from the same session, found by hand.** A board read hands the same card back more than
 once whenever a cursor pages through a list somebody is editing, and the draft half mirrored every
@@ -2361,3 +2364,56 @@ lines below, so a very long field costs the fields under it. That is what "trim 
 means, a test pins the prefix, and the alternative leaves a hole in the middle of a block whose
 trailing marker says it was cut at the end. Recorded rather than changed, because it is a judgement
 somebody already made and wrote down.
+
+## A fourth look: the race closed, and a mutation campaign
+
+The six readers planned for this round all died to a rate limit before they read anything, so this
+was done by hand and by machine instead.
+
+### The overlapping-sync race is fixed
+
+The three lines that close it were written two sessions ago, measured, and taken straight back out
+because the run carrying them was three times slower than the run without and two tests failed in
+a fixture. That reading was wrong. The failures were `asyncpg.connect` giving up after sixty
+seconds, which is connection pressure rather than lock contention, and the pressure was several
+test runs and eighteen review agents sharing one PostgreSQL. Measured again with the machine to
+itself, the locked suite is 8:13 against 11:02 for the unlocked one.
+
+So the read that decides whether a delivery is stale now holds the row for the rest of its
+transaction. Two syncs of one item overlap by design, and without it both read the mark before
+either commits, both answer "not superseded", and the one carrying the older payload writes its
+whole snapshot over the newer one: title, state and priority, and the reviewers, whose rows
+`replace` deletes and reinserts with `notified_at` cleared, so somebody the newer payload had
+removed goes back on the item and is pinged for it again.
+
+### Seven guards nothing was checking
+
+A generated mutation campaign over ten modules: every comparison and boolean operator flipped one
+at a time, eighty-five mutants, each run against the tests that name its module. Sixty-one died.
+Of the twenty-four that lived, seven were real gaps and are now closed.
+
+- **`LabelChange.nothing_to_do`** is `not remove and not add`, and turning that `and` into an `or`
+  changed nothing any test could see. Every assertion about the property said it was true and none
+  said it was false. What the wrong version costs: an item already stored at BACKLOG, wearing a
+  stray second status label, asked for BACKLOG again returns early and never strips the stray one.
+  The test that looks like it covers this does not, because its stored status differs from the one
+  being set, so the guard's second half is false and the early return never fires either way.
+- **Six guards in `mapping.py`**, all the same shape. `if not isinstance(x, str) or not x` turned
+  into an `and` accepts a field that is present and empty, or present and the wrong type, and no
+  test noticed for the login, the team slug, the repository name, a label name, or either of the
+  two link fallbacks. There was no test file for that module at all: the parsers were covered
+  against payloads missing a key or shaped wrongly at the top, never against a key that is there
+  and useless. What the wrong version costs is not an exception but an `Actor` whose login is the
+  empty string reaching the assignment store and the renderer, and a blank tag in a thread.
+
+### And seventeen that were not
+
+Recorded because a mutation report is only worth reading if it says which survivors do not matter.
+Three are boundary flips on timestamp comparisons, `<` against `<=`, which differ only when two
+times are equal to the microsecond. Two are inside a logging branch that runs while the process is
+shutting down. The other twelve were an artefact of the campaign itself: it ran each module against
+the tests that name it, and `get_by_number` is reached by the note path rather than by the sync
+files, so a dozen WHERE clauses looked unpinned when they were not. Re-run against the whole
+integration tier, they die. The lesson is about the method rather than the code: a surviving mutant
+is a question, not an answer, and the first thing to ask is whether the tests that should have
+killed it were even running.
