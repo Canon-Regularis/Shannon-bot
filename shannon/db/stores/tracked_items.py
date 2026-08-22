@@ -18,15 +18,31 @@ class TrackedItemStore:
         self._session = session
 
     async def get(
-        self, *, repository_id: int, object_type: ObjectType, github_object_id: int
+        self,
+        *,
+        repository_id: int,
+        object_type: ObjectType,
+        github_object_id: int,
+        lock: bool = False,
     ) -> TrackedItem | None:
-        return await self._session.scalar(
-            select(TrackedItem).where(
-                TrackedItem.repository_id == repository_id,
-                TrackedItem.github_object_type == object_type,
-                TrackedItem.github_object_id == github_object_id,
-            )
+        """Find one item, optionally holding it for the rest of the transaction.
+
+        `lock` is for the caller that reads the item, decides something from what it read, and
+        then writes. Two syncs of one item overlap by design, and without it both read the row
+        before either commits, so both decide against the same out-of-date answer. Postgres
+        re-reads a row once it grants the lock, so the second one in sees what the first wrote
+        and decides against that instead.
+
+        Off by default. Every other caller reads to answer a question and writes nothing, and a
+        lock held on the busiest row of the sync path for the length of those is a queue nobody
+        asked for.
+        """
+        statement = select(TrackedItem).where(
+            TrackedItem.repository_id == repository_id,
+            TrackedItem.github_object_type == object_type,
+            TrackedItem.github_object_id == github_object_id,
         )
+        return await self._session.scalar(statement.with_for_update() if lock else statement)
 
     async def get_by_id(self, tracked_item_id: int) -> TrackedItem | None:
         return await self._session.get(TrackedItem, tracked_item_id)

@@ -239,6 +239,57 @@ class TestAnItemThatWentAwayBetweenTwoStatements:
                 await _create(store)
 
 
+async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """The staleness decision is made from one read and acted on several statements later.
+
+    Read committed gives no snapshot stability inside a transaction, so with nothing held both
+    syncs of an item read the mark before either commits, both answer "not superseded", and
+    neither takes the stale exit. The one carrying the older payload then writes its whole
+    snapshot over the newer one: title, state and priority, and the reviewers, whose rows
+    `replace` deletes and reinserts with `notified_at` cleared, so somebody the newer payload had
+    removed goes back on the item and is pinged for it a second time.
+
+    Made to happen rather than hoped for, the way the collision above is: the row is held by
+    somebody mid-write while the sync starts, so it waits on the row rather than on luck.
+    """
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    snapshot = pr_event("opened")
+    await service.sync(snapshot)
+    newer = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+    async with db_sessionmaker() as holder:
+        await holder.begin()
+        store = TrackedItemStore(holder)
+        held = await store.get(
+            repository_id=registered.id,
+            object_type=ObjectType.PR,
+            github_object_id=snapshot.github_object_id,
+            lock=True,
+        )
+        assert held is not None
+        store.raise_updated_at(held, newer)
+        await holder.flush()
+
+        # The same delivery arriving again, which is what a retry is, while somebody newer is
+        # part way through writing.
+        catching_up = asyncio.create_task(service.sync(snapshot))
+        await asyncio.sleep(0.2)
+        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
+
+        await holder.commit()
+        result = await catching_up
+
+    assert result.outcome is SyncOutcome.STALE, "it decided from what it read before the write"
+    db_session.expire_all()
+    item = await db_session.scalar(select(TrackedItem))
+    assert as_utc(item.github_updated_at) == newer, "the older payload wrote over the newer one"
+
+
 async def _create(store: TrackedItemStore) -> TrackedItem:
     return await store.get_or_create(
         repository_id=1,

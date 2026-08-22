@@ -246,10 +246,20 @@ class ItemSyncService:
         # `notified_at` and putting back somebody the newer payload had removed, who is then
         # pinged again. The row a new item is created from is not there to lock yet, which is
         # what `get_or_create`'s own conflict handling is for.
+        # Held for the rest of the transaction, because everything below is decided from what
+        # this read says and then written. Two syncs of one item overlap by design: `/pr` runs
+        # while the worker is mid-delivery, GitHub sends several events for one item at once, and
+        # a second replica leases in parallel. Without the lock both read the row before either
+        # commits, so both answer "not superseded" and the one carrying the older payload writes
+        # its whole snapshot over the newer one, down to deleting a reviewer's row with its
+        # `notified_at` and putting back somebody the newer payload had removed, who is then
+        # pinged again. A new item has no row to lock yet, which is what `get_or_create`'s own
+        # conflict handling is for.
         item = await TrackedItemStore(session).get(
             repository_id=repository.id,
             object_type=object_type,
             github_object_id=snapshot.github_object_id,
+            lock=True,
         )
         superseded = item is not None and is_superseded(snapshot.updated_at, item.github_updated_at)
 
