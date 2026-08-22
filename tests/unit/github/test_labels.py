@@ -49,6 +49,20 @@ class TestStatus:
         assert sorted(change.remove) == ["BACKLOG", "IN_REVIEW"]
         assert change.add == "DONE"
 
+    def test_tidying_a_stale_label_is_something_to_do(self) -> None:
+        """An item wearing two statuses, asked for the one it already has. There is nothing to
+        add and a label to take off, and reading that as nothing to do leaves the stale one on
+        for ever: `set_status` returns early on `nothing_to_do` and never reaches the write.
+
+        Every other assertion about this property is that it is true, so nothing said what it
+        means for it to be false, and `not remove and not add` could be an `or` unnoticed.
+        """
+        change = labels.status_change(["DONE", "BACKLOG"], Status.DONE)
+
+        assert change.remove == ("BACKLOG",)
+        assert change.add == ""
+        assert not change.nothing_to_do, "a label left to remove is not nothing to do"
+
     def test_a_status_word_used_loosely_is_not_a_status(self) -> None:
         """Unlike priority, no synonyms. A repository is free to have a label called `blocked`
         or `review` meaning its own thing, and reading those as workflow states would move
