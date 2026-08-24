@@ -843,6 +843,30 @@ class TestASecondReviewFound:
         assert item.status is Status.BACKLOG
 
 
+class TestABoardNobodyFinishedSettingUp:
+    """Tickets have no channel fallback, so a board configured before `/set_channel` mirrors
+    nothing at all. What it must not do is say so once per card, once a minute, for ever."""
+
+    async def test_the_missing_channel_is_said_once_rather_than_once_per_card(
+        self, registered: Repository, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nothing about any one card decided this: the sync refuses on the repository or on the
+        channel, so every card after the first is refused identically, and each one opens a
+        session and runs two queries to learn the same thing. On a board of any size that is the
+        whole log, every interval, until somebody notices the one line that matters.
+        """
+        board = FakeBoard(*(card(item_id=900 + n, title=f"Card {n}") for n in range(6)))
+
+        with caplog.at_level("WARNING"):
+            assert await poller_for(board).run_once() == 0
+
+        per_card = [r for r in caplog.records if "has no channel mapped" in r.getMessage()]
+        assert len(per_card) == 1, f"six cards were each asked and refused: {len(per_card)} times"
+        assert any("run /set_channel" in r.getMessage() for r in caplog.records), (
+            "it stopped without saying what to do about it"
+        )
+
+
 class TestOneCardTakingTheWholeBoardWithIt:
     """A poll reads the whole board, and used to act on all of it or on none of it.
 

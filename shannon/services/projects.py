@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, URL_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
-from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import ShannonError
@@ -36,7 +36,7 @@ from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.errors import GitHubRateLimitError
 from shannon.github.projects import BoardItem
-from shannon.services.sync.items import SyncsItems
+from shannon.services.sync.items import SyncOutcome, SyncsItems
 from shannon.services.workflow import WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
@@ -162,6 +162,25 @@ class ProjectPoller:
             # counting those reports a board being mirrored while nothing is written.
             if result.synced:
                 mirrored += 1
+                continue
+
+            # The check stays explicit and the branch coverage floor is told not to look for
+            # its other half: STALE is the only other outcome and it cannot happen here, because
+            # it needs a stored timestamp newer than the card's and `_has_moved` above only lets
+            # a card through when the card is the newer of the two.
+            if result.outcome is SyncOutcome.NOT_TRACKED:  # pragma: no branch
+                # Nothing about this card decided that: the sync refuses on the repository or on
+                # the channel, so every remaining card would be refused the same way and each one
+                # would open a session, run two queries and write the same warning. On a board of
+                # any size that is the whole log, once a minute, for as long as nobody has run
+                # /set_channel. One card is enough to learn it from.
+                logger.warning(
+                    "no channel is mapped for %s, so none of this board's %s cards can be "
+                    "mirrored; run /set_channel",
+                    ObjectType.TICKET.value,
+                    len(drafts),
+                )
+                break
         return mirrored
 
     async def _forget_the_mirror(
@@ -203,10 +222,15 @@ class ProjectPoller:
         match. It compares against the column it last saw instead, so a card nobody has touched
         says nothing at all.
         """
+        # One query for the whole board rather than one per card. Every card asks the same
+        # question of the same table, and a board is read whole on every poll whether or not
+        # anything moved.
+        state = await self._board_state(board.repository_id)
+
         moved = 0
         for item in wrapped:
             try:
-                moved += await self._move_one(board, item)
+                moved += await self._move_one(board, item, state)
             except Exception:
                 # The same bargain the draft half makes, for the same reason. Everything below
                 # is per-card already; this is only about the failures nobody wrote a branch
@@ -214,12 +238,14 @@ class ProjectPoller:
                 logger.exception("could not move the card %r", item.title)
         return moved
 
-    async def _move_one(self, board: _Board, item: BoardItem) -> int:
+    async def _move_one(
+        self, board: _Board, item: BoardItem, state: Mapping[tuple[ObjectType, int], BoardRow]
+    ) -> int:
         """Act on one card, answering with whether it moved anything."""
         if item.content_id is None:
             return 0
 
-        tracked = await self._tracked(board.repository_id, item)
+        tracked = state.get((item.kind, item.content_id))
         if tracked is None or tracked.thread_id is None:
             return 0
 
@@ -301,16 +327,9 @@ class ProjectPoller:
         async with self._sessionmaker() as session, session.begin():
             await TrackedItemStore(session).remember_column(tracked_item_id, column)
 
-    async def _tracked(self, repository_id: int, item: BoardItem) -> _Tracked | None:
+    async def _board_state(self, repository_id: int) -> Mapping[tuple[ObjectType, int], BoardRow]:
         async with self._sessionmaker() as session:
-            row = await TrackedItemStore(session).get(
-                repository_id=repository_id,
-                object_type=item.kind,
-                github_object_id=item.content_id,
-            )
-            if row is None:
-                return None
-            return _Tracked(row.id, row.discord_thread_id, row.status, row.project_column)
+            return await TrackedItemStore(session).board_state(repository_id=repository_id)
 
     async def run_forever(self) -> None:
         """Read the board until asked to stop.
@@ -379,16 +398,6 @@ class ProjectPoller:
             column=item.column,
             project_number=self._project_number,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _Tracked:
-    """What the poller needs of an item that is already mirrored, out of its session."""
-
-    tracked_item_id: int
-    thread_id: int | None
-    status: Status
-    column: str | None
 
 
 def _fits(column: str | None) -> str:

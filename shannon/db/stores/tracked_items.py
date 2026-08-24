@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import func, select, update
@@ -9,6 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.time import as_utc
+
+
+@dataclass(frozen=True, slots=True)
+class BoardRow:
+    """One tracked item as the board poller needs it, out of its session."""
+
+    tracked_item_id: int
+    thread_id: int | None
+    status: Status
+    column: str | None
 
 
 class TrackedItemStore:
@@ -122,6 +133,29 @@ class TrackedItemStore:
             )
         )
         return {row[0]: (row[1], row[2]) for row in rows.all()}
+
+    async def board_state(self, *, repository_id: int) -> dict[tuple[ObjectType, int], BoardRow]:
+        """What the poller needs of every item a board card could wrap, in one query.
+
+        The draft half of a poll already reads its state this way. The wrapped half asked per
+        card, which is a session and a query each, once a minute, for every card on the board
+        whether or not it had moved. A board is read whole every time, so the number of questions
+        should be a function of the number of boards and not of the number of cards.
+
+        Keyed by the pair a card is matched on, because issues and pull requests number
+        separately and a board holds both.
+        """
+        rows = await self._session.execute(
+            select(
+                TrackedItem.github_object_type,
+                TrackedItem.github_object_id,
+                TrackedItem.id,
+                TrackedItem.discord_thread_id,
+                TrackedItem.status,
+                TrackedItem.project_column,
+            ).where(TrackedItem.repository_id == repository_id)
+        )
+        return {(row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5]) for row in rows.all()}
 
     async def remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record the board column this item was last seen in.
