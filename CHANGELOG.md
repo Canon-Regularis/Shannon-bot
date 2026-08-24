@@ -2472,14 +2472,39 @@ Two of the three tests that pinned the old wording were testing something else a
 it in passing. The third used the rate limit as its example of falling through to the general case,
 so it was pinning the defect; it now uses the error that really does mean unreachable.
 
-### Leads, not findings
+### The leads, chased
 
-Recorded because the readers that would have verified them ran out of quota, and an unverified
-claim is worth keeping and worth labelling. A guild can never be unbound from its repository, so a
-server that wants to move to a different one has no supported way to do it. The project board is
-addressed by an owner derived from the mutable repository name, so a transfer points the poller at
-the wrong account. A board with no ticket channel writes one identical warning per card per poll.
-The poller binds to whichever guild registered first. `tracked_items.discord_thread_id` carries no
-index, so every workflow command scans the table. The poller runs a session and a query per card.
-Same-second timestamps count as current, which may matter where a close and an open-state event
-share a second. None of these has been reproduced.
+The readers that would have verified these ran out of quota, so they were recorded as leads and
+then checked by hand. Three were real and are fixed, one is real and is not, and three were
+decisions somebody had already made and written down.
+
+**A board nobody had finished setting up wrote one warning per card per poll.** Tickets have no
+channel fallback, so a board configured before `/set_channel` mirrors nothing, and every card was
+asked and refused separately: a session, two queries and an identical warning each, once a minute,
+for as long as nobody noticed. Nothing about any one card decides that, so the first refusal now
+ends the pass and says once what is wrong and what to do about it.
+
+**The poller asked the database once per card.** The draft half of a poll already reads the whole
+board's state in one query; the wrapped half asked per card, opening a session each time, for every
+card whether or not it had moved. A board is read whole every time, so the number of questions
+should follow the number of boards and not the number of cards. It reads once now, the way the
+half beside it always did.
+
+**A closed issue can be reopened by a delivery from the same second.** Reproduced: an issue closed
+and locked, then the retry of an event stamped the same second lands and takes it back to
+NOT_REVIEWED with the thread unlocked, and nothing corrects it until the next event. This one is
+recorded rather than fixed, because the obvious fix is wrong. `is_superseded` counts equal
+timestamps as current on purpose, and the reason holds: GitHub stamps to the second, two changes
+often share one, and treating equal as stale would drop the second of a pair arriving in order,
+which is usually the one carrying the newer state. Telling those two apart needs an ordering the
+timestamps do not carry, and the queue does have one in its own row ids. That is a schema and a
+signature change rather than a comparison, and it wants deciding rather than bolting on.
+
+**Three were already decided.** `tracked_items.discord_thread_id` carries no index, and the store
+says why: one row per thread and a handful of commands a day is not an index worth maintaining on
+the sync path. The poller reads whichever repository registered first, and `only_one` says why:
+one per guild is a constraint, and the process serves one guild. Neither is a defect. The third is
+a genuine limitation rather than a bug: there is no way to unregister a guild, so a server that
+wants to move to a different repository has no supported route, and the board is addressed by an
+owner taken from the repository name, so a transfer to another account silently repoints it. Both
+are product decisions and are recorded here as such rather than changed.
