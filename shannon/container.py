@@ -24,7 +24,8 @@ from shannon.discord_bot.formatting import (
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import ThreadGateway
-from shannon.domain.enums import ActorRole
+from shannon.domain.enums import ActorRole, ObjectType
+from shannon.domain.models import ItemNote
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.comments import parse_comment_event
@@ -156,6 +157,7 @@ def _sync_services(
 def _event_router(
     sessionmaker: async_sessionmaker,
     threads: ThreadGateway,
+    github: GitHubClient,
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
 ) -> EventRouter:
@@ -164,8 +166,27 @@ def _event_router(
     A submitted review is the only note that means something beyond its own text, so it carries
     the ledger that closes the request it answers.
     """
-    comments = ItemNoteMirror(sessionmaker, threads, render=format_comment)
-    reviews = ItemNoteMirror(sessionmaker, threads, render=format_review)
+
+    async def rebuild(note: ItemNote) -> None:
+        """Read the item from GitHub and put it through the ordinary sync, which opens a thread.
+
+        Wired in for one case: a note that finds its thread deleted. Nothing else on the note
+        path can mend that, because only a sync has the channel and the metadata to build a
+        thread with, and a comment is not an item event. Without this the note that discovers
+        the deletion is lost, and so is every one after it until an unrelated item event happens
+        to arrive.
+
+        The only call to GitHub anywhere on the note path, and it fires when a thread has
+        actually gone rather than on every comment.
+        """
+        owner, _, name = note.repository.full_name.partition("/")
+        if note.object_type is ObjectType.PR:
+            await pr_sync.sync(await github.get_pull_request(owner, name, note.item_number))
+        else:
+            await issue_sync.sync(await github.get_issue(owner, name, note.item_number))
+
+    comments = ItemNoteMirror(sessionmaker, threads, render=format_comment, rebuild=rebuild)
+    reviews = ItemNoteMirror(sessionmaker, threads, render=format_review, rebuild=rebuild)
 
     router = EventRouter()
     router.register("pull_request", build_item_handler(pr_sync, parse_pull_request_event))
@@ -230,7 +251,7 @@ def build_container(
         sessionmaker, github, threads, pr_sync=pr_sync, issue_sync=issue_sync
     )
     queue = WebhookDeliveryQueue(sessionmaker)
-    event_router = _event_router(sessionmaker, threads, pr_sync, issue_sync)
+    event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
 
     return Container(
         settings=settings,

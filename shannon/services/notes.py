@@ -23,6 +23,10 @@ from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 logger = logging.getLogger(__name__)
 
 Renderer = Callable[[ItemNote, Mapping[str, int]], str]
+# Getting an item's thread built again, for the one case this path can detect and not mend.
+# A callable rather than a service, because what it needs is the item read from GitHub and
+# put through the ordinary sync, and this module has no business knowing either of those.
+Rebuild = Callable[[ItemNote], Awaitable[None]]
 NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
 Follow = Callable[[ItemNote], Awaitable[None]]
 
@@ -59,10 +63,12 @@ class ItemNoteMirror:
         threads: PostsToThread,
         *,
         render: Renderer,
+        rebuild: Rebuild | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
         self._render = render
+        self._rebuild = rebuild
 
     async def mirror(self, snapshot: ItemNote) -> bool:
         """Post the note, returning whether there was anywhere to post it."""
@@ -143,10 +149,17 @@ class ItemNoteMirror:
             )
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the
-            # channel and the metadata. Letting go of the dead id is what lets that happen, and
-            # asking to be tried again is what gets this note into the new thread.
+            # channel and the metadata. Letting go of the dead id is what lets that happen.
+            #
+            # Asking for it is the other half, and it used to be missing. Comments and reviews
+            # are not item events, so nothing on this path ever rebuilt anything: the retry this
+            # raises found the pointer still null, raised the same thing again, and sixteen
+            # attempts later the note was dropped. Every comment and review left in the meantime
+            # went the same way, until some unrelated `pull_request` or `issues` action happened
+            # to arrive and rebuild the thread as a side effect. On a quiet item that is never.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             await self._forget_thread(target.tracked_item_id, target.thread_id)
+            await self._ask_for_a_rebuild(snapshot)
             raise ItemNotReadyError(
                 f"thread {target.thread_id} for {snapshot.repository.full_name}"
                 f"#{snapshot.item_number} is gone and has to be rebuilt"
@@ -166,6 +179,28 @@ class ItemNoteMirror:
     async def _claim(self, tracked_item_id: int, note_key: str) -> bool:
         async with self._sessionmaker() as session, session.begin():
             return await MirroredNoteStore(session).claim(tracked_item_id, note_key)
+
+    async def _ask_for_a_rebuild(self, snapshot: ItemNote) -> None:
+        """Get the item's thread built again, best effort.
+
+        Best effort on purpose. The note is going to be retried either way, so a rebuild that
+        cannot happen now may well work on the attempt after, and raising from here would replace
+        a reason that names the thread with whatever went wrong reading GitHub.
+
+        Optional, because a mirror with nothing wired in still behaves as it did: the note is
+        retried and the thread waits for an item event. Only the wiring decides.
+        """
+        if self._rebuild is None:
+            return
+        try:
+            await self._rebuild(snapshot)
+        except Exception:
+            logger.warning(
+                "could not rebuild the thread for %s#%s; the note will be tried again",
+                snapshot.repository.full_name,
+                snapshot.item_number,
+                exc_info=True,
+            )
 
     async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
         """Give a claim back, best effort.

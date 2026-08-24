@@ -15,12 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import MirroredNote, Repository, WebhookEvent
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
 
 pytestmark = pytest.mark.integration
+
+REPO_FULL = f"{payloads.OWNER}/{payloads.REPO}".lower()
 
 
 def a_comment(**overrides):
@@ -34,6 +37,17 @@ async def expire_the_lease(container, delivery: str) -> None:
             update(WebhookEvent)
             .where(WebhookEvent.github_delivery_id == delivery)
             .values(locked_until=text("now() - interval '1 hour'"))
+        )
+
+
+async def let_the_backoff_elapse(container, delivery: str) -> None:
+    """Bring a rescheduled delivery forward. A failed handler backs off; a lost lease does not,
+    which is why this and `expire_the_lease` are two different levers."""
+    async with container.sessionmaker() as session, session.begin():
+        await session.execute(
+            update(WebhookEvent)
+            .where(WebhookEvent.github_delivery_id == delivery)
+            .values(next_attempt_at=None)
         )
 
 
@@ -148,6 +162,80 @@ async def test_a_thread_that_was_deleted_gives_the_claim_back_too(
         held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
 
     assert held == 0, "the note was recorded as posted into a thread that had been deleted"
+
+
+async def test_a_comment_on_a_deleted_thread_lands_once_the_thread_is_rebuilt(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, pr_event
+) -> None:
+    """The note that discovers the deletion used to be the note that was lost.
+
+    Letting go of the dead pointer is only half of it. Nothing else on this path rebuilds a
+    thread, because only a sync has the channel and the metadata and a comment is not an item
+    event, so the retry found the pointer still null and raised the same thing until the
+    delivery ran out of attempts. Every comment and review left in the meantime went with it,
+    unless an unrelated `pull_request` action happened to arrive first.
+    """
+    threads = FakeThreadGateway()
+    github = FakeGitHubClient(pull_requests={(REPO_FULL, 7): pr_event("opened")})
+    container = build_stack(db_engine, threads=threads, github=github)
+    client = build_http_client(container)
+
+    async with client:
+        await with_a_thread(client, container)
+        first_thread = threads.created[0].thread_id
+        real_post = threads.post
+
+        async def the_thread_is_gone(**kwargs):
+            if kwargs["thread_id"] == first_thread:
+                raise ThreadNotFoundError("somebody deleted the thread")
+            return await real_post(**kwargs)
+
+        threads.post = the_thread_is_gone
+        await post(client, "issue_comment", a_comment(), delivery="comment-1")
+        await container.worker.run_once()
+
+        assert comment_posts(threads) == [], "it posted into a thread that was not there"
+        assert len(threads.created) == 2, "nothing rebuilt the thread the comment could not reach"
+
+        # What the queue does next of its own accord, five seconds later.
+        await let_the_backoff_elapse(container, "comment-1")
+        await container.worker.run_once()
+
+    assert len(comment_posts(threads)) == 1, "the comment was lost with the thread"
+
+
+async def test_a_comment_on_a_deleted_issue_thread_is_rebuilt_the_same_way(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+) -> None:
+    """The other half of the rebuild. An issue is read back through a different GitHub call and
+    a different sync, and a branch nothing exercises is a branch that stops working quietly."""
+    threads = FakeThreadGateway()
+    github = FakeGitHubClient(issues={(REPO_FULL, 12): issue_event("opened")})
+    container = build_stack(db_engine, threads=threads, github=github)
+    client = build_http_client(container)
+
+    async with client:
+        await post(client, "issues", payloads.issue_event("opened"), delivery="issue-1")
+        await container.worker.run_once()
+        first_thread = threads.created[0].thread_id
+        real_post = threads.post
+
+        async def the_thread_is_gone(**kwargs):
+            if kwargs["thread_id"] == first_thread:
+                raise ThreadNotFoundError("somebody deleted the thread")
+            return await real_post(**kwargs)
+
+        threads.post = the_thread_is_gone
+        await post(
+            client, "issue_comment", payloads.issue_comment_event("created"), delivery="comment-1"
+        )
+        await container.worker.run_once()
+        assert len(threads.created) == 2, "nothing rebuilt the issue's thread"
+
+        await let_the_backoff_elapse(container, "comment-1")
+        await container.worker.run_once()
+
+    assert len(comment_posts(threads)) == 1, "the comment was lost with the thread"
 
 
 async def test_a_comment_and_a_review_sharing_a_number_are_different_notes(
