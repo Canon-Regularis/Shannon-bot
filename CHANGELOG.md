@@ -2417,3 +2417,69 @@ files, so a dozen WHERE clauses looked unpinned when they were not. Re-run again
 integration tier, they die. The lesson is about the method rather than the code: a surviving mutant
 is a question, not an answer, and the first thing to ask is whether the tests that should have
 killed it were even running.
+
+## A fifth look, to a product standard
+
+Six lenses again: authorisation boundaries, what happens to everything already mirrored when the
+setup changes underneath it, the issue path, behaviour at volume, the protocol seams, and what a
+person actually sees when it goes wrong. The readers ran out of quota partway, so two findings got
+a full adversarial verification and the rest are recorded below as leads rather than as facts.
+
+### A comment on a deleted thread was the comment that got lost
+
+Somebody deletes an item's thread in Discord. The next comment or review arrives, cannot post,
+lets go of the dead pointer and asks to be tried again. Nothing rebuilds the thread: only a sync
+can, because only a sync has the channel and the metadata, and a comment is not an item event. So
+the retry found the pointer still null, raised the same thing again, and sixteen attempts and two
+hours later the note was dropped. Every comment and review left in the meantime went the same way,
+until some unrelated `pull_request` or `issues` action happened to arrive and rebuild the thread as
+a side effect. On a quiet item that is never.
+
+The note mirror now asks for the rebuild it was already assuming would happen, and its own retry
+posts the note into the new thread. That is the only call to GitHub anywhere on the note path and
+it fires when a thread has actually gone rather than on every comment, which is worth stating
+because it is a dependency the path did not have before. It is optional at the wiring rather than
+baked in, so a mirror with nothing passed behaves exactly as it did.
+
+### A delivery from the past renamed the repository back
+
+An item whose thread has gone is deliberately not turned away as stale, because the thread has to
+be rebuilt however old the delivery is. That one path reached `_write` with a superseded payload,
+and the rename was being followed above the guard that refuses to believe the rest of it: a
+repository renamed or transferred on GitHub had its stored name and URL rolled back to whatever it
+was called before. Nothing rewrites that row afterwards, so it stayed wrong until the next current
+delivery, which for a quiet repository may never come.
+
+The fix moves the rename below the guard. Worth recording why it was missed: an earlier round fixed
+exactly this defect on the ordinary stale path by returning early in `_resolve`, and wrote in this
+file that the rename "is now followed only for a delivery that is actually current". That was true
+of the case it tested and not of the rebuild bypass, and the test that pins it never reaches
+`_write` at all, so the second half stayed broken with a passing test and a changelog entry both
+saying otherwise.
+
+### What a user is told when GitHub says no
+
+Three different answers were arriving as "GitHub could not be reached", which was wrong for two of
+them and useless for all three. GitHub had answered.
+
+A spent rate limit now says when to come back, using the reset moment the client works out from
+GitHub's own headers and which nothing had ever read. A refused token now says the bot's access was
+refused and an admin needs to look at it, because nobody running a command can fix that one, and it
+no longer echoes an API path at somebody sitting in Discord. Only a genuine outage still says the
+service could not be reached.
+
+Two of the three tests that pinned the old wording were testing something else and had hard-coded
+it in passing. The third used the rate limit as its example of falling through to the general case,
+so it was pinning the defect; it now uses the error that really does mean unreachable.
+
+### Leads, not findings
+
+Recorded because the readers that would have verified them ran out of quota, and an unverified
+claim is worth keeping and worth labelling. A guild can never be unbound from its repository, so a
+server that wants to move to a different one has no supported way to do it. The project board is
+addressed by an owner derived from the mutable repository name, so a transfer points the poller at
+the wrong account. A board with no ticket channel writes one identical warning per card per poll.
+The poller binds to whichever guild registered first. `tracked_items.discord_thread_id` carries no
+index, so every workflow command scans the table. The poller runs a session and a query per card.
+Same-second timestamps count as current, which may matter where a close and an open-state event
+share a second. None of these has been reproduced.
