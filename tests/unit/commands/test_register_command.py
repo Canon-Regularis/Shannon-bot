@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import discord
 import pytest
 
+from shannon.commands._replies import reply_for
 from shannon.commands.register import build_register_command
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError
@@ -131,11 +132,14 @@ async def test_a_repository_bound_elsewhere_is_told_so() -> None:
     ],
 )
 async def test_github_trouble_is_reported_rather_than_raised(error: Exception) -> None:
+    """What matters here is that the person is told at all. Which words they get is the reply
+    table's business, and it says something different for a spent quota than for an outage."""
     service = StubRegistration(error=error)
 
     interaction = await run(service, project_manager())
 
-    assert "GitHub could not be reached" in interaction.reply
+    assert interaction.reply == reply_for(error)
+    assert "GitHub" in interaction.reply
 
 
 async def test_a_database_failure_is_not_swallowed() -> None:

@@ -166,11 +166,13 @@ async def test_a_link_to_another_repository_is_refused() -> None:
 
 
 async def test_a_github_failure_is_reported_rather_than_raised() -> None:
-    service = StubManualSync(error=GitHubRateLimitError("GitHub rate limit reached"))
+    """Reported, and reported usefully: a spent quota says when to come back rather than
+    claiming GitHub was unreachable, which it was not."""
+    service = StubManualSync(error=GitHubRateLimitError("rate limited", retry_after=600))
 
     interaction = await run(service, member_with("Developer"))
 
-    assert "GitHub could not be reached" in interaction.reply
+    assert interaction.reply == "GitHub's rate limit is spent. Try again in about 10 minutes."
 
 
 async def test_a_discord_failure_is_reported_rather_than_raised() -> None:

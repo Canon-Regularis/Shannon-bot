@@ -12,7 +12,12 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.errors import NotRegisteredError
-from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubNotFoundError,
+    GitHubRateLimitError,
+    GitHubUnavailableError,
+)
 from tests.fakes.discord_objects import FakeInteraction
 
 
@@ -33,7 +38,43 @@ class TestReadingAnError:
     def test_the_most_specific_match_wins(self) -> None:
         """GitHubNotFoundError is a GitHubError, and only one of the two answers is useful."""
         assert "could not find" in reply_for(GitHubNotFoundError("gone"))
-        assert "could not be reached" in reply_for(GitHubRateLimitError("slow down"))
+        assert "could not be reached" in reply_for(GitHubUnavailableError("timed out"))
+
+    def test_a_spent_quota_says_when_to_come_back_rather_than_that_github_is_down(self) -> None:
+        """GitHub answered. It said no, and it said when to ask again, and the client already
+        works that out. Reporting it as unreachable told the person nothing they could use."""
+        answer = reply_for(GitHubRateLimitError("slow down", retry_after=1800))
+
+        assert "rate limit" in answer
+        assert "about 30 minutes" in answer
+        assert "could not be reached" not in answer
+
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            (1, "Try again in a minute."),
+            (60, "Try again in a minute."),
+            (61, "Try again in about 2 minutes."),
+            (1800, "Try again in about 30 minutes."),
+        ],
+    )
+    def test_the_wait_is_rounded_up_and_read_in_minutes(self, seconds: int, expected: str) -> None:
+        """Rounded up, because telling somebody to wait less than the truth earns a second
+        refusal, and a single minute reads differently from several."""
+        assert reply_for(GitHubRateLimitError("slow down", retry_after=seconds)).endswith(expected)
+
+    def test_a_quota_with_no_stated_wait_still_says_something_useful(self) -> None:
+        assert reply_for(GitHubRateLimitError("slow down")) == (
+            "GitHub's rate limit is spent. Try again shortly."
+        )
+
+    def test_a_refused_token_points_at_the_admin_rather_than_at_the_network(self) -> None:
+        """Nobody running a command can fix this one, so the message has to say whose it is."""
+        answer = reply_for(GitHubAuthError("GitHub refused the request for /repos/a/b (403)"))
+
+        assert "admin" in answer
+        assert "could not be reached" not in answer
+        assert "/repos/a/b" not in answer, "the API path is no use to a person in Discord"
 
     def test_something_unrecognised_gets_the_catch_all(self) -> None:
         assert reply_for(RuntimeError("connection pool exhausted")) == UNEXPECTED
