@@ -294,13 +294,22 @@ class ItemSyncService:
         items = TrackedItemStore(session)
 
         # Only once the delivery is known to be current. Every payload carries the repository's
-        # name at the time it was sent, so following one from a delivery that arrived late would
-        # put the old name back and break /pr all over again.
-        await repositories.follow_rename(
-            placement.repository,
-            repo_name=snapshot.repository.full_name,
-            repo_url=snapshot.repository.html_url,
-        )
+        # name as of the moment it was sent, so following one that arrived late puts the old name
+        # back.
+        #
+        # The guard belongs here and not only in `_resolve`. An item whose thread has gone is
+        # deliberately not turned away as stale, because the thread has to be rebuilt however old
+        # the delivery is, and that one path reached this line with a superseded payload and
+        # rolled the repository's name and URL back to whatever GitHub called it before a rename.
+        # Nothing rewrites the row afterwards, so it stayed wrong until the next current delivery,
+        # which for a quiet repository may never come. The rest of this method already refuses to
+        # believe such a payload about anything; the name is the piece that was believing it.
+        if not placement.superseded:
+            await repositories.follow_rename(
+                placement.repository,
+                repo_name=snapshot.repository.full_name,
+                repo_url=snapshot.repository.html_url,
+            )
 
         item = placement.item
         if item is None:

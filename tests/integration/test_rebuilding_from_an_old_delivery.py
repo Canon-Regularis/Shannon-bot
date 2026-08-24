@@ -36,6 +36,25 @@ def pr(action: str, **overrides):
     return snapshot
 
 
+def renamed_to(full_name: str, **overrides):
+    """The same pull request, after GitHub has moved the repository under it.
+
+    Built by hand because the payload helper fills the repository in for itself: an event carries
+    the name as of the moment it was sent, which is the whole point here.
+    """
+    owner, _, name = full_name.partition("/")
+    payload = payloads.pull_request_event("edited", **overrides)
+    payload["repository"] = payloads.repository(
+        name=name,
+        full_name=full_name,
+        html_url=f"https://github.com/{full_name}",
+        owner=payloads.user(owner, 80922799),
+    )
+    snapshot = parse_pull_request_event("edited", payload)
+    assert snapshot is not None
+    return snapshot
+
+
 async def stored(session: AsyncSession) -> tuple[str, int | None, list[str]]:
     session.expunge_all()
     item = await session.scalar(select(TrackedItem))
@@ -80,6 +99,37 @@ async def test_an_old_delivery_rebuilds_the_thread_without_reverting_the_item(
     assert reviewers == ["monalisa"], "an old delivery decided who was on the item"
     assert thread_id is not None, "the item was left with no thread, which it never recovers from"
     assert threads.posts[posts_before:] == [], "somebody was pinged by a delivery from the past"
+
+
+async def test_an_old_delivery_does_not_put_the_repositorys_old_name_back(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """The one field the rebuild bypass was still believing.
+
+    `_resolve` turns a stale delivery away, which is what keeps the name safe in the ordinary
+    case, so the test that pins that never reaches `_write`. This path does reach it, on purpose,
+    because a thread that has gone has to be rebuilt however old the delivery is, and the rename
+    was being followed above the guard that refuses the rest of the payload. A repository renamed
+    or transferred on GitHub had its stored name and URL rolled back to whatever it was called
+    before, and nothing rewrites that row until the next current delivery.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    sync = container.pr_sync
+
+    await sync.sync(pr("opened", updated_at=BEFORE))
+    await sync.sync(renamed_to("big-corp/moved", updated_at=AFTER))
+    db_session.expunge_all()
+    moved = await db_session.scalar(select(Repository))
+    assert moved.repo_name == "big-corp/moved", "the rename was never followed in the first place"
+
+    await forget_the_thread(container, db_session)
+    await sync.sync(pr("edited", updated_at=STALE))
+
+    db_session.expunge_all()
+    now = await db_session.scalar(select(Repository))
+    assert now.repo_name == moved.repo_name, "a delivery from the past renamed the repository back"
+    assert now.repo_url == moved.repo_url
 
 
 async def test_a_current_delivery_still_rebuilds_and_applies(
