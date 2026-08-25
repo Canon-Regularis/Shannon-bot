@@ -29,6 +29,11 @@ API_VERSION = "2022-11-28"
 # self-referential cursor and a loop that never ends.
 MAX_PAGES = 50
 
+# How far a write will follow a redirect. GitHub answers a renamed repository with the current
+# name in one hop rather than a chain, so this is a bound on something that should not happen
+# rather than room to work in.
+MAX_WRITE_REDIRECTS = 3
+
 
 class LooksUpRepository(Protocol):
     """Resolving a repository by owner and name.
@@ -166,12 +171,35 @@ class HttpGitHubClient:
             await self._send("DELETE", path)
 
     async def _send(self, method: str, path: str, **kwargs: Any) -> None:
-        """A write, whose answer is only ever whether it worked."""
+        """A write, whose answer is only ever whether it worked.
+
+        Redirects are followed here rather than by the transport, because httpx follows one the
+        way the RFC allows and not the way a write needs. A 301 is what GitHub answers after a
+        rename, and on a POST httpx re-issues it as a bodyless GET, so putting a label on a
+        renamed repository fetched the label list, was answered 200, and wrote nothing. Nothing
+        downstream can tell that from success: the command replies that it worked, the status
+        goes into the row and into the thread, and no later delivery re-derives status from
+        labels, so the item keeps the label it had. The DELETE beside it is not downgraded and
+        does land, which leaves the item with its old status label stripped and no new one.
+
+        The stale name is ordinary rather than rare. Nothing corrects `repositories.repo_name`
+        until an item webhook arrives, and no `repository` event is registered at all.
+        """
         try:
-            response = await self._client.request(method, path, **kwargs)
+            response = await self._client.request(method, path, follow_redirects=False, **kwargs)
+            for _ in range(MAX_WRITE_REDIRECTS):
+                if not response.is_redirect:
+                    break
+                path = _redirect_target(response, path)
+                response = await self._client.request(
+                    method, path, follow_redirects=False, **kwargs
+                )
         except httpx.HTTPError as exc:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
+        # A redirect still standing after that lands in the catch-all as "GitHub returned 301",
+        # which is retryable and loud. That is the answer the write path had before this, and
+        # for a chain that never resolves it is still the right one.
         _raise_for_status(response, path)
 
     async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
@@ -256,6 +284,24 @@ def _headers(token: str) -> dict[str, str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def _redirect_target(response: httpx.Response, path: str) -> str:
+    """Where a redirected write goes instead, if it can go anywhere at all.
+
+    Following one by hand means deciding for oneself who the Authorization header is handed to,
+    which is the job httpx was doing. GitHub answers a rename with the same host and a new path,
+    so anything else is refused rather than trusted with the token.
+    """
+    location = response.headers.get("location")
+    if not location:
+        raise GitHubUnavailableError(f"GitHub redirected {path} without saying where")
+
+    target = response.url.join(location)
+    here = response.url
+    if (target.scheme, target.host, target.port) != (here.scheme, here.host, here.port):
+        raise GitHubUnavailableError(f"GitHub redirected {path} to another host, {target.host}")
+    return str(target)
 
 
 def _raise_for_status(response: httpx.Response, path: str) -> None:

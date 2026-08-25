@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from discord import app_commands
 
-from shannon.discord_bot.client import ShannonBot
+from shannon.discord_bot.client import ShannonBot, build_intents
 
 
 def a_command(name: str) -> app_commands.Command:
@@ -77,3 +77,32 @@ async def test_the_ready_hook_survives_not_knowing_who_it_is(
         await bot.on_ready()
 
     assert "connected to Discord" in caplog.text
+
+
+class TestWhatTheGatewayIsAskedFor:
+    """A privileged intent is a setup step that fails the whole process when it is missed.
+
+    `members` was asked for and never used. What made it worth removing rather than leaving
+    alone is what discord.py does with it: it turns on `chunk_guilds_at_startup`, so every
+    server's whole member list is pulled over the gateway before READY, and READY is what the
+    delivery worker waits on before it will write anything to Discord.
+    """
+
+    def test_nothing_privileged_is_asked_for(self) -> None:
+        intents = build_intents()
+
+        assert intents.members is False, "a Developer Portal toggle nothing here reads"
+        assert intents.presences is False
+        assert intents.message_content is False
+
+    def test_guilds_is_asked_for_because_the_permission_gate_needs_the_role_cache(self) -> None:
+        """`interaction.user.roles` resolves ids against the guild's roles, and that is where
+        they come from. It is not privileged, and it is on by default; this says why."""
+        assert build_intents().guilds is True
+
+    def test_the_client_does_not_chunk_every_server_before_it_is_ready(self) -> None:
+        """discord.py reads `members` as a request to chunk, so this follows from the first
+        test rather than being set anywhere. Pinned because it is the expensive half."""
+        client = ShannonBot(explain_error=lambda error: "no")
+
+        assert client._connection._chunk_guilds is False
