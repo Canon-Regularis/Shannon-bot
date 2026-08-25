@@ -29,6 +29,7 @@ from shannon.github import mapping
 
 logger = logging.getLogger(__name__)
 
+
 # The board column lives in the single-select field GitHub's own templates call Status. A board
 # that renamed it is a board this cannot read, which is worth saying out loud rather than
 # guessing at whichever single-select field happens to come first.
@@ -112,31 +113,37 @@ class HttpProjectBoards:
         return items
 
     async def _field_ids(self, owner: str, project_number: int) -> tuple[int, ...]:
-        """The ids of the Title and Status fields, looked up once per board."""
+        """The ids of the Title and Status fields, looked up once per board.
+
+        An answer with no Status in it is not remembered, whatever else it carried. Without
+        that id the request does not ask for the field, GitHub does not send it, and every card
+        comes back with no column at all. It used to be remembered as long as Title was there,
+        so a board whose Status somebody renamed was read that way for the life of the process
+        rather than for one poll. The answer is a board somebody has to fix or a response that
+        arrived wrong, the next read may well get right, and there is no telling the two apart
+        from here.
+        """
         key = (owner, project_number)
         if key in self._fields:
             return self._fields[key]
 
         body = await self._client.get_json(f"/users/{owner}/projectsV2/{project_number}/fields")
         rows = body if isinstance(body, list) else []
-        found = tuple(
-            field_id
+        by_name = {
+            row.get("name"): field_id
             for row in rows
             if isinstance(row, Mapping)
             and row.get("name") in (TITLE_FIELD, STATUS_FIELD)
             and isinstance(field_id := row.get("id"), int)
-        )
-        if not found:
-            # Not remembered. An answer with no Status field is either a board that renamed it,
-            # which somebody has to fix, or a response that arrived wrong, which the next read
-            # may well get right. Caching the empty answer would blank every column on the board
-            # until the process restarted, and there is no way to tell the two cases apart.
+        }
+        found = tuple(by_name[name] for name in (TITLE_FIELD, STATUS_FIELD) if name in by_name)
+        if STATUS_FIELD not in by_name:
             logger.warning(
                 "project %s answered with no %r field, so no card can carry a status",
                 project_number,
                 STATUS_FIELD,
             )
-            return ()
+            return found
 
         self._fields[key] = found
         return found

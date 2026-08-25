@@ -797,11 +797,20 @@ class TestASecondReviewFound:
         )
         assert item.status is Status.BACKLOG
 
-    async def test_a_card_whose_status_was_cleared_is_still_remembered(
+    async def test_a_card_that_reads_as_having_no_column_keeps_the_one_it_had(
         self, mirrored_pr: int, poller_for, db_session: AsyncSession
     ) -> None:
-        """Null means never seen. Writing null for a card somebody cleared the Status of would
-        put it back to never seen, which re-arms the first-look guard and drops the next move."""
+        """One card with no column and a board whose Status field cannot be read look the same.
+
+        The second is the one that cannot be survived: every card on the board reads blank at
+        once, and believing it means writing the blank over every remembered column, so the poll
+        after the field comes back reads the whole board as having moved and drives all of it
+        through the status commands. Whatever anybody had set by hand goes with it.
+
+        Nothing is lost by keeping the old column instead. A card with no column carries no
+        status to move to, so it is passed over either way, and the memory that is kept is one
+        the card is no longer in, which the next real move still differs from.
+        """
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
         poller = poller_for(board)
         await poller.run_once()
@@ -813,7 +822,44 @@ class TestASecondReviewFound:
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.project_column == "", "a cleared column was stored as never seen"
+        assert item.project_column == "In Progress", "the blank was written over the memory"
+
+    async def test_a_board_that_goes_blank_does_not_restate_itself_when_it_comes_back(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """The whole failure, end to end: read the board, lose the Status field, get it back.
+
+        A board's Status field is matched by name, so renaming it is enough, and the ids are
+        looked up per board. In between, somebody decides an item is not what the board says and
+        sets it by hand. That decision has to survive the field coming back.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        # The Status field renamed, which every card answers by carrying no column at all.
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column=None)]
+        await poller.run_once()
+
+        # Somebody looks at the item and decides otherwise while the board cannot be read.
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+
+        # The field comes back, unchanged, saying what it said before.
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="In Progress")]
+
+        assert await poller.run_once() == 0, "a board that had not moved restated itself"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.READY_FOR_MERGE, "the board overwrote a decision"
 
     async def test_a_cleared_column_does_not_re_arm_the_first_look_guard(
         self,
