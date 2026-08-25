@@ -209,9 +209,15 @@ class WebhookEvent(Base):
         Index(
             "ix_webhook_events_live",
             "id",
-            # Built from the enum so a sixth state cannot leave the index behind. The string
-            # has to match what migration 0005 created, byte for byte, or the schema diff in
-            # test_migrations fails; that is why `live()` returns an ordered tuple.
+            # Built from the enum so a sixth state cannot leave the index behind, and
+            # `live()` returns an ordered tuple so the string comes out the same every time.
+            #
+            # Not checked by the schema diff in test_migrations, whatever this used to say:
+            # alembic's PostgreSQL comparison ignores an index's WHERE clause, so widening this
+            # predicate, narrowing it or deleting it outright all leave that test answering with
+            # no differences. `test_the_live_index_covers_exactly_the_live_statuses` reads the
+            # predicate back out of pg_indexes instead, which is what actually holds the two
+            # together.
             postgresql_where=text(f"status IN ({_LIVE_STATUSES})"),
         ),
         # Pruning has to find the slice past the retention window without reading the rest.
