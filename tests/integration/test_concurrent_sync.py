@@ -290,6 +290,121 @@ async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
     assert as_utc(item.github_updated_at) == newer, "the older payload wrote over the newer one"
 
 
+async def test_a_brand_new_item_is_judged_against_whoever_created_it_first(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """The staleness question the row lock cannot answer, because there is no row yet.
+
+    A pull request opened with a reviewer already on it is two deliveries milliseconds apart:
+    `opened`, listing nobody, and `review_requested`, listing them. Two replicas lease one each
+    and run them together, and neither finds an item to lock, so both used to answer "not
+    superseded". The one carrying `opened` then wrote its whole payload over the other's, and
+    `replace` deletes the rows of anyone it does not list, so the reviewer's row went with it,
+    `notified_at` and all. Nobody was pinged, both deliveries were recorded as processed, and
+    the next ordinary event re-inserted the reviewer with `notified_at` empty and pinged them
+    for a request nobody had made.
+
+    Raced deterministically: the newer sync holds its transaction open, which parks the older
+    one on the unique index inside the insert, which is exactly where it lands in production.
+    """
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    newer = pr_event("review_requested", updated_at="2026-08-10T18:00:05Z")
+    older = pr_event("opened", updated_at="2026-08-10T18:00:00Z", requested_reviewers=[])
+
+    async with db_sessionmaker() as holder:
+        await holder.begin()
+        item = await TrackedItemStore(holder).get_or_create(
+            repository_id=registered.id,
+            object_type=ObjectType.PR,
+            github_object_id=payloads.PR_ID,
+            github_object_number=7,
+            github_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+            title="What the newer delivery called it",
+            github_state="open",
+            status=Status.NOT_REVIEWED,
+            github_updated_at=as_utc(newer.updated_at),
+        )
+        await ItemAssignmentStore(holder).replace(
+            tracked_item_id=item.id,
+            role=ActorRole.REVIEWER,
+            actors=[Actor(login="monalisa", github_user_id=200)],
+        )
+        await holder.flush()
+
+        catching_up = asyncio.create_task(service.sync(older))
+        await asyncio.sleep(0.2)
+        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
+
+        await holder.commit()
+        await catching_up
+
+    db_session.expire_all()
+    stored = await db_session.scalar(select(TrackedItem))
+    assert stored.title == "What the newer delivery called it", "the older payload won"
+    assert as_utc(stored.github_updated_at) == datetime(2026, 8, 10, 18, 0, 5, tzinfo=UTC)
+
+    reviewers = (
+        await db_session.scalars(
+            select(ItemAssignment.github_username).where(
+                ItemAssignment.role_type == ActorRole.REVIEWER
+            )
+        )
+    ).all()
+    assert list(reviewers) == ["monalisa"], "the older payload deleted the review request"
+
+
+async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned_away(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """The same race, run slowly enough that the winner got as far as Discord.
+
+    The thread is what separates the two answers. Without one, the older delivery still has
+    work to do, because something has to open the thread and nothing else is going to; it just
+    must not believe its own payload while doing it. With one, there is nothing left to do at
+    all, and saying so is what keeps a second thread from being opened for the same item.
+    """
+    threads = FakeThreadGateway()
+    service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+    newer = pr_event("edited", updated_at="2026-08-10T18:00:05Z", title="Renamed since")
+    older = pr_event("opened", updated_at="2026-08-10T18:00:00Z")
+
+    async with db_sessionmaker() as holder:
+        await holder.begin()
+        item = await TrackedItemStore(holder).get_or_create(
+            repository_id=registered.id,
+            object_type=ObjectType.PR,
+            github_object_id=payloads.PR_ID,
+            github_object_number=7,
+            github_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+            title="Renamed since",
+            github_state="open",
+            status=Status.NOT_REVIEWED,
+            github_updated_at=as_utc(newer.updated_at),
+        )
+        item.discord_thread_id = 4242
+        item.discord_message_id = 99
+        await holder.flush()
+
+        catching_up = asyncio.create_task(service.sync(older))
+        await asyncio.sleep(0.2)
+        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
+
+        await holder.commit()
+        result = await catching_up
+
+    assert result.outcome is SyncOutcome.STALE
+    assert result.thread_id == 4242
+    assert threads.created == [], "it opened a second thread for an item that had one"
+    db_session.expire_all()
+    assert (await db_session.scalar(select(TrackedItem.title))) == "Renamed since"
+
+
 async def _create(store: TrackedItemStore) -> TrackedItem:
     return await store.get_or_create(
         repository_id=1,

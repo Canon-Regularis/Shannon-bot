@@ -216,6 +216,11 @@ class TrackedItemStore:
         delivery ids so the duplicate guard passes all of them through. Checking for the row
         and then inserting it would let every one of them past the check and leave all but one
         failing on the unique constraint, so the insert carries its own conflict handling.
+
+        The row comes back locked either way, because every caller of this writes to it. On a
+        conflict the insert has already waited on the unique index until the other caller
+        committed, and the read below would otherwise hand back a row that caller is free to
+        keep changing while this one decides things from it.
         """
         statement = (
             pg_insert(TrackedItem)
@@ -249,6 +254,7 @@ class TrackedItemStore:
                 repository_id=repository_id,
                 object_type=object_type,
                 github_object_id=github_object_id,
+                lock=True,
             )
         )
         if item is None:

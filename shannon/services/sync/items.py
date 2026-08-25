@@ -242,19 +242,10 @@ class ItemSyncService:
         # while the worker is mid-delivery, GitHub sends several events for one item at once, and
         # a second replica leases in parallel. Without the lock both read the row before either
         # commits, so both answer "not superseded" and the one carrying the older payload writes
-        # its whole snapshot over the newer one, down to deleting a reviewer's row and its
-        # `notified_at` and putting back somebody the newer payload had removed, who is then
-        # pinged again. The row a new item is created from is not there to lock yet, which is
-        # what `get_or_create`'s own conflict handling is for.
-        # Held for the rest of the transaction, because everything below is decided from what
-        # this read says and then written. Two syncs of one item overlap by design: `/pr` runs
-        # while the worker is mid-delivery, GitHub sends several events for one item at once, and
-        # a second replica leases in parallel. Without the lock both read the row before either
-        # commits, so both answer "not superseded" and the one carrying the older payload writes
         # its whole snapshot over the newer one, down to deleting a reviewer's row with its
         # `notified_at` and putting back somebody the newer payload had removed, who is then
-        # pinged again. A new item has no row to lock yet, which is what `get_or_create`'s own
-        # conflict handling is for.
+        # pinged again. An item nobody has created yet has no row to lock, so it cannot be
+        # judged here at all. `_write` judges that one, at the point the row exists.
         item = await TrackedItemStore(session).get(
             repository_id=repository.id,
             object_type=object_type,
@@ -287,31 +278,14 @@ class ItemSyncService:
 
     async def _write(
         self, session: AsyncSession, snapshot: TrackedSnapshot, placement: _Placement
-    ) -> _SyncState:
+    ) -> _SyncState | SyncResult:
         """Bring the stored item in line with the snapshot, and render what Discord will show."""
         object_type = self._policy.object_type
         repositories = RepositoryStore(session)
         items = TrackedItemStore(session)
 
-        # Only once the delivery is known to be current. Every payload carries the repository's
-        # name as of the moment it was sent, so following one that arrived late puts the old name
-        # back.
-        #
-        # The guard belongs here and not only in `_resolve`. An item whose thread has gone is
-        # deliberately not turned away as stale, because the thread has to be rebuilt however old
-        # the delivery is, and that one path reached this line with a superseded payload and
-        # rolled the repository's name and URL back to whatever GitHub called it before a rename.
-        # Nothing rewrites the row afterwards, so it stayed wrong until the next current delivery,
-        # which for a quiet repository may never come. The rest of this method already refuses to
-        # believe such a payload about anything; the name is the piece that was believing it.
-        if not placement.superseded:
-            await repositories.follow_rename(
-                placement.repository,
-                repo_name=snapshot.repository.full_name,
-                repo_url=snapshot.repository.html_url,
-            )
-
         item = placement.item
+        superseded = placement.superseded
         if item is None:
             item = await items.get_or_create(
                 repository_id=placement.repository.id,
@@ -325,9 +299,57 @@ class ItemSyncService:
                 priority=snapshot.priority,
                 github_updated_at=snapshot.updated_at,
             )
+            # The same question `_resolve` asks, asked again because it could not be asked there.
+            # A brand-new item has no row to lock, so both syncs of one arrive here believing they
+            # are current, and the loser then wrote the older payload over the newer: the title
+            # and the state, and the reviewers, whose rows `replace` deletes outright along with
+            # the `notified_at` saying they had already been told. An item opened with a reviewer
+            # on it is two deliveries milliseconds apart, so this is the ordinary case, not a
+            # corner of one.
+            #
+            # Asking here works because the insert above is what serialises them. On a conflict
+            # it waits on the unique index until the sync that got there first commits, so by the
+            # time it returns, that sync's timestamp is on the row and held. Nothing to compare
+            # against means this sync wrote the row itself, and a mark equal to its own snapshot
+            # reads as current, which it is.
+            superseded = is_superseded(snapshot.updated_at, item.github_updated_at)
+            if superseded and item.discord_thread_id is not None:
+                logger.info(
+                    "ignoring a stale %s.%s for %s#%s, another sync created it first",
+                    object_type.value,
+                    snapshot.action,
+                    snapshot.repository.full_name,
+                    snapshot.number,
+                )
+                return SyncResult(
+                    outcome=SyncOutcome.STALE,
+                    tracked_item_id=item.id,
+                    thread_id=item.discord_thread_id,
+                    message_id=item.discord_message_id,
+                )
+
+        # Only once the delivery is known to be current. Every payload carries the repository's
+        # name as of the moment it was sent, so following one that arrived late puts the old name
+        # back.
+        #
+        # The guard belongs here and not only in `_resolve`. An item whose thread has gone is
+        # deliberately not turned away as stale, because the thread has to be rebuilt however old
+        # the delivery is, and that one path reached this line with a superseded payload and
+        # rolled the repository's name and URL back to whatever GitHub called it before a rename.
+        # Nothing rewrites the row afterwards, so it stayed wrong until the next current delivery,
+        # which for a quiet repository may never come. The rest of this method already refuses to
+        # believe such a payload about anything; the name is the piece that was believing it.
+        #
+        # Below the item, because until the row is there the answer above is not known yet.
+        if not superseded:
+            await repositories.follow_rename(
+                placement.repository,
+                repo_name=snapshot.repository.full_name,
+                repo_url=snapshot.repository.html_url,
+            )
 
         roles = self._policy.assignments(snapshot)
-        if placement.superseded:
+        if superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
             # no reason to believe the payload about anything else: adopting it would put back a
             # title since changed and swap the people for whoever was on the item then, deleting
