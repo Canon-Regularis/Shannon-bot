@@ -205,3 +205,17 @@ class TicketPolicy:
     def thread_name(self, snapshot: TicketSnapshot) -> str:
         """No number in front. A draft item has none, and the board is where it is found."""
         return snapshot.title.strip() or "Untitled ticket"
+
+
+def channel_fallbacks() -> dict[ObjectType, ObjectType]:
+    """Which kinds fall back to another kind's channel, read off the policies themselves.
+
+    So that anything else needing the answer asks the policies rather than restating the rule.
+    `/set_channel` needs it to say where the threads already open actually went, which for a
+    server that has never mapped issues is the pull request channel and not nowhere.
+    """
+    return {
+        policy.object_type: policy.channel_fallback
+        for policy in (PullRequestPolicy(), IssuePolicy(), TicketPolicy())
+        if policy.channel_fallback is not None
+    }

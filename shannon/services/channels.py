@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -24,8 +25,16 @@ class ChannelAssignment:
 class ChannelMappingService:
     """Points an object type at the Discord channel its threads belong in."""
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        fallbacks: Mapping[ObjectType, ObjectType] | None = None,
+    ) -> None:
         self._sessionmaker = sessionmaker
+        # Where each kind's threads go when nobody has mapped a channel for it, which is only
+        # read to answer where the ones already open are. Handed in rather than known here: the
+        # sync policies decide it, and two copies of a product rule is one too many.
+        self._fallbacks = dict(fallbacks or {})
 
     async def assign(
         self, *, guild_id: int, object_type: ObjectType, channel_id: int
@@ -42,6 +51,15 @@ class ChannelMappingService:
 
             mappings = ChannelMappingStore(session)
             existing = await mappings.get(repository.id, object_type)
+            fallback = self._fallbacks.get(object_type)
+            if existing is None and fallback is not None:
+                # Where this kind's threads have actually been going. `/register` maps pull
+                # requests and nothing else, so on most servers the first `/set_channel issues`
+                # finds no issue row at all, and answering from that row alone said nothing
+                # about the issue threads sitting in the pull request channel. That clause is
+                # the whole reason this field exists: without it an admin tidying a server goes
+                # looking for threads that never went anywhere.
+                existing = await mappings.get(repository.id, fallback)
             replaced = existing.discord_channel_id if existing else None
 
             await mappings.set(

@@ -49,7 +49,12 @@ from shannon.services.sync.items import (
 )
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
+from shannon.services.sync.policies import (
+    IssuePolicy,
+    PullRequestPolicy,
+    TicketPolicy,
+    channel_fallbacks,
+)
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
 
 
@@ -216,7 +221,7 @@ def _commands(
     """
     return (
         build_register_command(RepositoryRegistrationService(sessionmaker, github), gate),
-        build_set_channel_command(ChannelMappingService(sessionmaker), gate),
+        build_set_channel_command(ChannelMappingService(sessionmaker, channel_fallbacks()), gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_link_command(UserLinkingService(sessionmaker), gate),
