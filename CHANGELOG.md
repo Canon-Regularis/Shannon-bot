@@ -2508,3 +2508,262 @@ a genuine limitation rather than a bug: there is no way to unregister a guild, s
 wants to move to a different repository has no supported route, and the board is addressed by an
 owner taken from the repository name, so a transfer to another account silently repoints it. Both
 are product decisions and are recorded here as such rather than changed.
+
+## A sixth look, before it runs on a real server
+
+The last few rounds read the code. This one asked a different question: what breaks the first time
+somebody actually starts it against Discord and GitHub, which is a question no test with a fake can
+answer, because a fake accepts whatever it is handed. Six lenses covered the Discord seam, the
+GitHub seam, the protocol boundaries, running more than one copy, recovery, and configuration at
+its extremes. Everything below either failed for real or was reproduced against a live database.
+
+### The invite link was missing a permission, and the failure looked like nothing
+
+The metadata block at the top of a thread is one message, written when the thread opens and
+rewritten on every event after. Rewriting it means reading it first, and Discord counts reading a
+message the bot wrote itself as reading history. `Read Message History` was not in the permission
+list in the README.
+
+The failure mode is the bad kind. A refusal becomes `DiscordPermissionError`, which is permanent,
+so the delivery is given up on the first attempt rather than retried. The thread appears once,
+correctly, and then never changes again, and nothing in Discord says why. Documented now, along
+with what goes wrong when it is missing.
+
+### Slash commands take up to an hour to appear, and the log said they were done
+
+Commands are registered globally rather than per guild, which is right: a global registration
+survives being added to a second server and needs no guild id at startup. Discord serves global
+commands from a cache that can take an hour to catch up, so on a fresh application the commands do
+not exist for anyone yet. The log said it had synced them, which reads as ready.
+
+The log now says what actually happened and the README sets the expectation. No behaviour changed;
+the wrong expectation was the whole defect.
+
+### Nothing anywhere checked what Discord will accept
+
+Discord validates every command name and description at sync time, and a violation does not fail
+gracefully: the sync raises, `setup_hook` raises, and the process ends without connecting. Every
+test of a command drives its callback directly, and the fake gateway syncs nothing, so a rename to
+an invalid name would have passed the whole suite and then refused to boot.
+
+`tests/unit/test_the_commands_discord_will_accept.py` builds the commands the container really
+installs and holds them to Discord's rules: the name pattern, the description limits, the parameter
+ceiling, and no two commands answering to one name. All fourteen pass today. It is the first test
+here that checks something Discord enforces rather than something this code does.
+
+### A privileged intent that nothing used, and what it quietly turned on
+
+`build_intents` asked for `members`, and the comment beside it and the README both said pinging a
+GitHub user needed it. Neither was true. A mention is a user-id mention string built from a
+`user_links` row and resolved by Discord on receipt, and the one thing that reads a member is the
+permission gate, which reads `interaction.user`: discord.py builds that from the interaction
+payload, and its roles resolve against the guild role cache that arrives under the ordinary
+`guilds` intent. Verified against the installed library rather than from memory.
+
+Asking anyway cost three things. It is a Developer Portal toggle that stops the process starting at
+all when it is missed, which is a first-run failure over a capability nothing used. It needs
+Discord's approval past a hundred servers. And discord.py reads it as a request to chunk, so the
+entire member list of every server is pulled over the gateway before READY fires and then held in
+memory, while READY is exactly what the delivery worker waits for before it will write anything.
+Removed, with tests pinning that it and the chunking stay off.
+
+### A label write that GitHub answered 200 to and never wrote
+
+Renaming a repository on GitHub, or transferring an issue, makes every request to the old path a
+301. Checked against the live API rather than assumed: `/repos/facebook/jest/issues/1/labels`,
+which is the exact endpoint the label writes use, answers 301 pointing at
+`https://api.github.com/repositories/15062869/issues/1/labels`.
+
+Following redirects was turned on for reads in an earlier round, where an unfollowed one reached
+the user as "GitHub could not be reached". On a write it is worse than not following at all:
+httpx re-issues a redirected POST as a bodyless GET, so putting a label on the renamed repository
+fetched the label list, was answered 200, and wrote nothing.
+
+Nothing downstream could tell that from success. `/set_in_review` replied that it worked, the
+status went into the row and was rendered into the thread, and no later delivery re-derives status
+from labels, so nothing ever noticed or repaired it. The removal beside it is a DELETE, which is
+not downgraded and does land, so the item is left with its old status label stripped and no new
+one. From the board poller the same call is recorded as carried through, so no later poll retries
+it either.
+
+Nothing corrects the stored repository name until an item webhook arrives, and no `repository`
+event is registered at all, so the stale name is ordinary rather than rare. Writes now follow
+redirects themselves, keeping the method, and refuse to follow one off the API host rather than
+hand the token to wherever it points. A chain that never resolves still comes back as "GitHub
+returned 301", which is loud and retryable.
+
+Worth recording how it hid: the helper that builds a client for the GitHub tests did not turn
+redirect following on, so no test could see the transport do the thing that caused this. The helper
+now builds the client the way the real one is built.
+
+### Two replicas, one brand-new item, and a review request deleted
+
+The row lock added last round is the whole staleness mechanism: it is what makes the second sync of
+one item re-read the row and answer "superseded". A brand-new item has no row to lock, and the
+comment beside the lock claimed `get_or_create` covered that case. It does not. It stops a
+duplicate key error and then hands back the other transaction's row, unlocked, with staleness never
+decided.
+
+A pull request opened with a reviewer already on it is two deliveries milliseconds apart. With two
+replicas the queue hands one to each, as designed, and both used to answer "not superseded". The
+one carrying the opened event then wrote its whole payload over the other's, and `replace` deletes
+the rows of anyone the payload does not list, so the reviewer's row went with it and took
+`notified_at` and `requested_at` with it. Run end to end with two worker processes and a real
+database: on one replica the reviewer is pinged once; on two, nobody is pinged at all, both
+deliveries are recorded processed with no error, and later an ordinary label event re-inserts the
+reviewer with `notified_at` empty and pings them for a request nobody made.
+
+The question is now asked in `_write` as well, at the only point a new item can be asked about at
+all. It works because the insert is what serialises the two: on a conflict it waits on the unique
+index until the other sync commits, so by the time it returns, that sync's timestamp is on the row.
+`get_or_create` holds the row it reads back, since every caller of it writes. The rename follow
+moved below the item for the same reason: until the row is there, whether to believe the payload is
+not known yet.
+
+The same hole in the other direction left a merged pull request stored as open, with the newer
+timestamp on it, which nothing later corrects.
+
+### The rebuild the note path could ask for only once
+
+Last round gave the note path a way out of a deleted thread: ask the item's own sync to build a new
+one. The ask was made from the branch that clears the dead pointer, and that branch cannot be
+reached twice. Every attempt after the first stopped one step earlier, at the item with no thread,
+where nothing asked for anything.
+
+So one rebuild that failed for any reason ended the item's mirror. A 502 from GitHub, a spent rate
+limit, or the worker's delivery deadline landing inside the rebuild is enough. That note burns its
+sixteen attempts, every later comment and review on the item goes the same way, and the item has no
+thread until an unrelated item event arrives, which for a closed issue or a merged pull request is
+never. The docstring on the ask said the opposite in as many words: "a rebuild that cannot happen
+now may well work on the attempt after". The line above it made sure it could not.
+
+The ask moved to `mirror`, where both ways of having nowhere to post arrive, so it repeats for as
+long as the delivery does. Verified against the database: with a rebuild that fails once and works
+after, the old order asked once, posted nothing, and left the pointer empty across four attempts.
+
+### A Discord outage arrived as somebody else's exception
+
+The two lookups in the thread gateway caught a missing thread and a refused one and let everything
+else through as a raw discord.py exception. That includes a 503, and a 500 or 502 that outlived
+discord.py's own five retries.
+
+Not a cold path. discord.py drops a thread from the guild cache the moment it archives, so the
+fetch is the only route to exactly the archived thread the write path exists to reopen. Two things
+went wrong when it fired. `delete` documents itself as best effort and suppresses this project's
+gateway error, so a raw one walked straight through it and took down a sync whose useful work was
+already done, costing a delivery a retry it did not need. And the command replies match on this
+project's errors, so a Discord outage was answered with "something went wrong here, it has been
+logged", which is the same unhelpful answer an earlier round fixed for GitHub.
+
+Both lookups translate it now. The order of the arms is the whole distinction, since a refusal is
+itself an HTTP exception, and a test says so.
+
+## A seventh look, at the first hour on a real server
+
+Same question as the sixth, pushed further out: not what the code does, but what an operator
+running this for the first time actually meets. Six lenses again, over the first ten minutes on an
+empty database, real GitHub payloads rather than the hand-built fixtures, Discord's own limits,
+the process after a week, what GitHub-authored text does to a message, and being killed and
+restarted mid-flight. Each finding below was reproduced, then handed to somebody told to refute
+it; three did not survive that and are not here.
+
+### Markdown after a link went to Discord unescaped
+
+`as_plain_text` is the only thing standing between anything anybody writes on GitHub and Discord's
+renderer. It escapes one character at a time, except for one alternative in the pattern that
+matches a whole span: the `[text](url)` link form. That one is greedy, so on a line carrying a
+link it runs from the first bracket to the last closing parenthesis on the line and puts a single
+backslash in front of all of it. Every marker in between ships live.
+
+A pull request titled `Fix [regression](https://github.com/o/r/issues/3) in **/*.py (again)` is a
+link to an issue, a glob and a parenthetical, and it put an odd number of bold markers into a
+metadata block built entirely out of matched pairs. Bold runs past a newline in Discord, so every
+label below the title paired with the value of the field underneath it, and whoever wrote the
+title chose where that started. The same hole let a code fence through, which opens a block that
+runs to the end of the message and swallows the link back to GitHub with it.
+
+The earlier round that turned `ignore_links` off closed the other half of this and the test that
+pins it uses a bare URL, so it never touched the link form. Breaking the bracket away from the
+parenthesis stops the alternative matching at all, which leaves every marker to be escaped one at
+a time like the rest. Six titles of that shape are pinned now, against the escaping itself rather
+than against the rendered block, where the block's own markers hide the leak.
+
+### A forum that demands a tag was mapped happily and then refused every thread
+
+A forum channel can be set to require a tag on every post. Nothing here picks one, because which
+tag a pull request belongs under is the server's business, so Discord refuses every thread the bot
+tries to open in such a channel. `/register` and `/set_channel` both accepted one: the guard asked
+whether the channel was a kind that can hold threads, and a forum is.
+
+The refusal then arrives as a 400, which the queue reads as worth retrying, so the first pull
+request burned sixteen attempts over two hours and was dropped with one log line. Nobody is told
+at any point, and every item after it does the same. Both commands now ask a single question that
+covers both cases and answers in a sentence naming the checkbox to turn off.
+
+The claim that Announcement channels fail the same way did not survive: an announcement channel
+really is a `discord.TextChannel`, really does pass the guard, and really is offered by the
+channel picker, but nobody established that Discord refuses the thread type rather than coercing
+it, so it stays unrecorded rather than guessed at.
+
+### A team ping that notified nobody
+
+Discord notifies a role's members only when the role is mentionable or the sender holds Mention
+@everyone, @here, and All Roles. Roles are created without that flag, and the permission is not in
+the list the README asks for, so on an ordinary server the mention `/link_team` promises rendered
+in the thread as a blue pill and reached not one person.
+
+This is the one moment the team feature exists for, and it looks exactly like it worked. It does
+not get a second chance either: the ping is claimed before it is sent and stamped as spent whether
+or not anybody read it, so every review request that goes past before somebody notices is silent.
+User links are unaffected, since a user mention needs no permission, which is why the two look
+identical in testing.
+
+`/link_team` now says so in its answer, and the README says so beside the setup steps. A warning
+rather than a refusal: the link is worth having either way, and it is one checkbox to fix.
+
+### Shutdown needed fifteen seconds and the container gave it ten
+
+Two shutdown budgets were each written against Docker's ten second default, in different files,
+neither aware of the other. The worker grace waits five seconds for the delivery in hand; the
+cancellation then unwinds into the thread binding, which waits up to ten more for a thread Discord
+has been asked for and not yet answered about. They run one after the other, and neither the
+Dockerfile nor the compose file set a stop timeout.
+
+Killed part way through, the worker never hands back the rest of its leased batch, so up to nine
+other deliveries sit locked until their fifteen minute lease lapses. The replacement process starts
+clean, polls a queue that looks empty, and those pull requests get no thread for a quarter of an
+hour with nothing in either log saying why. That is the exact regression an earlier round fixed by
+adding the hand-back, made unreachable in the case it was written for. Docker Desktop is worse than
+the documented default and stops a container after about a second and a half.
+
+The compose file now allows thirty seconds and says where the number comes from. A test reads both
+waits out of the code and the allowance out of the deployment, so raising either budget without
+raising the allowance fails rather than quietly going back to being killed.
+
+### A dead worker left a live process that nothing would restart
+
+The delivery worker dying takes the whole point of the process with it, and the only thing that
+happened was one line in the log. Uvicorn kept serving, the endpoint kept answering 200 to
+deliveries nothing would ever work, and the container sat there.
+
+`/health` reported this correctly and the image's health check read it correctly, and that changed
+nothing, because a container restart policy watches the exit code and never the health state. An
+unhealthy container that has not exited is a container that waits for a human. An earlier round
+recorded this as fixed on the strength of the health check now asking `/health`, which was never
+what decided it.
+
+A task the process cannot do its job without now asks the process to stop, by sending it the same
+signal an orchestrator would, so the ordinary shutdown still runs and the delivery in hand still
+finishes. The worker and the gateway are wired that way; the poller is not, because everything the
+webhooks bring still works without it. Half of what ends these tasks is fixed by a restart, a
+rotated token first among them. Nothing was being lost while it sat there, which is the one thing
+the original report had too high: the endpoint's 200 is the right answer, and those rows are
+pending, not failed, so they are worked within milliseconds of the next start.
+
+### A blank database URL failed before anything written to be helpful about it
+
+`build_engine` runs ahead of uvicorn, so a URL that will not parse fails there rather than at the
+startup check written to say what is wrong with a database. SQLAlchemy's own words for it name
+nothing an operator can go and change, and blank is the shape it usually takes: an empty
+`SHANNON_DATABASE_URL=` in a copied `.env` reads as a value that was set, and pydantic takes it.
+It now names the setting and shows the shape of a working one.
