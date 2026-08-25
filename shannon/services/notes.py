@@ -72,10 +72,27 @@ class ItemNoteMirror:
 
     async def mirror(self, snapshot: ItemNote) -> bool:
         """Post the note, returning whether there was anywhere to post it."""
-        target = await self._find_thread(snapshot)
-        if target is None:
-            return False
-        return await self._post(snapshot, target)
+        try:
+            target = await self._find_thread(snapshot)
+            if target is None:
+                return False
+            return await self._post(snapshot, target)
+        except ItemNotReadyError:
+            # Both ways of having nowhere to post arrive here: an item whose thread was never
+            # built, and one whose thread was deleted between the read and the post. Asking on
+            # the way out is what makes the ask repeat.
+            #
+            # It used to sit in the second branch alone, which is the one branch that cannot be
+            # reached twice: it clears the dead pointer on its way past, so every later attempt
+            # of this note, and every later note on the item, stopped at the first branch
+            # instead, where nothing asked for anything. One rebuild that failed for any reason
+            # ended the item's mirror, and a spent rate limit or the delivery deadline landing
+            # inside it is reason enough.
+            #
+            # Outside the sessions the two branches open, so nothing holds a connection while
+            # GitHub is read.
+            await self._ask_for_a_rebuild(snapshot)
+            raise
 
     async def _find_thread(self, snapshot: ItemNote) -> _NoteTarget | None:
         """Which thread this note belongs in, or None if the item is not mirrored here.
@@ -149,17 +166,14 @@ class ItemNoteMirror:
             )
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the
-            # channel and the metadata. Letting go of the dead id is what lets that happen.
+            # channel and the metadata. Letting go of the dead id is what lets an item event
+            # that arrived late do it too: `_resolve` turns a stale delivery away, but only for
+            # an item that still has a thread to show for itself.
             #
-            # Asking for it is the other half, and it used to be missing. Comments and reviews
-            # are not item events, so nothing on this path ever rebuilt anything: the retry this
-            # raises found the pointer still null, raised the same thing again, and sixteen
-            # attempts later the note was dropped. Every comment and review left in the meantime
-            # went the same way, until some unrelated `pull_request` or `issues` action happened
-            # to arrive and rebuild the thread as a side effect. On a quiet item that is never.
+            # Asking for the rebuild is the other half, and `mirror` does that, for this branch
+            # and for the one that finds no thread at all.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             await self._forget_thread(target.tracked_item_id, target.thread_id)
-            await self._ask_for_a_rebuild(snapshot)
             raise ItemNotReadyError(
                 f"thread {target.thread_id} for {snapshot.repository.full_name}"
                 f"#{snapshot.item_number} is gone and has to be rebuilt"

@@ -399,6 +399,87 @@ class TestTheStalenessWatermark:
         assert (await stored(db_session)).github_updated_at == newer
 
 
+class TestARebuildThatDidNotWorkTheFirstTime:
+    """The note path's only way out of a deleted thread, and it used to get one try at it.
+
+    Nothing else on this path can build a thread: a comment is not an item event, and only a
+    sync has the channel and the metadata. So the ask is the whole recovery, and it was made
+    from the branch that clears the dead pointer on its way past. That branch cannot be reached
+    a second time. Every attempt after the first stopped one step earlier, at the item with no
+    thread, where nothing asked for anything, and one 502 from GitHub or one delivery deadline
+    landing inside the rebuild ended the item's mirror for good: sixteen attempts, every later
+    comment the same, and no thread until an item event happened to arrive, which for a closed
+    issue is never.
+    """
+
+    @pytest.fixture
+    def issues(
+        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    ) -> ItemSyncService:
+        return build_item_sync(db_sessionmaker, threads, IssuePolicy())
+
+    async def test_it_is_asked_for_again_and_the_note_lands(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        asks: list[int] = []
+
+        async def rebuild(note) -> None:
+            asks.append(note.item_number)
+            if len(asks) == 1:
+                raise RuntimeError("GitHub answered 502")
+            await issues.sync(issue_event("edited"))
+
+        mirror = ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions: "hello", rebuild=rebuild
+        )
+        synced = await issues.sync(issue_event("opened"))
+        threads.threads.pop(synced.thread_id)
+        note = parse_comment_event("created", payloads.issue_comment_event())
+
+        # The attempt that finds the thread gone, asks, and is refused.
+        with pytest.raises(ItemNotReadyError):
+            await mirror.mirror(note)
+        # The retry, which finds an item with no thread at all.
+        with pytest.raises(ItemNotReadyError):
+            await mirror.mirror(note)
+        posted = await mirror.mirror(note)
+
+        assert asks == [note.item_number] * 2, "it only ever asked once"
+        assert posted is True
+        assert threads.posts == [(threads.created[-1].thread_id, "hello")]
+
+    async def test_the_failure_is_kept_out_of_the_reason_the_note_gives(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """What the delivery is told has to name the thread, not whatever GitHub said.
+
+        The note is retried either way, and a rebuild that cannot happen now may work on the
+        attempt after, so the rebuild failing is not the note's reason for stopping.
+        """
+
+        async def rebuild(note) -> None:
+            raise RuntimeError("GitHub answered 502")
+
+        mirror = ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions: "hello", rebuild=rebuild
+        )
+        synced = await issues.sync(issue_event("opened"))
+        threads.threads.pop(synced.thread_id)
+
+        with pytest.raises(ItemNotReadyError, match=str(synced.thread_id)):
+            await mirror.mirror(parse_comment_event("created", payloads.issue_comment_event()))
+
+
 class TestTheSlotBeingClearedMidRebuild:
     """The branch that guards the narrowest race here, and nothing exercised it.
 
