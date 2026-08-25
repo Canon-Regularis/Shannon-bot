@@ -205,6 +205,22 @@ class TestReadingABoard:
 
         assert [item.column for item in items] == [None]
 
+    async def test_an_answer_with_no_status_field_is_asked_again_next_time(self) -> None:
+        """The ids are looked up once and kept, which is right for an answer worth keeping.
+
+        Title alone is not one. Without the Status id the request never asks for the field, so
+        every card comes back with no column, and remembering that answer read the board that
+        way for the life of the process rather than for one poll. A renamed field is one edit to
+        undo, and the poll after it should see the board again.
+        """
+        client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[draft(fields=[])])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert sum(path.endswith("/fields") for path, _ in client.calls) == 2
+
     async def test_an_answer_that_is_not_a_list_reads_as_an_empty_board(self) -> None:
         client = FakeJson(fields={"message": "Not Found"}, items={"message": "Not Found"})
 

@@ -259,7 +259,7 @@ class ProjectPoller:
                 # first-look guard below is still armed when a Status is finally set: the move
                 # that sets it is read as a first look and dropped, and the column matches from
                 # then on so no later poll revisits it.
-                await self._remember_column(tracked.tracked_item_id, column)
+                await self._remember_column(tracked, column)
             return 0
 
         wanted = status_from_column(column)
@@ -267,7 +267,7 @@ class ProjectPoller:
             # A column nobody has taught us, or the first look at a card that already agrees
             # with its item. Neither is a move to carry out, and both have to be written down
             # or the same card is looked at again on every poll for ever.
-            await self._remember_column(tracked.tracked_item_id, column)
+            await self._remember_column(tracked, column)
             return 0
 
         if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
@@ -280,7 +280,7 @@ class ProjectPoller:
                 tracked.status.value,
                 column,
             )
-            await self._remember_column(tracked.tracked_item_id, column)
+            await self._remember_column(tracked, column)
             return 0
 
         # A card that has moved before goes through even where the status already matches.
@@ -291,7 +291,7 @@ class ProjectPoller:
         # through, and it says this one was not. Repeating a status nothing changed costs one
         # read of the item and writes nothing, which is what makes it safe to send round again.
         try:
-            await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
+            moved = await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
         except WorkflowRefusedError as refusal:
             # A status the item cannot hold, such as anything but DONE on a closed issue.
             # The board is allowed to disagree with GitHub; it is not allowed to win. This is
@@ -303,7 +303,7 @@ class ProjectPoller:
                 item.title,
                 refusal.message,
             )
-            await self._remember_column(tracked.tracked_item_id, column)
+            await self._remember_column(tracked, column)
             return 0
         except ShannonError as error:
             # GitHub or Discord having a bad moment, which is not an answer about anything.
@@ -314,18 +314,51 @@ class ProjectPoller:
             logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
             return 0
 
-        await self._remember_column(tracked.tracked_item_id, column)
+        if moved.lock_refused:
+            # The same half-done move, reported rather than raised. A command answers a refused
+            # lock by telling the person who ran it what did land and what did not, because they
+            # are standing there and can act on it. Nobody is standing here, so the only way this
+            # gets a second go is the card coming round again, and the column not being written
+            # down is what sends it.
+            logger.warning(
+                "moved %s to %s but could not lock its thread; it will be tried again",
+                item.title,
+                wanted.value,
+            )
+            return 0
+
+        await self._remember_column(tracked, column)
         return 1
 
-    async def _remember_column(self, tracked_item_id: int, column: str) -> None:
+    async def _remember_column(self, tracked: BoardRow, column: str) -> None:
         """Record where the card was, storing the empty string for a card with no column at all.
 
         Null has to keep meaning one thing, and it already means never seen. Writing null for a
         card whose Status somebody cleared would put it back to never seen, which re-arms the
         first-look guard and quietly drops the next real move.
+
+        A card that had a column and now reads as having none is the one thing this refuses to
+        write down. Somebody clearing one card's Status looks identical here to the board's whole
+        Status field having gone unreadable, and the second is a shape the poller cannot survive
+        believing: it would write the empty string over every remembered column on the board at
+        once, and the poll after the field came back would read every card as having moved into a
+        column and drive all of them through the status commands, stripping whatever label a
+        person had set by hand from every item at once.
+
+        Refusing costs nothing in the case it is wrong about. A cleared Status carries no status
+        to move to, so the card is passed over either way, and the memory that is kept is a
+        column the card is no longer in, which the next real move still differs from.
         """
+        if column == "" and tracked.column:
+            logger.info(
+                "not forgetting that card %s was in %r: a card with no column at all is what a "
+                "board whose Status field cannot be read looks like",
+                tracked.tracked_item_id,
+                tracked.column,
+            )
+            return
         async with self._sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).remember_column(tracked_item_id, column)
+            await TrackedItemStore(session).remember_column(tracked.tracked_item_id, column)
 
     async def _board_state(self, repository_id: int) -> Mapping[tuple[ObjectType, int], BoardRow]:
         async with self._sessionmaker() as session:
