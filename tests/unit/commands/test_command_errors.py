@@ -8,7 +8,11 @@ from discord import app_commands
 
 from shannon.commands._replies import UNEXPECTED, reply_for
 from shannon.discord_bot.client import ShannonBot
-from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.errors import (
+    ChannelNotFoundError,
+    DiscordGatewayError,
+    DiscordPermissionError,
+)
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.errors import NotRegisteredError
@@ -87,6 +91,29 @@ class TestReadingAnError:
 
     def test_a_wrapped_gateway_failure_is_recognised_too(self) -> None:
         assert "Discord refused the update" in reply_for(wrapped(DiscordGatewayError("no")))
+
+    def test_a_missing_permission_says_it_is_a_permission(self) -> None:
+        """The likeliest thing to go wrong on a new server, and nobody in the thread can wait it
+        out. It used to read as a refusal, with discord.py's error code echoed after it."""
+        answer = reply_for(
+            DiscordPermissionError("403 Forbidden (error code: 50013): Missing Permissions")
+        )
+
+        assert "permission" in answer
+        assert "admin" in answer
+        assert "50013" not in answer, "a Discord error code is no use to a person in Discord"
+
+    def test_a_channel_that_has_gone_names_the_command_that_fixes_it(self) -> None:
+        answer = reply_for(ChannelNotFoundError("Channel 12345 is not there"), noun="issue")
+
+        assert "/set_channel" in answer
+        assert "12345" not in answer, "a snowflake is no use to a person in Discord"
+
+    def test_an_ordinary_refusal_is_still_an_ordinary_refusal(self) -> None:
+        """Both of the rows above are a gateway error, so the order of the three decides this."""
+        answer = reply_for(DiscordGatewayError("Discord refused to update the thread: 503"))
+
+        assert answer == "Discord refused the update. Discord refused to update the thread: 503"
 
     def test_a_wrapped_unknown_still_gets_the_catch_all(self) -> None:
         assert reply_for(wrapped(RuntimeError("boom"))) == UNEXPECTED

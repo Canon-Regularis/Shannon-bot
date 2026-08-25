@@ -3,7 +3,11 @@ from __future__ import annotations
 import logging
 import math
 
-from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.errors import (
+    ChannelNotFoundError,
+    DiscordGatewayError,
+    DiscordPermissionError,
+)
 from shannon.domain.errors import (
     DuplicateRegistrationError,
     ItemNotReadyError,
@@ -44,6 +48,22 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
         "An admin needs to check its GitHub token.",
     ),
     (GitHubError, "GitHub could not be reached. {message}"),
+    # The same split as the two GitHub rows above, for the same reason, on the side of it that
+    # is likelier to happen. Both of these are a DiscordGatewayError and both used to fall
+    # through to it, so a permission nobody granted and a channel somebody deleted were each
+    # reported as "Discord refused the update", followed by whatever discord.py had said, error
+    # code and all. Neither is a refusal to wait out, and echoing a raw API message at somebody
+    # sitting in Discord tells them nothing they can do.
+    (
+        DiscordPermissionError,
+        "Discord will not let this bot do that here. An admin needs to give it the missing "
+        "permission; the log says which one.",
+    ),
+    (
+        ChannelNotFoundError,
+        "The channel {noun} threads go in has gone, or is a kind that cannot hold threads. "
+        "Run /set_channel to point them somewhere else.",
+    ),
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
     (NotRegisteredError, "{message}"),
