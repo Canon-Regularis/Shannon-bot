@@ -354,6 +354,65 @@ class TestDeletingAThread:
         await gateway.delete(thread_id=500)
 
 
+class TestDiscordFailingOnTheLookupItself:
+    """The fetch is a network call like any other, and it can answer 500 like any other.
+
+    Not a cold path either. discord.py drops a thread from the guild cache the moment it
+    archives, so `get_channel` misses and the fetch is the only route to exactly the archived
+    thread the write path exists to reopen. Left raw, that exception is discord.py's rather
+    than this project's, and two things go wrong: `delete` suppresses this project's gateway
+    error and would have let it through, taking down a sync that had already done its work and
+    costing a delivery a retry; and the command replies match on this project's errors, so a
+    Discord outage answered "something went wrong here" instead of saying Discord refused.
+    """
+
+    def _client_failing(self, error: Exception) -> MagicMock:
+        stub = MagicMock(spec=discord.Client)
+        stub.is_ready = MagicMock(return_value=True)
+        stub.get_channel = MagicMock(return_value=None)
+        stub.fetch_channel = AsyncMock(side_effect=error)
+        return stub
+
+    async def test_a_thread_lookup_that_fails_is_a_gateway_error(self) -> None:
+        client = self._client_failing(discord.HTTPException(MagicMock(status=503), "unavailable"))
+        gateway = DiscordThreadGateway(client)
+
+        with pytest.raises(DiscordGatewayError, match=r"503|unavailable"):
+            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+
+    async def test_discord_being_down_is_a_gateway_error_too(self) -> None:
+        """Raised by discord.py once its own five retries are spent, so it means it."""
+        client = self._client_failing(discord.DiscordServerError(MagicMock(status=502), "bad"))
+        gateway = DiscordThreadGateway(client)
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+
+    async def test_a_channel_lookup_that_fails_is_a_gateway_error(self) -> None:
+        client = self._client_failing(discord.HTTPException(MagicMock(status=503), "unavailable"))
+        gateway = DiscordThreadGateway(client)
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway.create(channel_id=10, name="x", content="y")
+
+    async def test_the_stranded_thread_it_cannot_look_up_is_still_not_worth_raising_over(
+        self,
+    ) -> None:
+        """`delete` is called on the branch where another sync already attached the winner."""
+        client = self._client_failing(discord.HTTPException(MagicMock(status=503), "unavailable"))
+        gateway = DiscordThreadGateway(client)
+
+        await gateway.delete(thread_id=500)
+
+    async def test_a_refusal_is_still_kept_apart_from_an_outage(self) -> None:
+        """Forbidden is an HTTPException, so the order of the arms is the whole distinction."""
+        client = self._client_failing(discord.Forbidden(MagicMock(status=403), "no"))
+        gateway = DiscordThreadGateway(client)
+
+        with pytest.raises(DiscordPermissionError):
+            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+
+
 class TestRefusedIsNotGone:
     """A permission refusal must never read as a deleted thread.
 

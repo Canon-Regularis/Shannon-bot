@@ -25,6 +25,31 @@ THREAD_NAME_LIMIT = 100
 # is still watching, because by the time the sync path reaches it there is nobody to tell.
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
 
+
+def why_threads_will_not_open(channel: object) -> str | None:
+    """What is wrong with a channel as a home for this bot's threads, or None if nothing is.
+
+    Asked by `/register` and `/set_channel` before either writes anything down, because that is
+    the last moment somebody is looking at the answer. A channel that refuses is not found out
+    until the sync path reaches it, which is hours later and behind the queue: Discord answers a
+    refused create with a 400, the queue reads that as worth retrying, and the item burns sixteen
+    attempts over two hours before it is dropped with one log line. Nobody is told at any point.
+
+    A forum can be set to demand a tag on every post. Nothing here picks one, because which tag
+    a pull request belongs under is the server's business and not something to guess, so a forum
+    set that way is refused rather than half-supported. It is one checkbox in the channel's
+    settings, and the message says so.
+    """
+    if not isinstance(channel, THREADABLE):
+        return "Use a text or forum channel."
+    if isinstance(channel, discord.ForumChannel) and channel.flags.require_tag:
+        return (
+            "That forum requires a tag on every post, and this bot does not set one. "
+            "Turn off Require Tags in the channel's settings, or pick another channel."
+        )
+    return None
+
+
 # The longest window Discord offers before it archives a quiet thread by itself. An archived
 # thread rejects edits, and a pull request nobody discusses for a day is completely ordinary, so
 # the default of one day would archive most threads while their item was still open.
@@ -245,6 +270,10 @@ class DiscordThreadGateway:
                 raise DiscordPermissionError(
                     f"Discord will not let the bot see channel {channel_id}"
                 ) from exc
+            except discord.HTTPException as exc:
+                raise DiscordGatewayError(
+                    f"Discord refused to look up channel {channel_id}: {exc}"
+                ) from exc
         return channel  # type: ignore[return-value]
 
     async def _thread(self, thread_id: int) -> discord.Thread:
@@ -253,6 +282,14 @@ class DiscordThreadGateway:
         Callers rebuild on the first and give up on the second. Reporting a permission refusal
         as a missing thread would have a temporary loss of access delete the item's record of
         its thread and open a replacement, orphaning everything already mirrored into it.
+
+        Everything else Discord can answer is a third thing, and it used to leave here as a raw
+        discord.py exception. This is not a cold path: discord.py drops a thread from the guild
+        cache the moment it archives, so the fetch is the only route to exactly the archived
+        thread `_wake` exists to reopen, and a 503 lands in it. Untranslated it walked straight
+        through `delete`, which suppresses this project's gateway error and documents itself as
+        not worth failing over, and it reached the command replies, which match on this
+        project's errors and answered "something went wrong here" for a Discord outage.
         """
         self._require_a_connection()
         channel = self._client.get_channel(thread_id)
@@ -264,6 +301,10 @@ class DiscordThreadGateway:
             except discord.Forbidden as exc:
                 raise DiscordPermissionError(
                     f"Discord will not let the bot see thread {thread_id}"
+                ) from exc
+            except discord.HTTPException as exc:
+                raise DiscordGatewayError(
+                    f"Discord refused to look up thread {thread_id}: {exc}"
                 ) from exc
 
         if not isinstance(channel, discord.Thread):
