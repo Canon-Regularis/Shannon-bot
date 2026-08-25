@@ -17,10 +17,23 @@ ExplainError = Callable[[BaseException], str]
 
 
 def build_intents() -> discord.Intents:
-    intents = discord.Intents.default()
-    # Members are needed to turn a GitHub login into someone this server can actually ping.
-    intents.members = True
-    return intents
+    """What this bot needs off the gateway, which is nothing privileged.
+
+    It used to ask for `members`, on the stated grounds that turning a GitHub login into
+    somebody this server can ping needed it. It does not. A mention is a `<@id>` string built
+    from a row in `user_links`, and Discord resolves it on receipt; nothing here ever looks a
+    member up. The one thing that reads a member is the permission gate, and what it reads is
+    `interaction.user`, which discord.py builds from the interaction payload and whose roles
+    resolve against the guild role cache that arrives under `guilds`.
+
+    Asking for it anyway was not free. It is privileged, so it is a Developer Portal toggle
+    that stops the process starting at all when it is missed, and it needs Discord's approval
+    past a hundred servers. discord.py also reads it as a request to chunk: `members` on turns
+    `chunk_guilds_at_startup` on, so the whole member list of every server is pulled over the
+    gateway before READY fires and then kept in memory, and READY is what the worker waits for
+    before it will deliver anything.
+    """
+    return discord.Intents.default()
 
 
 class ShannonBot(discord.Client):
@@ -73,10 +86,23 @@ class ShannonBot(discord.Client):
         self._pending.extend(commands)
 
     async def setup_hook(self) -> None:
+        """Register the commands with Discord, once, before the gateway connects.
+
+        A global sync rather than a per-guild one, because this bot is invited to a server rather
+        than built into one and a global command works wherever it is invited. The cost is worth
+        saying out loud in the log: Discord serves global commands from a cache and can take up to
+        an hour to show a new one, so the first start of a fresh application looks exactly like a
+        broken one. A per-guild sync appears at once and is the thing to reach for while
+        developing.
+        """
         for command in self._pending:
             self.tree.add_command(command)
         await self.tree.sync()
-        logger.info("synced %s slash commands", len(self._pending))
+        logger.info(
+            "registered %s slash commands with Discord; a global sync can take up to an hour to "
+            "appear in a server, so they may not be typeable yet",
+            len(self._pending),
+        )
 
     async def on_ready(self) -> None:
         logger.info("connected to Discord as %s", self.user)

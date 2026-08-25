@@ -75,10 +75,10 @@ GitHub's Recent Deliveries page is the first place to look when nothing appears 
 a wrong secret, 500 is an unset one, and a 200 answering `ignored` means the event arrived and this
 bot does not act on it.
 
-**The Discord bot.** In the Developer Portal, under Bot, turn on the **Server Members** intent.
-Turning a GitHub login into somebody this server can ping needs it, and the client asks for it at
-startup, so without it the bot will not connect at all. Invite it with the `bot` and
-`applications.commands` scopes and these permissions:
+**The Discord bot.** No privileged intent is needed, so there is nothing to turn on under Bot in
+the Developer Portal and nothing for Discord to approve. Pinging somebody works from the account
+map `/link` builds, and reading somebody's roles works from what Discord sends with the command
+itself. Invite it with the `bot` and `applications.commands` scopes and these permissions:
 
 ```text
 View Channels
@@ -86,11 +86,24 @@ Send Messages
 Send Messages in Threads
 Create Public Threads
 Manage Threads
+Read Message History
 ```
 
-`Manage Threads` is the one that is easy to miss and fails late. Everything works until an issue
-closes or somebody runs `/set_done`, and then the lock is refused; it is a separate permission from
-the ones that open and write to a thread.
+Two of those are easy to miss and both fail after everything looks fine.
+
+`Read Message History` is needed to edit the metadata block. The block is one message, written when
+the thread opens and rewritten on every later event, and rewriting it means reading it first;
+Discord counts that as reading history even though the bot wrote it. Without this the thread
+appears once, correctly, and then never changes again, and every later delivery for that item is
+refused as a missing permission rather than retried.
+
+`Manage Threads` fails later still. Everything works until an issue closes or somebody runs
+`/set_done`, and then the lock is refused; it is a separate permission from the ones that open and
+write to a thread.
+
+On the very first start the commands are registered globally, and Discord serves those from a cache
+that can take up to an hour to catch up. The log says so. Until it does, typing `/` shows nothing
+and there is nothing wrong: wait, or restart the Discord client, which usually shortens it.
 
 **Then, in the server, in this order.**
 
@@ -105,6 +118,16 @@ the ones that open and write to a thread.
 Only `/register` has to come first. Issues fall back to the pull request channel until they are
 given one of their own; project tickets do not, so a board stays unmirrored until `/set_channel`
 names a channel for them.
+
+The role given to `/link_team` needs **Allow Anyone To @mention This Role** turned on in its
+settings. Discord notifies a role's members only when that is set or the sender holds Mention
+@everyone, @here, and All Roles, and roles are created without it, so otherwise the ping shows in
+the thread as a blue pill and reaches nobody. `/link_team` says so when it sees it. The other way
+is to add that permission to the invite; it is safe here because the bot refuses to resolve
+`@everyone` in anything it sends, whoever wrote the text.
+
+A forum channel set to **Require Tags** is refused by `/register` and `/set_channel`, because
+nothing here picks a tag and Discord rejects every post without one.
 
 ## Configuration
 

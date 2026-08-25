@@ -20,9 +20,17 @@ from tests.support import github_payloads as payloads
 
 
 def client_with(handler: Callable[[httpx.Request], httpx.Response]) -> HttpGitHubClient:
+    """A client wired to a handler, otherwise built the way the real one is.
+
+    `follow_redirects` is the way the real one is built, and leaving it off here made a whole
+    class of defect invisible: a redirected write is downgraded to a read by the transport, and
+    with the transport told not to follow anything, no test could see it happen.
+    """
     transport = httpx.MockTransport(handler)
     return HttpGitHubClient(
-        http_client=httpx.AsyncClient(transport=transport, base_url="https://api.github.com")
+        http_client=httpx.AsyncClient(
+            transport=transport, base_url="https://api.github.com", follow_redirects=True
+        )
     )
 
 
@@ -546,6 +554,84 @@ class TestFetchingAnIssue:
         async with client_with(responds(500, {"message": "boom"})) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+
+class TestAWriteToARepositoryThatMoved:
+    """The same 301, on the half of the client that changes something.
+
+    Following redirects was turned on for reads, where an unfollowed one reached the person who
+    ran the command as "GitHub could not be reached". On a write it is worse than not following:
+    httpx re-issues a redirected POST as a bodyless GET, GitHub answers the label list with 200,
+    and the client reports a write that never happened. Nothing after it can tell the difference,
+    so `/set_in_review` says it worked, writes the status to the row and renders it into the
+    thread, and the item on GitHub keeps whatever label it had.
+    """
+
+    def _renamed(self, seen: list[tuple[str, str]]):
+        """The answer GitHub really gives, checked against the live API.
+
+        A renamed repository answers 301 on this exact endpoint, and the Location it gives is
+        the canonical numeric form with the rest of the path kept: asking for
+        `/repos/facebook/jest/issues/1/labels` comes back pointing at
+        `https://api.github.com/repositories/15062869/issues/1/labels`.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path))
+            if request.url.path.startswith("/repositories/"):
+                return httpx.Response(200, content=json.dumps([]))
+            return httpx.Response(
+                301,
+                headers={
+                    "Location": "https://api.github.com/repositories/15062869/issues/7/labels"
+                },
+            )
+
+        return handler
+
+    async def test_the_label_is_written_to_the_new_name_by_the_same_method(self) -> None:
+        seen: list[tuple[str, str]] = []
+        async with client_with(self._renamed(seen)) as client:
+            await client.add_label("acme", "widgets", 7, "IN_REVIEW")
+
+        assert seen == [
+            ("POST", "/repos/acme/widgets/issues/7/labels"),
+            ("POST", "/repositories/15062869/issues/7/labels"),
+        ], "the redirected write was downgraded to a read"
+
+    async def test_a_redirect_off_the_host_is_refused_rather_than_handed_the_token(self) -> None:
+        """Following one by hand is deciding who the Authorization header goes to."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(301, headers={"Location": "https://example.invalid/labels"})
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match=r"example\.invalid"):
+                await client.add_label("acme", "widgets", 7, "IN_REVIEW")
+
+    async def test_a_redirect_that_says_nothing_about_where_is_refused(self) -> None:
+        async with client_with(responds(301)) as client:
+            with pytest.raises(GitHubUnavailableError, match="without saying where"):
+                await client.add_label("acme", "widgets", 7, "IN_REVIEW")
+
+    async def test_a_chain_that_never_resolves_stops_and_says_so(self) -> None:
+        """Loud and retryable, which is what the write path answered before it followed any."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                301, headers={"Location": f"https://api.github.com{request.url.path}/on"}
+            )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="301"):
+                await client.add_label("acme", "widgets", 7, "IN_REVIEW")
+
+    async def test_a_removal_follows_the_rename_too(self) -> None:
+        seen: list[tuple[str, str]] = []
+        async with client_with(self._renamed(seen)) as client:
+            await client.remove_label("acme", "widgets", 7, "BACKLOG")
+
+        assert [method for method, _ in seen] == ["DELETE", "DELETE"]
 
 
 class TestARepositoryThatMoved:
