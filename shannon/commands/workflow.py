@@ -128,6 +128,23 @@ async def _act(interaction, name: str, gate: PermissionGate, call, *, said: str)
 
 def _said(outcome: WorkflowOutcome, said: str) -> str:
     item = f"{outcome.full_name}#{outcome.number}"
+    if outcome.lock_refused:
+        # The move landed and the lock did not, and those two are one Discord permission apart.
+        # Reporting only the refusal reads as nothing having happened, which is the opposite of
+        # what did: the labels are on GitHub, the status is stored, the thread says so.
+        #
+        # Which way it was going matters to whoever reads this. A thread that would not lock is
+        # untidy; a thread that would not unlock is one nobody can reply in, which is the thing
+        # they just reopened it to do.
+        left = (
+            "this thread could not be locked"
+            if outcome.wanted_locked
+            else "this thread could not be unlocked, so nobody can reply in it yet"
+        )
+        return (
+            f"{item} is {said}, but {left}. Discord refused that, which is usually the bot "
+            "missing Manage Threads. Run this again once it has it and the lock gets another go."
+        )
     if not outcome.changed:
         # A repeat is not a failure. The requirements say a duplicate takes no action, and the
         # person running it wants to know the item is where they were putting it.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -35,6 +36,11 @@ class FakeGitHubClient:
         self.pull_requests = pull_requests or {}
         self.issues = issues or {}
         self.repository_calls: list[str] = []
+        # A pair of events for a test that needs to stop a caller here. The real client makes a
+        # network round trip at this point, which is the window two overlapping commands
+        # interleave in, and a test that waits out a guess at how long that takes is a test that
+        # passes on a busy machine for the wrong reason.
+        self.before_read: tuple[asyncio.Event, asyncio.Event] | None = None
         self.pull_request_calls: list[tuple[str, int]] = []
         self.issue_calls: list[tuple[str, int]] = []
         # Labels the fake has been told to write, keyed the same way the snapshots are, so a
@@ -67,6 +73,7 @@ class FakeGitHubClient:
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         key = (f"{owner}/{name}".lower(), number)
         self.pull_request_calls.append(key)
+        await self._hold()
         if self.error is not None:
             raise self.error
         try:
@@ -75,6 +82,13 @@ class FakeGitHubClient:
             raise GitHubNotFoundError(
                 f"GitHub has nothing at /repos/{owner}/{name}/pulls/{number}"
             ) from None
+
+    async def _hold(self) -> None:
+        if self.before_read is None:
+            return
+        reached, release = self.before_read
+        reached.set()
+        await release.wait()
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot:
         key = (f"{owner}/{name}".lower(), number)

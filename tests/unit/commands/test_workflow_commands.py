@@ -136,6 +136,57 @@ async def test_finishing_says_the_thread_is_locked() -> None:
     assert said(interaction).endswith("is now DONE, and this thread is locked.")
 
 
+async def test_a_lock_discord_refused_says_what_did_happen_as_well() -> None:
+    """Everything but the lock landed, and reporting only the refusal reads as the opposite.
+
+    Somebody told the command failed goes and runs it again from the top, or worse, decides the
+    item is not done and chases it. What it needs to say is that the item moved, that the one
+    step left is a permission, and that running it again is what takes it.
+    """
+    service = StubWorkflow(
+        outcome=WorkflowOutcome(
+            "Canon-Regularis/Shannon-bot",
+            7,
+            changed=True,
+            locked=False,
+            lock_refused=True,
+            wanted_locked=True,
+        )
+    )
+
+    interaction = await run("set_done", service, member_with("Reviewer"))
+
+    answer = said(interaction)
+    assert answer.startswith("Canon-Regularis/Shannon-bot#7 is DONE")
+    assert "could not be locked" in answer
+    assert "Manage Threads" in answer
+
+
+async def test_a_refused_unlock_says_nobody_can_reply_rather_than_the_opposite() -> None:
+    """The two directions are not the same news.
+
+    A thread that would not lock is untidy. A thread that would not unlock is shut against the
+    discussion the person running this has just reopened it for, and they need to know that
+    before they walk away from it.
+    """
+    service = StubWorkflow(
+        outcome=WorkflowOutcome(
+            "Canon-Regularis/Shannon-bot",
+            7,
+            changed=True,
+            locked=True,
+            lock_refused=True,
+            wanted_locked=False,
+        )
+    )
+
+    interaction = await run("set_in_review", service, member_with("Reviewer"))
+
+    answer = said(interaction)
+    assert "could not be unlocked" in answer
+    assert "nobody can reply in it" in answer
+
+
 async def test_a_refusal_comes_back_as_a_sentence() -> None:
     """The interaction has been deferred by this point, so anything escaping leaves the person
     who ran it watching a spinner until Discord gives up."""

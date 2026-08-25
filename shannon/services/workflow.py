@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.models import TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.threads import LocksThread
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import ItemNotReadyError, ShannonError
@@ -68,6 +69,11 @@ class WorkflowOutcome:
     number: int
     changed: bool
     locked: bool = False
+    # Set when Discord refused the lock step, with the direction that was asked for. What to
+    # tell somebody about a thread that would not lock and one that would not unlock is not the
+    # same sentence: the second one means nobody can reply in it.
+    lock_refused: bool = False
+    wanted_locked: bool = False
 
 
 class LabelsItems(Protocol):
@@ -106,14 +112,33 @@ class ItemWorkflow:
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
-            # Nothing to write, which is not the same as nothing to do. Locking is the last
-            # step of finishing an item and the likeliest to have failed on its own, so a
-            # repeat of /set_done is what gets a second go at it.
-            locked = status is Status.DONE and await self._set_lock(thread_id, True)
-            return WorkflowOutcome(found.full_name, found.number, changed=False, locked=locked)
+            # Nothing to write, which is not the same as nothing to do. The lock is the last step
+            # of a status change and the likeliest to have been refused on its own, so a repeat
+            # is what gets it a second go.
+            #
+            # Both directions, and it used to be only one. Leaving DONE has to give the thread
+            # back, and a refused unlock had nothing anywhere to try it again: the row already
+            # says the new status, so the branch below never touches the lock either, and
+            # `PullRequestPolicy.locked` returns None so no sync, webhook or `/pr` ever unlocks a
+            # pull request's thread. One 503 shut a reopened pull request against the discussion
+            # it had just been reopened for, permanently, while every later command answered that
+            # it was already where it was being put.
+            #
+            # A closed issue cannot reach here asking to be unlocked: the guard above refuses any
+            # status but DONE for one. So the only thread this ever opens is one this path shut.
+            wants_lock = status is Status.DONE
+            locked, refused = await self._set_lock(thread_id, wants_lock)
+            return WorkflowOutcome(
+                found.full_name,
+                found.number,
+                changed=False,
+                locked=locked,
+                lock_refused=refused,
+                wanted_locked=wants_lock,
+            )
 
         await self._apply(found, change)
-        await self._store_status(found.tracked_item_id, status)
+        previous = await self._store_status(found.tracked_item_id, status)
         written = await self._rerender(found, snapshot, change)
 
         # Touched only when DONE is on one side of the move or the other, so an ordinary status
@@ -123,14 +148,21 @@ class ItemWorkflow:
         # commands to move it back are all allowed and all reported success, and left the thread
         # shut against the discussion they had just reopened.
         wants_lock = status is Status.DONE
-        locked = (
+        locked, refused = (
             await self._set_lock(written or thread_id, wants_lock)
-            if wants_lock or found.status is Status.DONE
-            else False
+            if wants_lock or previous is Status.DONE
+            else (False, False)
         )
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
-        return WorkflowOutcome(found.full_name, found.number, changed=True, locked=locked)
+        return WorkflowOutcome(
+            found.full_name,
+            found.number,
+            changed=True,
+            locked=locked,
+            lock_refused=refused,
+            wanted_locked=wants_lock,
+        )
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
         """Move an item to a priority. Nothing is locked and no status moves with it."""
@@ -221,26 +253,54 @@ class ItemWorkflow:
         result = await self._kinds[found.object_type].sync.sync(_relabelled(snapshot, change))
         return result.thread_id
 
-    async def _set_lock(self, thread_id: int, locked: bool) -> bool:
+    async def _set_lock(self, thread_id: int, locked: bool) -> tuple[bool, bool]:
         """Close a finished item's thread to further replies, or open it again.
 
         Last, after the metadata is written. A locked thread still takes this bot's edits, so
         the order is not what makes it work; it is that the lock is the step most likely to be
         refused, and everything before it is worth keeping when it is.
 
-        Answers with what was asked for rather than with what Discord did, because a refusal
-        raises here and never reaches the caller.
-        """
-        await self._threads.set_locked(thread_id=thread_id, locked=locked)
-        return locked
+        Answers whether the lock is where it was asked to be, and separately whether Discord
+        refused to put it there. Raising instead is what this used to do, and it told the person
+        who ran the command that the whole thing had failed, when everything before this had
+        landed: the labels are on GitHub, the status is in the row, the thread says so. The two
+        readings are a long way apart for somebody deciding whether to run it again, and a
+        refusal here is usually one permission rather than anything to wait out.
 
-    async def _store_status(self, tracked_item_id: int, status: Status) -> None:
-        """Written before the re-render, because the render reads it back off the row."""
+        Only the gateway errors, and only around this call. Anything else still raises, and
+        anything that fails before this still fails the command outright, because then nothing
+        did happen.
+        """
+        try:
+            await self._threads.set_locked(thread_id=thread_id, locked=locked)
+        except DiscordGatewayError as error:
+            logger.warning("could not set the lock on thread %s: %s", thread_id, error.message)
+            return False, True
+        return locked, False
+
+    async def _store_status(self, tracked_item_id: int, status: Status) -> Status:
+        """Written before the re-render, because the render reads it back off the row.
+
+        Answers with the status it replaced, read under the row's own lock. Whether the thread
+        gets locked or given back is decided from that and not from the read at the top of the
+        command, because three GitHub round trips sit in between and two commands overlapping
+        across them both decided from a row neither of them still had.
+
+        What that cost: a pull request at READY_FOR_MERGE, a `/set_done` and a `/set_in_review`
+        from two reviewers, or from a reviewer and the board poller. The one that was not
+        finishing the item read a status that was not DONE yet, so it never asked for the thread
+        back, while `/set_done` locked it last. The item was left reading IN_REVIEW with its
+        thread shut, both users were told their command had worked, and nothing lifted it:
+        `PullRequestPolicy.locked` returns None, so no webhook or sync ever unlocks a pull
+        request, and `/set_done` is refused for being exactly what the race made it.
+        """
         async with self._sessionmaker() as session, session.begin():
-            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id, lock=True)
             if item is None:
                 raise ItemNotReadyError("That item is no longer tracked here.")
+            previous = item.status
             item.status = status
+            return previous
 
     async def _locate(self, thread_id: int) -> _Found:
         """Which item this thread is, as plain values out of the session.

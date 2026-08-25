@@ -7,11 +7,14 @@ ordinary shape of a command that has to leave two systems agreeing.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import Priority, Status
 from shannon.domain.errors import ItemNotReadyError
@@ -417,14 +420,123 @@ class TestWhatAReviewFound:
         """
         await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
         threads.fail_next_lock = True
-        with pytest.raises(DiscordGatewayError):
-            await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        refused = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is False
 
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
+        assert refused.lock_refused is True
         assert outcome.locked is True
         assert threads.threads[thread_id].locked is True
+
+    async def test_two_commands_at_once_do_not_leave_a_locked_thread_on_an_open_item(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        github: FakeGitHubClient,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        """Whether to give the thread back was decided from a read taken three calls earlier.
+
+        A pull request at READY_FOR_MERGE, one reviewer marking it done and another putting it
+        back into review, or the board poller doing the second. The one that was not finishing
+        the item read a status that was not DONE yet, so it never asked for the thread back,
+        while `/set_done` locked it last. The item was left reading IN_REVIEW with its thread
+        shut, both callers were told they had succeeded, and nothing lifted it: nothing else
+        locks or unlocks a pull request's thread, and `/set_done` is refused for being exactly
+        what the race had made it.
+
+        Made to happen rather than timed. The fake GitHub holds the second command at the read
+        that sits between its own look at the row and its write, which is exactly the window the
+        three real round trips open, so the interleaving is the same every run instead of being
+        whatever the machine was doing that second.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        reached, release = asyncio.Event(), asyncio.Event()
+        github.before_read = (reached, release)
+
+        async with db_sessionmaker() as holder:
+            await holder.begin()
+            item = await TrackedItemStore(holder).get_by_id(
+                await db_session.scalar(select(TrackedItem.id)), lock=True
+            )
+            item.status = Status.DONE
+            await holder.flush()
+
+            catching_up = asyncio.create_task(
+                workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+            )
+            await asyncio.wait_for(reached.wait(), timeout=5)
+            assert not catching_up.done(), "nothing overlapped, so this proves nothing"
+
+            # What the command finishing the item does, now that its own write has landed.
+            await holder.commit()
+            await threads.set_locked(thread_id=thread_id, locked=True)
+            release.set()
+            await catching_up
+
+        db_session.expire_all()
+        stored = await db_session.scalar(select(TrackedItem.status))
+        assert stored is Status.IN_REVIEW
+        assert threads.threads[thread_id].locked is False, "an open item kept a shut thread"
+
+    async def test_a_reopened_pull_request_whose_unlock_was_refused_can_be_reopened_again(
+        self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
+    ) -> None:
+        """The other direction, which had nothing anywhere to try it a second time.
+
+        The row says the new status by the time the unlock is attempted, so the branch that
+        touches the lock is not reached again, and `PullRequestPolicy.locked` returns None so no
+        sync, webhook or `/pr` ever unlocks a pull request's thread. One refusal shut a reopened
+        pull request against the discussion it had just been reopened for, for good, while every
+        later command answered that it was already where it was being put.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        assert threads.threads[thread_id].locked is True
+
+        threads.fail_next_lock = True
+        refused = await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        assert threads.threads[thread_id].locked is True, "nothing overlapped, this proves nothing"
+
+        repeated = await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert refused.lock_refused is True
+        assert refused.wanted_locked is False
+        assert repeated.locked is False
+        assert threads.threads[thread_id].locked is False, "the thread stayed shut"
+
+    async def test_a_refused_lock_does_not_undo_the_move_it_finished(
+        self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway, github
+    ) -> None:
+        """Locking is last because everything before it is worth keeping when it is refused.
+
+        Raising instead is what this used to do, and the person who ran the command was told the
+        whole thing had failed while the labels were on GitHub, the status was in the row and
+        the thread already said so. The two readings are one Discord permission apart and a long
+        way apart for somebody deciding what to do next.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        threads.fail_next_lock = True
+
+        outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert outcome.changed is True, "the move it did carry out was reported as no move"
+        assert outcome.locked is False
+        assert outcome.lock_refused is True
+        assert "DONE" in github.label_calls[-1][-1], github.label_calls
+        assert "DONE" in threads.metadata_of(thread_id)
+
+    async def test_anything_else_that_fails_still_fails_the_whole_command(
+        self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
+    ) -> None:
+        """Only the lock is survivable, because only the lock happens after everything else."""
+        threads.fail_next_update = True
+
+        with pytest.raises(DiscordGatewayError):
+            await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
 
     async def test_it_locks_the_thread_the_render_actually_wrote_to(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
