@@ -55,6 +55,15 @@ def text_channel(channel_id: int = 4242) -> MagicMock:
     return stub
 
 
+def forum_channel(channel_id: int = 7777, *, requires_a_tag: bool = False) -> MagicMock:
+    stub = MagicMock(spec=discord.ForumChannel)
+    stub.id = channel_id
+    # Set explicitly. Left to the mock this is a truthy Mock, so every forum would look like one
+    # demanding a tag, and a forum that demands one is refused.
+    stub.flags = discord.ChannelFlags(require_tag=requires_a_tag)
+    return stub
+
+
 async def test_a_project_manager_can_map_the_issue_channel() -> None:
     service = StubChannels()
     interaction = FakeInteraction(guild_id=1, user=project_manager())
@@ -119,13 +128,28 @@ async def test_remapping_to_the_same_channel_mentions_no_other_one() -> None:
 
 async def test_a_forum_channel_is_accepted() -> None:
     service = StubChannels()
-    forum = MagicMock(spec=discord.ForumChannel)
-    forum.id = 7777
     interaction = FakeInteraction(guild_id=1, user=project_manager())
 
-    await command(service).callback(interaction, choice("ISSUE"), forum)
+    await command(service).callback(interaction, choice("ISSUE"), forum_channel())
 
     assert service.calls[0]["channel_id"] == 7777
+
+
+async def test_a_forum_that_demands_a_tag_is_refused_here_rather_than_behind_the_queue() -> None:
+    """Nothing picks a tag, so Discord refuses every post, with a 400 the queue retries.
+
+    Left to the sync path that costs the item sixteen attempts over two hours and then drops it,
+    with one log line and nobody told. Here there is somebody reading the answer.
+    """
+    service = StubChannels()
+    interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+    await command(service).callback(
+        interaction, choice("ISSUE"), forum_channel(requires_a_tag=True)
+    )
+
+    assert service.calls == [], "it was mapped to a channel that will refuse every thread"
+    assert "Require Tags" in interaction.reply
 
 
 async def test_a_channel_that_cannot_hold_threads_is_refused() -> None:

@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
-from shannon.discord_bot.threads import THREADABLE
+from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.services.channels import ChannelAssignment
@@ -53,8 +53,9 @@ def build_set_channel_command(service: MapsChannels, gate: PermissionGate) -> ap
         if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, gate.denial("set_channel", REGISTER_ROLES))
             return
-        if not isinstance(channel, THREADABLE):
-            await reply(interaction, f"<#{channel.id}> cannot hold threads.")
+        refusal = why_threads_will_not_open(channel)
+        if refusal is not None:
+            await reply(interaction, f"<#{channel.id}> cannot hold threads. {refusal}")
             return
 
         await defer(interaction)

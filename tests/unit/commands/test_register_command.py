@@ -198,15 +198,40 @@ async def test_registering_where_threads_cannot_be_opened_is_refused() -> None:
     assert service.calls == []
 
 
+def forum_channel(*, requires_a_tag: bool = False) -> MagicMock:
+    stub = MagicMock(spec=discord.ForumChannel)
+    # Set explicitly. Left to the mock this is a truthy Mock, so every forum would look like one
+    # demanding a tag, and a forum that demands one is refused.
+    stub.flags = discord.ChannelFlags(require_tag=requires_a_tag)
+    return stub
+
+
 async def test_a_forum_channel_is_accepted() -> None:
     service = StubRegistration()
     interaction = FakeInteraction(
-        guild_id=1,
-        channel_id=99,
-        user=project_manager(),
-        channel=MagicMock(spec=discord.ForumChannel),
+        guild_id=1, channel_id=99, user=project_manager(), channel=forum_channel()
     )
 
     await command(service).callback(interaction, LINK)
 
     assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK}]
+
+
+async def test_a_forum_that_demands_a_tag_is_refused_while_somebody_is_looking() -> None:
+    """Nothing here picks a tag, so Discord refuses every post with a 400 the queue retries.
+
+    Left to the sync path, the first pull request burns sixteen attempts over two hours and is
+    then dropped, with one log line and nobody told.
+    """
+    service = StubRegistration()
+    interaction = FakeInteraction(
+        guild_id=1,
+        channel_id=99,
+        user=project_manager(),
+        channel=forum_channel(requires_a_tag=True),
+    )
+
+    await command(service).callback(interaction, LINK)
+
+    assert service.calls == [], "it registered a channel that will refuse every thread"
+    assert "Require Tags" in interaction.reply

@@ -10,7 +10,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
-from shannon.discord_bot.threads import THREADABLE
+from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.errors import ShannonError
 from shannon.services.registration import RegistrationResult
 
@@ -40,14 +40,12 @@ def build_register_command(
         if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, gate.denial("register", REGISTER_ROLES))
             return
-        # The channel this was run in becomes the home for pull request threads, and a thread
-        # or a voice channel cannot hold one. Refusing here is the last chance to say so to
-        # somebody who is looking; the sync path hits it hours later with nobody to tell.
-        if not isinstance(interaction.channel, THREADABLE):
-            await reply(
-                interaction,
-                "Run /register in a text or forum channel. Threads cannot be opened here.",
-            )
+        # The channel this was run in becomes the home for pull request threads. Refusing here
+        # is the last chance to say so to somebody who is looking; the sync path hits it hours
+        # later with nobody to tell.
+        refusal = why_threads_will_not_open(interaction.channel)
+        if refusal is not None:
+            await reply(interaction, f"Threads cannot be opened here. {refusal}")
             return
 
         await defer(interaction)

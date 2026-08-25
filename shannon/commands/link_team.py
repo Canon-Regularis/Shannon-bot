@@ -59,7 +59,31 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> app_co
         else:
             await reply(
                 interaction,
-                f"Reviews asked of the {linked} team will now ping <@&{role.id}>.",
+                f"Reviews asked of the {linked} team will now ping <@&{role.id}>."
+                f"{_a_ping_nobody_will_get(interaction, role)}",
             )
 
     return link_team
+
+
+def _a_ping_nobody_will_get(interaction: discord.Interaction, role: discord.Role) -> str:
+    """Warn when the mention this command promises will reach nobody, or say nothing.
+
+    Discord notifies a role's members only if the role is mentionable or the sender holds Mention
+    Everyone. Roles are created not mentionable, and neither of those is in the permission list
+    the README gives, so on an ordinary server the ping renders as a blue pill in the thread and
+    tells nobody. That is the one moment the whole team feature exists for, and it looks like it
+    worked, so nobody finds out for days.
+
+    A warning rather than a refusal: the link is still worth having, whoever runs this can fix it
+    in one checkbox afterwards, and refusing over a permission would leave the team unlinked as
+    well as unpinged. The ping itself is claimed before it is sent and stamped as spent whether
+    or not anybody read it, so every review request that passes before the fix is silent.
+    """
+    if role.mentionable or interaction.app_permissions.mention_everyone:
+        return ""
+    return (
+        f" Nobody will be notified by that yet: <@&{role.id}> is not mentionable, so Discord "
+        "shows the mention without telling anyone. Turn on Allow Anyone To @mention This Role "
+        "in the role's settings, or give this bot Mention @everyone, @here, and All Roles."
+    )

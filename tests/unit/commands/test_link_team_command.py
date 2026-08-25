@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import discord
 import pytest
 from discord import app_commands
 
@@ -29,8 +30,11 @@ ROLE_ID = 777000
 class FakeRole:
     """Enough of discord.Role for the command to run without Discord."""
 
-    def __init__(self, role_id: int = ROLE_ID, *, default: bool = False) -> None:
+    def __init__(
+        self, role_id: int = ROLE_ID, *, default: bool = False, mentionable: bool = True
+    ) -> None:
         self.id = role_id
+        self.mentionable = mentionable
         self._default = default
 
     def is_default(self) -> bool:
@@ -129,3 +133,43 @@ async def test_something_that_is_not_a_team_comes_back_as_a_sentence() -> None:
     interaction = await run(service, project_manager(), team="not a team")
 
     assert said(interaction) == "'not a team' is not a GitHub team."
+
+
+class TestARoleTheBotCannotActuallyPing:
+    """Discord notifies a role's members only if the role is mentionable or the sender may
+    mention any role. Roles are created not mentionable and neither is in the permission list
+    the README gives, so on an ordinary server the ping renders as a blue pill and reaches
+    nobody. It looks exactly like it worked, which is why nobody finds out for days.
+
+    The ping is claimed before it is sent and stamped as spent whether or not anybody read it,
+    so every review request that goes past before somebody fixes this is silent.
+    """
+
+    async def test_the_answer_says_nobody_will_be_notified(self) -> None:
+        service = StubTeamLinking()
+
+        interaction = await run(service, project_manager(), role=FakeRole(mentionable=False))
+
+        assert service.calls != [], "the link is still worth having, it is the ping that is not"
+        assert "Nobody will be notified" in said(interaction)
+        assert "mentionable" in said(interaction)
+
+    async def test_a_mentionable_role_is_not_warned_about(self) -> None:
+        service = StubTeamLinking()
+
+        interaction = await run(service, project_manager())
+
+        assert "Nobody will be notified" not in said(interaction)
+
+    async def test_a_bot_allowed_to_mention_any_role_is_not_warned_about(self) -> None:
+        """The other half of Discord's rule, and the other way to fix it."""
+        service = StubTeamLinking()
+        interaction = FakeInteraction(
+            user=project_manager(),
+            guild_id=1,
+            app_permissions=discord.Permissions(mention_everyone=True),
+        )
+
+        await command(service).callback(interaction, "backend", FakeRole(mentionable=False))
+
+        assert "Nobody will be notified" not in said(interaction)

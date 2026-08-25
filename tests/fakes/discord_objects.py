@@ -64,10 +64,22 @@ class FakeInteraction:
         channel_id: int | None = 10,
         user: FakeMember | None = None,
         channel: object | None = None,
+        app_permissions: discord.Permissions | None = None,
     ) -> None:
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.user = user or FakeMember()
+        # What this bot may do in the channel the command was run in. Defaults to the permission
+        # list the README asks for, which grants nothing beyond reading and writing threads, so a
+        # command that depends on more finds that out here rather than in front of a user.
+        self.app_permissions = app_permissions or discord.Permissions(
+            view_channel=True,
+            send_messages=True,
+            send_messages_in_threads=True,
+            create_public_threads=True,
+            manage_threads=True,
+            read_message_history=True,
+        )
         # A real text channel by default, because that is where a command normally runs and
         # /register refuses anywhere threads cannot be opened.
         self.channel = channel if channel is not None else MagicMock(spec=discord.TextChannel)
