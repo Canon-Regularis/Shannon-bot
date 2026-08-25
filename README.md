@@ -275,4 +275,4 @@ and there is no middleware of any kind.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
