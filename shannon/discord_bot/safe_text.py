@@ -47,6 +47,15 @@ def defuse_mentions(text: str) -> str:
     return _MENTION.sub("<​\\1\\2>", text)
 
 
+# `escape_markdown` escapes one character at a time, with one exception: `[text](url)` is an
+# alternative in its pattern that matches a whole span. It is greedy, so on a line carrying a
+# link it runs from the first bracket to the last closing parenthesis on that line, puts a single
+# backslash in front of all of it, and ships everything in between unescaped. Breaking the
+# bracket away from the parenthesis is enough to stop it matching, which leaves every marker to
+# be escaped individually the way the rest already are.
+_LINK_JOIN = re.compile(r"\]\(")
+
+
 def as_plain_text(text: str) -> str:
     """Render GitHub-authored text so it displays as written.
 
@@ -60,9 +69,16 @@ def as_plain_text(text: str) -> str:
     cost: an underscore in a URL comes out escaped and unclickable inside a quoted body. The
     blocks that quote a body carry an unescaped link of their own, so nothing that matters is
     left unreachable.
+
+    That flag closed one of the two holes. The other is the link alternative above, and it is the
+    wider of the two: a pull request titled
+    `Fix [regression](https://github.com/o/r/issues/3) in **/*.py (again)` put an odd number of
+    bold markers into a metadata block built entirely out of matched pairs, so every label below
+    the title paired with the wrong value, and the author of the title chose where that landed.
+    A comment could do the same with a code fence and swallow the link back to GitHub with it.
     """
-    escaped = discord.utils.escape_markdown(discord.utils.escape_mentions(text), ignore_links=False)
-    return defuse_mentions(escaped)
+    unlinked = _LINK_JOIN.sub("]​(", discord.utils.escape_mentions(text))
+    return defuse_mentions(discord.utils.escape_markdown(unlinked, ignore_links=False))
 
 
 _BACKTICK_RUN = re.compile(r"``+")

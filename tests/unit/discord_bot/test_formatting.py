@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from shannon.discord_bot.formatting import format_pull_request
-from shannon.discord_bot.safe_text import MESSAGE_LIMIT
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT, as_plain_text
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
 
@@ -281,5 +281,58 @@ class TestMarkupGluedToALink:
     def test_the_link_back_to_github_is_still_a_link(self) -> None:
         """The cost of escaping links is paid by previews, not by the pointer that matters."""
         rendered = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
+
+        assert SNAPSHOT.html_url in rendered
+
+
+# Titles carrying a markdown link and one loose marker after it, which is the shape the greedy
+# link alternative in `escape_markdown` lets through.
+LINKED_TITLES = [
+    "Fix [regression](https://github.com/o/r/issues/3) in **/*.py (again)",
+    "Fix [a](https://x.dev) the *thing (typo)",
+    "Ignore [vendored](https://x.dev) __pycache__ dirs (cleanup)",
+    "Drop [the](https://x.dev) ~~old~~ path (v2)",
+    "See [this](https://x.dev) ||spoiler|| (maybe)",
+    "Fixed in [abc123](https://x.dev/c) then ``` (end)",
+]
+
+
+class TestMarkupAfterAMarkdownLink:
+    """The second hole in the same escaping, and the wider of the two.
+
+    `escape_markdown` escapes one character at a time except for `[text](url)`, which is an
+    alternative in its pattern that matches a span. It is greedy, so on a line carrying one it
+    runs from the first bracket to the last closing parenthesis on that line, puts one backslash
+    in front of all of it, and everything in between goes to Discord unescaped. Turning
+    `ignore_links` off closed the other hole and does nothing for this one.
+
+    The block below is built entirely out of matched pairs, so an odd marker leaking through
+    re-pairs every label with the value of the field under it, and whoever wrote the title
+    chooses where that starts.
+    """
+
+    @pytest.mark.parametrize("title", LINKED_TITLES)
+    def test_no_marker_survives_a_link_earlier_on_the_line(self, title: str) -> None:
+        rendered = as_plain_text(title)
+
+        loose = [
+            index
+            for index, character in enumerate(rendered)
+            if character in "*_~|`" and (index == 0 or rendered[index - 1] != "\\")
+        ]
+        assert not loose, f"{rendered!r} carries markers Discord will act on"
+
+    @pytest.mark.parametrize("title", LINKED_TITLES)
+    def test_the_block_a_title_lands_in_stays_paired(self, title: str) -> None:
+        """Bold runs past a newline, so an odd marker re-pairs every label below it."""
+        rendered = format_pull_request(replace(SNAPSHOT, title=title), status=Status.NOT_REVIEWED)
+
+        assert rendered.count("**") % 2 == 0
+
+    def test_the_pointer_back_to_github_survives_a_fence_in_the_title(self) -> None:
+        """A live fence opens a code block that runs to the end of the message."""
+        titled = replace(SNAPSHOT, title="Fixed in [abc123](https://x.dev/c) then ``` (end)")
+
+        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED)
 
         assert SNAPSHOT.html_url in rendered
