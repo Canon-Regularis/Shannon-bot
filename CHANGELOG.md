@@ -2767,3 +2767,124 @@ startup check written to say what is wrong with a database. SQLAlchemy's own wor
 nothing an operator can go and change, and blank is the shape it usually takes: an empty
 `SHANNON_DATABASE_URL=` in a copied `.env` reads as a value that was set, and pydantic takes it.
 It now names the setting and shows the shape of a working one.
+
+## An eighth look, at what a person actually does with it
+
+Six lenses over the trust boundary, the eight workflow commands run in every order somebody
+really would, the setup being changed after things are already mirrored, the board poller against
+a board that is not the one in the tests, the migrations against a database with rows in it, and
+a command and the delivery worker touching one item at once. Three findings did not survive being
+handed to somebody told to refute them and are not here.
+
+Two more came out of reading the reply table rather than from a lens.
+
+### A missing permission read as a refusal, with a Discord error code attached
+
+The reply table splits GitHub's errors carefully: a spent rate limit says when to come back, a
+refused token says an admin has to look, and only a real outage says GitHub could not be reached.
+It did nothing of the kind for Discord's. A channel that has gone and a permission nobody granted
+are both a gateway error, so both fell through to "Discord refused the update", followed by
+whatever discord.py had said.
+
+What that looked like in a thread was `Discord refused the update. Discord will not let the bot
+lock the thread: 403 Forbidden (error code: 50013): Missing Permissions`, which names no
+permission and no fix, and `Discord refused the update. Channel 12345 is not there`, which names a
+snowflake and no action when the fix is one command. A missing permission is the likeliest thing
+to go wrong on a server nobody has run this on before. Both have their own row now, above the
+general one, and a test moves the general row up and watches them break, because the ordering is
+the whole thing.
+
+### A command that did most of its work reported total failure
+
+Locking is deliberately the last step of a status change, because everything before it is worth
+keeping when it is refused: the labels are on GitHub, the status is in the row, the thread already
+says so. It raised anyway, so the person who ran `/set_done` was told the command had failed and
+would reasonably go and check whether the item was done. The two readings are one Discord
+permission apart.
+
+The refusal is carried back now instead of raised, and the answer says both halves: the item is
+where it was put, the thread could not be locked, that is usually Manage Threads, and running it
+again gives the lock another go. The last part already worked and nothing had ever said so. Only
+the lock is survivable this way; anything failing before it still fails the whole command, since
+then nothing did happen.
+
+That change had a consequence worth recording, because it was caught by a test rather than by
+thinking. The board poller depends on `set_status` raising: a raise is what stops it writing the
+card's new column down, and not writing the column down is the only thing that brings the card
+round again. Swallowing the refusal silently reintroduced a defect this file already records as
+fixed, a card dragged to Done keeping an open thread for ever. The poller now reads the refusal
+off the outcome and leaves the column alone, which is the same decision made in the open.
+
+### A refused unlock could never be tried again
+
+The other direction of the same step, and worse. A pull request moved out of DONE has to have its
+thread given back, and nothing but this path ever does it: `PullRequestPolicy.locked` returns None
+on every sync, so no webhook, no `/pr`, no board move touches a pull request's lock. If Discord
+refused that one call, the row already said the new status, so the branch that touches the lock
+was never reached again, and the repeat that exists to retry a failed lock was gated on the status
+being DONE. One 503 left a reopened pull request shut against the discussion it had just been
+reopened for, permanently, while every later command answered that it was already where it was
+being put.
+
+The repeat now puts the lock where the status says it belongs in both directions. A closed issue
+cannot reach it asking to be unlocked, because the guard above refuses any status but DONE for
+one, so the only thread this ever opens is one this path shut. The reply distinguishes the two
+directions as well: a thread that would not lock is untidy, and a thread that would not unlock is
+one nobody can reply in.
+
+### Two commands at once left an open item with a shut thread
+
+Whether to give the thread back was decided from the status read at the top of the command, three
+GitHub round trips before the write. Two commands overlapping across that window both decided from
+a row neither of them still had: a pull request at READY_FOR_MERGE, one reviewer marking it done
+and another putting it back into review, or the board poller doing the second. The one that was
+not finishing the item read a status that was not DONE yet, so it never asked for the thread back,
+while the other locked it last. The item was left reading IN_REVIEW with its thread shut, both
+callers were told they had succeeded, and nothing lifted it.
+
+The status is now read and written under the row's own lock, and the answer that comes back is
+what the lock decision is made from. The test that pins it holds the second command at the read
+between its own look at the row and its write, using the fake GitHub rather than a sleep: written
+against a timer it caught the defect two runs in three, which is worse than not having it.
+
+### A board that could not be read wrote itself over everything
+
+A board's Status field is matched by name, so renaming it is enough to make every card come back
+carrying no column at all. That is indistinguishable here from a board where nobody has picked a
+status yet, and the poller wrote down what it was told: the empty string over every remembered
+column, on every card, in one pass. The poll after the field came back then read the whole board
+as having moved into a column and drove all of it through the status commands, stripping whatever
+label a person had set by hand while the board was unreadable.
+
+Two things kept it going. The field ids are looked up once per board and kept, and an answer
+carrying Title without Status was kept like any other, so a renamed field was read that way for
+the life of the process rather than for one poll. That answer is no longer remembered. And the
+poller now refuses the one write that does the damage: a card that had a column and now reads as
+having none keeps the one it had. Nothing is lost in the case that guard is wrong about, since a
+card with no column carries no status to move to and is passed over either way, and the memory
+that is kept is a column the card has left, which the next real move still differs from.
+
+### The schema check could not see the thing the models said it checked
+
+`ix_webhook_events_live` is what keeps the delivery lease off a full table scan, and its predicate
+is why it stays small however long deliveries are kept. The comment beside it said the string had
+to match the migration byte for byte or the schema diff in `test_migrations` would fail. It would
+not: alembic's PostgreSQL comparison ignores an index's WHERE clause, so widening the predicate,
+narrowing it or deleting it outright all left that test answering with no differences.
+
+Nothing was actually wrong with the schema, which is why nothing showed. The predicate is now read
+back out of `pg_indexes` and compared against the statuses `live()` names, so the claim the models
+make is one something enforces.
+
+### `/set_channel` answered from a row nothing was placed by
+
+`/register` maps pull requests and nothing else, so until somebody runs `/set_channel issues`,
+issue threads open in the pull request channel through the fallback the issue policy declares.
+That is the shipped default and the state most servers are in. The first `/set_channel issues`
+then answered from the issue row, which does not exist, so it said nothing at all about the issue
+threads sitting in the pull request channel.
+
+Discord cannot move a thread between channels, so every item already tracked keeps the one it has,
+and telling the admin where that is exists precisely so they do not go looking for threads that
+never went anywhere. The service is handed the fallbacks now, read off the sync policies rather
+than restated, and answers from where the threads actually went.
