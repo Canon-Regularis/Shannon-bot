@@ -54,6 +54,19 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Two shutdown budgets run one after the other and were each sized against Docker's ten
+    # second default without either knowing about the other. `worker_shutdown_grace_seconds`
+    # (5s) waits for the delivery in hand; cancelling the worker then unwinds into
+    # `ItemThreads._open`, which waits up to `CLAIM_GRACE_SECONDS` (10s) for a thread Discord
+    # has been asked for and not yet answered about. Measured end to end at just over fifteen
+    # seconds when discord.py is sitting out a rate limit.
+    #
+    # Killed before that finishes, the worker never hands back the rest of its leased batch, so
+    # up to nine other deliveries sit PROCESSING until their fifteen minute lease lapses. The
+    # replacement process polls a queue that looks empty and those items get no thread for a
+    # quarter of an hour, with nothing in either log saying why. Docker Desktop is worse than
+    # the documented default: it stops containers after about one and a half seconds.
+    stop_grace_period: 30s
 
 volumes:
   shannon-pgdata:
