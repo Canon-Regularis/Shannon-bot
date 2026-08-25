@@ -55,8 +55,14 @@ class TrackedItemStore:
         )
         return await self._session.scalar(statement.with_for_update() if lock else statement)
 
-    async def get_by_id(self, tracked_item_id: int) -> TrackedItem | None:
-        return await self._session.get(TrackedItem, tracked_item_id)
+    async def get_by_id(self, tracked_item_id: int, *, lock: bool = False) -> TrackedItem | None:
+        """Find one item by its own id, optionally holding it for the rest of the transaction.
+
+        `lock` is for the same caller `get`'s is: one that reads the row, decides something from
+        what it read, and then writes. Off by default, because most callers here are answering a
+        question and writing nothing.
+        """
+        return await self._session.get(TrackedItem, tracked_item_id, with_for_update=lock)
 
     def raise_updated_at(self, item: TrackedItem, incoming: datetime) -> None:
         """Move the item's high-water mark up, and never down.
