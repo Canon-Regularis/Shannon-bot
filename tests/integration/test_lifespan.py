@@ -101,9 +101,24 @@ def settings_with(token: str = "") -> Settings:
     )
 
 
-async def runbuild_lifespan(bot: Any, container: Any, settings: Settings):
+class Halts:
+    """Stands in for the signal a dying task sends the process.
+
+    Injected in every test here, and not only for the ones that check it. The real one raises
+    SIGTERM, which under pytest ends the run: any test whose worker or bot task dies would take
+    the suite with it.
+    """
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    def __call__(self) -> None:
+        self.asked += 1
+
+
+async def runbuild_lifespan(bot: Any, container: Any, settings: Settings, halt: Any = None):
     app = create_app(settings=settings)
-    return app, build_lifespan(bot, container, settings)(app)
+    return app, build_lifespan(bot, container, settings, halt or Halts())(app)
 
 
 class TestStartingUp:
@@ -286,8 +301,9 @@ class TestShuttingDown:
 class FakePoller:
     """A project poller with the shape the lifespan uses, and a switch for whether it runs."""
 
-    def __init__(self, *, enabled: bool) -> None:
+    def __init__(self, *, enabled: bool, dies: bool = False) -> None:
         self.enabled = enabled
+        self.dies = dies
         self.stopped = False
         self.ran = asyncio.Event()
 
@@ -296,8 +312,80 @@ class FakePoller:
 
     async def run_forever(self) -> None:
         self.ran.set()
+        if self.dies:
+            raise RuntimeError("the poller fell over")
         while not self.stopped:
             await asyncio.sleep(0.01)
+
+
+class TestATaskTheProcessCannotDoWithout:
+    """A dead worker used to leave a live process, and nothing anywhere ended it.
+
+    The endpoint went on answering 200 to deliveries nothing would ever work, `/health` went on
+    answering 503, and the container sat there: a restart policy watches the exit code and never
+    the health state, so an unhealthy container that has not exited is not restarted. Half of
+    what kills these tasks is fixed by a restart, a rotated token first among them.
+    """
+
+    async def test_a_worker_that_falls_over_asks_the_process_to_stop(
+        self, migrated: AsyncEngine
+    ) -> None:
+        halt = Halts()
+        worker = FakeWorker(dies=True)
+        container = container_for(migrated, worker, ClosingGitHub())
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with(), halt)
+
+        async with lifespan:
+            await asyncio.wait_for(worker.ran.wait(), timeout=5)
+            await asyncio.sleep(0.05)
+
+        assert halt.asked == 1
+
+    async def test_a_bot_that_gives_up_asks_the_process_to_stop(
+        self, migrated: AsyncEngine
+    ) -> None:
+        """discord.py reconnects on its own, so `start` returning means it will not come back.
+
+        The worker only waits for the gateway once, at the start, so a connection lost after
+        that leaves it leasing deliveries that every one of them fails.
+        """
+        halt = Halts()
+        worker = FakeWorker()
+        container = container_for(migrated, worker, ClosingGitHub())
+        _, lifespan = await runbuild_lifespan(
+            FakeBot(connects=False), container, settings_with("a-token"), halt
+        )
+
+        async with lifespan:
+            await asyncio.sleep(0.05)
+
+        assert halt.asked >= 1
+
+    async def test_an_ordinary_shutdown_asks_for_nothing(self, migrated: AsyncEngine) -> None:
+        """Every task ends at shutdown, and reading that as a failure would loop the container."""
+        halt = Halts()
+        worker = FakeWorker()
+        container = container_for(migrated, worker, ClosingGitHub())
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with("a-token"), halt)
+
+        async with lifespan:
+            await asyncio.wait_for(worker.ran.wait(), timeout=5)
+
+        assert halt.asked == 0
+
+    async def test_a_poller_that_dies_leaves_the_process_alone(self, migrated: AsyncEngine) -> None:
+        """Webhooks still mirror everything without it, so stopping over one is worse."""
+        halt = Halts()
+        worker, poller = FakeWorker(), FakePoller(enabled=True, dies=True)
+        container = container_for(migrated, worker, ClosingGitHub())
+        container.poller = poller
+
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with(), halt)
+        async with lifespan:
+            await asyncio.wait_for(poller.ran.wait(), timeout=5)
+            await asyncio.sleep(0.05)
+
+        assert halt.asked == 0
 
 
 class TestTheProjectPoller:

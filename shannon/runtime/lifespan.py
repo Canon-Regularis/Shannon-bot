@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from shannon.config import Settings
 from shannon.runtime.liveness import ProcessLiveness
-from shannon.runtime.supervision import Shutdown, report_exit, safely, stop
+from shannon.runtime.supervision import (
+    Shutdown,
+    ask_the_process_to_stop,
+    report_exit,
+    safely,
+    stop,
+)
 from shannon.services.delivery.worker import ReadyCheck
 
 logger = logging.getLogger(__name__)
@@ -138,13 +144,21 @@ class _Running:
 
 
 async def _start(
-    bot: Gateway, container: ProcessParts, settings: Settings, liveness: ProcessLiveness
+    bot: Gateway,
+    container: ProcessParts,
+    settings: Settings,
+    liveness: ProcessLiveness,
+    halt: Callable[[], None],
 ) -> _Running:
     """Bring up the gateway and the worker, in that order.
 
     The worker waits for the gateway rather than racing it. The endpoint accepts deliveries from
     the moment the port is open, which is the point, but acting on one before Discord is
     connected only wastes an attempt.
+
+    `halt` is what the two tasks that carry the point of the process do when they end without
+    being asked to. The poller does not, because a process with no poller still mirrors
+    everything the webhooks bring it.
     """
     shutdown = Shutdown()
     bot_task: asyncio.Task | None = None
@@ -153,7 +167,11 @@ async def _start(
     token = settings.discord_token.get_secret_value()
     if token:
         bot_task = asyncio.create_task(bot.start(token))
-        bot_task.add_done_callback(report_exit("Discord bot", shutdown))
+        # discord.py reconnects on its own, so this task ending at all means it gave up: a
+        # refused token, a close code it cannot come back from. The worker only waits for the
+        # gateway once, at the start, so a connection lost after that leaves it leasing
+        # deliveries that every one of them fails.
+        bot_task.add_done_callback(report_exit("Discord bot", shutdown, halt))
         ready = gateway_ready(bot, bot_task)
     else:
         # Handy for poking the webhook endpoint locally, and loud enough that nobody deploys
@@ -161,7 +179,7 @@ async def _start(
         logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
 
     worker_task = asyncio.create_task(container.worker.run_forever(ready))
-    worker_task.add_done_callback(report_exit("delivery worker", shutdown))
+    worker_task.add_done_callback(report_exit("delivery worker", shutdown, halt))
 
     # Only when a board was configured. Starting a task that returns at once would have the done
     # callback report the poller as having stopped, on every boot, for everybody not using one.
@@ -209,7 +227,12 @@ async def _close(
     await safely("close the container", container.aclose())
 
 
-def build_lifespan(bot: Gateway, container: ProcessParts, settings: Settings):
+def build_lifespan(
+    bot: Gateway,
+    container: ProcessParts,
+    settings: Settings,
+    halt: Callable[[], None] = ask_the_process_to_stop,
+):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
@@ -225,7 +248,7 @@ def build_lifespan(bot: Gateway, container: ProcessParts, settings: Settings):
         liveness = ProcessLiveness(container.engine)
         app.state.liveness = liveness
 
-        running = await _start(bot, container, settings, liveness)
+        running = await _start(bot, container, settings, liveness, halt)
         try:
             yield
         finally:

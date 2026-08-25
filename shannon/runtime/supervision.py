@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+import signal
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,18 @@ class Shutdown:
     asked: bool = False
 
 
-def report_exit(what: str, shutdown: Shutdown):
+def ask_the_process_to_stop() -> None:
+    """Send this process the signal an orchestrator would send it.
+
+    Uvicorn owns the exit, so the way to ask for one from in here is the signal it already
+    listens for. It runs the ordinary shutdown, which means the delivery in hand still finishes
+    and the rest of its batch still goes back on the queue.
+    """
+    logger.error("stopping the process so it can be restarted")
+    signal.raise_signal(signal.SIGTERM)
+
+
+def report_exit(what: str, shutdown: Shutdown, halt: Callable[[], None] | None = None):
     """Say why a background task stopped, when nobody asked it to.
 
     A task that dies otherwise takes its exception with it while the endpoint carries on
@@ -31,6 +43,15 @@ def report_exit(what: str, shutdown: Shutdown):
     failure does: the worker's loop returns when told, and the Discord client's start returns
     when closed. Warning either way meant the one line that says the process is now useless
     appeared on every restart. Errors are still reported whichever way it is going.
+
+    `halt` is for a task the process cannot do its job without. Reporting alone leaves a process
+    that answers 200 to every delivery and works none of them: `/health` says so, and nothing
+    reads it, because a container restart policy watches the exit code and never the health
+    state. An unhealthy container that has not exited is a container that sits there until
+    somebody looks. Stopping instead is what makes a restart happen, and a restart is the fix
+    for a good half of what ends these tasks, a rotated token among them.
+
+    Left off for a task the process is still useful without, which is how the poller is wired.
     """
 
     def report(task: asyncio.Task) -> None:
@@ -41,6 +62,10 @@ def report_exit(what: str, shutdown: Shutdown):
             logger.error("the %s stopped: %s", what, error, exc_info=error)
         elif not shutdown.asked:
             logger.warning("the %s stopped without an error", what)
+        else:
+            return
+        if halt is not None:
+            halt()
 
     return report
 
