@@ -106,7 +106,7 @@ class ProjectPoller:
             # about. Not an error: the process runs before anybody has set it up.
             return 0
 
-        items = await self._projects.list_board_items(board.owner, self._project_number)
+        items = _once_each(await self._projects.list_board_items(board.owner, self._project_number))
         moved = await self._mirror_drafts(board, [i for i in items if i.is_draft])
         moved += await self._move_tracked(board, [i for i in items if not i.is_draft])
 
@@ -122,19 +122,7 @@ class ProjectPoller:
         """
         seen = await self._mirrored(board.repository_id)
         mirrored = 0
-        done: set[int] = set()
         for item in drafts:
-            if item.item_id in done:
-                # A board is read a page at a time by cursor, and a cursor is not a snapshot:
-                # GitHub says outright that a list edited while it is being paged through can
-                # hand the same row back on two pages, which is what a board somebody is
-                # dragging cards around on is. `seen` is read once for the whole board and not
-                # written to, so the second copy still reads as unmirrored and syncs again,
-                # rewriting a thread nothing had changed.
-                logger.info("the board listed the card %r more than once", item.title)
-                continue
-            done.add(item.item_id)
-
             stored, thread_id = seen.get(item.item_id, (None, None))
             if not _has_moved(item, stored, thread_id):
                 continue
@@ -319,7 +307,7 @@ class ProjectPoller:
             logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
             return 0
 
-        if moved.lock_refused:
+        if moved.lock_refused and not moved.lock_refusal_is_permanent:
             # The same half-done move, reported rather than raised. A command answers a refused
             # lock by telling the person who ran it what did land and what did not, because they
             # are standing there and can act on it. Nobody is standing here, so the only way this
@@ -331,6 +319,24 @@ class ProjectPoller:
                 wanted.value,
             )
             return 0
+
+        if moved.lock_refused:
+            # A permission is not a bad moment. Coming round again cannot help, and this card is
+            # never going to stop coming: nothing else advances the column, so every card ever
+            # dragged to Done joins a set that is retried on every poll and never leaves it,
+            # costing a GitHub read and a Discord call each, once a minute, for as long as the
+            # permission is missing. It grows with the team's throughput.
+            #
+            # So the move is written off as carried through, which is what the column means, and
+            # said once. The thread stays open until somebody grants the permission and moves the
+            # card again, which is the same bargain the rest of this file makes with a refusal
+            # nothing can wait out.
+            logger.warning(
+                "moved %s to %s but Discord will not let this bot lock threads, so it stays "
+                "open; grant Manage Threads and move the card again",
+                item.title,
+                wanted.value,
+            )
 
         await self._remember_column(tracked, column)
         return 1
@@ -436,6 +442,29 @@ class ProjectPoller:
             column=item.column,
             project_number=self._project_number,
         )
+
+
+def _once_each(items: Sequence[BoardItem]) -> list[BoardItem]:
+    """The board's cards, with any the read handed back twice dropped.
+
+    A board is read a page at a time by cursor, and a cursor is not a snapshot: GitHub says
+    outright that a list edited while it is being paged through can hand the same row back on two
+    pages, which is exactly what a board somebody is dragging cards around on is.
+
+    Done to the read rather than inside either half that consumes it, because it is a property of
+    the read. The draft half guarded itself and the wrapped half did not, and both are read from
+    a map built once for the whole board and never written to, so a second copy is judged against
+    the state before the first was acted on. For a draft that meant syncing a thread nothing had
+    changed; for a wrapped card it meant a second GitHub read of the item on every poll that saw
+    it, and the pass counting one move as two.
+    """
+    once: dict[int, BoardItem] = {}
+    for item in items:
+        if item.item_id in once:
+            logger.info("the board listed the card %r more than once", item.title)
+            continue
+        once[item.item_id] = item
+    return list(once.values())
 
 
 def _fits(column: str | None) -> str:

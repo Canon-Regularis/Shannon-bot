@@ -1088,6 +1088,58 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 1, "the lock nobody got round to was written off as done"
         assert threads.threads[thread_id].locked is True
 
+    async def test_a_wrapped_card_listed_twice_is_only_acted_on_once(
+        self, mirrored_pr: int, poller_for, github_client
+    ) -> None:
+        """The draft half refused a repeat and the wrapped half did not, in the same function.
+
+        The reason given for the draft guard is a property of the read rather than of drafts: a
+        board is paged by cursor, and GitHub documents that a list edited while it is being paged
+        can hand the same row back on two pages, which is what a board being dragged is. The
+        state both halves judge against is read once for the whole board and never written to, so
+        the second copy is judged against the state before the first was acted on.
+
+        For a wrapped card that cost a second GitHub read of the item on every poll that saw it,
+        against the same rate limit the board read and every command draw on, and made the pass
+        report two moves where one had happened.
+        """
+        board = FakeBoard(
+            wraps(ObjectType.PR, mirrored_pr, column="In Review"),
+            wraps(ObjectType.PR, mirrored_pr, column="In Review"),
+        )
+        reads = len(github_client.pull_request_calls)
+
+        moved = await poller_for(board).run_once()
+
+        assert moved == 1, "one card moving was counted twice"
+        assert len(github_client.pull_request_calls) - reads == 1, "it read the item twice"
+
+    async def test_a_lock_no_permission_will_ever_grant_is_not_asked_for_every_minute(
+        self, mirrored_pr: int, poller_for, threads: FakeThreadGateway, github_client
+    ) -> None:
+        """The retry above is for a bad moment. A missing permission is not one.
+
+        Nothing else advances the column, so a card whose lock is refused comes round on every
+        poll for as long as the refusal lasts. When the refusal is a permission, that is for
+        ever, and every card the team ever finishes joins the set and never leaves it: a GitHub
+        read and a Discord call each, once a minute, growing with throughput.
+
+        The move itself did land, so it is written off as carried through, which is what the
+        column records, and the reason is said once rather than once a minute.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
+        threads.refuses_every_lock = True
+        assert await poller.run_once() == 1, "the move it did carry out was reported as none"
+
+        reads = len(github_client.pull_request_calls)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+        assert github_client.pull_request_calls[reads:] == [], "it asked GitHub every poll"
+
     async def test_a_draft_whose_thread_edit_was_refused_is_mirrored_again(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
     ) -> None:

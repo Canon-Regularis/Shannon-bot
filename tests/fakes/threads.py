@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from shannon.discord_bot.errors import (
     DiscordGatewayError,
+    DiscordPermissionError,
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
@@ -46,6 +47,9 @@ class FakeThreadGateway:
         # The same for locking, which is a separate permission on Discord's side: a server can
         # let this bot open and edit threads and not let it close one.
         self.fail_next_lock = False
+        # A server that will never let it close one, which is a different thing: no amount of
+        # waiting grants a permission, and a caller with nobody to tell has to stop asking.
+        self.refuses_every_lock = False
         # And for rewriting a thread that already exists, which is what a card that moves after
         # its first mirror needs.
         self.fail_next_update = False
@@ -104,6 +108,8 @@ class FakeThreadGateway:
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
     async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+        if self.refuses_every_lock:
+            raise DiscordPermissionError("Discord will not let the bot lock the thread")
         if self.fail_next_lock:
             self.fail_next_lock = False
             raise DiscordGatewayError("Discord refused to lock the thread")
