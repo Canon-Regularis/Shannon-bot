@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -131,7 +131,7 @@ class ItemSyncService:
         # Discord is called outside the transaction. Holding one open across a network call
         # would let a slow gateway block the database, and a rollback would throw away work
         # Discord had already done.
-        wants_locked = self._policy.locked(snapshot)
+        wants_locked = state.wants_locked
 
         # Unlocking comes first and locking last, so that everything in between happens on an
         # open thread. Not because the bot cannot write to a locked one, which it can and which
@@ -145,7 +145,7 @@ class ItemSyncService:
                 await self._threads.set_locked(thread_id=state.thread_id, locked=False)
 
         written = await self._binding.write(
-            state.target, name=self._policy.thread_name(snapshot), content=state.metadata
+            state.target, name=state.thread_name, content=state.metadata
         )
         handle = written.handle
 
@@ -157,7 +157,13 @@ class ItemSyncService:
                 guild_id=state.guild_id,
             )
 
-        if wants_locked is True and await self._still_current(state.tracked_item_id, snapshot):
+        # The guard is about a lock decided from a payload that may have been superseded while
+        # this sync was in Discord. A lock decided from the row has nothing to be superseded by:
+        # the row is what a newer sync would have written, and it was read after that sync
+        # committed or not at all.
+        if wants_locked is True and (
+            state.locked_from_the_row or await self._still_current(state.tracked_item_id, snapshot)
+        ):
             await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
 
         return SyncResult(
@@ -387,6 +393,33 @@ class ItemSyncService:
             guild_id=placement.repository.discord_guild_id, github_usernames=logins
         )
 
+        # What the thread is told, and what its lock is set from. The same snapshot everywhere
+        # else, and on the superseded branch above the row instead, for the fields the row holds.
+        #
+        # That branch already refuses this payload about the title, the state, the status and
+        # the people, because a delivery from before a close is wrong about all of them. It went
+        # on to render the block from it anyway, so a merged pull request whose thread somebody
+        # deleted was rebuilt saying `State: Open`, and a closed issue was rebuilt with `State:
+        # Open` sitting directly above `Status: DONE`. The window that was accepted for a stale
+        # block is only a window while another delivery is coming; a merged pull request and a
+        # closed issue send no more, so it was permanent.
+        #
+        # The lock was read off the same payload, which left the rebuilt thread of a closed issue
+        # open, and nothing else ever locks one.
+        #
+        # People are not corrected here. They live in their own table rather than on this row,
+        # and the empty mention map the superseded branch leaves behind is what stops the rebuild
+        # pinging whoever was on the item at the time.
+        shown = (
+            replace(
+                snapshot,
+                title=item.title,
+                state=item.github_state,
+                html_url=item.github_url,
+            )
+            if superseded
+            else snapshot
+        )
         return _SyncState(
             tracked_item_id=item.id,
             guild_id=placement.repository.discord_guild_id,
@@ -394,8 +427,11 @@ class ItemSyncService:
             thread_id=item.discord_thread_id,
             message_id=item.discord_message_id,
             metadata=self._policy.render(
-                snapshot, status=item.status, priority=item.priority, mentions=mentions
+                shown, status=item.status, priority=item.priority, mentions=mentions
             ),
+            thread_name=self._policy.thread_name(shown),
+            wants_locked=self._policy.locked(shown),
+            locked_from_the_row=superseded,
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -507,8 +543,18 @@ class _SyncState:
     guild_id: int
     channel_id: int
     metadata: str
+    # The thread's name, rendered beside the block it belongs with rather than in the caller,
+    # so the two cannot end up describing different states.
+    thread_name: str
     thread_id: int | None
     message_id: int | None
+    # Where the thread's lock belongs, or None for a kind whose lock this path does not touch.
+    # Decided in `_write`, where the payload and the row are both in hand, because on the
+    # rebuild path they disagree and only one of them is to be believed.
+    wants_locked: bool | None
+    # Whether that answer came from the row rather than from the payload, which decides whether
+    # the staleness guard below applies to it at all.
+    locked_from_the_row: bool
 
     @property
     def target(self) -> ThreadTarget:

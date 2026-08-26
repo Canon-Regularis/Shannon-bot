@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.domain.enums import ActorRole
+from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -32,6 +33,12 @@ AFTER = "2026-08-10T12:00:00Z"
 
 def pr(action: str, **overrides):
     snapshot = parse_pull_request_event(action, payloads.pull_request_event(action, **overrides))
+    assert snapshot is not None
+    return snapshot
+
+
+def issue(action: str, **overrides):
+    snapshot = parse_issue_event(action, payloads.issue_event(action, **overrides))
     assert snapshot is not None
     return snapshot
 
@@ -160,3 +167,65 @@ async def test_an_item_that_never_had_a_thread_is_still_built_from_its_own_deliv
 
     title, thread_id, reviewers = await stored(db_session)
     assert (title, thread_id is not None, reviewers) == ("OLD title", True, ["monalisa"])
+
+
+async def test_a_closed_issue_rebuilt_from_an_open_delivery_still_gets_a_shut_thread(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """The lock was the one thing still decided from the payload this path refuses to believe.
+
+    An issue closes, which locks its thread. Somebody deletes the thread. A delivery from before
+    the close is retried and rebuilds it, and the payload it carries says the issue is open. The
+    title, the state, the status and the people are all taken from the row, because this path
+    refuses that payload about every one of them; the lock was read off the payload, so the
+    replacement thread came back open on an issue the row records as closed and DONE.
+
+    Nothing else shuts it. `IssuePolicy.locked` is the only thing that locks an issue's thread,
+    and it is reached once per delivery, so the next current event would have to arrive to put it
+    right, and a closed issue has no reason to send one.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    sync = container.issue_sync
+
+    await sync.sync(issue("opened", updated_at=BEFORE))
+    await sync.sync(issue("closed", state="closed", updated_at=AFTER))
+    closed_thread = threads.created[-1].thread_id
+    assert threads.threads[closed_thread].locked is True, "the close did not lock it"
+
+    await forget_the_thread(container, db_session)
+    await sync.sync(issue("edited", updated_at=STALE))
+
+    rebuilt = threads.created[-1].thread_id
+    assert rebuilt != closed_thread, "nothing was rebuilt, so this proves nothing"
+    assert threads.threads[rebuilt].locked is True, "a closed issue was given an open thread"
+
+
+async def test_a_rebuilt_block_says_what_the_row_says_rather_than_what_the_payload_says(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """The block was rendered from the very payload this path refuses to believe.
+
+    A merged pull request whose thread somebody deleted was rebuilt saying `State: Open`, and a
+    closed issue was rebuilt with `State: Open` directly above `Status: DONE`, a block that
+    contradicts itself and the row it was built from in the same transaction.
+
+    The stale block is accepted elsewhere on the grounds that the next delivery corrects it, and
+    that is what fails here: a merged pull request and a closed issue send no more events, so it
+    was not a window but the last thing the thread ever said.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    sync = container.pr_sync
+
+    await sync.sync(pr("opened", updated_at=BEFORE, title="OLD title"))
+    await sync.sync(pr("closed", state="closed", merged=True, updated_at=AFTER, title="NEW title"))
+    await forget_the_thread(container, db_session)
+
+    await sync.sync(pr("edited", updated_at=STALE, title="OLD title"))
+
+    rebuilt = threads.created[-1]
+    block = threads.metadata_of(rebuilt.thread_id)
+    assert "**State:** Merged" in block, f"the rebuilt block reported the stale payload: {block}"
+    assert "**PR Name:** NEW title" in block
+    assert rebuilt.name == "#7 NEW title", "the thread was named from the stale payload"
