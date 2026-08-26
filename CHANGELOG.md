@@ -2888,3 +2888,76 @@ Discord cannot move a thread between channels, so every item already tracked kee
 and telling the admin where that is exists precisely so they do not go looking for threads that
 never went anywhere. The service is handed the fallbacks now, read off the sync policies rather
 than restated, and answers from where the threads actually went.
+
+## A ninth look, by changing the code to see what nobody notices
+
+A different method from the eight before it. Six lenses were sent out after logic errors
+specifically, and five of them died on a session limit before reporting; the one that finished
+found nothing, having gone through the label parsing, every dict keyed by an enum, the orderings,
+four hundred combinations of the status commands and a hundred and eighty of the board poller.
+
+So the work here is mutation testing. One operator at a time is changed in place, the tests are
+run, and whatever passes anyway is a decision nothing pins. Replaced by character span rather than
+by re-emitting the module, because `ast.unparse` strips every comment, and a run killed part way
+through would leave the file looking like a machine wrote it. One run was killed, and what it left
+was a single `0` turned into a `1`, visible in a one-line diff.
+
+### The module that decides what Discord accepts was pinned by nothing
+
+Nine of the eighteen logic changes possible in `safe_text` went unnoticed by the whole unit tier.
+Inverting the comment preview cut, so that short comments are truncated and long ones are not:
+unnoticed. Moving Discord's message limit from 2000 to 2001: unnoticed. Turning the boundary at
+exactly 2000 from inclusive to exclusive: unnoticed.
+
+The reason is worth writing down because it is a shape rather than an accident. What covers that
+module is the block formatters and the property tests, and those assert that the rendered length
+is at most `MESSAGE_LIMIT`, comparing the output against the very constant that decides it. Raise
+the constant and the assertion rises with it. Those tests could not have failed.
+
+`tests/unit/discord_bot/test_safe_text.py` checks the constants against the numbers Discord
+documents, written out separately, and both functions one character either side of every limit
+they enforce. Killing the last three took a message whose lines land exactly on the budget, which
+lines of equal length can never do: that is why three different one-character changes to the same
+arithmetic all survived every other test in the file. Seventeen of the eighteen die now. The
+survivor is the seven hundred character comment preview, a product choice with nothing external to
+measure it against, so what is pinned is its relationship to the message limit rather than its
+value.
+
+### Three renderers of one title disagreed about whitespace
+
+A title of nothing but spaces is truthy, so a check asking whether there is a title answered yes,
+and the metadata block rendered a label with nothing after it. The other two renderers of the same
+string already knew better: `thread_name` strips, and `TicketPolicy.thread_name` calls an untitled
+card an untitled card. A draft titled with spaces opened a thread named "Untitled ticket" whose
+first line named it nothing at all, and a field rendered blank reads as the bot having broken
+rather than as an item nobody named.
+
+The mapping layer refuses a title that is missing or empty outright, which is why this is the one
+shape of it that gets through. All three agree now, and five kinds of whitespace are pinned.
+
+### Two parsers could drop a note without saying so
+
+`parse_comment_event` and `parse_review_event` both end by logging a warning when the note cannot
+be read. Inverting the condition that decides whether to log went unnoticed by the whole unit tier
+in both files: every refusal would have been silent and every success would have carried the
+warning. A note refused there reaches nobody and leaves no row, so that line is the only thing
+between "the comment never appeared" and knowing why. Both are pinned now, in both directions.
+
+### What came back already sound
+
+`labels.py`, `urls.py`, `permissions.py` and the four other webhook parsers have no unpinned
+decision left in them at all. `mapping.py` has one, and it cannot matter: `split("/", 1)[0]` and
+`split("/", 2)[0]` are the same expression.
+
+Also recorded, because it cost time twice: a mutation result is only as good as the tests it was
+run against. Four apparent survivors in `policies.py` and `formatting.py`, and one in the event
+router, all die against the whole suite and were nothing but a narrow test selection. Half the
+survivors in the fourth look's campaign were the same thing. The router one is worth a note of its
+own: `EventRouter.handles` has no production caller, since the route asks `will_act_on`, and it
+exists for the two tests that check every supported event has a handler. That is a method serving
+a test rather than dead code, and it stays.
+
+One methodological cost worth recording too. The mutation runs and the reading agents overlapped,
+and one agent read a constant mid-mutation, reported 2001 where the file says 2000, and had to
+check it against git and a live import before trusting either. Changing the tree under somebody
+reading it wastes both of them.
