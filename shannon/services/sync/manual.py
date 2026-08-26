@@ -142,6 +142,25 @@ class ManualSync:
             raise UnparseableLinkError(f"{link!r} has no {self._noun} number")
 
         snapshot = await self._fetch(ref.owner, ref.name, ref.number)
+
+        # Checked whichever way the name went. A matching name skips the confirmation above, and
+        # a name is not an identity: GitHub frees one the moment a repository is renamed or
+        # deleted, and the stored one goes stale by design, since nothing corrects it until an
+        # item webhook arrives and a repository renamed away sends none.
+        #
+        # So a link that reads as this server's own can fetch somebody else's item. The sync
+        # places what it is given by the payload's own repository id, not by the guild that ran
+        # the command, so unchecked it mirrored that item into whichever server had registered
+        # that repository, and answered the person who ran it with a thread they cannot open.
+        # The confirmation above already settles a genuine rename by id; this settles the case
+        # it skips, and costs no call because the snapshot already carries the id.
+        if snapshot.repository.github_repo_id != registered.github_repo_id:
+            raise RepositoryMismatchError(
+                f"This server is registered to {registered.full_name}, and that link now points "
+                f"at {snapshot.repository.full_name}, which is a different repository. The name "
+                "has been taken by somebody else on GitHub."
+            )
+
         result = await self._sync.sync(snapshot)
 
         if result.outcome is SyncOutcome.NOT_TRACKED:

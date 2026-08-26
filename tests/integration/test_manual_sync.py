@@ -446,3 +446,63 @@ class TestSyncingAnIssueByLink:
     async def test_an_unregistered_guild_is_told_to_register(self, issues: ManualSync) -> None:
         with pytest.raises(NotRegisteredError):
             await issues.sync_link(guild_id=1, link=ISSUE_LINK)
+
+
+class TestTheNameTakenBySomebodyElse:
+    """A repository name is not an identity, and this is the case that separates the two.
+
+    GitHub frees a name the moment a repository is renamed, transferred or deleted, and anybody
+    can take it. The stored name goes stale by design: nothing corrects it until an item webhook
+    arrives, and a repository renamed away sends none, so the row can name a path that now
+    belongs to a stranger for as long as the server lives.
+
+    The confirmation this service already had settles the opposite case, a genuine rename, by
+    asking GitHub for the id. It is only reached when the name disagrees, so a name that still
+    matches walked straight past it into somebody else's repository. The sync places what it is
+    handed by the payload's own repository id rather than by the guild that ran the command, so
+    the item was mirrored wherever that repository was registered, and the person who ran it was
+    answered with a thread they cannot open.
+    """
+
+    @pytest.fixture
+    def somebody_elses(self) -> FakeGitHubClient:
+        """The same path on GitHub, now a different repository with a different id."""
+        theirs = replace(REPO, github_repo_id=payloads.REPO_ID + 5000)
+        return FakeGitHubClient(
+            pull_requests={
+                (f"{payloads.OWNER}/{payloads.REPO}".lower(), 7): replace(
+                    SNAPSHOT, repository=theirs, title="Somebody else's pull request"
+                )
+            },
+            repositories={f"{payloads.OWNER}/{payloads.REPO}".lower(): theirs},
+        )
+
+    async def test_the_link_is_refused_rather_than_mirrored(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        sync_service: ItemSyncService,
+        somebody_elses: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        service = build_pull_request_sync(db_sessionmaker, somebody_elses, sync_service)
+
+        with pytest.raises(RepositoryMismatchError, match="different repository"):
+            await service.sync_link(guild_id=1, link=LINK)
+
+        assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 0
+
+    async def test_the_repository_it_really_is_gets_named(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        sync_service: ItemSyncService,
+        somebody_elses: FakeGitHubClient,
+    ) -> None:
+        """Refusing without saying what happened leaves the admin re-pasting the same link."""
+        service = build_pull_request_sync(db_sessionmaker, somebody_elses, sync_service)
+
+        with pytest.raises(RepositoryMismatchError) as refusal:
+            await service.sync_link(guild_id=1, link=LINK)
+
+        assert "taken by somebody else" in refusal.value.message
