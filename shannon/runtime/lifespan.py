@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from shannon.config import Settings
+from shannon.db.session import build_probe_engine
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.runtime.supervision import (
     Shutdown,
@@ -21,6 +22,7 @@ from shannon.runtime.supervision import (
     report_exit,
     safely,
     stop,
+    why,
 )
 from shannon.services.delivery.worker import ReadyCheck
 
@@ -241,11 +243,12 @@ def build_lifespan(
             logger.error(
                 "cannot reach the database, or it has never been migrated: %s. "
                 "Check SHANNON_DATABASE_URL and run `alembic upgrade head`.",
-                error,
+                why(error),
             )
             raise
 
-        liveness = ProcessLiveness(container.engine)
+        probes = build_probe_engine(container.engine)
+        liveness = ProcessLiveness(probes)
         app.state.liveness = liveness
 
         running = await _start(bot, container, settings, liveness, halt)
@@ -253,5 +256,6 @@ def build_lifespan(
             yield
         finally:
             await _close(bot, container, settings, running)
+            await safely("close the health probe engine", probes.dispose())
 
     return lifespan
