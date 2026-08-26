@@ -2961,3 +2961,130 @@ One methodological cost worth recording too. The mutation runs and the reading a
 and one agent read a constant mid-mutation, reported 2001 where the file says 2000, and had to
 check it against git and a live import before trusting either. Changing the tree under somebody
 reading it wastes both of them.
+
+## A tenth look, at logic that reads from the wrong side
+
+The five lenses that ran out of quota last round, run again: the conditions in the service layer,
+the arithmetic the delivery machinery does, every comparison between two moments, the set and dict
+work in the stores, and whether the thread can be made to say something untrue. Everything below
+was reproduced before it was touched, and one of the reports was refuted and is not here.
+
+### A closed issue could be given an open thread
+
+The rebuild path exists so that an item whose thread somebody deleted gets another one however
+old the delivery that finds it. It refuses that delivery about everything else: the title stays as
+stored, the state stays as stored, the status stays as stored, and the people stay as stored,
+because a payload from before the close is wrong about all of them and a ping cannot be taken
+back. The lock was the one thing still read off the payload.
+
+So a closed issue whose thread was deleted, rebuilt from a delivery captured while it was open,
+came back with an open thread on an item the row records as closed and DONE. Nothing else shuts
+it: an issue's lock is set by exactly one line, reached once per delivery, and a closed issue has
+no reason to send another. The requirements say a closed issue's thread is locked.
+
+The lock is now decided where the payload and the row are both in hand, and asked about the item
+as it is stored rather than as the payload describes it. The staleness guard that would have
+blocked it is skipped for that answer alone, which is sound for the reason the guard exists: it
+protects a decision made from a payload that may have been superseded, and a decision made from
+the row has nothing to be superseded by. The block beside it had the same fault, recorded below.
+
+### A rebuilt thread reported the payload it had just refused to believe
+
+The same branch, and the same mistake twice over. Having decided not to believe a stale delivery
+about the title, the state, the status or the people, it rendered the block from that delivery
+anyway. A merged pull request whose thread somebody deleted came back saying `State: Open`, and a
+closed issue came back with `State: Open` sitting directly above `Status: DONE`, contradicting
+itself and contradicting the row it was built from in the same transaction. The thread was renamed
+from the stale title to match.
+
+The stale block is accepted elsewhere on the grounds that the next delivery corrects it, and that
+is the premise that fails here. A merged pull request and a closed issue send no further events,
+so this was not a window but the last thing the thread ever said.
+
+The block and the thread name are now rendered from the item as stored, for the fields the row
+holds, and beside each other so the two cannot describe different states. The people are left
+alone: they live in their own table rather than on the row, and the empty mention map that branch
+leaves behind is what stops a rebuild pinging whoever was on the item at the time.
+
+### A draft whose first message was refused was never offered again
+
+Opening a thread and writing the first message in it are two Discord calls and two permissions, so
+a server that grants Create Public Threads and not Send Messages in Threads refuses the second
+every time. The thread is real by then, and the sync attaches it to the row on purpose so that a
+retry writes into it rather than opening another beside it.
+
+Putting the card's timestamp back was skipped whenever nothing had been stored before, on the
+grounds that a card with no timestamp or no thread is offered again anyway. That describes the row
+as it was before the sync, not as the sync had just left it: the row holds both the card's
+timestamp and a thread id, so neither escape applied. The card compared its own timestamp with
+itself for ever, Discord kept an empty thread named after it with no block inside, and a draft has
+no worker to retry it. One warning, then silence.
+
+It now goes back to never seen, which is where a card that failed on its very first mirror
+belongs, and the next poll writes the block into the thread that is already there.
+
+### `/set_priority` could not repair what it had half done
+
+The label goes on GitHub first and the row and the thread follow, so a run that fails in between
+leaves the three disagreeing. The status half of the same service guards on both the labels and
+the stored status before deciding a repeat has nothing to do. The priority half asked GitHub
+alone, so the command that exists to put that right answered "already HIGH priority" and wrote
+nothing, and nothing else ever rederives a priority: it stayed wrong until an unrelated event for
+the item arrived, which for a merged pull request is never.
+
+It asks both now. A repeat with nothing out of step still does nothing at all, which the
+requirements are explicit about and which has a test of its own.
+
+Recorded rather than fixed, because it needs that requirement changed rather than read
+differently: when GitHub and the row agree and only the thread is stale, no repeat of any of these
+commands rewrites the block. `/set_done` is the exception, because its repeat retries the lock.
+The requirements say a duplicated command takes no action; making a repeat re-render would be an
+action, and it is worth deciding on purpose rather than as a side effect of this.
+
+### A full read reported as cut short
+
+`get_pages` bounds itself at fifty pages, and warned about it from the loop's `else`, which runs
+whenever the range is exhausted rather than only when a page was left behind. A list that ends on
+exactly the fiftieth page was read whole and logged as truncated. Reproduced against the real
+client: forty-nine pages, no warning; fifty pages, read whole, warned; fifty-one, read short and
+warned. It now warns only when there was a next page it did not follow. A warning that fires when
+nothing is wrong teaches whoever reads the log to skip the line, and the one time it means a board
+is being cut off looks exactly like the times it does not.
+
+### A login matched in a case the column never holds
+
+`ItemAssignmentStore.release_notifications` matched on the login as given, while the three other
+methods there that take logins all fold first and the column only ever holds folded values. It
+works today because its one caller hands back exactly what the claim returned, which came out of
+that column. Any other caller would have matched no row, and matching no row there means a ping
+stamped as sent that nobody received and nothing revisits. Folded now, with a test that passes the
+login in the case GitHub uses.
+
+### A race test that only raced when the machine was quiet
+
+Found by the coverage floor rather than by reading. Three tests in the concurrency file arranged
+an overlap by holding a row, starting the other half as a task and sleeping two tenths of a
+second. Run on their own they exercised the branch they were written for. Run in a full suite on a
+loaded machine, the task had not reached the database at all by the time the sleep ended: the
+holder committed first, the sync found the row where it looks for it, and the test passed having
+gone down the other path entirely.
+
+They passed either way, which is the worst way for a race test to be wrong, and the only reason it
+surfaced is that one of those branches has nothing else covering it. They now ask PostgreSQL
+whether anything is waiting on a lock rather than guessing how long that takes, and say so out
+loud when nothing ever blocks. The same fault was fixed in the workflow race test earlier this
+round, where it showed up as a mutation surviving two runs in three.
+
+### What came back sound
+
+The delivery arithmetic: sixteen attempts really are sixteen tries, the fifteen backoffs
+`total_backoff` sums are exactly the fifteen the loop applies, and the give-up boundary is at the
+sixteenth. The mention lookups: `/link` and `/link_team` fold on the way in and the renderers fold
+on the way out, on both sides. The note keys are prefixed by kind, so a review and a comment
+sharing a number cannot be taken for one another. The manual sync compares a link against the
+stored name case-insensitively. The board poller normalises both sides of every column comparison.
+
+A refuted one worth recording: the rebuilt block naming people as plain logins instead of mentions
+is not a defect but a defence. Thread creation sends that block as a real message under allowed
+mentions that permit users, so filling the mention map in would ping the stale set of people the
+rest of that path exists to avoid pinging.
