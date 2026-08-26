@@ -405,6 +405,60 @@ async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned
     assert (await db_session.scalar(select(TrackedItem.title))) == "Renamed since"
 
 
+async def test_a_brand_new_item_the_loser_knows_more_about_is_still_written(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """The other way round from the test above, and the half the guard is easy to get wrong on.
+
+    Whichever sync of a brand-new item reaches the insert second is not necessarily the one
+    carrying the older payload: GitHub sends several events for a new item together and the
+    queue hands them out in parallel, so the second one in may well be the newer. It has the
+    same two facts in front of it as the loser above, and only one of them says to stop.
+
+    Turning away on either fact rather than on both drops that delivery outright: the newer
+    title, state and people never land, and nothing revisits it, because the row it would have
+    corrected already carries a timestamp newer than the one that wrote it.
+    """
+    threads = FakeThreadGateway()
+    service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+    older = pr_event("opened", updated_at="2026-08-10T18:00:00Z", title="What the first one said")
+    newer = pr_event("edited", updated_at="2026-08-10T18:00:05Z", title="What it is really called")
+
+    async with db_sessionmaker() as holder:
+        await holder.begin()
+        item = await TrackedItemStore(holder).get_or_create(
+            repository_id=registered.id,
+            object_type=ObjectType.PR,
+            github_object_id=payloads.PR_ID,
+            github_object_number=7,
+            github_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+            title="What the first one said",
+            github_state="open",
+            status=Status.NOT_REVIEWED,
+            github_updated_at=as_utc(older.updated_at),
+        )
+        # The winner got as far as Discord, which is the only state that reaches the guard.
+        item.discord_thread_id = 4242
+        item.discord_message_id = 99
+        await holder.flush()
+
+        catching_up = asyncio.create_task(service.sync(newer))
+        await blocked_on_a_row(db_sessionmaker, catching_up)
+        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
+
+        await holder.commit()
+        result = await catching_up
+
+    assert result.outcome is SyncOutcome.SYNCED, "the newer delivery was thrown away"
+    db_session.expire_all()
+    stored = await db_session.scalar(select(TrackedItem))
+    assert stored.title == "What it is really called"
+    assert as_utc(stored.github_updated_at) == datetime(2026, 8, 10, 18, 0, 5, tzinfo=UTC)
+
+
 async def blocked_on_a_row(sessionmaker: async_sessionmaker, task: asyncio.Task) -> None:
     """Wait until the task is genuinely waiting on a lock somebody else holds.
 
