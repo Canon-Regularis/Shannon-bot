@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
@@ -278,7 +278,7 @@ async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
         # The same delivery arriving again, which is what a retry is, while somebody newer is
         # part way through writing.
         catching_up = asyncio.create_task(service.sync(snapshot))
-        await asyncio.sleep(0.2)
+        await blocked_on_a_row(db_sessionmaker, catching_up)
         assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
@@ -335,7 +335,7 @@ async def test_a_brand_new_item_is_judged_against_whoever_created_it_first(
         await holder.flush()
 
         catching_up = asyncio.create_task(service.sync(older))
-        await asyncio.sleep(0.2)
+        await blocked_on_a_row(db_sessionmaker, catching_up)
         assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
@@ -392,7 +392,7 @@ async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned
         await holder.flush()
 
         catching_up = asyncio.create_task(service.sync(older))
-        await asyncio.sleep(0.2)
+        await blocked_on_a_row(db_sessionmaker, catching_up)
         assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
@@ -403,6 +403,33 @@ async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned
     assert threads.created == [], "it opened a second thread for an item that had one"
     db_session.expire_all()
     assert (await db_session.scalar(select(TrackedItem.title))) == "Renamed since"
+
+
+async def blocked_on_a_row(sessionmaker: async_sessionmaker, task: asyncio.Task) -> None:
+    """Wait until the task is genuinely waiting on a lock somebody else holds.
+
+    Sleeping a fixed moment instead is what these used to do, and on a loaded machine the task
+    had not reached the database at all: the holder committed first, the sync found the row
+    where it looks for it, and the test passed having exercised the other path entirely. It
+    passed on its own and stopped covering the branch it was written for in a full run, which is
+    the worst way for a race test to be wrong.
+
+    Asked of PostgreSQL rather than guessed at. A backend waiting on a lock says so.
+    """
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if task.done():
+            break
+        async with sessionmaker() as watcher:
+            waiting = await watcher.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                )
+            )
+        if waiting:
+            return
+    raise AssertionError("nothing ever blocked, so this proves nothing")
 
 
 async def _create(store: TrackedItemStore) -> TrackedItem:
