@@ -232,10 +232,17 @@ class HttpGitHubClient:
             # sent again beside it.
             url = response.links.get("next", {}).get("url")
             params = {}
-        else:
-            # A Link header that points at itself, or a list that never ends, would otherwise
-            # keep this reading for as long as the process lives. Bounded rather than trusted:
-            # the cursor is opaque, so there is nothing to inspect to tell the two apart.
+
+        # A Link header that points at itself, or a list that never ends, would otherwise keep
+        # this reading for as long as the process lives. Bounded rather than trusted: the cursor
+        # is opaque, so there is nothing to inspect to tell the two apart.
+        #
+        # Only when something was actually left. This used to hang off the loop's `else`, which
+        # runs whenever the range is exhausted, so a list of exactly `MAX_PAGES` pages was read
+        # whole and reported as cut short. A warning that fires when nothing is wrong is worse
+        # than no warning: it teaches whoever reads the log to skip the line, and the one time
+        # it means a board is being truncated looks exactly like the times it does not.
+        if url is not None:
             logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
 
     async def get_json(self, path: str, **params: Any) -> Any:

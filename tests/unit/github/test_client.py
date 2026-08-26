@@ -356,6 +356,58 @@ class TestPagingThroughAList:
         assert len(pages) == MAX_PAGES
         assert len(seen) == MAX_PAGES
 
+    def _of_length(self, pages: int):
+        """A list that really ends, in as many pages as asked for."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            page = int(request.url.params.get("page", 1))
+            links = (
+                {"Link": f'<https://api.github.com/items?page={page + 1}>; rel="next"'}
+                if page < pages
+                else {}
+            )
+            return httpx.Response(200, content=json.dumps([page]), headers=links)
+
+        return handler
+
+    async def test_a_list_of_exactly_the_limit_is_not_reported_as_cut_short(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The warning used to hang off the loop's `else`, which runs whenever the range is
+        exhausted, so a list that ended on the last page it was allowed was read whole and
+        reported as truncated.
+
+        A warning that fires when nothing is wrong is worse than no warning. It teaches whoever
+        reads the log to skip the line, and the one time it means a board is being cut off looks
+        exactly like the times it does not.
+        """
+        async with client_with(self._of_length(MAX_PAGES)) as client:
+            with caplog.at_level("WARNING"):
+                pages = [page async for page in client.get_pages("/items", page=1)]
+
+        assert len(pages) == MAX_PAGES, "it did not read the whole list"
+        assert "stopped following" not in caplog.text
+
+    async def test_a_list_one_page_longer_is_reported_as_cut_short(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        async with client_with(self._of_length(MAX_PAGES + 1)) as client:
+            with caplog.at_level("WARNING"):
+                pages = [page async for page in client.get_pages("/items", page=1)]
+
+        assert len(pages) == MAX_PAGES
+        assert "stopped following" in caplog.text
+
+    async def test_a_list_shorter_than_the_limit_says_nothing_either(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        async with client_with(self._of_length(3)) as client:
+            with caplog.at_level("WARNING"):
+                pages = [page async for page in client.get_pages("/items", page=1)]
+
+        assert len(pages) == 3
+        assert caplog.text == ""
+
 
 class TestFetchingAnyJson:
     """`get_json` hands the body over as it came, for endpoints that answer with arrays."""
