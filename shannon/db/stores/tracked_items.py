@@ -178,7 +178,12 @@ class TrackedItemStore:
         )
 
     async def forget_mirror(
-        self, *, repository_id: int, object_type: ObjectType, github_object_id: int, to: datetime
+        self,
+        *,
+        repository_id: int,
+        object_type: ObjectType,
+        github_object_id: int,
+        to: datetime | None,
     ) -> None:
         """Put the high-water mark back, for a sync that wrote the row and then failed.
 
@@ -190,6 +195,10 @@ class TrackedItemStore:
 
         Deliberately not `raise_updated_at`, which exists to stop the mark moving backwards.
         This is the one caller that means to.
+
+        `None` puts it back to never seen, which is where a card that failed on its very first
+        mirror belongs. Anything else would be a moment invented here, and the column already
+        has a word for having no answer.
         """
         await self._session.execute(
             update(TrackedItem)
@@ -198,7 +207,7 @@ class TrackedItemStore:
                 TrackedItem.github_object_type == object_type,
                 TrackedItem.github_object_id == github_object_id,
             )
-            .values(github_updated_at=as_utc(to))
+            .values(github_updated_at=as_utc(to) if to is not None else None)
             .execution_options(synchronize_session=False)
         )
 

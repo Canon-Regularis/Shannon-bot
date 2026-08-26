@@ -1108,6 +1108,33 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 1, "a refused edit left the thread wrong for ever"
         assert threads.threads[thread_id].name == "Write the poller, properly"
 
+    async def test_a_draft_whose_very_first_message_was_refused_is_mirrored_again(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The same repair, on the mirror that has nothing stored to put back.
+
+        Opening a thread and writing the first message in it are two Discord calls and two
+        permissions, so a server that grants Create Public Threads and not Send Messages in
+        Threads refuses the second every time. The thread is real by then and the sync attaches
+        it on purpose, so the row ends up holding both the card's timestamp and a thread id.
+
+        Putting the mark back used to be skipped whenever nothing had been stored before, on the
+        grounds that a card with no timestamp or no thread is offered again anyway. This row has
+        both, so neither escape applied: the card compared its own timestamp with itself for
+        ever, and Discord kept an empty thread named after it with no block in it.
+        """
+        board = FakeBoard(card())
+        poller = poller_for(board)
+        threads.fail_next_first_message = True
+
+        assert await poller.run_once() == 0
+        empty = threads.created[0]
+        assert empty.metadata_message_id is None, "nothing was refused, so this proves nothing"
+
+        assert await poller.run_once() == 1, "the card was never offered again"
+        assert threads.threads[empty.thread_id].metadata_message_id is not None
+        assert len(threads.created) == 1, "it opened a second thread beside the empty one"
+
 
 class ExplodingSync:
     """A sync that fails the way nobody wrote a branch for, counting how often it was asked."""

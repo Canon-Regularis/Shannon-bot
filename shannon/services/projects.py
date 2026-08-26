@@ -194,11 +194,16 @@ class ProjectPoller:
         timestamp beats the stored one, which the failed sync just made equal. Without this the
         thread stays wrong until somebody edits the card on GitHub.
 
-        Nothing to put back when there was nothing stored: a card with no timestamp, or with no
-        thread, is offered again anyway.
+        Back to nothing when there was nothing stored, rather than left alone. That case used
+        to return here, on the grounds that a card with no timestamp or no thread is offered
+        again anyway, which describes the row as it was before the sync and not as the sync has
+        just left it. A first mirror into a text channel opens the thread and sends the metadata
+        as a second call, and a refusal there raises after the thread has been attached to the
+        row that already carries the card's timestamp. The row then holds both, so neither of
+        the two escapes applies: `_has_moved` compares the card's own timestamp with itself for
+        ever, and Discord keeps an empty thread named after a card with no block in it and
+        nothing anywhere revisiting it.
         """
-        if stored is None:
-            return
         async with self._sessionmaker() as session, session.begin():
             await TrackedItemStore(session).forget_mirror(
                 repository_id=board.repository_id,

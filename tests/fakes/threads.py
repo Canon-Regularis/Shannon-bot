@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.errors import (
+    DiscordGatewayError,
+    ThreadNotFoundError,
+    ThreadStartedEmptyError,
+)
 from shannon.discord_bot.threads import ThreadHandle, truncate_thread_name
 
 
@@ -45,6 +49,10 @@ class FakeThreadGateway:
         # And for rewriting a thread that already exists, which is what a card that moves after
         # its first mirror needs.
         self.fail_next_update = False
+        # Opening the thread and writing the first message in it are two Discord calls and two
+        # permissions, so the second can be refused on its own. The thread is real by then, and
+        # the real gateway hands its id back with the failure so the row can point at it.
+        self.fail_next_first_message = False
         self._next_id = 1000
 
     def _allocate(self) -> int:
@@ -62,11 +70,16 @@ class FakeThreadGateway:
             thread_id=thread_id,
             channel_id=channel_id,
             name=truncate_thread_name(name),
-            messages={message_id: content},
-            metadata_message_id=message_id,
+            messages={} if self.fail_next_first_message else {message_id: content},
+            metadata_message_id=None if self.fail_next_first_message else message_id,
         )
         self.threads[thread_id] = thread
         self.created.append(thread)
+        if self.fail_next_first_message:
+            self.fail_next_first_message = False
+            raise ThreadStartedEmptyError(
+                "Discord refused to post the first message", thread_id=thread_id
+            )
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
     async def update(
