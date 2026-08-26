@@ -263,6 +263,45 @@ class TestSettingAPriority:
 
         assert (await stored(db_session)).priority is Priority.HIGH
 
+    async def test_a_label_the_row_never_caught_up_with_is_put_right_by_running_it_again(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """The guard asked GitHub and not the row, so a repeat could not repair a half-done run.
+
+        The label goes on GitHub first and the row and the thread follow, so a run that dies in
+        between leaves the three disagreeing. Asking GitHub alone, the command that exists to
+        put that right answered "already HIGH priority" and wrote nothing, and nothing else
+        rederives a priority: it stayed wrong until an unrelated event for the item arrived,
+        which for a merged pull request is never.
+
+        The status half of this service has always asked both. This is that rule, applied to the
+        half that did not.
+        """
+        github.set_labels(REPO_KEY, [*github.labels[REPO_KEY], "HIGH"])
+        assert (await stored(db_session)).priority is not Priority.HIGH
+
+        outcome = await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+        assert outcome.changed is True, "it answered that there was nothing to do"
+        assert (await stored(db_session)).priority is Priority.HIGH
+
+    async def test_a_repeat_with_nothing_out_of_step_still_does_nothing(
+        self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """The requirements are explicit that a duplicated command takes no action, and the
+        repair above must not turn every repeat into a pair of writes."""
+        await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+        before = len(github.label_calls)
+
+        outcome = await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+        assert outcome.changed is False
+        assert github.label_calls[before:] == []
+
     async def test_moving_priority_removes_the_one_before(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
     ) -> None:

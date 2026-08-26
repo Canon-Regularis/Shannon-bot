@@ -165,13 +165,22 @@ class ItemWorkflow:
         )
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
-        """Move an item to a priority. Nothing is locked and no status moves with it."""
+        """Move an item to a priority. Nothing is locked and no status moves with it.
+
+        The stored priority has to agree as well as the label, which is the same rule the status
+        half above follows and for the same reason: a run that puts the label on GitHub and then
+        cannot reach Discord leaves the thread saying the old one. Asking GitHub alone, the
+        repeat that is meant to repair that answers "already HIGH priority" and writes nothing,
+        so the block stays wrong until some unrelated event for the item arrives, which for a
+        merged pull request is never. Reproduced: label HIGH on GitHub, HIGH in the row, UNSET
+        in the thread, and the command that exists to fix it reporting nothing to do.
+        """
         found = await self._locate(thread_id)
         self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
 
         change = labels.priority_change(snapshot.label_names, priority)
-        if change.nothing_to_do:
+        if change.nothing_to_do and found.priority is priority:
             return WorkflowOutcome(found.full_name, found.number, changed=False)
 
         await self._apply(found, change)
@@ -347,6 +356,7 @@ class _Found:
     full_name: str
     number: int
     status: Status
+    priority: Priority
 
     @property
     def owner(self) -> str:
@@ -364,6 +374,7 @@ class _Found:
             full_name=repo_name,
             number=item.github_object_number,
             status=item.status,
+            priority=item.priority,
         )
 
 
