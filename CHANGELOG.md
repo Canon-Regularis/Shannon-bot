@@ -3088,3 +3088,90 @@ A refuted one worth recording: the rebuilt block naming people as plain logins i
 is not a defect but a defence. Thread creation sends that block as a real message under allowed
 mentions that permit users, so filling the mention map in would ping the stale set of people the
 rest of that path exists to avoid pinging.
+
+## An eleventh look, mutating the service layer
+
+The ninth look mutated the pure modules, where a test run costs a second. This one does the rest,
+where a run needs PostgreSQL and costs a minute, so each module was given a test selection first
+and the selection was only used once it was shown to cover the module. That discipline is the
+whole reason the results below are worth anything: twice already in this project a batch of
+apparent survivors turned out to be nothing but a narrow selection.
+
+Six modules, a hundred and twenty-six one-token changes. Two defects worth a test, five decisions
+that nothing pinned, and a list of survivors that are survivors for good reasons.
+
+### The guard that let the wrong delivery through
+
+`items.py` gave up one survivor and it was the useful kind. The create-race guard reads
+`if superseded and item.discord_thread_id is not None`, and it could be changed to `or` without a
+single test noticing, because every case the suite covered had both facts agreeing: an ordinary
+creation has neither, and the loser of a race for a brand-new item has both.
+
+The case nothing exercised is the one where exactly one holds. Whichever sync reaches the insert
+second is not necessarily the one carrying the older payload: GitHub sends several events for a
+new item together and the queue hands them out in parallel, so losing the race says nothing about
+knowing less. Under `or` that delivery is discarded whole, and nothing revisits it, because the
+row it would have corrected already carries a timestamp newer than the one that wrote it. Now
+tested, from the side the suite had never approached.
+
+### The line that decides whether a backlog drains
+
+Four separate one-character changes to
+`if handled < self._settings.batch_size and not self._stopping` went unnoticed, which is every
+way there is to write that line wrong. It carries three decisions and nothing pinned any of them:
+that a full batch goes straight back round, that a short one waits, and that a stop is not made to
+wait first.
+
+Each of the three matters somewhere different. Sleeping after a full batch caps the queue at one
+batch per interval however far behind it is, which is exactly the moment it must not: a repository
+that was busy while the bot was down comes back as a burst. Going straight round after a short one
+is a hot loop against the database for as long as the queue is empty, which is nearly always.
+Sleeping when a stop has already arrived spends a whole interval before looking at the flag again,
+which at the shipped two seconds is invisible and at anything longer is a container killed part
+way through the shutdown it was given time for.
+
+Three tests, one for each. Two of them are the same test with the comparison the other way round,
+which is the point: the full-batch case cannot tell `<` from `>`, because at exactly the batch
+size both are false.
+
+### The line that says the queue is running without Discord
+
+An earlier round gave the wait for the gateway an end, so a client that never connects no longer
+parks the queue for the life of the process. What it does instead is go ahead without Discord, and
+the one line that says so was not pinned: dropping the negation in front of it left the decision
+identical and the log silent. Every delivery then fails with a gateway error that names Discord
+rather than the choice that was made about it, and nothing anywhere connects the two. Pinned now,
+in both directions.
+
+### What survives, and why each one is left alone
+
+Twenty-one survivors are recorded here rather than chased, because a mutant is a question and
+these have answers.
+
+Eleven are constants with no external truth to measure against: five worker settings, the comment
+preview length, the exponent clamp. A test asserting `retention == 7 days` restates the line above
+it. The one that would have been worth pinning says so itself: `error_limit` is documented as a
+readability limit against a `Text` column rather than a schema one, so overshooting it breaks
+nothing.
+
+Four are boundaries between two moments that both come from the database clock, in the lease and
+the prune. Making them equal would mean freezing that clock, and `<=` is the right side of each:
+a delivery due now is due.
+
+Two are `split("/", 1)` against `split("/", 2)` on a name with exactly one slash, which is the
+same expression. Two more are the second half of an `or` whose first half already covers every
+reachable case, one of them needing a `repositories` row deleted between two statements of the
+same read, which nothing can do because the foreign key cascades and there is no unregister.
+The last is cancelling a future that is already done, which is a no-op either way.
+
+### A note on the method
+
+The coverage floor cannot find any of this. Branch coverage asks whether an `if` went both ways.
+It never asks whether each half of an `and` mattered, and both of this session's real mutation
+findings were compound conditions where every test happened to exercise the halves together.
+
+Two of the mutants took the machine down while being checked. Changing `<` to `>` on the poll
+decision turns an idle worker into a hot loop against PostgreSQL, and the run has to be killed
+rather than waited out. The harness replaces one operator by character span rather than rewriting
+the module, so what a kill leaves behind is a one-line diff with every comment intact, which is
+the only reason that was cheap rather than expensive.
