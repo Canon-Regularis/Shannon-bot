@@ -449,7 +449,7 @@ class TestWaitingForDiscord:
             await asyncio.wait_for(worker.run_forever(never_connects), timeout=2)
 
     async def test_a_gateway_that_never_connects_does_not_park_the_queue_for_ever(
-        self, queue: WebhookDeliveryQueue
+        self, queue: WebhookDeliveryQueue, caplog: pytest.LogCaptureFixture
     ) -> None:
         """discord.py reconnects for ever by design, so a gateway outage leaves `start()` running
         and `wait_until_ready()` unfired. The wait here had no end, so the worker sat in it for
@@ -469,10 +469,32 @@ class TestWaitingForDiscord:
         async def never_answers() -> None:
             await asyncio.Event().wait()
 
-        running = asyncio.create_task(worker.run_forever(never_answers))
-        await _until(lambda: handler.calls == 1)
-        worker.stop()
-        await asyncio.wait_for(running, timeout=5)
+        with caplog.at_level("ERROR"):
+            running = asyncio.create_task(worker.run_forever(never_answers))
+            await _until(lambda: handler.calls == 1)
+            worker.stop()
+            await asyncio.wait_for(running, timeout=5)
+
+        # The one line that explains a queue draining into gateway errors. Without it the
+        # failures downstream are the only evidence, and they name Discord rather than the
+        # decision that went ahead without it.
+        assert "working the queue without it" in caplog.text
+
+    async def test_a_gateway_that_answers_is_not_reported_as_absent(
+        self, queue: WebhookDeliveryQueue, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The other side of the line above: an ordinary start says nothing alarming."""
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, poll_interval=timedelta(seconds=0.01))
+        await enqueue(queue, "delivery-a")
+
+        with caplog.at_level("ERROR"):
+            running = asyncio.create_task(worker.run_forever(_connected))
+            await _until(lambda: handler.calls == 1)
+            worker.stop()
+            await running
+
+        assert "working the queue without it" not in caplog.text
 
     async def test_without_a_check_it_starts_at_once(self, queue: WebhookDeliveryQueue) -> None:
         """No token means no bot to wait for, and the queue should still be worked."""
@@ -507,11 +529,87 @@ async def _handed_back(
             await asyncio.sleep(0.01)
 
 
+async def _connected() -> None:
+    """A gateway that is already there, which is what an ordinary start looks like."""
+    return
+
+
 async def _until(condition, timeout: float = 10.0) -> None:
     """Wait for something the worker does on its own schedule, rather than guessing at a sleep."""
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
+
+
+class TestDrainingABacklog:
+    """A full batch means there is more waiting, so the loop goes straight back round.
+
+    Sleeping between every batch instead caps the queue at one batch per poll interval however
+    far behind it is, which is exactly the moment that matters: a repository that has been
+    quiet while the bot was down comes back as a burst. Four one-character changes to the line
+    that decides this went unnoticed by everything else here, in both directions.
+    """
+
+    # Long enough that a poll cannot be mistaken for going straight back round, and never
+    # actually waited out: every test here stops the worker before it matters.
+    NEVER = timedelta(seconds=30)
+
+    async def test_a_full_batch_goes_straight_back_round(self, queue: WebhookDeliveryQueue) -> None:
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, batch_size=2, poll_interval=self.NEVER)
+        for name in ("a", "b", "c", "d"):
+            await enqueue(queue, name)
+
+        running = asyncio.create_task(worker.run_forever())
+        try:
+            await _until(lambda: handler.calls == 4, timeout=5)
+        finally:
+            worker.stop()
+            running.cancel()
+
+    async def test_a_batch_with_room_left_in_it_waits(self, queue: WebhookDeliveryQueue) -> None:
+        """The other half. Going straight back round on a short batch is a hot loop against the
+        database for as long as the queue is empty, which is nearly all the time."""
+        handler = Exploding(failures=0)
+        worker = build_worker(queue, handler, batch_size=2, poll_interval=self.NEVER)
+        await enqueue(queue, "a")
+
+        running = asyncio.create_task(worker.run_forever())
+        try:
+            await _until(lambda: handler.calls == 1, timeout=5)
+            await enqueue(queue, "b")
+            await asyncio.sleep(0.5)
+
+            assert handler.calls == 1, "it polled again rather than waiting out the interval"
+        finally:
+            worker.stop()
+            running.cancel()
+
+    async def test_a_stop_during_a_batch_is_not_made_to_wait_out_the_interval(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """The half of that line about stopping, which decides how long a redeploy takes.
+
+        A stop that arrives while a delivery is being handled reaches the sleep below it, and
+        sleeping anyway means a shutdown waits out a whole poll interval before it looks at the
+        flag again. At the shipped two seconds that is tolerable and invisible; at anything
+        longer it is a container killed part way through the shutdown it was granted time for.
+        """
+        handled = Exploding(failures=0)
+        worker = build_worker(queue, handled, batch_size=2, poll_interval=self.NEVER)
+
+        async def stop_while_handling(action: str, payload: dict) -> WebhookOutcome:
+            worker.stop()
+            return await handled(action, payload)
+
+        router = EventRouter()
+        router.register("issues", stop_while_handling)
+        worker._dispatch = router
+        await enqueue(queue, "a")
+
+        await asyncio.wait_for(worker.run_forever(), timeout=5)
+
+        assert handled.calls == 1, "the delivery in hand was not finished"
 
 
 class TestPruning:
