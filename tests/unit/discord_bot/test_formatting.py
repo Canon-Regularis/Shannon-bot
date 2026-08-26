@@ -257,8 +257,21 @@ def test_defusing_a_label_leaves_an_ordinary_one_alone() -> None:
     assert fields["Tags"] == "`backend`, `bug`"
 
 
-def test_a_missing_title_reads_unknown() -> None:
-    fields = lines(format_pull_request(replace(SNAPSHOT, title=""), status=Status.NOT_REVIEWED))
+@pytest.mark.parametrize("title", ["", "   ", "\t", "\n \n", "\u00a0"])
+def test_a_title_with_nothing_in_it_reads_unknown(title: str) -> None:
+    """Whitespace is a title as far as a truthiness check is concerned, and is not one.
+
+    Three things render this title and they used to disagree. `thread_name` strips, so the
+    thread was called `#7`; `TicketPolicy.thread_name` calls an untitled card an untitled card;
+    and the block asked whether the string was truthy, which spaces are, so it rendered a label
+    with nothing after it. A draft titled with spaces opened a thread named "Untitled ticket"
+    whose first line named it nothing at all, and a field that renders blank reads as the bot
+    having broken rather than as an item nobody named.
+
+    The mapping layer refuses a title that is missing or empty outright, so whitespace is the
+    one shape of it that reaches here carrying nothing.
+    """
+    fields = lines(format_pull_request(replace(SNAPSHOT, title=title), status=Status.NOT_REVIEWED))
 
     assert fields["PR Name"] == "Unknown"
 

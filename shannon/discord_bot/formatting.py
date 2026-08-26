@@ -48,6 +48,25 @@ def thread_name(snapshot: TrackedSnapshot) -> str:
     return f"#{snapshot.number} {snapshot.title}".strip()
 
 
+def _title(snapshot: TrackedSnapshot) -> str:
+    """The item's title as something to show, or the word for having none.
+
+    Stripped before it is judged rather than after. A title of nothing but spaces is truthy, so
+    a check asking whether there is a title answered yes and the block rendered a label with
+    nothing after it, which reads as the bot having broken rather than as an item nobody named.
+
+    The other two renderers of the same title already agreed on this and the block did not:
+    `thread_name` above strips, and `TicketPolicy.thread_name` calls an untitled card an
+    untitled card. A draft with a title of spaces opened a thread named "Untitled ticket" whose
+    first line named it nothing at all.
+
+    The mapping layer refuses an item whose title is missing or empty, so what reaches here is
+    always a string, and whitespace is the one shape of it that carries no title.
+    """
+    title = snapshot.title.strip()
+    return as_plain_text(title) if title else UNKNOWN
+
+
 def format_pull_request(
     snapshot: PullRequestSnapshot,
     *,
@@ -97,7 +116,7 @@ def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> s
     one signature and a ticket has nobody to mention.
     """
     lines = [
-        f"**Ticket Name:** {as_plain_text(snapshot.title) if snapshot.title else UNKNOWN}",
+        f"**Ticket Name:** {_title(snapshot)}",
         f"**GitHub Link:** {snapshot.html_url}",
         f"**Status:** {status.value}",
     ]
@@ -165,7 +184,7 @@ def _metadata(
 ) -> str:
     """The block both kinds of item share; only the noun and the reviewers line differ."""
     lines = [
-        f"**{noun} Name:** {as_plain_text(snapshot.title) if snapshot.title else UNKNOWN}",
+        f"**{noun} Name:** {_title(snapshot)}",
         f"**Type:** {noun}",
         f"**State:** {snapshot.display_state.capitalize()}",
         f"**GitHub Link:** {snapshot.html_url}",
