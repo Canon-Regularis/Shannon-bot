@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from shannon.runtime.supervision import why as _why
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +55,7 @@ class ProcessLiveness:
                 async with asyncio.timeout(self.probe_timeout), self.engine.connect() as conn:
                     await conn.execute(text("SELECT 1"))
             except Exception as error:
-                logger.warning("the database is not reachable: %s", error)
+                logger.warning("the database is not reachable: %s", _why(error))
                 self._reachable = False
             else:
                 self._reachable = True

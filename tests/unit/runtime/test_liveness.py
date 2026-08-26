@@ -142,3 +142,30 @@ class TestWhetherTheBackgroundWorkIsAlive:
         await asyncio.wait({task})
 
         assert ProcessLiveness(FakeEngine(), bot_task=task).bot_connected() is False
+
+
+class TestSayingWhyItIsUnreachable:
+    """The health log is the only place a runtime outage is explained.
+
+    Nothing else writes a reason: the endpoint's own line reports `database=False` and no more,
+    and there is no traceback, so a colon with nothing after it leaves the owner unable to tell a
+    black-holed route from a dead server. That is exactly the case the probe deadline was added
+    for, and the deadline is the one failure whose exception carries no message: asyncio raises
+    `TimeoutError` with no arguments, so `str` of it is empty.
+    """
+
+    async def test_a_deadline_is_named_rather_than_left_blank(self, caplog) -> None:
+        liveness = ProcessLiveness(FakeEngine(connecting=1.0), probe_timeout=0.01)
+
+        with caplog.at_level("WARNING"):
+            assert await liveness.database_reachable() is False
+
+        assert "not reachable: TimeoutError" in caplog.text
+
+    async def test_an_ordinary_refusal_still_says_what_it_said(self, caplog) -> None:
+        liveness = ProcessLiveness(FakeEngine(working=False))
+
+        with caplog.at_level("WARNING"):
+            assert await liveness.database_reachable() is False
+
+        assert "the database is not there" in caplog.text

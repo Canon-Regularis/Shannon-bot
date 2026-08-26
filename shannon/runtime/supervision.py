@@ -22,6 +22,18 @@ class Shutdown:
     asked: bool = False
 
 
+def why(error: BaseException) -> str:
+    """What went wrong, in words, even when the exception has none.
+
+    `str(TimeoutError())` is the empty string, because asyncio raises it with no arguments. That
+    is the one failure here with nothing to say and the one that most needs saying: an unanswered
+    connection is a dropped packet, a firewall, a security group nobody opened, and it reads in
+    the log as a colon with nothing after it. Everything else, a refused connection, a wrong
+    password, a database that is not there, fills its own message.
+    """
+    return str(error) or type(error).__name__
+
+
 def ask_the_process_to_stop() -> None:
     """Send this process the signal an orchestrator would send it.
 
