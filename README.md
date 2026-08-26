@@ -140,7 +140,7 @@ at the door.
 | `SHANNON_DATABASE_URL` | `postgresql+asyncpg://shannon:shannon@localhost:5433/shannon` | The default is the compose database |
 | `SHANNON_GITHUB_WEBHOOK_SECRET` | empty | HMAC secret. Empty answers 500 to every delivery rather than waving them through |
 | `SHANNON_DISCORD_TOKEN` | empty | Bot token. Empty runs without the gateway |
-| `SHANNON_GITHUB_TOKEN` | empty | REST token for `/register`, `/pr` and `/issue` |
+| `SHANNON_GITHUB_TOKEN` | empty | REST token. Needs **write** access to issues: `/register`, `/pr` and `/issue` only read, but every `/set_*` command and every board move puts a label on the item |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | |
