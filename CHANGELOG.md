@@ -3175,3 +3175,116 @@ decision turns an idle worker into a hot loop against PostgreSQL, and the run ha
 rather than waited out. The harness replaces one operator by character span rather than rewriting
 the module, so what a kill leaves behind is a one-line diff with every comment intact, which is
 the only reason that was cheap rather than expensive.
+
+## A twelfth look, before real people use it
+
+Six lenses over ground the eleven before them had not touched: the whole journey a person takes,
+driven end to end and read as a person rather than as a programmer; more than one server; what the
+log says to somebody at three in the morning; what runs out first; whether every service is wired
+to the thing it should be; and the documentation against what the code does. Five reports were
+refuted, two of them after their mechanism had been reproduced, which is the right outcome for a
+mechanism that is real and a consequence that is not.
+
+### A repository name is not an identity, and every write used one as if it were
+
+The most serious thing found in twelve rounds. GitHub frees an `owner/name` the moment a
+repository is renamed, transferred or deleted, and anybody can take it. The stored name goes stale
+by design: nothing corrects it until an item webhook arrives, and a repository renamed away sends
+none, so a row can name a path that belongs to a stranger for as long as the server lives.
+
+Every write the workflow commands make was addressed by that string, and nothing compared what
+came back against the row it came from. Reproduced against a live database: the status label is
+written onto the recycled repository's item of the same number; the re-render then resolves the
+fetched snapshot by its own repository id and opens a thread in whichever server registered it;
+`/set_done` locks that thread rather than the one the command was run in. The reviewer is told it
+worked, their own thread never changes, and every repeat afterwards answers that the item is
+already where they put it.
+
+`/pr` and `/issue` had the same hole through a different door. The confirmation they already carry
+settles a genuine rename by asking GitHub for the id, and it is only reached when the name
+disagrees, so a name that still matches walked straight past it.
+
+Both now compare the fetched snapshot's repository id against the registered one, which costs no
+API call because the snapshot already carries it, and both say what actually happened rather than
+refusing blankly.
+
+### A permission is not a bad moment
+
+The board poller deliberately does not write a card's column down when its move could not be
+carried through, because the column is the record of a move having landed and not writing it is
+what brings the card round again. That is right for a Discord blip. It is wrong for a missing
+permission, which no amount of coming round again will grant.
+
+With the bot invited without Manage Threads, every card ever dragged to Done joined a set that was
+retried on every poll and never left it: a GitHub read and a Discord call each, once a minute,
+growing with the team's throughput, against the same rate limit the board read and every command
+draw on. The workflow now reports whether a refusal is the kind that can be waited out, which is a
+distinction the error hierarchy already makes and only this caller needed, and the poller writes
+the move off and says once what to grant.
+
+### The board read handed the same card back twice
+
+A board is paged by cursor and a cursor is not a snapshot: GitHub documents that a list edited
+while it is being paged can hand the same row back on two pages, which is exactly what a board
+somebody is dragging cards around on is. The draft half of the poll guarded against it and spent
+six lines saying why. The wrapped half, in the same function, did not, although the reason given
+is a property of the read rather than of drafts.
+
+Both halves judge a card against state read once for the whole board and never written to, so a
+second copy is judged against the state before the first was acted on. Measured: one card listed
+twice cost two GitHub reads of the item instead of one, on every poll that saw it, and the pass
+reported two moves where one had happened. The dedupe now happens to the read, where its reason
+lives, and the draft half no longer needs its own.
+
+### The health check was the one thing an outage silenced
+
+`/health` probes the database behind a five second deadline, added by an earlier round so that a
+database that has stopped answering cannot park every health check behind it. The deadline does
+not hold. The engine pre-pings on checkout, which is right for work that must not be handed a
+connection that died in the pool; when the deadline cancels that pre-ping, SQLAlchemy treats the
+connection as failed and terminates it, and terminating an asyncpg connection opens a second
+socket to send the cancel and waits on that one with nothing bounding it.
+
+Measured against a frozen database: the first health check after the outage began returned nothing
+for eleven minutes, and every later one queued behind it, while the rest of the application
+answered in milliseconds. The probe now asks through an engine of its own with no pool and no
+pre-ping, so every probe opens its own connection and the deadline is the only thing deciding how
+long it waits. The engine everything else uses still pre-pings, because its needs are the
+opposite.
+
+### The one failure with nothing to say
+
+`str(TimeoutError())` is the empty string, because asyncio raises it with no arguments, and that
+is the one database failure whose reason was interpolated into a message as nothing at all. A
+refused connection, a wrong password, a missing database and a DNS failure all fill their own; an
+unanswered connection, which is a dropped packet or a security group nobody opened, read in the
+log as a colon with nothing after it. At startup the traceback underneath makes up for it. At
+runtime nothing does: the health probe's line is the only place an outage is explained, and it
+said nothing.
+
+### The token the README understates
+
+The configuration table calls `SHANNON_GITHUB_TOKEN` the "REST token for `/register`, `/pr` and
+`/issue`", which are three reads, and the board note asks only for project read access. Every one
+of the eight `/set_*` commands and every board-driven move writes a label through that same
+client. A token granted exactly the access the README asks for leaves all of them failing, and the
+reply blames the read that had just succeeded. The row now says it needs write access and which
+commands need it.
+
+### Considered and left alone
+
+Two first-run messages are true in a way that reads oddly and are recorded here rather than
+changed.
+
+`/set_channel issues` on a server registered a minute ago says "Threads already open stay in
+<#the-channel-you-just-registered-in>". Nothing is open. The clause is a statement about where
+open threads stay, vacuously true of none, and it fires whenever any previous mapping existed
+rather than because of the fallback: `/set_channel pull requests` on the same fresh server says it
+too. Its wording was chosen deliberately over "Moved from" in an earlier round and is pinned by a
+test.
+
+`/set_channel project tickets` answers "will now appear in <#X>" on a deployment whose board
+number is still zero, where nothing will ever appear. The setting's own comment in `.env.example`
+says so, and a test exists to keep it named there, so this is a discoverability problem that was
+already found and fixed once. What is left is that the reply itself does not know, and telling it
+would mean handing the command a setting it does not otherwise need.
