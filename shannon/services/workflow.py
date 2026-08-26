@@ -16,13 +16,13 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from shannon.db.models import TrackedItem
+from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.threads import LocksThread
 from shannon.domain.enums import ObjectType, Priority, Status
-from shannon.domain.errors import ItemNotReadyError, ShannonError
+from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
 from shannon.domain.models import Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
@@ -62,6 +62,15 @@ class ItemKind:
 
 
 @dataclass(frozen=True, slots=True)
+class _Lock:
+    """What became of the one Discord call a status change makes, and whether to ask again."""
+
+    locked: bool
+    refused: bool = False
+    permanent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowOutcome:
     """What the person who ran the command is told."""
 
@@ -74,6 +83,10 @@ class WorkflowOutcome:
     # same sentence: the second one means nobody can reply in it.
     lock_refused: bool = False
     wanted_locked: bool = False
+    # Whether asking again could ever work. A missing permission cannot be waited out, and the
+    # board poller is the one caller with nobody to tell, so it is the one that has to know the
+    # difference between a refusal worth another poll and one that will refuse every poll.
+    lock_refusal_is_permanent: bool = False
 
 
 class LabelsItems(Protocol):
@@ -107,7 +120,7 @@ class ItemWorkflow:
         """Move an item to a status, and lock its thread once it is done."""
         found = await self._locate(thread_id)
         self._refuse_a_kind_it_cannot_move(found)
-        snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
+        snapshot = await self._fetch(found)
         self._refuse_a_status_that_will_not_hold(found, snapshot, status)
 
         change = labels.status_change(snapshot.label_names, status)
@@ -127,14 +140,15 @@ class ItemWorkflow:
             # A closed issue cannot reach here asking to be unlocked: the guard above refuses any
             # status but DONE for one. So the only thread this ever opens is one this path shut.
             wants_lock = status is Status.DONE
-            locked, refused = await self._set_lock(thread_id, wants_lock)
+            lock = await self._set_lock(thread_id, wants_lock)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
                 changed=False,
-                locked=locked,
-                lock_refused=refused,
+                locked=lock.locked,
+                lock_refused=lock.refused,
                 wanted_locked=wants_lock,
+                lock_refusal_is_permanent=lock.permanent,
             )
 
         await self._apply(found, change)
@@ -148,10 +162,10 @@ class ItemWorkflow:
         # commands to move it back are all allowed and all reported success, and left the thread
         # shut against the discussion they had just reopened.
         wants_lock = status is Status.DONE
-        locked, refused = (
+        lock = (
             await self._set_lock(written or thread_id, wants_lock)
             if wants_lock or previous is Status.DONE
-            else (False, False)
+            else _Lock(locked=False)
         )
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
@@ -159,9 +173,10 @@ class ItemWorkflow:
             found.full_name,
             found.number,
             changed=True,
-            locked=locked,
-            lock_refused=refused,
+            locked=lock.locked,
+            lock_refused=lock.refused,
             wanted_locked=wants_lock,
+            lock_refusal_is_permanent=lock.permanent,
         )
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
@@ -177,7 +192,7 @@ class ItemWorkflow:
         """
         found = await self._locate(thread_id)
         self._refuse_a_kind_it_cannot_move(found)
-        snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
+        snapshot = await self._fetch(found)
 
         change = labels.priority_change(snapshot.label_names, priority)
         if change.nothing_to_do and found.priority is priority:
@@ -235,6 +250,31 @@ class ItemWorkflow:
                 f"{Status.DONE.value}. This one is {found.status.value}."
             )
 
+    async def _fetch(self, found: _Found) -> TrackedSnapshot:
+        """Read the item from GitHub, and refuse anything that is not the repository we mean.
+
+        Everything below this addresses GitHub by the stored `owner/name`, and a name is not an
+        identity. GitHub frees one the moment a repository is renamed, transferred or deleted,
+        and the stored one goes stale by design: nothing corrects it until an item webhook
+        arrives, and for a repository that has been renamed away no webhook ever will.
+
+        So the path this asks about can be somebody else's repository by the time it is asked.
+        Unchecked, the labels were written onto their item, the re-render resolved the fetched
+        snapshot by its own id and opened a thread in whichever server had registered it, and
+        `/set_done` locked that thread rather than the one the command was run in. The reviewer
+        was told it worked and their own thread never changed.
+
+        The check is free. The snapshot already carries the id, and comparing it costs no call.
+        """
+        snapshot = await self._kinds[found.object_type].fetch(found.owner, found.name, found.number)
+        if snapshot.repository.github_repo_id != found.github_repo_id:
+            raise WorkflowRefusedError(
+                f"{found.full_name} is not the repository this server registered any more. "
+                "It has been renamed or replaced on GitHub, and somebody else holds that name "
+                "now. Register the repository again under its current name."
+            )
+        return snapshot
+
     async def _apply(self, found: _Found, change: labels.LabelChange) -> None:
         """Put the labels right on GitHub.
 
@@ -262,7 +302,7 @@ class ItemWorkflow:
         result = await self._kinds[found.object_type].sync.sync(_relabelled(snapshot, change))
         return result.thread_id
 
-    async def _set_lock(self, thread_id: int, locked: bool) -> tuple[bool, bool]:
+    async def _set_lock(self, thread_id: int, locked: bool) -> _Lock:
         """Close a finished item's thread to further replies, or open it again.
 
         Last, after the metadata is written. A locked thread still takes this bot's edits, so
@@ -284,8 +324,8 @@ class ItemWorkflow:
             await self._threads.set_locked(thread_id=thread_id, locked=locked)
         except DiscordGatewayError as error:
             logger.warning("could not set the lock on thread %s: %s", thread_id, error.message)
-            return False, True
-        return locked, False
+            return _Lock(locked=False, refused=True, permanent=isinstance(error, PermanentError))
+        return _Lock(locked=locked)
 
     async def _store_status(self, tracked_item_id: int, status: Status) -> Status:
         """Written before the re-render, because the render reads it back off the row.
@@ -328,7 +368,7 @@ class ItemWorkflow:
                 raise NotAnItemThreadError(
                     "Run this inside the thread of a pull request or issue this bot is tracking."
                 )
-            return _Found.of(item, repository.repo_name)
+            return _Found.of(item, repository)
 
 
 def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> TrackedSnapshot:
@@ -354,6 +394,9 @@ class _Found:
     tracked_item_id: int
     object_type: ObjectType
     full_name: str
+    # What the repository actually is. The name is only what GitHub called it when something
+    # last told us, and GitHub frees a name the moment a repository is renamed or deleted.
+    github_repo_id: int
     number: int
     status: Status
     priority: Priority
@@ -367,11 +410,12 @@ class _Found:
         return self.full_name.split("/", 1)[1]
 
     @classmethod
-    def of(cls, item: TrackedItem, repo_name: str) -> _Found:
+    def of(cls, item: TrackedItem, repository: Repository) -> _Found:
         return cls(
             tracked_item_id=item.id,
             object_type=item.github_object_type,
-            full_name=repo_name,
+            full_name=repository.repo_name,
+            github_repo_id=repository.github_repo_id,
             number=item.github_object_number,
             status=item.status,
             priority=item.priority,

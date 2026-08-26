@@ -8,6 +8,7 @@ ordinary shape of a command that has to leave two systems agreeing.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import delete, select
@@ -19,7 +20,8 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import Priority, Status
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.errors import GitHubUnavailableError
-from shannon.services.sync.items import ItemSyncService
+from shannon.services.sync.items import ItemSyncService, build_item_sync
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.workflow import (
     ItemWorkflow,
     NotAnItemThreadError,
@@ -243,6 +245,71 @@ class TestFinishing:
         because reopening an issue is what clears DONE."""
         with pytest.raises(WorkflowRefusedError, match="Close the issue"):
             await workflow.set_status(thread_id=issue_thread_id, status=Status.DONE)
+
+
+class TestTheRepositoryNameTakenBySomebodyElse:
+    """Every write here is addressed by the stored `owner/name`, and that is not an identity.
+
+    GitHub frees a name the moment a repository is renamed, transferred or deleted, and the
+    stored one goes stale by design: nothing corrects it until an item webhook arrives, and a
+    repository renamed away sends none. So the path these commands ask about can belong to a
+    stranger, and nothing compared what came back against the row it came from.
+
+    Unchecked, the labels went onto their item, the re-render resolved the fetched snapshot by
+    its own repository id and opened a thread wherever that repository was registered, and
+    `/set_done` locked that thread rather than the one the command was run in. The reviewer was
+    told it worked and the thread in front of them never changed.
+    """
+
+    @pytest.fixture
+    def somebody_elses(self, pr_event) -> FakeGitHubClient:
+        """The same path on GitHub, now a different repository with a different id."""
+        theirs = pr_event("opened")
+        moved = replace(theirs.repository, github_repo_id=theirs.repository.github_repo_id + 5000)
+        return FakeGitHubClient(pull_requests={REPO_KEY: replace(theirs, repository=moved)})
+
+    async def test_the_command_refuses_rather_than_writing_to_it(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        somebody_elses: FakeGitHubClient,
+    ) -> None:
+        workflow = build_item_workflow(
+            db_sessionmaker,
+            somebody_elses,
+            threads,
+            pr_sync=build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
+            issue_sync=build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+        )
+
+        with pytest.raises(WorkflowRefusedError, match="not the repository this server"):
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert somebody_elses.label_calls == [], "it labelled a repository somebody else owns"
+
+    async def test_setting_a_priority_is_refused_the_same_way(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        somebody_elses: FakeGitHubClient,
+    ) -> None:
+        """Both commands read through the same fetch, and both write labels through it."""
+        workflow = build_item_workflow(
+            db_sessionmaker,
+            somebody_elses,
+            threads,
+            pr_sync=build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
+            issue_sync=build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+        )
+
+        with pytest.raises(WorkflowRefusedError):
+            await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+        assert somebody_elses.label_calls == []
 
 
 class TestSettingAPriority:
