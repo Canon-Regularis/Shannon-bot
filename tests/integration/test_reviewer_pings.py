@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ItemAssignment, Repository
+from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_reviewer_ping
@@ -458,3 +459,37 @@ async def _owed_again(session: AsyncSession, timeout: float = 5.0) -> bool:
             if row is not None and row.notified_at is None:
                 return True
             await asyncio.sleep(0.02)
+
+
+class TestHandingAClaimBackWhateverCaseItArrivesIn:
+    """The hand-back matches on the login, and matching nothing is the worst outcome here.
+
+    A ping is claimed before it is sent, so a row whose claim is not handed back is stamped as
+    told while nobody was told, and nothing revisits it. The column holds logins folded, because
+    the one thing that writes it folds on the way in, and the three other methods on this store
+    that take logins fold before comparing. This one did not, and it worked only because its one
+    caller hands back exactly what the claim returned, which came out of that column already
+    folded.
+    """
+
+    async def test_a_login_in_the_case_github_uses_still_finds_its_row(
+        self, registered: Repository, db_sessionmaker, db_session: AsyncSession, pr_event
+    ) -> None:
+        service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+        await service.sync(pr_event("opened"))
+        item_id = await db_session.scalar(select(ItemAssignment.tracked_item_id))
+        store = ItemAssignmentStore
+
+        async with db_sessionmaker() as session, session.begin():
+            claimed = await store(session).claim_notifications(item_id, ActorRole.REVIEWER)
+        assert claimed == ["monalisa"], "nothing was claimed, so this proves nothing"
+
+        # What GitHub calls them, which is not what the column holds.
+        async with db_sessionmaker() as session, session.begin():
+            await store(session).release_notifications(item_id, ActorRole.REVIEWER, ["MonaLisa"])
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row.notified_at is None, "the claim was never handed back, so the ping is lost"

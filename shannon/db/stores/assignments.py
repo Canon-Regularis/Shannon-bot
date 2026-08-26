@@ -118,8 +118,17 @@ class ItemAssignmentStore:
     async def release_notifications(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str]
     ) -> None:
-        """Hand claimed pings back, for when the message did not go out after all."""
-        wanted = list(logins)
+        """Hand claimed pings back, for when the message did not go out after all.
+
+        Folded, like every other login this class matches on. The column holds them folded,
+        because `replace` is the only thing that writes it and folds on the way in, and the
+        three other methods here that take logins all fold before comparing. This one did not,
+        and it works today only because its one caller hands back exactly what
+        `claim_notifications` returned, which came out of that column already folded. A caller
+        passing what GitHub said would have matched no row, and matching no row here means a
+        ping stamped as sent that nobody ever received, for good.
+        """
+        wanted = [login.lower() for login in logins]
         if not wanted:
             return
         await self._session.execute(
