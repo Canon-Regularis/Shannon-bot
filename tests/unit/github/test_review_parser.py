@@ -98,3 +98,26 @@ def test_an_unparseable_timestamp_becomes_none() -> None:
 
     assert snapshot is not None
     assert snapshot.created_at is None
+
+
+class TestSayingWhyOneWasDropped:
+    """The same gap the comment parser had, in the same shape and the same line.
+
+    A review refused here closes no request and reaches no thread, and the log line is the only
+    record that it arrived at all.
+    """
+
+    def test_an_unusable_review_says_so(self, caplog: pytest.LogCaptureFixture) -> None:
+        payload = payloads.pull_request_review_event()
+        payload["review"]["id"] = None
+
+        with caplog.at_level("WARNING"):
+            assert parse_review_event("submitted", payload) is None
+
+        assert "usable review" in caplog.text
+
+    def test_a_review_that_parses_says_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            assert parse_review_event("submitted", payloads.pull_request_review_event()) is not None
+
+        assert caplog.text == ""

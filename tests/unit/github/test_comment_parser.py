@@ -68,3 +68,29 @@ class TestCommentParsing:
 
         assert snapshot is not None
         assert snapshot.body == ""
+
+
+class TestSayingWhyOneWasDropped:
+    """A note that is refused here reaches nobody and leaves no row, so the log line is the only
+    thing standing between "the comment never appeared" and knowing why.
+
+    Written because inverting the condition that decides whether to log went unnoticed by the
+    whole unit tier: every refusal was silent and every success carried the warning, and nothing
+    said so.
+    """
+
+    def test_an_unusable_comment_says_so(self, caplog: pytest.LogCaptureFixture) -> None:
+        payload = payloads.issue_comment_event()
+        payload["comment"]["id"] = None
+
+        with caplog.at_level("WARNING"):
+            assert parse_comment_event("created", payload) is None
+
+        assert "usable comment" in caplog.text
+
+    def test_a_comment_that_parses_says_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A warning on the ordinary path is worse than none: it teaches the reader to skip it."""
+        with caplog.at_level("WARNING"):
+            assert parse_comment_event("created", payloads.issue_comment_event()) is not None
+
+        assert caplog.text == ""
