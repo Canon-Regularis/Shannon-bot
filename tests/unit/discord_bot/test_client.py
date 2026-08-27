@@ -7,6 +7,8 @@ tree does not fail: it stops existing in Discord and nothing anywhere says so.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from discord import app_commands
 
@@ -106,3 +108,48 @@ class TestWhatTheGatewayIsAskedFor:
         client = ShannonBot(explain_error=lambda error: "no")
 
         assert client._connection._chunk_guilds is False
+
+
+class TestBeingToldAThreadHasGone:
+    """The only gateway event this listens to besides READY, and it earns its place.
+
+    A pull request or an issue is told again by its next webhook, and the write path turns the
+    refusal into a replacement thread. A draft card on a project board has no webhook: its only
+    visitor is the poller, which decides from timestamps and a stored pointer without asking
+    Discord, so it passes over a card whose thread has gone without a single call and without a
+    line in the log. A card parked in Done that nobody edits again is then mirrored nowhere.
+    """
+
+    async def test_the_id_is_passed_on(self) -> None:
+        gone: list[int] = []
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_thread_goes(lambda thread_id: _record(gone, thread_id))
+
+        await bot.on_thread_delete(_thread(4242))
+
+        assert gone == [4242]
+
+    async def test_nothing_wired_in_is_not_an_error(self) -> None:
+        """The client is built before the thing that owns the rows exists."""
+        await ShannonBot(explain_error=lambda error: "no").on_thread_delete(_thread(4242))
+
+    async def test_a_failure_letting_go_does_not_reach_discord(self) -> None:
+        """discord.py logs an event handler that raises and carries on, which is a traceback per
+        deleted thread in a busy server for something nobody can act on."""
+
+        async def refuses(thread_id: int) -> None:
+            raise RuntimeError("the database went away")
+
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_thread_goes(refuses)
+
+        await bot.on_thread_delete(_thread(4242))
+
+
+async def _record(seen: list[int], thread_id: int) -> None:
+    seen.append(thread_id)
+
+
+def _thread(thread_id: int):
+    """Enough of discord.Thread for the listener, which reads one attribute."""
+    return SimpleNamespace(id=thread_id)

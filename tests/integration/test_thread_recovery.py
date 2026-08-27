@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
@@ -18,6 +18,7 @@ from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.stack import build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -559,3 +560,46 @@ class _DeletesTheItemWhileCreating(FakeThreadGateway):
         async with self._sessionmaker() as session, session.begin():
             await session.execute(delete(TrackedItem))
         return handle
+
+
+class TestTheContainerLettingGoOnDiscordSaySo:
+    """What the gateway listener calls, wired to the rows.
+
+    Discord reports a deleted thread on the gateway whether or not this bot cared about it, so
+    the common case is a thread belonging to nobody here.
+    """
+
+    async def test_the_item_pointing_at_it_lets_go(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+    ) -> None:
+        container = build_stack(db_engine, threads=FakeThreadGateway())
+        synced = await container.issue_sync.sync(issue_event("opened"))
+
+        await container.forget_thread(synced.thread_id)
+
+        assert (await stored(db_session)).discord_thread_id is None
+
+    async def test_a_thread_nobody_here_owns_is_left_alone(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+    ) -> None:
+        container = build_stack(db_engine, threads=FakeThreadGateway())
+        synced = await container.issue_sync.sync(issue_event("opened"))
+
+        await container.forget_thread(999_999)
+
+        assert (await stored(db_session)).discord_thread_id == synced.thread_id
+
+    async def test_a_pointer_that_has_moved_on_is_left_alone(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+    ) -> None:
+        """A delete reported for a thread the item has already replaced must not strand the
+        replacement, which is the same guard the note mirror needed."""
+        threads = FakeThreadGateway()
+        container = build_stack(db_engine, threads=threads)
+        first = await container.issue_sync.sync(issue_event("opened"))
+        threads.threads.pop(first.thread_id)
+        rebuilt = await container.issue_sync.sync(issue_event("edited"))
+
+        await container.forget_thread(first.thread_id)
+
+        assert (await stored(db_session)).discord_thread_id == rebuilt.thread_id

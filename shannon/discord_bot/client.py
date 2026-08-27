@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import discord
 from discord import app_commands
@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 # Turns whatever a command raised into something worth showing the person who ran it. Injected
 # because the mapping knows the service errors, and nothing in this package should.
 ExplainError = Callable[[BaseException], str]
+
+# Told that a thread has gone, so whatever was pointing at it can stop. Injected for the same
+# reason: which table holds a thread id is not this package's business.
+ThreadGone = Callable[[int], Awaitable[None]]
 
 
 def build_intents() -> discord.Intents:
@@ -44,7 +48,9 @@ class ShannonBot(discord.Client):
     things that use it. Composition is the container's job.
     """
 
-    def __init__(self, *, explain_error: ExplainError) -> None:
+    def __init__(
+        self, *, explain_error: ExplainError, thread_gone: ThreadGone | None = None
+    ) -> None:
         # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
         # otherwise ping the whole server.
         #
@@ -64,6 +70,7 @@ class ShannonBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.tree.on_error = self._command_failed
         self._explain_error = explain_error
+        self._thread_gone = thread_gone
         self._pending: list[app_commands.Command] = []
 
     async def _command_failed(
@@ -84,6 +91,14 @@ class ShannonBot(discord.Client):
 
     def install(self, *commands: app_commands.Command) -> None:
         self._pending.extend(commands)
+
+    def tell_when_a_thread_goes(self, gone: ThreadGone) -> None:
+        """Wire up the thread-delete listener, once the thing that owns the rows exists.
+
+        A second step for the same reason `install` is one: the gateway has to exist before the
+        container that needs it, so the container cannot be handed to the constructor.
+        """
+        self._thread_gone = gone
 
     async def setup_hook(self) -> None:
         """Register the commands with Discord, once, before the gateway connects.
@@ -106,3 +121,26 @@ class ShannonBot(discord.Client):
 
     async def on_ready(self) -> None:
         logger.info("connected to Discord as %s", self.user)
+
+    async def on_thread_delete(self, thread: discord.Thread) -> None:
+        """Somebody removed a thread. Let go of it before anything tries to write there again.
+
+        The only gateway event this bot listens to besides READY, and it earns its place: the
+        alternative is finding out by being refused, and one kind of item never finds out at all.
+        A pull request or an issue is told again by its next webhook, and the write path turns
+        the refusal into a replacement thread. A draft card on a project board has no webhook.
+        Its only visitor is the poller, which decides whether to look at a card by comparing
+        timestamps and sees a row still holding a thread id, so it passes over the card without a
+        single Discord call and without a line in the log. A card parked in Done that nobody ever
+        edits again is then mirrored nowhere, permanently, and nothing anywhere says so.
+
+        Letting go here puts every kind of item back on the same footing: the pointer goes, and
+        the next thing to come past opens a replacement.
+
+        Fires for every thread in the server, most of which are nobody's business here. One
+        unindexed lookup that finds nothing is the whole cost of the ones that are not.
+        """
+        if self._thread_gone is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._thread_gone(thread.id)

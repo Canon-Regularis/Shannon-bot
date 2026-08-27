@@ -15,6 +15,8 @@ from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
 from shannon.db.stores.team_links import TeamLinkStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
     format_comment,
@@ -81,6 +83,26 @@ class Container:
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
     commands: tuple[app_commands.Command, ...]
+
+    async def forget_thread(self, thread_id: int) -> None:
+        """Let go of a thread somebody deleted in Discord.
+
+        Handed to the client so the gateway can say so, rather than every path finding out by
+        being refused. A draft card never finds out at all: nothing but the poller visits one,
+        and the poller decides from timestamps and a stored pointer without asking Discord, so a
+        card parked in a column nobody touches again is mirrored nowhere for good.
+
+        Silent about a thread that is not one of ours, which is most of the ones Discord reports.
+        """
+        async with self.sessionmaker() as session, session.begin():
+            item = await TrackedItemStore(session).get_by_thread(thread_id)
+            if item is None:
+                return
+            await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=thread_id)
+            tracked_item_id = item.id
+        logger.info(
+            "thread %s was deleted, so tracked item %s lets go of it", thread_id, tracked_item_id
+        )
 
     async def aclose(self) -> None:
         """Close what was opened.
