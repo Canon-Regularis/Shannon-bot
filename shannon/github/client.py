@@ -47,13 +47,13 @@ class LooksUpRepository(Protocol):
 
 
 class LooksUpUsers(Protocol):
-    """Asking whether a GitHub account exists, which is all `/link` needs of GitHub.
+    """Asking who holds a GitHub login, which is all `/link` needs of GitHub.
 
     Its own protocol rather than the whole client, so binding a name to a Discord account cannot
     reach anything that reads a pull request or writes a label.
     """
 
-    async def user_exists(self, login: str) -> bool: ...
+    async def user_id(self, login: str) -> int | None: ...
 
 
 class GitHubClient(LooksUpRepository, LooksUpUsers, Protocol):
@@ -65,7 +65,7 @@ class GitHubClient(LooksUpRepository, LooksUpUsers, Protocol):
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
 
-    async def user_exists(self, login: str) -> bool: ...
+    async def user_id(self, login: str) -> int | None: ...
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
@@ -124,21 +124,26 @@ class HttpGitHubClient:
             )
         return snapshot
 
-    async def user_exists(self, login: str) -> bool:
-        """Whether GitHub has an account with this login.
+    async def user_id(self, login: str) -> int | None:
+        """Who holds this login, by GitHub's own numeric id, or None if nobody does.
 
         The endpoint is public, so this answers with no token set and answers the same for
         somebody who can only be seen through a private repository.
+
+        The id rather than a yes, because a login is not an identity: GitHub frees one the moment
+        it is renamed or deleted and lets anybody take it. Storing what was asked for alongside
+        the name is what lets a mention built later be checked against the person somebody meant.
 
         Only "not there" is turned into an answer. Anything else GitHub says is a reason the
         question could not be put, and the caller has a person in front of it who can be told to
         try again, which is a better outcome than binding a name nothing will ever match.
         """
         try:
-            await self._get(f"/users/{quote(login, safe='')}")
+            payload = await self._get(f"/users/{quote(login, safe='')}")
         except GitHubNotFoundError:
-            return False
-        return True
+            return None
+        found = payload.get("id")
+        return found if isinstance(found, int) else None
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}")

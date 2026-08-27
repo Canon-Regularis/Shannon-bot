@@ -609,7 +609,7 @@ class TestFetchingAnIssue:
                 await client.get_issue(payloads.OWNER, payloads.REPO, 12)
 
 
-class TestAskingWhetherAnAccountExists:
+class TestAskingWhoHoldsALogin:
     """What `/link` checks before it records a login.
 
     The one thing this must not do is say yes when it does not know. A login nobody holds is
@@ -618,13 +618,21 @@ class TestAskingWhetherAnAccountExists:
     tell the two apart.
     """
 
-    async def test_an_account_that_is_there_is_yes(self) -> None:
-        async with client_with(responds(200, {"login": "monalisa", "id": 1})) as client:
-            assert await client.user_exists("monalisa") is True
+    async def test_an_account_that_is_there_answers_with_its_id(self) -> None:
+        """The id rather than a yes: a login is not an identity, and what is stored beside the
+        name is what a mention built later is checked against."""
+        async with client_with(responds(200, {"login": "monalisa", "id": 583231})) as client:
+            assert await client.user_id("monalisa") == 583231
 
-    async def test_an_account_that_is_not_there_is_no(self) -> None:
+    async def test_an_account_that_is_not_there_is_nobody(self) -> None:
         async with client_with(responds(404, {"message": "Not Found"})) as client:
-            assert await client.user_exists("nobody-at-all") is False
+            assert await client.user_id("nobody-at-all") is None
+
+    async def test_an_answer_with_no_id_in_it_is_nobody(self) -> None:
+        """GitHub always sends one. Reading a body that does not carry it as an account would
+        store a null and quietly fall back to matching on the name for ever."""
+        async with client_with(responds(200, {"login": "monalisa"})) as client:
+            assert await client.user_id("monalisa") is None
 
     async def test_it_asks_the_public_endpoint(self) -> None:
         seen: list[str] = []
@@ -634,7 +642,7 @@ class TestAskingWhetherAnAccountExists:
             return httpx.Response(200, content=json.dumps({"login": "x"}))
 
         async with client_with(handler) as client:
-            await client.user_exists("mona-lisa")
+            await client.user_id("mona-lisa")
 
         assert seen == ["/users/mona-lisa"]
 
@@ -651,7 +659,7 @@ class TestAskingWhetherAnAccountExists:
             return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
 
         async with client_with(handler) as client:
-            await client.user_exists("../repos/acme/widgets")
+            await client.user_id("../repos/acme/widgets")
 
         assert seen == [b"/users/..%2Frepos%2Facme%2Fwidgets"]
 
@@ -663,7 +671,7 @@ class TestAskingWhetherAnAccountExists:
         back in a minute; answering no records nothing and tells them their login is wrong."""
         async with client_with(responds(status, {"message": "nope"})) as client:
             with pytest.raises(GitHubError):
-                await client.user_exists("monalisa")
+                await client.user_id("monalisa")
 
 
 class TestAWriteToARepositoryThatMoved:
