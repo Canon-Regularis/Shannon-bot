@@ -182,7 +182,7 @@ Retention bounds it and the payload goes with the row.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions |
+| `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Reviewer, Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Reviewer, Project Manager | Same, for priority |
