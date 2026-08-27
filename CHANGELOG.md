@@ -3288,3 +3288,86 @@ number is still zero, where nothing will ever appear. The setting's own comment 
 says so, and a test exists to keep it named there, so this is a discoverability problem that was
 already found and fixed once. What is left is that the reply itself does not know, and telling it
 would mean handing the command a setting it does not otherwise need.
+
+## A link that could never work, recorded as though it had
+
+`/link` is the first command every person on a server runs, and until now it recorded whatever
+they typed. The pattern it checked against accepted names GitHub cannot issue, and of course
+accepted any correctly shaped name that is simply not an account.
+
+What made it worth fixing is the shape of the failure rather than its likelihood. Somebody who
+has not linked is named in plain text in the thread, deliberately and by design. So a login with
+a typo in it produces exactly what an unlinked person produces: plain text in the ping, plain text
+in the reviewer line of the block, and nothing at all in the log. There is no way for the person,
+the server admin or the owner to tell the two apart, and the person simply never hears from the
+bot again.
+
+Proven before it was touched, through the real command:
+
+    'mona--lisa'                     -> Linked GitHub user mona--lisa to <@555>.
+    'monalisa-'                      -> Linked GitHub user monalisa- to <@555>.
+    'definitely-not-a-real-account'  -> Linked GitHub user definitely-not-a-real-account to <@555>.
+
+and then, with `monalisaa` linked and a review requested from the real `monalisa`:
+
+    Review requested from monalisa.
+    **Reviewers:** monalisa
+
+The login is now checked against GitHub. `GET /users/{login}` is public, so it answers with no
+token set and answers correctly for somebody who can only be seen through a private repository,
+and it is one call on a command each person runs once. Only "not there" becomes an answer:
+anything else GitHub says is a reason the question could not be put, and refusing sends the person
+back in a minute rather than binding a name nothing will ever match.
+
+Its own protocol at the consumer rather than the whole client, so binding a name to an account
+cannot reach anything that reads a pull request or writes a label.
+
+The pattern was tightened to GitHub's real rule at the same time, single hyphens and never leading
+or trailing, so the shapes GitHub cannot issue are refused without a call that could only say no.
+
+Two things this does not cover, both recorded rather than fixed. `/link_team` has no equivalent: a
+team slug is only checkable through an endpoint that is not public and needs organisation scope
+the token may not have. And verifying at link time says nothing about a login that changes hands
+afterwards, which is a separate defect on the same table.
+
+## A link that could never work, recorded as though it had
+
+`/link` is the first command every person on a server runs, and until now it recorded whatever
+they typed. The pattern it checked against accepted names GitHub cannot issue, and of course
+accepted any correctly shaped name that is simply not an account.
+
+What made it worth fixing is the shape of the failure rather than its likelihood. Somebody who
+has not linked is named in plain text in the thread, deliberately and by design. So a login with
+a typo in it produces exactly what an unlinked person produces: plain text in the ping, plain text
+in the reviewer line of the block, and nothing at all in the log. There is no way for the person,
+the server admin or the owner to tell the two apart, and the person simply never hears from the
+bot again.
+
+Proven before it was touched, through the real command:
+
+    'mona--lisa'                     -> Linked GitHub user mona--lisa to <@555>.
+    'monalisa-'                      -> Linked GitHub user monalisa- to <@555>.
+    'definitely-not-a-real-account'  -> Linked GitHub user definitely-not-a-real-account to <@555>.
+
+and then, with `monalisaa` linked and a review requested from the real `monalisa`:
+
+    Review requested from monalisa.
+    **Reviewers:** monalisa
+
+The login is now checked against GitHub. `GET /users/{login}` is public, so it answers with no
+token set and answers correctly for somebody who can only be seen through a private repository,
+and it is one call on a command each person runs once. Only "not there" becomes an answer:
+anything else GitHub says is a reason the question could not be put, and refusing sends the person
+back in a minute rather than binding a name nothing will ever match.
+
+Its own protocol at the consumer rather than the whole client, so binding a name to an account
+cannot reach anything that reads a pull request or writes a label.
+
+The pattern was tightened to GitHub's real rule at the same time, single hyphens and never leading
+or trailing, so the shapes GitHub cannot issue are refused without a call that could only say no.
+
+Two things this does not cover, both recorded rather than fixed. `/link_team` has no equivalent: a
+team slug is only checkable through an endpoint that is not public and needs organisation scope
+the token may not have. And verifying at link time says nothing about a login that changes hands
+afterwards, which is a separate defect on the same table.
+
