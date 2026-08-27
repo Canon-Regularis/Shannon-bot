@@ -47,25 +47,33 @@ class UserLinkingService:
         One public call, on a command each person runs once. GitHub being unreachable makes this
         fail rather than bind, and the reply says so: a link that cannot be checked is worth
         less than a person trying again in a minute.
+
+        The same call answers the other half. A login is not an identity, so the account's own
+        numeric id is stored beside it, and every mention built later is checked against the
+        person somebody meant rather than against whoever holds the name by then.
         """
         username = github_username.strip().lstrip("@")
         if not _GITHUB_LOGIN.match(username):
             raise InvalidGitHubUsernameError(f"{github_username!r} is not a GitHub username.")
-        if not await self._github.user_exists(username):
+        github_user_id = await self._github.user_id(username)
+        if github_user_id is None:
             raise InvalidGitHubUsernameError(f"GitHub has no user called {username!r}.")
 
-        await self._write(guild_id, username, discord_user_id)
+        await self._write(guild_id, username, github_user_id, discord_user_id)
 
         logger.info(
             "linked github:%s to discord:%s in guild %s", username, discord_user_id, guild_id
         )
         return username
 
-    async def _write(self, guild_id: int, username: str, discord_user_id: int) -> None:
+    async def _write(
+        self, guild_id: int, username: str, github_user_id: int, discord_user_id: int
+    ) -> None:
         async with self._sessionmaker() as session, session.begin():
             await UserLinkStore(session).link(
                 guild_id=guild_id,
                 github_username=username,
+                github_user_id=github_user_id,
                 discord_user_id=discord_user_id,
             )
 

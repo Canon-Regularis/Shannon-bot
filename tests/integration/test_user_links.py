@@ -86,7 +86,7 @@ async def test_resolving_many_ignores_case_and_skips_unknowns(
     await service.link(guild_id=1, github_username="octocat", discord_user_id=42)
 
     resolved = await UserLinkStore(db_session).resolve_many(
-        guild_id=1, github_usernames=["OctoCat", "nobody"]
+        guild_id=1, people={"OctoCat": None, "nobody": None}
     )
 
     assert resolved == {"octocat": 42}
@@ -95,7 +95,7 @@ async def test_resolving_many_ignores_case_and_skips_unknowns(
 async def test_resolving_nothing_asks_the_database_for_nothing(
     db_session: AsyncSession,
 ) -> None:
-    assert await UserLinkStore(db_session).resolve_many(guild_id=1, github_usernames=[]) == {}
+    assert await UserLinkStore(db_session).resolve_many(guild_id=1, people={}) == {}
 
 
 class TestALoginNobodyHolds:
@@ -115,7 +115,7 @@ class TestALoginNobodyHolds:
 
     @pytest.fixture
     def github(self) -> FakeGitHubClient:
-        return FakeGitHubClient(users={"monalisa"})
+        return FakeGitHubClient(users={"monalisa": 900})
 
     async def test_a_login_github_has_never_heard_of_is_refused(
         self, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
@@ -157,3 +157,79 @@ class TestALoginNobodyHolds:
 
         with pytest.raises(GitHubUnavailableError):
             await service.link(guild_id=1, github_username="monalisa", discord_user_id=555)
+
+
+class TestALoginThatChangedHands:
+    """A login is not an identity, and this is the case that separates the two.
+
+    GitHub frees an account name the moment it is renamed or deleted, redirects the old one so
+    nothing appears to break, and lets anybody register it. A row matched on the name alone
+    points at whoever holds it now rather than at the person somebody linked, so a stranger who
+    took a freed name inherited the previous holder's Discord account everywhere a mention is
+    built, including the ping, which is the one that actually notifies them.
+
+    Alice linked as `alice`. She renames to `alicia` and nobody re-runs `/link`, because nothing
+    anywhere says the link has gone stale. Months later a new contributor takes `alice`.
+    """
+
+    async def test_the_stranger_does_not_inherit_the_mention(
+        self, db_session: AsyncSession
+    ) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=111, discord_user_id=42
+        )
+
+        resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": 900})
+
+        assert resolved == {}, "somebody else's account was mentioned as Alice"
+
+    async def test_the_person_who_linked_is_still_resolved(self, db_session: AsyncSession) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=111, discord_user_id=42
+        )
+
+        resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": 111})
+
+        assert resolved == {"alice": 42}
+
+    async def test_it_says_so_rather_than_going_quiet(
+        self, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Not mentioning them looks exactly like somebody who never linked, so the one line
+        naming both accounts is all anybody has to tell the two apart."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=111, discord_user_id=42
+        )
+
+        with caplog.at_level("WARNING"):
+            await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": 900})
+
+        assert "somebody else now" in caplog.text
+        assert "/link again" in caplog.text
+
+    @pytest.mark.parametrize("asked", [111, 900, None])
+    async def test_a_row_from_before_the_column_existed_still_works(
+        self, db_session: AsyncSession, asked: int | None
+    ) -> None:
+        """Nothing can invent an id for a link made before this: GitHub can say what a login is
+        called now, not what it was called when somebody bound it. A null is no evidence, and
+        refusing on no evidence would take away mentions that work."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=None, discord_user_id=42
+        )
+
+        resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": asked})
+
+        assert resolved == {"alice": 42}
+
+    async def test_a_payload_that_carries_no_id_falls_back_to_the_name(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The other side of the same rule: a deleted account arrives with no id at all."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=111, discord_user_id=42
+        )
+
+        resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": None})
+
+        assert resolved == {"alice": 42}
