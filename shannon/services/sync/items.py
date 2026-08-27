@@ -157,13 +157,29 @@ class ItemSyncService:
                 guild_id=state.guild_id,
             )
 
-        # The guard is about a lock decided from a payload that may have been superseded while
-        # this sync was in Discord. A lock decided from the row has nothing to be superseded by:
-        # the row is what a newer sync would have written, and it was read after that sync
-        # committed or not at all.
-        if wants_locked is True and (
+        # Two reasons to shut it, kept apart because they are answered by different things.
+        #
+        # The payload asked for it, and the guard is about a payload that may have been
+        # superseded while this sync was in Discord. A lock decided from the row has nothing to
+        # be superseded by: the row is what a newer sync would have written, and it was read
+        # after that sync committed or not at all.
+        asked_for = wants_locked is True and (
             state.locked_from_the_row or await self._still_current(state.tracked_item_id, snapshot)
-        ):
+        )
+
+        # Or a thread has just been opened, and one this bot opens belongs in the state the item
+        # is in. For a pull request the payload cannot say what that is: its lock is taken by
+        # `/set_done` alone and lives in the row. So a finished pull request whose thread
+        # somebody deleted came back with a replacement anybody could post in, above a block
+        # reading DONE, and nothing here ever shut one, because `PullRequestPolicy.locked`
+        # answers None for every snapshot and both calls that could have are skipped on that.
+        # Running `/set_done` again does restore it, and nothing tells anybody to.
+        #
+        # Only for a thread that was opened, so an ordinary delivery for a finished pull request
+        # still costs no Discord call, which is what answering None was protecting.
+        opened_shut = written.created and wants_locked is None and state.shut_when_opened
+
+        if asked_for or opened_shut:
             await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
 
         return SyncResult(
@@ -383,14 +399,14 @@ class ItemSyncService:
         # keeps the slug out of the map in the first place, so that a later reader of it cannot
         # reopen the hole by looking up something by name without knowing which namespace it came
         # from. Deleting it changes nothing today, which is exactly why it needs saying.
-        logins = [
-            actor.login
+        people = {
+            actor.login: actor.github_user_id
             for role, actors in roles.items()
             if role is not ActorRole.REVIEWER_TEAM
             for actor in actors
-        ]
+        }
         mentions = await UserLinkStore(session).resolve_many(
-            guild_id=placement.repository.discord_guild_id, github_usernames=logins
+            guild_id=placement.repository.discord_guild_id, people=people
         )
 
         # What the thread is told, and what its lock is set from. The same snapshot everywhere
@@ -432,6 +448,7 @@ class ItemSyncService:
             thread_name=self._policy.thread_name(shown),
             wants_locked=self._policy.locked(shown),
             locked_from_the_row=superseded,
+            shut_when_opened=item.status is Status.DONE,
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -555,6 +572,9 @@ class _SyncState:
     # Whether that answer came from the row rather than from the payload, which decides whether
     # the staleness guard below applies to it at all.
     locked_from_the_row: bool
+    # Whether a thread opened by this sync belongs shut. Only consulted for a thread that was
+    # actually opened, and only for a kind whose lock the payload says nothing about.
+    shut_when_opened: bool
 
     @property
     def target(self) -> ThreadTarget:

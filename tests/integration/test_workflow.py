@@ -644,6 +644,56 @@ class TestWhatAReviewFound:
         with pytest.raises(DiscordGatewayError):
             await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
 
+    async def test_a_replacement_thread_for_a_finished_pull_request_comes_back_shut(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """The lock `/set_done` takes is the only one a pull request ever gets.
+
+        `PullRequestPolicy.locked` answers None for every snapshot, deliberately, so no delivery
+        touches a pull request's lock. That leaves nothing to shut a replacement: somebody
+        deletes the thread of a finished pull request, the next event of any kind rebuilds it,
+        and the new one is open to replies above a block that reads DONE. Running `/set_done`
+        again does restore the lock and answers "is already DONE", which gives nobody a reason
+        to run it.
+
+        The issue half of this was closed a while ago by deciding the lock from the row on the
+        rebuild path. A pull request has no such answer in the payload at all, so the answer has
+        to come from the row for the one call that opens a thread.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        assert threads.threads[thread_id].locked is True
+
+        threads.threads.pop(thread_id)
+        sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+        await sync.sync(pr_event("edited", title="Rebuilt after somebody deleted the thread"))
+
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != thread_id, "nothing was rebuilt, so this proves nothing"
+        assert threads.threads[rebuilt].locked is True, "a finished item got an open thread"
+
+    async def test_a_replacement_for_an_unfinished_one_is_left_open(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """The other side of it, and the one an ordinary rebuild takes."""
+        threads.threads.pop(thread_id)
+        sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+
+        await sync.sync(pr_event("edited"))
+
+        assert threads.threads[threads.created[-1].thread_id].locked is False
+
     async def test_it_locks_the_thread_the_render_actually_wrote_to(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
