@@ -107,7 +107,9 @@ async def test_the_assignee_is_pinged_in_the_new_thread(
 async def test_a_linked_assignee_is_pinged_by_mention(
     client: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
-    await UserLinkStore(db_session).link(guild_id=1, github_username="hubot", discord_user_id=4242)
+    await UserLinkStore(db_session).link(
+        guild_id=1, github_username="hubot", github_user_id=100, discord_user_id=4242
+    )
     await db_session.commit()
 
     await deliver(client, "issues", payloads.issue_event("opened"))

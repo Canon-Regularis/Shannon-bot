@@ -27,7 +27,7 @@ class ResolvesMentions(Protocol):
     """
 
     async def resolve_many(
-        self, *, guild_id: int, github_usernames: Sequence[str]
+        self, *, guild_id: int, people: Mapping[str, int | None]
     ) -> Mapping[str, int]: ...
 
 
@@ -101,21 +101,20 @@ class ActorNotifier:
     async def _claim(
         self, tracked_item_id: int, guild_id: int
     ) -> tuple[tuple[str, ...], Mapping[str, int]]:
-        """Take the pings nobody has sent yet, and work out how to address them."""
+        """Take the pings nobody has sent yet, and work out how to address them.
+
+        The claim answers with the account beside each name, because this is the one mention
+        built from a stored name rather than from the payload in hand. A login is not an
+        identity, and the ping is the mention that actually notifies somebody.
+        """
         async with self._sessionmaker() as session, session.begin():
-            logins = tuple(
-                sorted(
-                    await ItemAssignmentStore(session).claim_notifications(
-                        tracked_item_id, self._role
-                    )
-                )
+            claimed = await ItemAssignmentStore(session).claim_notifications(
+                tracked_item_id, self._role
             )
-            if not logins:
+            if not claimed:
                 return (), {}
-            mentions = await self._mentions(session).resolve_many(
-                guild_id=guild_id, github_usernames=logins
-            )
-        return logins, mentions
+            mentions = await self._mentions(session).resolve_many(guild_id=guild_id, people=claimed)
+        return tuple(sorted(claimed)), mentions
 
     async def _release(self, tracked_item_id: int, logins: tuple[str, ...]) -> None:
         async with self._sessionmaker() as session, session.begin():

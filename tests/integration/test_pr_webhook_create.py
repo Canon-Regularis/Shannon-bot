@@ -106,7 +106,7 @@ async def test_a_linked_reviewer_is_pinged_by_mention(
     client: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
     await UserLinkStore(db_session).link(
-        guild_id=1, github_username="monalisa", discord_user_id=777
+        guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=777
     )
     await db_session.commit()
 

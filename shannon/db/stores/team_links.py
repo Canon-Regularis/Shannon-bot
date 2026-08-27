@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Mapping
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -24,15 +24,20 @@ class TeamLinkStore:
         self._session = session
 
     async def resolve_many(
-        self, *, guild_id: int, github_usernames: Iterable[str]
+        self, *, guild_id: int, people: Mapping[str, int | None]
     ) -> dict[str, int]:
         """Which of these teams this server has a role for.
 
-        The parameter is named for logins because the caller cannot tell the two apart and
-        should not have to: it holds a list of names that were asked for a review, and this
-        answers for the ones it recognises.
+        The parameter is named for people because the caller cannot tell the two apart and
+        should not have to: it holds the names that were asked for a review, and this answers
+        for the ones it recognises.
+
+        The ids beside them are for the account store, which uses them to tell a login that has
+        changed hands from the person somebody linked. A team has no id in that space: GitHub
+        numbers teams separately, and `mapping.team` carries a slug and nothing else. So they are
+        taken and ignored here, and the slug is the only thing this can match on.
         """
-        wanted = {name.lower() for name in github_usernames}
+        wanted = {name.lower() for name in people}
         if not wanted:
             return {}
 

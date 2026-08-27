@@ -12,6 +12,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_reviewer_ping
 from shannon.domain.enums import ActorRole
+from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.items import ItemSyncService, build_item_sync
@@ -81,7 +82,7 @@ async def test_a_linked_reviewer_is_pinged_by_mention(
     pr_event,
 ) -> None:
     await UserLinkStore(db_session).link(
-        guild_id=1, github_username="MonaLisa", discord_user_id=555
+        guild_id=1, github_username="MonaLisa", github_user_id=200, discord_user_id=555
     )
     await db_session.commit()
 
@@ -110,7 +111,7 @@ async def test_a_linked_reviewer_appears_as_a_mention_in_the_metadata(
     pr_event,
 ) -> None:
     await UserLinkStore(db_session).link(
-        guild_id=1, github_username="monalisa", discord_user_id=555
+        guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
     )
     await db_session.commit()
 
@@ -127,7 +128,7 @@ async def test_notification_stamps_the_assignment_row(
     pr_event,
 ) -> None:
     await UserLinkStore(db_session).link(
-        guild_id=1, github_username="monalisa", discord_user_id=555
+        guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
     )
     await db_session.commit()
 
@@ -482,7 +483,7 @@ class TestHandingAClaimBackWhateverCaseItArrivesIn:
 
         async with db_sessionmaker() as session, session.begin():
             claimed = await store(session).claim_notifications(item_id, ActorRole.REVIEWER)
-        assert claimed == ["monalisa"], "nothing was claimed, so this proves nothing"
+        assert list(claimed) == ["monalisa"], "nothing was claimed, so this proves nothing"
 
         # What GitHub calls them, which is not what the column holds.
         async with db_sessionmaker() as session, session.begin():
@@ -493,3 +494,132 @@ class TestHandingAClaimBackWhateverCaseItArrivesIn:
             select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
         )
         assert row.notified_at is None, "the claim was never handed back, so the ping is lost"
+
+
+class TestAReviewerWhoseLoginSomebodyElseNowHolds:
+    """The ping is the mention that notifies, and it is the one built from a stored name.
+
+    Everywhere else a mention is built the payload is in hand and carries the account's id. The
+    ping resolves from `item_assignments` long after that payload has gone, so without the id
+    recorded on the row it is the one place a stranger who took a freed login inherits somebody
+    else's Discord account and gets a real notification for a review nobody asked them for.
+    """
+
+    async def test_the_stranger_is_named_rather_than_mentioned(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        # Alice linked when `monalisa` was hers, under the id she had then.
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=111, discord_user_id=555
+        )
+        await db_session.commit()
+        service = build_item_sync(
+            db_sessionmaker,
+            threads,
+            PullRequestPolicy(),
+            ActorNotifier(
+                db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+            ),
+        )
+
+        # The payload's `monalisa` is account 200, which is somebody else.
+        await service.sync(pr_event("opened"))
+
+        assert threads.posts == [(threads.created[0].thread_id, "Review requested from monalisa.")]
+        assert "<@555>" not in threads.metadata_of(threads.created[0].thread_id)
+
+    async def test_the_person_who_linked_is_still_mentioned(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
+        )
+        await db_session.commit()
+        service = build_item_sync(
+            db_sessionmaker,
+            threads,
+            PullRequestPolicy(),
+            ActorNotifier(
+                db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+            ),
+        )
+
+        await service.sync(pr_event("opened"))
+
+        assert threads.posts == [(threads.created[0].thread_id, "Review requested from <@555>.")]
+
+
+class TestAReviewerWhoRenamedTheirAccount:
+    """A rename is one person, and matching on the name read it as two.
+
+    `replace` makes the stored people match the payload, and it matched on the login alone. So a
+    reviewer renaming their GitHub account looked like the one who was asked leaving and a
+    stranger arriving: the row was deleted and a fresh one inserted with `notified_at` empty, and
+    the next ordinary event on the item announced a review request nobody had re-made.
+
+    Renaming is ordinary housekeeping, and the announcement is not free. Where the new name is
+    already linked it tells the same person twice for one request, which is the one thing
+    `notified_at` exists to stop.
+    """
+
+    async def test_the_request_row_survives_it(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        await notifying_sync_service.sync(pr_event("opened"))
+        told = len(threads.posts)
+
+        # The same account, id 200, under the name GitHub uses now.
+        renamed = payloads.pull_request_event("labeled")
+        renamed["pull_request"]["requested_reviewers"] = [payloads.user("mona-lisa", 200)]
+        await notifying_sync_service.sync(parse_pull_request_event("labeled", renamed))
+
+        assert threads.posts[told:] == [], "it announced a request nobody made again"
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+            )
+        ).all()
+        assert len(rows) == 1, "the rename left two rows for one person"
+        assert rows[0].github_username == "mona-lisa", "the row kept the name they left behind"
+        assert rows[0].notified_at is not None, "the record of having told them was thrown away"
+
+    async def test_somebody_genuinely_leaving_still_loses_their_row(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        """The other side of it: a different account is a different person, whatever it is
+        called, and the row that says they were asked has to go."""
+        await notifying_sync_service.sync(pr_event("opened"))
+
+        await notifying_sync_service.sync(
+            pr_event("labeled", requested_reviewers=[payloads.user("somebody-else", 900)])
+        )
+
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment.github_username).where(
+                    ItemAssignment.role_type == ActorRole.REVIEWER
+                )
+            )
+        ).all()
+        assert sorted(rows) == ["somebody-else"]

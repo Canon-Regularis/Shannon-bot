@@ -219,7 +219,7 @@ class TestLinkingATeam:
         )
 
         found = await TeamLinkStore(db_session).resolve_many(
-            guild_id=1, github_usernames=["backend-team"]
+            guild_id=1, people={"backend-team": None}
         )
         assert found == {"backend-team": ROLE}
 
@@ -231,9 +231,7 @@ class TestLinkingATeam:
 
         await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE + 1)
 
-        found = await TeamLinkStore(db_session).resolve_many(
-            guild_id=1, github_usernames=["backend"]
-        )
+        found = await TeamLinkStore(db_session).resolve_many(guild_id=1, people={"backend": None})
         assert found == {"backend": ROLE + 1}
 
     async def test_two_teams_may_share_one_role(
@@ -246,7 +244,7 @@ class TestLinkingATeam:
         await service.link(guild_id=1, github_team="design", discord_role_id=ROLE)
 
         found = await TeamLinkStore(db_session).resolve_many(
-            guild_id=1, github_usernames=["backend", "design"]
+            guild_id=1, people={"backend": None, "design": None}
         )
         assert found == {"backend": ROLE, "design": ROLE}
 
@@ -266,15 +264,13 @@ class TestLinkingATeam:
             guild_id=1, github_team="backend", discord_role_id=ROLE
         )
 
-        found = await TeamLinkStore(db_session).resolve_many(
-            guild_id=2, github_usernames=["backend"]
-        )
+        found = await TeamLinkStore(db_session).resolve_many(guild_id=2, people={"backend": None})
         assert found == {}
 
     async def test_asking_about_nobody_asks_the_database_nothing(
         self, db_session: AsyncSession
     ) -> None:
-        assert await TeamLinkStore(db_session).resolve_many(guild_id=1, github_usernames=[]) == {}
+        assert await TeamLinkStore(db_session).resolve_many(guild_id=1, people={}) == {}
 
 
 class TestATeamIsNotToldTwice:

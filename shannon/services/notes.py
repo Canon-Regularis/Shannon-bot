@@ -135,7 +135,7 @@ class ItemNoteMirror:
             mentions = (
                 await UserLinkStore(session).resolve_many(
                     guild_id=repository.discord_guild_id,
-                    github_usernames=[snapshot.author.login],
+                    people={snapshot.author.login: snapshot.author.github_user_id},
                 )
                 if snapshot.author
                 else {}

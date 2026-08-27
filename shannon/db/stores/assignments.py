@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 
@@ -10,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment
 from shannon.domain.enums import ActorRole
 from shannon.domain.models import Actor
+
+logger = logging.getLogger(__name__)
 
 
 class ItemAssignmentStore:
@@ -56,10 +59,39 @@ class ItemAssignmentStore:
         together, and a second replica leases in parallel. Doing nothing on conflict keeps the
         other caller's row and whatever `notified_at` they have already claimed.
         """
-        wanted = {actor.login.lower() for actor in actors}
-        existing = {row.github_username for row in await self._list_for(tracked_item_id, role)}
+        # Keyed by login and carrying the account id beside it. The id is what the ping path
+        # checks a mention against, so it has to be recorded when the row is written, which is
+        # the only moment the payload carrying it is in hand.
+        wanted = {actor.login.lower(): actor.github_user_id for actor in actors}
+        rows = await self._list_for(tracked_item_id, role)
 
-        removed = existing - wanted
+        # Somebody who renamed their GitHub account is the same person, and matching on the name
+        # alone read them as one person leaving and another arriving: the row was deleted and a
+        # fresh one inserted with `notified_at` empty, so the next ordinary event on the item
+        # announced a review request nobody had re-made. Where the new name was already linked,
+        # that told the same person twice for one request, which is the one thing `notified_at`
+        # exists to stop.
+        #
+        # Renames are followed by id where both sides have one, and the row takes the new name.
+        by_id = {row.github_user_id: row for row in rows if row.github_user_id is not None}
+        renamed = {
+            login: by_id[found]
+            for login, found in wanted.items()
+            if found in by_id and by_id[found].github_username != login
+        }
+        for login, row in renamed.items():
+            logger.info(
+                "%r is now %r on GitHub, keeping the request row rather than asking again",
+                row.github_username,
+                login,
+            )
+
+        existing = {row.github_username for row in rows} | {
+            row.github_username for row in renamed.values()
+        }
+        kept = {row.github_username for row in renamed.values()}
+
+        removed = existing - wanted.keys() - kept
         if removed:
             await self._session.execute(
                 delete(ItemAssignment).where(
@@ -69,7 +101,14 @@ class ItemAssignmentStore:
                 )
             )
 
-        added = sorted(wanted - existing)
+        # After the deletes, so a name freed by somebody leaving is available to whoever the
+        # rename is bringing to it.
+        for login, row in renamed.items():
+            row.github_username = login
+        if renamed:
+            await self._session.flush()
+
+        added = sorted(wanted.keys() - existing - set(renamed))
         if added:
             await self._session.execute(
                 pg_insert(ItemAssignment)
@@ -78,6 +117,7 @@ class ItemAssignmentStore:
                         {
                             "tracked_item_id": tracked_item_id,
                             "github_username": login,
+                            "github_user_id": wanted[login],
                             "role_type": role,
                             "requested_at": as_of,
                         }
@@ -89,16 +129,24 @@ class ItemAssignmentStore:
 
         await self._session.flush()
 
-    async def claim_notifications(self, tracked_item_id: int, role: ActorRole) -> Sequence[str]:
+    async def claim_notifications(
+        self, tracked_item_id: int, role: ActorRole
+    ) -> dict[str, int | None]:
         """Take ownership of the pings nobody has sent yet, returning whose they are.
 
         Stamping first and posting after is what stops the same person being pinged twice. Two
         syncs of one item overlap whenever somebody runs /pr while an event for it is in
         flight, and a delivery that fails after the post is retried from the top. Both of those
         read the same pending rows if the read and the write are separate steps.
+
+        Answered as login to account id, because this is the one place a mention is built from a
+        stored name rather than from the payload in hand, and a name is not an identity: GitHub
+        frees one when it is renamed or deleted and lets anybody take it. Without the id beside
+        it, the ping is the mention a stranger inherits, and the ping is the one that notifies.
+        Null for a row written before the column existed.
         """
-        return (
-            await self._session.scalars(
+        claimed = (
+            await self._session.execute(
                 update(ItemAssignment)
                 .where(
                     ItemAssignment.tracked_item_id == tracked_item_id,
@@ -110,10 +158,11 @@ class ItemAssignmentStore:
                     ItemAssignment.fulfilled_at.is_(None),
                 )
                 .values(notified_at=func.now())
-                .returning(ItemAssignment.github_username)
+                .returning(ItemAssignment.github_username, ItemAssignment.github_user_id)
                 .execution_options(synchronize_session=False)
             )
-        ).all()
+        ).mappings()
+        return {row["github_username"]: row["github_user_id"] for row in claimed}
 
     async def release_notifications(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str]
