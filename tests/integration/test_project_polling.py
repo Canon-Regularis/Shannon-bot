@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.github.errors import GitHubRateLimitError, GitHubUnavailableError
 from shannon.services.projects import BoardItem, ProjectPoller
@@ -824,6 +825,54 @@ class TestASecondReviewFound:
         )
         assert item.project_column == "In Progress", "the blank was written over the memory"
 
+    async def test_a_card_dragged_back_where_it_came_from_is_still_a_move(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """What keeping the stale memory costs, and it was said to cost nothing.
+
+        The guard against a blank board keeps the column a card has left, on the grounds that
+        the next real move differs from it. One move does not: the one that goes back where it
+        came from. The card then reads as never having moved, and that move is dropped and never
+        revisited, because nothing else advances the column.
+
+        Told apart by reading the whole board rather than one card: this one is blank while its
+        neighbour is not, so it is somebody clearing a Status rather than the field going.
+        """
+        board = FakeBoard(
+            wraps(ObjectType.PR, mirrored_pr, column="In Progress"),
+            card(item_id=901, title="A card that keeps its column"),
+        )
+        poller = poller_for(board)
+        await poller.run_once()
+
+        # The Status cleared on that one card, and a decision taken by hand in the meantime.
+        board.items = [
+            wraps(ObjectType.PR, mirrored_pr, column=None),
+            card(item_id=901, title="A card that keeps its column"),
+        ]
+        await poller.run_once()
+        await workflow.set_status(
+            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
+        )
+
+        # Dragged back into the column it started in.
+        board.items = [
+            wraps(ObjectType.PR, mirrored_pr, column="In Progress"),
+            card(item_id=901, title="A card that keeps its column"),
+        ]
+
+        assert await poller.run_once() == 1, "the move back was read as no move at all"
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.IN_REVIEW
+
     async def test_a_board_that_goes_blank_does_not_restate_itself_when_it_comes_back(
         self,
         mirrored_pr: int,
@@ -1215,3 +1264,58 @@ async def _until(condition, timeout: float = 10.0) -> None:
     async with asyncio.timeout(timeout):
         while not condition():
             await asyncio.sleep(0.01)
+
+
+class TestATicketWhoseThreadSomebodyDeleted:
+    """A draft card has no webhook, so nothing else was ever going to notice.
+
+    An issue or a pull request is told again by its next delivery, and the write path turns the
+    refusal into a replacement. A draft's only visitor is the poller, which decides whether to
+    look at a card by comparing timestamps against a row that still holds a thread id, so it
+    passes the card over without a Discord call and without a log line. A card parked in Done
+    that nobody edits again is mirrored nowhere, permanently, and nothing says so.
+
+    Discord does say so, on the gateway. Letting go of the pointer when it does is what puts a
+    draft back on the same footing as everything else.
+    """
+
+    async def test_the_poller_alone_never_notices(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        board = FakeBoard(card())
+        poller = poller_for(board)
+        await poller.run_once()
+        opened = threads.created[0].thread_id
+        threads.threads.pop(opened)
+
+        calls = len(threads.created)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+
+        assert len(threads.created) == calls, "it rebuilt something without being told"
+
+    async def test_letting_go_of_the_pointer_is_what_rebuilds_it(
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        board = FakeBoard(card())
+        poller = poller_for(board)
+        await poller.run_once()
+        opened = threads.created[0].thread_id
+        threads.threads.pop(opened)
+
+        # What the gateway listener does when Discord reports the deletion.
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.TICKET)
+        )
+        async with db_sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=opened)
+
+        assert await poller.run_once() == 1, "the card was never mirrored again"
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != opened
+        assert rebuilt in threads.threads

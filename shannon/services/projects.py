@@ -107,8 +107,15 @@ class ProjectPoller:
             return 0
 
         items = _once_each(await self._projects.list_board_items(board.owner, self._project_number))
+
+        # Whether the board's Status field can be read at all, decided from the whole board
+        # rather than from one card. A single card with no column is somebody clearing its
+        # Status; every card with no column is the field itself gone, which is a shape nothing
+        # below may believe. Only the board sees the difference.
+        readable = any(_fits(item.column) for item in items)
+
         moved = await self._mirror_drafts(board, [i for i in items if i.is_draft])
-        moved += await self._move_tracked(board, [i for i in items if not i.is_draft])
+        moved += await self._move_tracked(board, [i for i in items if not i.is_draft], readable)
 
         if moved:
             logger.info("mirrored %s of %s cards that had moved", moved, len(items))
@@ -200,7 +207,9 @@ class ProjectPoller:
                 to=stored,
             )
 
-    async def _move_tracked(self, board: _Board, wrapped: Sequence[BoardItem]) -> int:
+    async def _move_tracked(
+        self, board: _Board, wrapped: Sequence[BoardItem], readable: bool
+    ) -> int:
         """A card wrapping an issue or a pull request moves the thread that item already has.
 
         Not a second thread and not a second snapshot: the issue is mirrored from its own
@@ -223,7 +232,7 @@ class ProjectPoller:
         moved = 0
         for item in wrapped:
             try:
-                moved += await self._move_one(board, item, state)
+                moved += await self._move_one(board, item, state, readable)
             except Exception:
                 # The same bargain the draft half makes, for the same reason. Everything below
                 # is per-card already; this is only about the failures nobody wrote a branch
@@ -232,7 +241,11 @@ class ProjectPoller:
         return moved
 
     async def _move_one(
-        self, board: _Board, item: BoardItem, state: Mapping[tuple[ObjectType, int], BoardRow]
+        self,
+        board: _Board,
+        item: BoardItem,
+        state: Mapping[tuple[ObjectType, int], BoardRow],
+        readable: bool,
     ) -> int:
         """Act on one card, answering with whether it moved anything."""
         if item.content_id is None:
@@ -252,7 +265,7 @@ class ProjectPoller:
                 # first-look guard below is still armed when a Status is finally set: the move
                 # that sets it is read as a first look and dropped, and the column matches from
                 # then on so no later poll revisits it.
-                await self._remember_column(tracked, column)
+                await self._remember_column(tracked, column, readable)
             return 0
 
         wanted = status_from_column(column)
@@ -260,7 +273,7 @@ class ProjectPoller:
             # A column nobody has taught us, or the first look at a card that already agrees
             # with its item. Neither is a move to carry out, and both have to be written down
             # or the same card is looked at again on every poll for ever.
-            await self._remember_column(tracked, column)
+            await self._remember_column(tracked, column, readable)
             return 0
 
         if tracked.column is None and tracked.status is not Status.NOT_REVIEWED:
@@ -273,7 +286,7 @@ class ProjectPoller:
                 tracked.status.value,
                 column,
             )
-            await self._remember_column(tracked, column)
+            await self._remember_column(tracked, column, readable)
             return 0
 
         # A card that has moved before goes through even where the status already matches.
@@ -296,7 +309,7 @@ class ProjectPoller:
                 item.title,
                 refusal.message,
             )
-            await self._remember_column(tracked, column)
+            await self._remember_column(tracked, column, readable)
             return 0
         except ShannonError as error:
             # GitHub or Discord having a bad moment, which is not an answer about anything.
@@ -338,32 +351,35 @@ class ProjectPoller:
                 wanted.value,
             )
 
-        await self._remember_column(tracked, column)
+        await self._remember_column(tracked, column, readable)
         return 1
 
-    async def _remember_column(self, tracked: BoardRow, column: str) -> None:
+    async def _remember_column(self, tracked: BoardRow, column: str, readable: bool) -> None:
         """Record where the card was, storing the empty string for a card with no column at all.
 
         Null has to keep meaning one thing, and it already means never seen. Writing null for a
         card whose Status somebody cleared would put it back to never seen, which re-arms the
         first-look guard and quietly drops the next real move.
 
-        A card that had a column and now reads as having none is the one thing this refuses to
-        write down. Somebody clearing one card's Status looks identical here to the board's whole
-        Status field having gone unreadable, and the second is a shape the poller cannot survive
-        believing: it would write the empty string over every remembered column on the board at
-        once, and the poll after the field came back would read every card as having moved into a
-        column and drive all of them through the status commands, stripping whatever label a
-        person had set by hand from every item at once.
+        A card that had a column and now reads as having none is refused only when nothing else
+        on the board has one either. Those are two different events that look identical from one
+        card: somebody clearing that card's Status, and the board's whole Status field having
+        gone unreadable. The second cannot be survived by believing it, because it would write
+        the empty string over every remembered column at once and the poll after the field came
+        back would read the whole board as having moved and drive all of it through the status
+        commands, stripping whatever anybody had set by hand.
 
-        Refusing costs nothing in the case it is wrong about. A cleared Status carries no status
-        to move to, so the card is passed over either way, and the memory that is kept is a
-        column the card is no longer in, which the next real move still differs from.
+        The board is read whole, so the two are distinguishable after all, and this used to
+        judge them one card at a time. Refusing to forget was said to cost nothing, on the
+        grounds that the memory kept is a column the card has left and the next real move
+        differs from it. That is untrue of the one move that goes back where it came from: the
+        card returns to the column the stale memory names, reads as never having moved, and that
+        move is dropped and never revisited.
         """
-        if column == "" and tracked.column:
+        if column == "" and tracked.column and not readable:
             logger.info(
-                "not forgetting that card %s was in %r: a card with no column at all is what a "
-                "board whose Status field cannot be read looks like",
+                "not forgetting that card %s was in %r: nothing on this board has a column, "
+                "which is what a Status field that cannot be read looks like",
                 tracked.tracked_item_id,
                 tracked.column,
             )
