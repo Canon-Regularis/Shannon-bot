@@ -145,6 +145,10 @@ class ItemAssignment(TimestampMixin, Base):
         ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
     )
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Its own copy rather than a read through `user_links`, because the two answer different
+    # questions: this records who GitHub said was asked whether or not anybody has linked them,
+    # and the ping path resolves from this row long after the payload that made it has gone.
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     role_type: Mapped[ActorRole] = mapped_column(
         varchar_enum(ActorRole, "actor_role"), nullable=False
     )
@@ -262,6 +266,11 @@ class UserLink(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Who that login belonged to when it was linked. GitHub frees a name the moment it is
+    # renamed or deleted and lets anybody take it, so the name alone points at whoever holds it
+    # now rather than at the person somebody meant. Null on rows written before this existed,
+    # and read as no evidence rather than as an answer.
+    github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
