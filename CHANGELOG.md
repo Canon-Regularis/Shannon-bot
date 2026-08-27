@@ -903,6 +903,20 @@ One reviewer found these by breaking the code and seeing what still passed.
 - Nothing exercised the worker's pruning, so the seven-day retention of private-repository
   payloads was only tested at the store. The loop that has to call it is covered now.
 
+### A test that left a transaction open and hung the run somewhere else
+
+Found by the run itself rather than by a lens. The two tests added last look for the poll decision
+end by cancelling the worker task and moving on, and a task cancelled and abandoned unwinds
+whenever the loop gets round to it. Until it does, its session sits in an open transaction holding
+rows, so the TRUNCATE the next test's fixture runs waits on a lock nothing is going to release and
+the whole suite stops, in a file neither test is in.
+
+It passed twice before it did not, which is what a leak of this kind looks like: the window is the
+gap between the cancellation and the collection, and it widens with load. Diagnosed by asking
+PostgreSQL rather than the traceback, which named only the TRUNCATE: one backend idle in
+transaction on a `webhook_events` update, one waiting on a lock. The tests now await what they
+cancel.
+
 ### Known and not fixed
 
 - Two syncs of one item can still interleave their Discord calls. The database half is ordered
@@ -3371,3 +3385,132 @@ team slug is only checkable through an endpoint that is not public and needs org
 the token may not have. And verifying at link time says nothing about a login that changes hands
 afterwards, which is a separate defect on the same table.
 
+
+## A thirteenth look, at what happens to it over time
+
+Six lenses on ground the twelve before them had not touched: people interfering with the threads
+by hand, identities that change while the row keeps the old one, GitHub sending things in an order
+nobody planned for, the database under real contention, pairs of facts that must agree, and
+everything that can be deleted out from under it. Four reports were refuted. Two verifiers ran out
+of quota, so two contention reports are unadjudicated and are not here.
+
+One theme runs through half of what it found, and it is the same mistake in four places: a name is
+being used as an identity.
+
+### A login is not an identity, and every mention was built from one
+
+GitHub frees an account name the moment it is renamed or deleted, redirects the old one so nothing
+appears to break, and lets anybody register it. Both tables that turn a person into a Discord
+mention were keyed on that name alone, and nothing ever revisited a row.
+
+So a contributor renames their account, nobody re-runs `/link` because nothing anywhere says the
+link has gone stale, and months later somebody else takes the freed name. From then on every
+mention built for that name resolved to the first person's Discord account: the review ping
+notified them for a review they were never asked for, the reviewers line of the metadata block
+carried their mention, and a stranger's mirrored comments were headed by it. Meanwhile the person
+who renamed was no longer resolved at all.
+
+The stable identity was in hand the whole time and thrown away. Every payload carries the account's
+numeric id and `mapping.actor` has always parsed it into `Actor.github_user_id`, which nothing
+outside its own unit test ever read. Migration 0012 stores it on both tables and the resolution
+asks it.
+
+A row whose id disagrees with the person being asked about is left out entirely, so they are named
+in plain text, which is what somebody who has never linked gets, and the wrong person is never
+mentioned. Those two outcomes are indistinguishable in the thread, so the store says which it was
+in the log, names both accounts, and says that person should run `/link` again.
+
+Null is read as no evidence rather than as an answer, on both sides. A link made before this
+carries no id and nothing can invent one, because GitHub can say what a login is called now and
+not what it was called when somebody bound it; those rows keep matching on the name exactly as
+before, and stop being a guess the first time anybody re-runs `/link`. A deleted account arrives
+with no id in the payload, and falls back the same way.
+
+`item_assignments` needed its own copy rather than a read through `user_links`, because the two
+answer different questions: the assignment row records who GitHub said was asked whether or not
+anybody has ever linked them, and the ping resolves from that row long after the payload that made
+it has gone. That is also why the ping was the worst of the three: it is the mention that actually
+notifies somebody.
+
+Teams are not covered. GitHub numbers teams in a different space and `mapping.team` carries a slug
+and nothing else, which its own docstring already says, so the same column cannot hold both. An org
+would have to delete a team and recreate one with the same slug for the equivalent to happen.
+
+### A rename read as one person leaving and another arriving
+
+The same root, one table further on. `replace` makes the stored people match the payload and
+matched on the login alone, so a reviewer renaming their account lost the row that recorded they
+had been asked: it was deleted and a fresh one inserted with `notified_at` empty, and the next
+ordinary event on the item announced a review request nobody had re-made. Where the new name was
+already linked, that told the same person twice for one request, which is the one thing
+`notified_at` exists to stop.
+
+Renames are followed by id now, and the row takes the new name rather than being replaced. A
+different account is still a different person, whatever it is called, and still loses its row.
+
+### A login `/link` had never heard of
+
+Recorded under the twelfth look, where it was found, and it belongs to this theme: the same table,
+the same assumption, from the other end. Verifying at link time says nothing about a login that
+changes hands afterwards, and following the id afterwards says nothing about one that was never
+right. Both were needed.
+
+### A draft's thread, deleted, was never rebuilt
+
+An issue or a pull request is told again by its next webhook, and the write path turns Discord's
+refusal into a replacement. A draft card on a project board has no webhook. Its only visitor is
+the poller, which decides whether to look at a card by comparing timestamps against a row that
+still holds a thread id, so it passed over a card whose thread had gone without a single Discord
+call and without a line in the log. A card parked in Done that nobody edits again was mirrored
+nowhere, permanently, and nothing anywhere said so.
+
+The poller cannot detect it, because it has no signal. Discord has one, on the gateway, and this
+was not listening. It now handles a thread being deleted and lets go of the pointer, which puts
+all three kinds of item on the same footing: the next thing to come past opens a replacement. It
+needs no new intent, since the one that carries it is not privileged and is already on.
+
+Three things that guard it. It fires for every thread in the server, most of which are nothing to
+do with this, and a lookup that finds nothing is the whole cost of those. A delete reported for a
+thread the item has already replaced must not strand the replacement, which the existing pointer
+guard already refuses. And an event handler that raises gets a traceback logged per deleted thread
+for something nobody can act on, so it does not.
+
+### A card dragged back where it came from
+
+The guard added two looks ago against a board going blank keeps the column a card has left, and
+said it cost nothing because the next real move differs from it. That is untrue of the one move
+that returns to the same column: the card reads as never having moved, and that move is dropped
+and never revisited, because nothing else advances the column.
+
+The board is read whole, so one blank card and a blank board are distinguishable after all, and
+this was judging them one card at a time. A card with no column is now refused only when nothing
+else on the board has one either.
+
+### A finished pull request came back with an open thread
+
+`PullRequestPolicy.locked` answers None for every snapshot, deliberately, so no delivery touches a
+pull request's lock and the one `/set_done` takes is the only one it ever gets. That left nothing
+to shut a replacement: somebody deletes the thread of a finished pull request, the next event of
+any kind rebuilds it, and the new one is open to replies above a block reading DONE. Running
+`/set_done` again does restore the lock and answers "is already DONE", which gives nobody a reason
+to run it.
+
+A thread this opens now comes back in the state the item is in, and only a thread that was opened,
+so an ordinary delivery for a finished pull request still costs no Discord call, which is what
+answering None was protecting.
+
+### Known and not fixed
+
+A reviewer can be pinged to review what they have already reviewed. The ledger closes a request by
+stamping the row and records the review nowhere else, so a review handled while the request's row
+does not yet exist leaves nothing behind. Reaching it needs the `pull_request` delivery carrying
+the request to commit nothing at all on an attempt, its own transaction failing on a lost
+connection, a deadlock, or the delivery deadline landing while another transaction holds the item's
+row lock, with the review handled during that backoff. A Discord failure does not do it, because
+the assignment row commits before any Discord call.
+
+The cost is exactly that one ping: `notified_at` stops any repeat and a genuine later re-request is
+still delivered. Fixing it means remembering the review independently of the item, which is another
+table, because the review is dropped before the item exists and nothing else records it. That is
+disproportionate to a window that needs a database failure to open, and it sits on top of an
+already recorded decision that a note arriving before its item is dropped rather than retried.
