@@ -12,6 +12,7 @@ import pytest
 from shannon.github.client import MAX_PAGES, HttpGitHubClient
 from shannon.github.errors import (
     GitHubAuthError,
+    GitHubError,
     GitHubNotFoundError,
     GitHubRateLimitError,
     GitHubUnavailableError,
@@ -606,6 +607,63 @@ class TestFetchingAnIssue:
         async with client_with(responds(500, {"message": "boom"})) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.get_issue(payloads.OWNER, payloads.REPO, 12)
+
+
+class TestAskingWhetherAnAccountExists:
+    """What `/link` checks before it records a login.
+
+    The one thing this must not do is say yes when it does not know. A login nobody holds is
+    recorded happily and then names that person in plain text for ever, which is exactly what
+    somebody who never linked looks like, so nothing in the thread, the block or the log can
+    tell the two apart.
+    """
+
+    async def test_an_account_that_is_there_is_yes(self) -> None:
+        async with client_with(responds(200, {"login": "monalisa", "id": 1})) as client:
+            assert await client.user_exists("monalisa") is True
+
+    async def test_an_account_that_is_not_there_is_no(self) -> None:
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            assert await client.user_exists("nobody-at-all") is False
+
+    async def test_it_asks_the_public_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({"login": "x"}))
+
+        async with client_with(handler) as client:
+            await client.user_exists("mona-lisa")
+
+        assert seen == ["/users/mona-lisa"]
+
+    async def test_a_login_with_a_slash_in_it_cannot_reach_another_endpoint(self) -> None:
+        """The pattern upstream rules this out, and a path built by hand should not rely on it.
+
+        Read as `raw_path`, which is what goes on the wire. `path` gives it back decoded, so a
+        test written against that would pass whether or not anything was escaped.
+        """
+        seen: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path)
+            return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+        async with client_with(handler) as client:
+            await client.user_exists("../repos/acme/widgets")
+
+        assert seen == [b"/users/..%2Frepos%2Facme%2Fwidgets"]
+
+    @pytest.mark.parametrize("status", [401, 403, 500, 503])
+    async def test_anything_else_github_says_is_raised_rather_than_answered(
+        self, status: int
+    ) -> None:
+        """A question that could not be put is not an answer of no. Refusing sends the person
+        back in a minute; answering no records nothing and tells them their login is wrong."""
+        async with client_with(responds(status, {"message": "nope"})) as client:
+            with pytest.raises(GitHubError):
+                await client.user_exists("monalisa")
 
 
 class TestAWriteToARepositoryThatMoved:
