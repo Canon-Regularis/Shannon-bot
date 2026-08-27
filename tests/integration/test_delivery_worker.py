@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Mapping
 from datetime import timedelta
 from typing import Any
@@ -566,6 +567,12 @@ class TestDrainingABacklog:
         finally:
             worker.stop()
             running.cancel()
+            # Awaited, not just cancelled. A task cancelled and abandoned unwinds whenever the
+            # loop gets round to it, and until it does its session sits in an open transaction
+            # holding rows: the next test's TRUNCATE then waits on a lock nothing is going to
+            # release, and the whole run hangs somewhere unrelated to either test.
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
 
     async def test_a_batch_with_room_left_in_it_waits(self, queue: WebhookDeliveryQueue) -> None:
         """The other half. Going straight back round on a short batch is a hot loop against the
@@ -584,6 +591,12 @@ class TestDrainingABacklog:
         finally:
             worker.stop()
             running.cancel()
+            # Awaited, not just cancelled. A task cancelled and abandoned unwinds whenever the
+            # loop gets round to it, and until it does its session sits in an open transaction
+            # holding rows: the next test's TRUNCATE then waits on a lock nothing is going to
+            # release, and the whole run hangs somewhere unrelated to either test.
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
 
     async def test_a_stop_during_a_batch_is_not_made_to_wait_out_the_interval(
         self, queue: WebhookDeliveryQueue
