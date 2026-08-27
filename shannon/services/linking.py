@@ -8,10 +8,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.errors import ShannonError
+from shannon.github.client import LooksUpUsers
 
 logger = logging.getLogger(__name__)
 
-_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+# GitHub's own rule, which is narrower than "letters, digits and hyphens": a login may not
+# begin or end with a hyphen and may not carry two in a row. Written out because the loose
+# version accepted `mona--lisa` and `monalisa-`, names GitHub cannot issue, and a name nothing
+# can ever match is the one thing this command must not record.
+_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")
 
 # A team slug is more forgiving than a login: GitHub builds it from the display name, so it takes
 # underscores and full stops that an account name never would, and it can be longer.
@@ -25,13 +30,29 @@ class InvalidGitHubUsernameError(ShannonError):
 class UserLinkingService:
     """Binds a GitHub login to a Discord account so that person can be pinged."""
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker, github: LooksUpUsers) -> None:
         self._sessionmaker = sessionmaker
+        self._github = github
 
     async def link(self, *, guild_id: int, github_username: str, discord_user_id: int) -> str:
+        """Bind a login to an account, refusing one GitHub has never heard of.
+
+        Asked of GitHub rather than only matched against a pattern, because the failure this
+        prevents is silent and permanent. A login nobody holds is recorded happily, the command
+        answers that it worked, and from then on that person is named in the thread as plain
+        text instead of being mentioned, which is exactly what somebody who never linked at all
+        looks like. There is nothing in the thread, the block or the log to tell the two apart,
+        so neither they nor the server admin has any way to find out.
+
+        One public call, on a command each person runs once. GitHub being unreachable makes this
+        fail rather than bind, and the reply says so: a link that cannot be checked is worth
+        less than a person trying again in a minute.
+        """
         username = github_username.strip().lstrip("@")
         if not _GITHUB_LOGIN.match(username):
             raise InvalidGitHubUsernameError(f"{github_username!r} is not a GitHub username.")
+        if not await self._github.user_exists(username):
+            raise InvalidGitHubUsernameError(f"GitHub has no user called {username!r}.")
 
         await self._write(guild_id, username, discord_user_id)
 

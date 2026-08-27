@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from discord import app_commands
@@ -56,6 +57,8 @@ from shannon.services.sync.policies import (
     channel_fallbacks,
 )
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -224,7 +227,7 @@ def _commands(
         build_set_channel_command(ChannelMappingService(sessionmaker, channel_fallbacks()), gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
-        build_link_command(UserLinkingService(sessionmaker), gate),
+        build_link_command(UserLinkingService(sessionmaker, github), gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
         *build_workflow_commands(workflow, gate),
     )

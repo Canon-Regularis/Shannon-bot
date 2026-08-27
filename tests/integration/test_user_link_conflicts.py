@@ -8,13 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import UserLink
 from shannon.services.linking import UserLinkingService
+from tests.fakes.github import FakeGitHubClient
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def service(db_sessionmaker: async_sessionmaker) -> UserLinkingService:
-    return UserLinkingService(db_sessionmaker)
+    return UserLinkingService(db_sessionmaker, FakeGitHubClient())
 
 
 async def rows(session: AsyncSession) -> list[tuple[str, int]]:

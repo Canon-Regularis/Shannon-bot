@@ -31,7 +31,12 @@ class FakeGitHubClient:
         repositories: dict[str, RepositorySnapshot] | None = None,
         pull_requests: dict[tuple[str, int], PullRequestSnapshot] | None = None,
         issues: dict[tuple[str, int], IssueSnapshot] | None = None,
+        users: set[str] | None = None,
     ) -> None:
+        # Every login exists unless a test says otherwise, because almost no test is about a
+        # login that does not. `set()` is how a test says the account is not there.
+        self.users = users
+        self.user_calls: list[str] = []
         self.repositories = repositories or {}
         self.pull_requests = pull_requests or {}
         self.issues = issues or {}
@@ -69,6 +74,12 @@ class FakeGitHubClient:
             return self.repositories[full_name.lower()]
         except KeyError:
             raise GitHubNotFoundError(f"GitHub has nothing at /repos/{full_name}") from None
+
+    async def user_exists(self, login: str) -> bool:
+        self.user_calls.append(login)
+        if self.error is not None:
+            raise self.error
+        return True if self.users is None else login.lower() in {u.lower() for u in self.users}
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         key = (f"{owner}/{name}".lower(), number)

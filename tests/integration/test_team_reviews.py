@@ -27,6 +27,7 @@ from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import PullRequestPolicy
+from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 
@@ -402,7 +403,7 @@ class TestATeamIsNotAPerson:
     ) -> None:
         from shannon.services.linking import UserLinkingService
 
-        await UserLinkingService(db_sessionmaker).link(
+        await UserLinkingService(db_sessionmaker, FakeGitHubClient()).link(
             guild_id=1, github_username="security", discord_user_id=424242
         )
 
@@ -423,7 +424,7 @@ class TestATeamIsNotAPerson:
         """The ping reads the team map, which only /link_team writes, and that one is gated."""
         from shannon.services.linking import UserLinkingService
 
-        await UserLinkingService(db_sessionmaker).link(
+        await UserLinkingService(db_sessionmaker, FakeGitHubClient()).link(
             guild_id=1, github_username="security", discord_user_id=424242
         )
 

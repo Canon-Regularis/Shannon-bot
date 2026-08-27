@@ -36,7 +36,7 @@ from shannon.discord_bot.threads import (
     PostsToThread,
     ThreadGateway,
 )
-from shannon.github.client import GitHubClient, HttpGitHubClient
+from shannon.github.client import GitHubClient, HttpGitHubClient, LooksUpUsers
 from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
@@ -87,6 +87,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (OpensAndLocksThreads, DiscordThreadGateway),
     (GitHubClient, FakeGitHubClient),
     (GitHubClient, HttpGitHubClient),
+    (LooksUpUsers, FakeGitHubClient),
+    (LooksUpUsers, HttpGitHubClient),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),
