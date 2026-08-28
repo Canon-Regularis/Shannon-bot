@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import runpy
 
+import discord
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -21,6 +22,8 @@ from httpx import ASGITransport, AsyncClient
 
 import shannon.main
 from shannon.config import Settings
+from shannon.container import Container
+from shannon.discord_bot.client import ShannonBot
 from shannon.main import build_app, configure_logging, run
 
 SETTINGS = Settings(github_webhook_secret="x")
@@ -62,6 +65,52 @@ def test_the_router_is_wired_to_a_handler_for_every_event(app: FastAPI) -> None:
 
 def test_the_settings_it_was_given_are_the_ones_it_uses(app: FastAPI) -> None:
     assert app.state.settings is SETTINGS
+
+
+class TestTheThreadDeleteListener:
+    """The one piece of assembly that has no other way of showing itself.
+
+    Every other step in `build_app` is load-bearing on the first request: a container that does
+    not build raises here, a route that is not included answers 404, a queue that is not passed
+    shows up as inline delivery. A listener that is never wired changes nothing until somebody
+    deletes a thread in a running server, and then it changes nothing visibly either, because
+    the whole point of it is to notice something silent. Both halves were covered, the bot's in
+    `tests/unit/discord_bot/test_client.py` and the container's in `test_thread_recovery.py`,
+    and the line joining them was missing.
+    """
+
+    async def test_a_deleted_thread_reaches_the_thing_that_owns_the_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through the real assembly and the real event handler, with only the last step stood
+        in for: what `forget_thread` does with the id has its own tests and needs a database.
+
+        The bot is caught on its way out of the constructor because `build_app` keeps it inside
+        the lifespan and hands back an app. Anything short of this passes with the wire cut.
+        """
+        built: list[ShannonBot] = []
+        letting_go: list[int] = []
+        real = shannon.main.ShannonBot
+
+        def remember(**kwargs: object) -> ShannonBot:
+            bot = real(**kwargs)
+            built.append(bot)
+            return bot
+
+        async def record(self: Container, thread_id: int) -> None:
+            letting_go.append(thread_id)
+
+        monkeypatch.setattr(shannon.main, "ShannonBot", remember)
+        monkeypatch.setattr(Container, "forget_thread", record)
+
+        build_app(SETTINGS)
+
+        assert len(built) == 1, "build_app made no bot"
+        await built[0].on_raw_thread_delete(
+            discord.RawThreadDeleteEvent({"id": 4242, "type": 11, "guild_id": 1, "parent_id": 2})
+        )
+
+        assert letting_go == [4242], "a deleted thread never reached the container"
 
 
 class TestStartingTheProcess:

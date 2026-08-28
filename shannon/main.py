@@ -34,6 +34,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     bot = ShannonBot(explain_error=reply_for)
     container = build_container(threads=DiscordThreadGateway(bot), settings=settings)
     bot.install(*container.commands)
+    # Both of these are a second step for the same reason: the gateway has to exist before the
+    # container that needs it, so neither can be handed to the constructor.
+    bot.tell_when_a_thread_goes(container.forget_thread)
 
     return create_app(
         settings=settings,
