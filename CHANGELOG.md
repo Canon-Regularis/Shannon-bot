@@ -3514,3 +3514,111 @@ still delivered. Fixing it means remembering the review independently of the ite
 table, because the review is dropped before the item exists and nothing else records it. That is
 disproportionate to a window that needs a database failure to open, and it sits on top of an
 already recorded decision that a note arriving before its item is dropped rather than retried.
+
+## A fourteenth look, at the thirteenth
+
+Six lenses were pointed at this and three of them never ran, because the account hit its limit
+partway through. Contention, idempotency under retry, and the handovers between subsystems are
+not covered here and are still worth a pass. The three that did run were the recent changes
+themselves, the new gateway listener, and failures that make no sound.
+
+Everything they found was in the previous look's own work. Three defects, three fixes from
+yesterday, and one of them had made a thing that was merely missing into a thing that was wrong.
+
+### A wire that was never connected
+
+The thirteenth look added a listener so a draft card whose thread somebody deleted lets go of its
+pointer. It added the handler on the bot, the method on the container, tests for both, and a
+changelog section describing the behaviour. It never joined them: `tell_when_a_thread_goes` had
+no caller anywhere outside the tests, so `build_app` produced a bot that dropped every deletion
+on the floor. The feature was inert in the only process that matters.
+
+Both halves were covered and the line between them was not, which is the shape of gap unit tests
+are worst at. It survived a full suite, a coverage gate at 100% with branches on, and a changelog
+entry written as though it worked.
+
+What makes this one worth more than its one-line fix is that `tests/unit/test_build_app.py`
+already exists to catch exactly this, and says so in its own docstring: it is there because
+`build_app` is the only place the real bot, the real gateway and the real container are put
+together, and each of those steps can break without another test noticing. It checked the
+routes, the queue, the router and the settings. Every one of those is load-bearing on the first
+request and would have been caught anyway. The listener was the only assembly step in the file
+with no other way of showing itself, and it was the one nobody thought to add.
+
+It is now driven end to end: the real bot is caught on its way out of the constructor, a real
+deletion payload goes into the real handler, and the container's method has to be the thing that
+receives it. Only that last step is stood in for, because what it does with the id has its own
+tests and needs a database.
+
+### The wrong half of a gateway event
+
+The listener was also on the wrong event, which nothing would have shown until it was wired up.
+
+discord.py dispatches `thread_delete` only while the deleted thread is still in its cache, and
+drops one from that cache the moment it archives. This bot opens threads with a seven day
+auto-archive, so a thread nobody writes in is out of the cache within a week. The case the
+listener exists for is a card parked in Done that nobody edits again, which is to say a thread
+that is guaranteed to be archived by the time anybody deletes it. The event covered busy threads
+and missed every quiet one, and quiet was the entire point.
+
+The project already knew this. The same fact about the cache is written down twice, in the
+changelog and in `ItemThreads._thread`, both about a different problem. It was not carried across
+to the new code.
+
+`on_raw_thread_delete` fires whether or not the thread was cached and carries the id, which is
+all this needs. The two are one word apart and both look right when a test calls them by hand, so
+the absence of the cached one is now pinned by a test of its own.
+
+### A lock invented for a card that never had one
+
+The thirteenth look also made a replacement thread come back in the state its item is in, so a
+finished pull request stops being rebuilt as an open thread under a block reading DONE. The
+condition it used was that the policy answers None to whether the thread should be locked, which
+is true of a pull request and true of a draft card, for opposite reasons.
+
+A pull request answers None because `/set_done` is the only thing that locks one and the row is
+the only record of it. A card answers None because a board column is not a closed state and a
+card comes back out of Done, which `TicketPolicy.locked` says in as many words. So the fix read
+one policy's silence as the other's meaning.
+
+The common way in is not a deleted thread. It is turning the feature on: somebody maps a channel
+for tickets against a board that has been in use for months, the first poll mirrors everything at
+once, and every card already sitting in Done gets a thread that is shut before anybody has seen
+it. Drag one back to In Progress and it stays shut, because nothing in this bot ever unlocks a
+ticket thread. The unlock is reached only by a policy answering False and this one never does,
+the branch that shuts a new thread runs only for a thread being opened, and the commands that
+lock and unlock refuse a ticket thread outright. That is live work in a thread nobody in Discord
+can reply to, and no way back short of a moderator doing it by hand.
+
+The policies now say which of the two they mean, as a flag with the reason next to it, and the
+sync asks rather than inferring it from a None that two policies return for different reasons.
+
+### Two people swapping names
+
+Not from the hunt. Found by reading back the rename fix from the day before and not believing it,
+then proving it against a database.
+
+Following a rename meant giving the stored row the new name where it sat. Two people on one item
+can swap names in a single payload, because GitHub frees a name the moment it is left: one
+renames, the other takes what they left, and both changes arrive together on the next event. The
+row taking the name then collided with the row still holding it, and the unique constraint
+refused it. That raises out of the delivery rather than being handled anywhere, so the item stops
+mirroring at all until sixteen attempts have run out over two hours.
+
+A rename now drops the old row and writes a new one carrying the stamps forward, so every old
+name is gone before any new one is written. That cannot collide whatever order the rows are in,
+which is a smaller thing to be sure of than an ordering argument would have been. The row's own
+age is not carried across, because nothing reads it.
+
+### What three for three says
+
+Every fix from the thirteenth look that touched more than one file was broken, and none of it was
+found by thinking harder about the code. The wire was found by an agent reading the shipped
+process rather than the diff, the archived thread by one reading the library rather than this
+project, the ticket lock by one asking what else answers None, and the rename collision by a
+probe written because the code smelled wrong.
+
+The failures share a shape. Each fix was correct about the case it was written for and was
+applied through a condition wider than that case: a policy's None, a cached event, a method
+nobody called. The tests written alongside each one exercised the case it was written for, so
+they all passed.
