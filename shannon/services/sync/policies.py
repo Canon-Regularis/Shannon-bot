@@ -31,6 +31,13 @@ class SyncPolicy(Protocol):
     # if it is not mapped, it is not posted.
     channel_fallback: ObjectType | None
 
+    # Whether this kind's DONE means somebody shut the thread. True only where the lock is taken
+    # by a command and kept in the row, which makes the row the only place a replacement thread
+    # can learn it should come back shut. False where DONE is derived from something outside
+    # Discord and no lock was ever taken for it, because then shutting a replacement would
+    # invent a lock the original never had.
+    lock_lives_in_the_row: bool
+
     def render(
         self,
         snapshot: TrackedSnapshot,
@@ -70,6 +77,9 @@ class SyncPolicy(Protocol):
 class PullRequestPolicy:
     object_type = ObjectType.PR
     channel_fallback = None
+    # `/set_done` is the only thing that locks one, and it writes the status to the row. No
+    # payload can say a pull request is finished, so the row is all a replacement thread has.
+    lock_lives_in_the_row = True
 
     def render(
         self,
@@ -116,6 +126,9 @@ class PullRequestPolicy:
 class IssuePolicy:
     object_type = ObjectType.ISSUE
     channel_fallback = ObjectType.PR
+    # `locked` reads it straight off the payload, so a replacement is shut by the ordinary path
+    # and has nothing to learn from the row.
+    lock_lives_in_the_row = False
 
     def render(
         self,
@@ -170,6 +183,9 @@ class TicketPolicy:
 
     object_type = ObjectType.TICKET
     channel_fallback = None
+    # A card in the Done column is DONE on the row, put there by the board rather than by
+    # anybody, and its thread was never locked. See `locked` for why it must not be.
+    lock_lives_in_the_row = False
 
     def render(
         self,

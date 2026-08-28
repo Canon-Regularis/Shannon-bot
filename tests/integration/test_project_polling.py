@@ -1266,6 +1266,58 @@ async def _until(condition, timeout: float = 10.0) -> None:
             await asyncio.sleep(0.01)
 
 
+class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:
+    """Turning ticket mirroring on against a board that has been in use for a while.
+
+    A deleted thread is the rare way in. This is the ordinary one: somebody runs `/set_channel`
+    for tickets, and the first poll mirrors everything on the board at once, including whatever
+    is already sitting in Done. Every one of those threads is opened for the first time with the
+    row already reading DONE.
+    """
+
+    async def test_the_first_poll_does_not_arrive_with_the_thread_shut(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        poller = poller_for(FakeBoard(card(column="Done")))
+
+        await poller.run_once()
+
+        opened = threads.created[0].thread_id
+        assert threads.threads[opened].locked is False, "it arrived shut before anybody saw it"
+        assert threads.locks == [], "it touched the lock at all, which costs a call per card"
+
+    async def test_a_card_dragged_back_out_of_done_is_not_left_shut(
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """What makes shutting it on the way in unrecoverable rather than merely wrong.
+
+        Nothing in this bot ever unlocks a ticket thread. The unlock is reached only by
+        `locked` answering False and `TicketPolicy` answers None to everything, the branch that
+        shuts a new thread runs only for a thread being opened, and `/set_in_review` refuses a
+        ticket thread outright because the workflow is built for pull requests and issues. So a
+        card shut in Done and then dragged back to In Progress would be live work nobody in
+        Discord could reply to, with no way back short of a moderator doing it by hand.
+        """
+        board = FakeBoard(card(column="Done"))
+        poller = poller_for(board)
+        await poller.run_once()
+        opened = threads.created[0].thread_id
+
+        board.items = [card(column="In Progress", at="2026-08-20T11:00:00Z")]
+        assert await poller.run_once() == 1, "the move was never picked up"
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.TICKET)
+        )
+        assert item.status is Status.IN_REVIEW, "the column never reached the row"
+        assert threads.threads[opened].locked is False, "live work in a thread nobody can answer"
+
+
 class TestATicketWhoseThreadSomebodyDeleted:
     """A draft card has no webhook, so nothing else was ever going to notice.
 
@@ -1319,3 +1371,42 @@ class TestATicketWhoseThreadSomebodyDeleted:
         rebuilt = threads.created[-1].thread_id
         assert rebuilt != opened
         assert rebuilt in threads.threads
+
+    async def test_a_rebuilt_card_in_done_is_still_open_to_replies(
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        """A card in Done is DONE on the row, and its thread was never locked for it.
+
+        The board put that status there, not a person, and `TicketPolicy.locked` answers None to
+        every snapshot on purpose: a column is not a closed state, and a card moves back out of
+        Done. Shutting a rebuilt thread because the row says DONE would invent a lock the
+        original never had, and nothing anywhere would take it off again, so the card would come
+        back out of Done into a thread nobody could answer in.
+
+        The pull request rule this sits next to is the opposite and for the opposite reason: its
+        DONE is `/set_done`, which locks, and the row is the only record of it.
+        """
+        board = FakeBoard(card(column="Done"))
+        poller = poller_for(board)
+        await poller.run_once()
+        opened = threads.created[0].thread_id
+        assert threads.threads[opened].locked is False, "the poller locked it on the way in"
+        threads.threads.pop(opened)
+
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.TICKET)
+        )
+        assert item.status is Status.DONE, (
+            "the column never reached the row, so this proves nothing"
+        )
+        async with db_sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=opened)
+
+        assert await poller.run_once() == 1
+        rebuilt = threads.created[-1].thread_id
+        assert threads.threads[rebuilt].locked is False, "the replacement came back shut"

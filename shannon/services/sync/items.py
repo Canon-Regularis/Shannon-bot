@@ -175,9 +175,17 @@ class ItemSyncService:
         # answers None for every snapshot and both calls that could have are skipped on that.
         # Running `/set_done` again does restore it, and nothing tells anybody to.
         #
+        # The policy is asked rather than read off `locked` answering None, which a ticket does
+        # too and for the opposite reason. A card in the Done column is DONE on the row because
+        # the board says so and nobody shut its thread; shutting a replacement would invent a
+        # lock the original never had, and nothing would ever take it off again, which is the
+        # thread nobody can answer in that `TicketPolicy.locked` refuses to make.
+        #
         # Only for a thread that was opened, so an ordinary delivery for a finished pull request
         # still costs no Discord call, which is what answering None was protecting.
-        opened_shut = written.created and wants_locked is None and state.shut_when_opened
+        opened_shut = (
+            written.created and self._policy.lock_lives_in_the_row and state.shut_when_opened
+        )
 
         if asked_for or opened_shut:
             await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
