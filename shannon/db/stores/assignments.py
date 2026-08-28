@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
 from sqlalchemy import delete, func, or_, select, update
@@ -64,50 +64,12 @@ class ItemAssignmentStore:
         # the only moment the payload carrying it is in hand.
         wanted = {actor.login.lower(): actor.github_user_id for actor in actors}
         rows = await self._list_for(tracked_item_id, role)
+        mine = self._match(wanted, rows)
 
-        # Somebody who renamed their GitHub account is the same person, and matching on the name
-        # alone read them as one person leaving and another arriving: the row was deleted and a
-        # fresh one inserted with `notified_at` empty, so the next ordinary event on the item
-        # announced a review request nobody had re-made. Where the new name was already linked,
-        # that told the same person twice for one request, which is the one thing `notified_at`
-        # exists to stop.
-        #
-        # Renames are followed by id where both sides have one, and the row takes the new name.
-        by_id = {row.github_user_id: row for row in rows if row.github_user_id is not None}
-        renamed = {
-            login: by_id[found]
-            for login, found in wanted.items()
-            if found in by_id and by_id[found].github_username != login
-        }
-        for login, row in renamed.items():
-            logger.info(
-                "%r is now %r on GitHub, keeping the request row rather than asking again",
-                row.github_username,
-                login,
-            )
-
-        # What a renamed person's new row is written with. The rename drops the old row and
-        # writes a fresh one carrying these forward, rather than giving the row the new name
-        # where it sits. Two people on one item can swap names in a single payload, one taking
-        # the name the other has just freed, and an update in place then breaks the unique
-        # constraint on whichever of the two Postgres writes first: the delivery fails outright
-        # and the item stops mirroring until sixteen attempts have run out. Clearing every old
-        # name before writing any new one cannot, and needs no reasoning about the order.
-        #
-        # The row's own age is not carried, because nothing reads it. These four are what the
-        # row is for.
-        carried = {
-            login: {
-                "github_user_id": wanted[login],
-                "requested_at": row.requested_at,
-                "notified_at": row.notified_at,
-                "fulfilled_at": row.fulfilled_at,
-            }
-            for login, row in renamed.items()
-        }
-
-        existing = {row.github_username for row in rows}
-        removed = (existing - wanted.keys()) | {row.github_username for row in renamed.values()}
+        # Whoever is left over is not on the item any more, under any name. Their names are
+        # freed here, before any rename below is allowed to take one.
+        kept = {row.id for row in mine.values() if row is not None}
+        removed = sorted(row.github_username for row in rows if row.id not in kept)
         if removed:
             await self._session.execute(
                 delete(ItemAssignment).where(
@@ -117,36 +79,142 @@ class ItemAssignmentStore:
                 )
             )
 
-        # After the deletes, in one statement, so a name freed by anybody at all is available to
-        # whoever is arriving at it.
-        writing = [
+        for login, row in mine.items():
+            # The payload knows who this login is. A row that predates the column, or one matched
+            # by name because neither side had an id, learns it here and stops being a guess from
+            # the next event onwards.
+            if row is not None and row.github_user_id is None and wanted[login] is not None:
+                row.github_user_id = wanted[login]
+
+        await self._rename(
             {
-                "tracked_item_id": tracked_item_id,
-                "github_username": login,
-                "role_type": role,
-                "github_user_id": wanted[login],
-                "requested_at": as_of,
-                "notified_at": None,
-                "fulfilled_at": None,
-            }
-            for login in sorted(wanted.keys() - existing - renamed.keys())
-        ] + [
-            {
-                "tracked_item_id": tracked_item_id,
-                "github_username": login,
-                "role_type": role,
-                **stamps,
-            }
-            for login, stamps in sorted(carried.items())
-        ]
-        if writing:
+                login: row
+                for login, row in mine.items()
+                if row is not None and row.github_username != login
+            },
+            held={row.github_username for row in rows if row.id in kept},
+        )
+
+        added = sorted(login for login, row in mine.items() if row is None)
+        if added:
             await self._session.execute(
                 pg_insert(ItemAssignment)
-                .values(writing)
+                .values(
+                    [
+                        {
+                            "tracked_item_id": tracked_item_id,
+                            "github_username": login,
+                            "github_user_id": wanted[login],
+                            "role_type": role,
+                            "requested_at": as_of,
+                        }
+                        for login in added
+                    ]
+                )
                 .on_conflict_do_nothing(constraint="uq_item_assignments_item_user_role")
             )
 
-        await self._session.flush()
+    @staticmethod
+    def _match(
+        wanted: dict[str, int | None], rows: Sequence[ItemAssignment]
+    ) -> dict[str, ItemAssignment | None]:
+        """Which stored row, if any, belongs to each person the payload names.
+
+        Somebody who renamed their GitHub account is the same person, and matching on the name
+        alone read them as one person leaving and another arriving: the row was deleted and a
+        fresh one inserted with `notified_at` empty, so the next ordinary event on the item
+        announced a review request nobody had re-made. Where the new name was already linked,
+        that told the same person twice for one request, which is the one thing `notified_at`
+        exists to stop.
+
+        So the account id goes first, for everybody who has one, before a single name is looked
+        at. A name match is what happens when the id cannot answer, and it must not take a row
+        the id has already spoken for.
+
+        A row carrying a different account under the name being asked about belongs to somebody
+        else, and the name is all the two have in common. It is left unmatched, which drops it,
+        because GitHub frees a login the moment it is left and a row saying otherwise is out of
+        date. Getting this wrong is not loud: the row survives, no later payload rewrites the id
+        on a login that already exists, and the item goes on addressing the account that left for
+        the rest of its life.
+        """
+        by_id = {row.github_user_id: row for row in rows if row.github_user_id is not None}
+        by_name = {row.github_username: row for row in rows}
+        mine: dict[str, ItemAssignment | None] = {}
+        claimed: set[int] = set()
+
+        for login, account in wanted.items():
+            row = by_id.get(account) if account is not None else None
+            if row is not None:
+                mine[login] = row
+                claimed.add(row.id)
+
+        for login, account in wanted.items():
+            if login in mine:
+                continue
+            row = by_name.get(login)
+            disputed = (
+                row is not None
+                and account is not None
+                and row.github_user_id is not None
+                and row.github_user_id != account
+            )
+            if row is None or disputed or row.id in claimed:
+                mine[login] = None
+                continue
+            mine[login] = row
+            claimed.add(row.id)
+        return mine
+
+    async def _rename(self, renamed: dict[str, ItemAssignment], *, held: set[str]) -> None:
+        """Give each row the name its account goes by now, in an order that cannot collide.
+
+        One column at a time, rather than dropping the row and writing a replacement. The
+        replacement carried the stamps forward in Python, which turned a rename into a read of
+        the whole row followed by a write of it, and anything another transaction committed in
+        between was reverted: a ping handed back, a review recorded, the stamp that stops
+        somebody being told twice. Nothing serialises those against this, deliberately, because
+        the notifier runs after the sync transaction has committed. A statement naming one column
+        has no such window.
+
+        The order is the whole difficulty. Two people on one item can swap names in a single
+        payload, because GitHub frees a name the moment it is left: one renames, the other takes
+        what they left, and both changes arrive on the next event. Writing a name another row is
+        still holding breaks the unique constraint, which raises out of the delivery and stops
+        the item mirroring at all until sixteen attempts have run out.
+
+        So a rename goes only when nothing is holding the name it wants. The deletions have
+        already run, and each rename frees its old name for the next, which is enough for any
+        chain of them. A closed loop, where two accounts have traded names outright, has no first
+        move: one of them is parked on a name GitHub cannot issue, since a login can neither
+        begin with a hyphen nor contain two in a row, and the row is renamed off it again before
+        this returns.
+        """
+        while renamed:
+            ready = sorted(login for login in renamed if login not in held)
+            if not ready:
+                login, row = sorted(renamed.items())[0]
+                parked = f"--swap-{row.id}"
+                logger.info(
+                    "%r and %r have traded names, parking one of them to make room",
+                    row.github_username,
+                    login,
+                )
+                held.discard(row.github_username)
+                held.add(parked)
+                row.github_username = parked
+            else:
+                for login in ready:
+                    row = renamed.pop(login)
+                    logger.info(
+                        "%r is now %r on GitHub, keeping the request row rather than asking again",
+                        row.github_username,
+                        login,
+                    )
+                    held.discard(row.github_username)
+                    held.add(login)
+                    row.github_username = login
+            await self._session.flush()
 
     async def claim_notifications(
         self, tracked_item_id: int, role: ActorRole
@@ -184,27 +252,37 @@ class ItemAssignmentStore:
         return {row["github_username"]: row["github_user_id"] for row in claimed}
 
     async def release_notifications(
-        self, tracked_item_id: int, role: ActorRole, logins: Iterable[str]
+        self, tracked_item_id: int, role: ActorRole, people: Mapping[str, int | None]
     ) -> None:
         """Hand claimed pings back, for when the message did not go out after all.
 
-        Folded, like every other login this class matches on. The column holds them folded,
-        because `replace` is the only thing that writes it and folds on the way in, and the
-        three other methods here that take logins all fold before comparing. This one did not,
-        and it works today only because its one caller hands back exactly what
-        `claim_notifications` returned, which came out of that column already folded. A caller
-        passing what GitHub said would have matched no row, and matching no row here means a
-        ping stamped as sent that nobody ever received, for good.
+        By account id wherever the claim had one, because the login is not stable across the gap
+        this covers. The gap is the whole Discord post: the worker allows each delivery sixty
+        seconds and discord.py sleeps through a rate limit rather than failing, so a second
+        delivery carrying a rename has time to commit in the middle of it. Matching on the name
+        the claim went out under then found no row at all, and finding no row here means a ping
+        stamped as sent that nobody ever received, for good. Where two people on one item had
+        traded names it was worse than nothing: the hand-back cleared the stamp of whoever now
+        holds the released name, so one of them was told twice and the other never.
+
+        Falling back to the name for anybody the claim had no id for, which is a row written
+        before the column existed or an account GitHub no longer has. Folded, like every other
+        login this class matches on, because the column holds them folded.
         """
-        wanted = [login.lower() for login in logins]
-        if not wanted:
+        if not people:
             return
+        # Everybody lands in exactly one of these, so between them they are never both empty.
+        ids = sorted({account for account in people.values() if account is not None})
+        logins = sorted(login.lower() for login, account in people.items() if account is None)
         await self._session.execute(
             update(ItemAssignment)
             .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
                 ItemAssignment.role_type == role,
-                ItemAssignment.github_username.in_(wanted),
+                or_(
+                    ItemAssignment.github_user_id.in_(ids),
+                    ItemAssignment.github_username.in_(logins),
+                ),
             )
             .values(notified_at=None)
             .execution_options(synchronize_session=False)

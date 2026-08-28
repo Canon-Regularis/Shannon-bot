@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ItemAssignment, Repository
@@ -485,15 +485,60 @@ class TestHandingAClaimBackWhateverCaseItArrivesIn:
             claimed = await store(session).claim_notifications(item_id, ActorRole.REVIEWER)
         assert list(claimed) == ["monalisa"], "nothing was claimed, so this proves nothing"
 
-        # What GitHub calls them, which is not what the column holds.
+        # What GitHub calls them, which is not what the column holds, and with no account id
+        # beside it, which is what a row written before that column existed hands back.
         async with db_sessionmaker() as session, session.begin():
-            await store(session).release_notifications(item_id, ActorRole.REVIEWER, ["MonaLisa"])
+            await store(session).release_notifications(
+                item_id, ActorRole.REVIEWER, {"MonaLisa": None}
+            )
 
         db_session.expire_all()
         row = await db_session.scalar(
             select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
         )
         assert row.notified_at is None, "the claim was never handed back, so the ping is lost"
+
+
+class TestHandingAClaimBackAfterTheNameHasMoved:
+    """The hand-back has to find the row the claim came from, and the login is not stable.
+
+    A ping is claimed and stamped before it is sent, so a claim that is not handed back leaves the
+    row saying somebody was told while nobody was. The gap it has to survive is the whole Discord
+    post: the worker allows each delivery sixty seconds and discord.py sleeps through a rate limit
+    rather than failing, which is long enough for a second delivery carrying a rename to commit in
+    the middle of it.
+    """
+
+    async def test_the_row_is_found_under_the_name_it_has_now(
+        self, registered: Repository, db_sessionmaker, db_session: AsyncSession, pr_event
+    ) -> None:
+        service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+        await service.sync(pr_event("opened"))
+        item_id = await db_session.scalar(select(ItemAssignment.tracked_item_id))
+
+        async with db_sessionmaker() as session, session.begin():
+            claimed = await ItemAssignmentStore(session).claim_notifications(
+                item_id, ActorRole.REVIEWER
+            )
+        assert claimed == {"monalisa": 200}, "nothing was claimed, so this proves nothing"
+
+        # The post is still in flight, and the rename lands.
+        await service.sync(
+            pr_event("labeled", requested_reviewers=[payloads.user("mona-lisa", 200)])
+        )
+
+        # Now the post gives up.
+        async with db_sessionmaker() as session, session.begin():
+            await ItemAssignmentStore(session).release_notifications(
+                item_id, ActorRole.REVIEWER, claimed
+            )
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row.github_username == "mona-lisa", "the rename never landed"
+        assert row.notified_at is None, "the ping is stamped as sent and nobody received it"
 
 
 class TestAReviewerWhoseLoginSomebodyElseNowHolds:
@@ -646,6 +691,72 @@ class TestAReviewerWhoRenamedTheirAccount:
             (300, "mona"),
         ]
         assert all(row.notified_at is not None for row in rows), "a record of telling them went"
+
+    async def test_a_login_handed_straight_from_one_person_to_another(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        """One reviewer leaves and another takes the login they freed, both in one payload.
+
+        Nothing unusual is needed for it: GitHub releases a name the moment an account is renamed
+        or deleted, and both facts reach this bot on the same next event. What arrives is a
+        payload naming a login the item already has a row for, belonging to a different account.
+
+        The row is the departed person's and the name is all the two have in common, so it goes.
+        Matching it by name and keeping it left the item addressing an account that is not on it
+        any more, for the rest of the pull request's life, with nothing to say so: no later
+        payload rewrites the account on a login that already exists.
+        """
+        await notifying_sync_service.sync(
+            pr_event(
+                "opened",
+                requested_reviewers=[payloads.user("alice", 1), payloads.user("bob", 2)],
+            )
+        )
+
+        # alice is gone and bob is called alice now.
+        await notifying_sync_service.sync(
+            pr_event("labeled", requested_reviewers=[payloads.user("alice", 2)])
+        )
+
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+            )
+        ).all()
+        assert [(row.github_username, row.github_user_id) for row in rows] == [("alice", 2)]
+        assert rows[0].notified_at is not None, "the person GitHub asked was made to look new"
+
+    async def test_a_row_that_never_knew_the_account_learns_it(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        """Rows written before the account was stored match on the name and nothing else.
+
+        They cannot be repaired from outside, because GitHub can say what a login is called now
+        and not who held it when the row was written. The payload that next names them can, and
+        it is the only thing that can, so the row stops being a guess from then on.
+        """
+        await notifying_sync_service.sync(pr_event("opened"))
+        # Committed, so the sync's own session can see it. An uncommitted write here would leave
+        # the sync reading the id it already had and the test proving nothing.
+        await db_session.execute(update(ItemAssignment).values(github_user_id=None))
+        await db_session.commit()
+
+        await notifying_sync_service.sync(pr_event("labeled"))
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row.github_user_id == 200, "the row is still matching on the name alone"
 
     async def test_somebody_genuinely_leaving_still_loses_their_row(
         self,

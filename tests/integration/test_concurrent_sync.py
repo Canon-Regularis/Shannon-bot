@@ -166,6 +166,64 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
     ) == 1
 
 
+async def test_a_rename_does_not_take_back_a_ping_claimed_while_it_ran(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """The notifier stamps a row and commits in its own transaction, holding no item lock.
+
+    That is deliberate: it runs after the sync transaction has committed, so the two are not
+    serialised against each other and a sync carrying a rename reads the row before the stamp
+    lands. A rename written as a whole-row read and write then puts the old value back, and the
+    reviewer is told a second time for one request, which is the single thing that column exists
+    to stop. Writing one column instead has no such window: the statement waits on the row and
+    Postgres re-reads it before applying, so the stamp survives.
+
+    Sequenced rather than timed. The claim holds its transaction open while the sync reads, which
+    is the interleaving that loses the stamp, and a sleep would only sometimes produce it.
+    """
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), PullRequestPolicy())
+    await service.sync(pr_event("opened"))
+    item_id = await db_session.scalar(select(ItemAssignment.tracked_item_id))
+
+    may_read = asyncio.Event()
+    claim_done = asyncio.Event()
+
+    async def claim() -> None:
+        async with db_sessionmaker() as session, session.begin():
+            await ItemAssignmentStore(session).claim_notifications(item_id, ActorRole.REVIEWER)
+            may_read.set()
+            await claim_done.wait()
+
+    async def rename() -> None:
+        await may_read.wait()
+        async with db_sessionmaker() as session, session.begin():
+            renaming = ItemAssignmentStore(session)
+            # Reads the rows while the claim is still uncommitted, so it sees no stamp.
+            reading = asyncio.create_task(
+                renaming.replace(
+                    tracked_item_id=item_id,
+                    role=ActorRole.REVIEWER,
+                    actors=[Actor(login="mona-lisa", github_user_id=200)],
+                )
+            )
+            # Let it get as far as the write, which parks on the row the claim is holding.
+            await asyncio.sleep(0.2)
+            claim_done.set()
+            await reading
+
+    await asyncio.gather(claim(), rename())
+
+    db_session.expire_all()
+    row = await db_session.scalar(
+        select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+    )
+    assert row.github_username == "mona-lisa", "the rename never landed, so this proves nothing"
+    assert row.notified_at is not None, "the rename put the claim back and will ping them twice"
+
+
 async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
     registered: Repository,
     db_sessionmaker: async_sessionmaker,

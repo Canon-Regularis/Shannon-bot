@@ -150,7 +150,7 @@ class TestHandingBackNothing:
     ) -> None:
         log = QueryLog(db_engine)
         try:
-            await ItemAssignmentStore(db_session).release_notifications(1, ActorRole.REVIEWER, [])
+            await ItemAssignmentStore(db_session).release_notifications(1, ActorRole.REVIEWER, {})
         finally:
             log.close()
 

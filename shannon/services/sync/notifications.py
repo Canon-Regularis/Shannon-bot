@@ -76,9 +76,10 @@ class ActorNotifier:
         # nobody for ever. Unshielded, a cancellation here aborts the transaction before it
         # commits and nothing was claimed, which is the outcome worth having. Once this returns
         # there is no await before the guard, so nothing can land in between.
-        logins, mentions = await self._claim(tracked_item_id, guild_id)
-        if not logins:
+        claimed, mentions = await self._claim(tracked_item_id, guild_id)
+        if not claimed:
             return ()
+        logins = tuple(sorted(claimed))
 
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))
@@ -92,7 +93,7 @@ class ActorNotifier:
             # Under cancellation the await returns at once and the release lands a moment later,
             # well before the retry five seconds on.
             with contextlib.suppress(Exception):
-                await asyncio.shield(self._release(tracked_item_id, logins))
+                await asyncio.shield(self._release(tracked_item_id, claimed))
             raise
 
         logger.info("pinged %s %s on tracked item %s", self._role, logins, tracked_item_id)
@@ -100,7 +101,7 @@ class ActorNotifier:
 
     async def _claim(
         self, tracked_item_id: int, guild_id: int
-    ) -> tuple[tuple[str, ...], Mapping[str, int]]:
+    ) -> tuple[Mapping[str, int | None], Mapping[str, int]]:
         """Take the pings nobody has sent yet, and work out how to address them.
 
         The claim answers with the account beside each name, because this is the one mention
@@ -114,10 +115,12 @@ class ActorNotifier:
             if not claimed:
                 return (), {}
             mentions = await self._mentions(session).resolve_many(guild_id=guild_id, people=claimed)
-        return tuple(sorted(claimed)), mentions
+        # The account beside each name goes back to the caller as well, because the hand-back
+        # below has to find these rows again after a gap long enough for a rename to land in.
+        return claimed, mentions
 
-    async def _release(self, tracked_item_id: int, logins: tuple[str, ...]) -> None:
+    async def _release(self, tracked_item_id: int, claimed: Mapping[str, int | None]) -> None:
         async with self._sessionmaker() as session, session.begin():
             await ItemAssignmentStore(session).release_notifications(
-                tracked_item_id, self._role, logins
+                tracked_item_id, self._role, claimed
             )
