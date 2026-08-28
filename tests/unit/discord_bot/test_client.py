@@ -7,8 +7,7 @@ tree does not fail: it stops existing in Discord and nothing anywhere says so.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
+import discord
 import pytest
 from discord import app_commands
 
@@ -125,13 +124,13 @@ class TestBeingToldAThreadHasGone:
         bot = ShannonBot(explain_error=lambda error: "no")
         bot.tell_when_a_thread_goes(lambda thread_id: _record(gone, thread_id))
 
-        await bot.on_thread_delete(_thread(4242))
+        await bot.on_raw_thread_delete(_deleted(4242))
 
         assert gone == [4242]
 
     async def test_nothing_wired_in_is_not_an_error(self) -> None:
         """The client is built before the thing that owns the rows exists."""
-        await ShannonBot(explain_error=lambda error: "no").on_thread_delete(_thread(4242))
+        await ShannonBot(explain_error=lambda error: "no").on_raw_thread_delete(_deleted(4242))
 
     async def test_a_failure_letting_go_does_not_reach_discord(self) -> None:
         """discord.py logs an event handler that raises and carries on, which is a traceback per
@@ -143,13 +142,28 @@ class TestBeingToldAThreadHasGone:
         bot = ShannonBot(explain_error=lambda error: "no")
         bot.tell_when_a_thread_goes(refuses)
 
-        await bot.on_thread_delete(_thread(4242))
+        await bot.on_raw_thread_delete(_deleted(4242))
+
+    def test_the_cached_event_is_deliberately_not_handled(self) -> None:
+        """`on_thread_delete` is the same event with the thread already resolved, and discord.py
+        dispatches it only while that thread is in its cache. It drops one the moment the thread
+        archives, and Discord archives a thread by itself after a few days of quiet, so the
+        cached form covers busy threads and misses every quiet one. Quiet is the whole case this
+        exists for: a card parked in Done, archived by age, then deleted.
+
+        Pinned by absence because the two are one character apart and the wrong one looks
+        correct in every test that dispatches by hand.
+        """
+        assert not hasattr(ShannonBot, "on_thread_delete")
 
 
 async def _record(seen: list[int], thread_id: int) -> None:
     seen.append(thread_id)
 
 
-def _thread(thread_id: int):
-    """Enough of discord.Thread for the listener, which reads one attribute."""
-    return SimpleNamespace(id=thread_id)
+def _deleted(thread_id: int) -> discord.RawThreadDeleteEvent:
+    """The real payload rather than a stand-in, built from the shape Discord sends. Type 11 is
+    a public thread, and the parent and guild are along for the ride."""
+    return discord.RawThreadDeleteEvent(
+        {"id": thread_id, "type": 11, "guild_id": 1, "parent_id": 2}
+    )

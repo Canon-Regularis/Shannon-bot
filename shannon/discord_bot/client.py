@@ -122,7 +122,7 @@ class ShannonBot(discord.Client):
     async def on_ready(self) -> None:
         logger.info("connected to Discord as %s", self.user)
 
-    async def on_thread_delete(self, thread: discord.Thread) -> None:
+    async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
         """Somebody removed a thread. Let go of it before anything tries to write there again.
 
         The only gateway event this bot listens to besides READY, and it earns its place: the
@@ -137,10 +137,17 @@ class ShannonBot(discord.Client):
         Letting go here puts every kind of item back on the same footing: the pointer goes, and
         the next thing to come past opens a replacement.
 
+        The raw event rather than `on_thread_delete`, which is the same thing with the deleted
+        thread already resolved and is dispatched only when discord.py still has that thread
+        cached. It drops one the moment it archives, and Discord archives a thread by itself
+        after a few days of quiet. So the cached form covers busy threads and misses every quiet
+        one, and quiet is the whole case this exists for: a card parked in Done, its thread
+        archived by age, then deleted. Nothing here needs the thread object anyway.
+
         Fires for every thread in the server, most of which are nobody's business here. One
         unindexed lookup that finds nothing is the whole cost of the ones that are not.
         """
         if self._thread_gone is None:
             return
         with contextlib.suppress(Exception):
-            await self._thread_gone(thread.id)
+            await self._thread_gone(payload.thread_id)
