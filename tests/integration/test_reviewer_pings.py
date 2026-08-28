@@ -599,6 +599,54 @@ class TestAReviewerWhoRenamedTheirAccount:
         assert rows[0].github_username == "mona-lisa", "the row kept the name they left behind"
         assert rows[0].notified_at is not None, "the record of having told them was thrown away"
 
+    async def test_two_of_them_swapping_names_does_not_fail_the_delivery(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """One reviewer takes the name another has just freed, and both are on this item.
+
+        GitHub frees a name the moment it is left, so this needs nothing unusual: 300 renames,
+        200 takes what 300 left, and both happened between two events on the item, so both
+        arrive together. Following a rename by giving the row its new name then wrote a name the
+        other row was still holding, and the unique constraint refused it. That raises out of
+        the delivery rather than being handled anywhere, so the item stops mirroring entirely
+        until sixteen attempts have run out over two hours.
+
+        The names are what they are afterwards, and neither is told again, which is the whole
+        reason for following a rename at all.
+        """
+        await notifying_sync_service.sync(
+            pr_event(
+                "opened",
+                requested_reviewers=[payloads.user("mona", 200), payloads.user("hub", 300)],
+            )
+        )
+        told = len(threads.posts)
+
+        await notifying_sync_service.sync(
+            pr_event(
+                "labeled",
+                requested_reviewers=[payloads.user("hub", 200), payloads.user("mona", 300)],
+            )
+        )
+
+        assert threads.posts[told:] == [], "it announced a request nobody made again"
+        db_session.expire_all()
+        rows = (
+            await db_session.scalars(
+                select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+            )
+        ).all()
+        assert sorted((row.github_user_id, row.github_username) for row in rows) == [
+            (200, "hub"),
+            (300, "mona"),
+        ]
+        assert all(row.notified_at is not None for row in rows), "a record of telling them went"
+
     async def test_somebody_genuinely_leaving_still_loses_their_row(
         self,
         registered: Repository,

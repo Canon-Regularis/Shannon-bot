@@ -86,12 +86,28 @@ class ItemAssignmentStore:
                 login,
             )
 
-        existing = {row.github_username for row in rows} | {
-            row.github_username for row in renamed.values()
+        # What a renamed person's new row is written with. The rename drops the old row and
+        # writes a fresh one carrying these forward, rather than giving the row the new name
+        # where it sits. Two people on one item can swap names in a single payload, one taking
+        # the name the other has just freed, and an update in place then breaks the unique
+        # constraint on whichever of the two Postgres writes first: the delivery fails outright
+        # and the item stops mirroring until sixteen attempts have run out. Clearing every old
+        # name before writing any new one cannot, and needs no reasoning about the order.
+        #
+        # The row's own age is not carried, because nothing reads it. These four are what the
+        # row is for.
+        carried = {
+            login: {
+                "github_user_id": wanted[login],
+                "requested_at": row.requested_at,
+                "notified_at": row.notified_at,
+                "fulfilled_at": row.fulfilled_at,
+            }
+            for login, row in renamed.items()
         }
-        kept = {row.github_username for row in renamed.values()}
 
-        removed = existing - wanted.keys() - kept
+        existing = {row.github_username for row in rows}
+        removed = (existing - wanted.keys()) | {row.github_username for row in renamed.values()}
         if removed:
             await self._session.execute(
                 delete(ItemAssignment).where(
@@ -101,29 +117,32 @@ class ItemAssignmentStore:
                 )
             )
 
-        # After the deletes, so a name freed by somebody leaving is available to whoever the
-        # rename is bringing to it.
-        for login, row in renamed.items():
-            row.github_username = login
-        if renamed:
-            await self._session.flush()
-
-        added = sorted(wanted.keys() - existing - set(renamed))
-        if added:
+        # After the deletes, in one statement, so a name freed by anybody at all is available to
+        # whoever is arriving at it.
+        writing = [
+            {
+                "tracked_item_id": tracked_item_id,
+                "github_username": login,
+                "role_type": role,
+                "github_user_id": wanted[login],
+                "requested_at": as_of,
+                "notified_at": None,
+                "fulfilled_at": None,
+            }
+            for login in sorted(wanted.keys() - existing - renamed.keys())
+        ] + [
+            {
+                "tracked_item_id": tracked_item_id,
+                "github_username": login,
+                "role_type": role,
+                **stamps,
+            }
+            for login, stamps in sorted(carried.items())
+        ]
+        if writing:
             await self._session.execute(
                 pg_insert(ItemAssignment)
-                .values(
-                    [
-                        {
-                            "tracked_item_id": tracked_item_id,
-                            "github_username": login,
-                            "github_user_id": wanted[login],
-                            "role_type": role,
-                            "requested_at": as_of,
-                        }
-                        for login in added
-                    ]
-                )
+                .values(writing)
                 .on_conflict_do_nothing(constraint="uq_item_assignments_item_user_role")
             )
 
