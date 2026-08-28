@@ -3622,3 +3622,101 @@ The failures share a shape. Each fix was correct about the case it was written f
 applied through a condition wider than that case: a policy's None, a cached event, a method
 nobody called. The tests written alongside each one exercised the case it was written for, so
 they all passed.
+
+## A fifteenth look, at the fourteenth
+
+Three of these lenses had been scheduled twice and killed twice by an account limit, so contention,
+idempotency under retry, and the handovers between subsystems had never been checked at all. The
+fourth was pointed at the four fixes made hours earlier, on the reasoning that a correction from
+somebody working fast is worth no more than what it corrected.
+
+Seven stood up. Five of them are in one file, and four of those are the rename fix from the day
+before, which turns out to have been worse than the crash it replaced.
+
+### A fix that traded a loud failure for two silent ones
+
+Following a rename by dropping the row and writing a replacement was chosen because it cannot
+break the unique constraint whatever order the rows are in, and that much is true. It was the
+wrong trade twice over.
+
+**It made a wrong identity permanent and quiet.** The rows to delete were the ones the payload no
+longer names, plus the old names of rows matched by id. A row whose login the payload still names
+was kept, even where that login now belongs to somebody else. The replacement then collided with
+it and the insert settled its conflict by doing nothing, which is what that clause is for and is
+the wrong answer here.
+
+The way in is one step past the case the fix was written for: two reviewers on a pull request, one
+of them leaves or renames, and the other takes the login they freed. Both facts arrive on the next
+event, because GitHub frees a name the moment it is left. What survived was one row carrying the
+departed account's id under the current reviewer's name, and a log line saying the rename had been
+followed, which is the opposite of what happened. Nothing repairs it, because no later payload
+rewrites the account on a login that already exists. Re-request the review and the ping goes to the
+person who left, while the person GitHub actually asked is never told. Before the fix, the same
+payload raised out of the delivery: loud, retried, eventually dropped, and it never pinged the
+wrong person.
+
+**It made a rename a read of the whole row followed by a write of it.** The old code changed one
+column, so anything another transaction committed in the meantime survived. Carrying the stamps
+forward in Python reverted them. Nothing serialises those two, deliberately: the notifier stamps
+its rows and commits in its own transaction, after the sync transaction has closed, holding no
+item lock.
+
+The window is not an instant either. Under READ COMMITTED the rename reads the row before the
+claim commits, its delete then waits on the row the claim is holding, and it resumes with the
+value it read. So the window is the notifier's whole claim, and the delete arrives at exactly the
+wrong moment by construction rather than by luck. Lose `notified_at` and the reviewer is told
+twice for one request, which is the one thing that column exists to stop. Lose `fulfilled_at` and
+somebody is asked to review what they have just approved, which the changelog files under known
+and not fixed as needing a database failure to reach. One rename delivery overlapping one ping
+reaches it with none.
+
+Both are gone. Renames go back to one column at a time, and the order problem they were avoiding
+is solved by ordering rather than by rewriting: a rename goes only when nothing holds the name it
+wants, deletions run first, and each rename frees its old name for the next. Two accounts trading
+names outright have no first move, so one of them is parked on a name GitHub cannot issue and
+renamed off it again before the call returns.
+
+Matching was rebuilt underneath it, because that was the actual defect. The account id is asked
+first for everybody who has one, before a single name is looked at; a name match is what happens
+when the id cannot answer, and it cannot take a row the id has already spoken for. A row carrying
+a different account under the name being asked about is somebody else's and is dropped. And a row
+that predates the id column learns it from the payload naming it, which is the only thing that
+can teach it, so it stops being a guess from the next event onwards.
+
+### A ping handed back under a name that had moved
+
+The same root, one method along. The hand-back that returns a claimed ping when the message did
+not go out matched on the login, and the login is not stable across the gap it covers. That gap is
+the whole Discord post: sixty seconds of delivery deadline, and discord.py sleeps through a rate
+limit rather than failing, so a second delivery carrying a rename has room to commit in the middle
+of it. The hand-back then matched no row, and matching no row here leaves the row saying somebody
+was told while nobody was, for good, with nothing to notice it. Where two people on one item had
+traded names it was worse than nothing: it cleared the stamp of whoever now held the released
+name, so one was told twice and the other never.
+
+The claim already reads the account beside each name and was throwing it away one line later. It
+is carried through now, and the hand-back matches on it, falling back to the name only for
+somebody the claim had no id for.
+
+### Known and not fixed
+
+Two findings about the lock on a rebuilt thread, both real, neither fixed, because the fix is a
+design change rather than a patch and the attempt at a shortcut broke something already decided.
+
+A thread this bot opens for a finished pull request is shut on the attempt that opens it and
+never asked about again. Three ordinary things can fail after the thread is claimed onto the row
+and before the lock lands: the lock itself refused, the reviewer ping refused, a thread that opens
+but cannot be written to. Any of them and the retry finds the thread already there, asks for
+nothing, and records the delivery handled. The replacement is left open to replies above a block
+reading DONE, which is the state that fix exists to prevent. Separately, a superseded delivery that
+rebuilt a thread arms the staleness guard against its own retry, so whatever it still owed is
+dropped and the delivery reports itself handled.
+
+The obvious repair is to stop gating it on the thread being new and ask on every delivery. That
+was tried and is wrong: the suite already pins that a lock Discord will never grant must not be
+asked for once a minute for ever, which an earlier look decided and wrote down. Asking again needs
+to be able to tell a lock that was never taken from one that is permanently refused, and neither
+is recorded anywhere. Doing it properly means the row remembering the state of its thread's lock,
+which is a column, a migration, and a change to what `/set_done` and the board poller write. That
+is worth doing deliberately rather than at the end of a long night, on the evidence of what the
+last four hurried fixes cost.
