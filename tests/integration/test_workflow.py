@@ -8,6 +8,7 @@ ordinary shape of a command that has to leave two systems agreeing.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 
 import pytest
@@ -20,6 +21,7 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import Priority, Status
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.errors import GitHubUnavailableError
+from shannon.services import workflow as workflow_module
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.workflow import (
@@ -708,3 +710,87 @@ class TestWhatAReviewFound:
         rebuilt = [t for t in threads.created if t.thread_id not in threads.deleted]
         assert len(rebuilt) == 1
         assert rebuilt[0].locked is True, "the replacement thread was left open"
+
+
+class TestAMoveWhoseLastStepFailed:
+    """The status reaches the row before the thread is rewritten, because the render reads it
+    off the row. So a render that fails leaves the row saying something happened that nobody can
+    see, and the row is put back rather than left saying it.
+
+    A person running the command is told it failed and can run it again. The board poller is the
+    caller that cannot: its whole retry is the column not being written down, and both of its
+    first-look guards read a card whose status already agrees and whose column was never
+    recorded as one nobody has looked at.
+    """
+
+    async def test_the_row_goes_back_to_what_it_said(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        threads.fail_next_update = True
+
+        with pytest.raises(DiscordGatewayError):
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem))
+        assert item.status is Status.NOT_REVIEWED, "the row kept a move nothing carried out"
+
+    async def test_somebody_else_moving_it_first_keeps_their_answer(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        """Putting it back is only right where the row still says what this wrote. Two commands
+        and the poller overlap here by design, and the newer answer is theirs."""
+        threads.fail_next_update = True
+
+        async def moved_by_somebody_else(*args: object, **kwargs: object) -> int | None:
+            async with db_sessionmaker() as session, session.begin():
+                item = await TrackedItemStore(session).get_by_id(1, lock=True)
+                item.status = Status.READY_FOR_MERGE
+            raise DiscordGatewayError("Discord refused to update the thread")
+
+        workflow._rerender = moved_by_somebody_else
+
+        with pytest.raises(DiscordGatewayError):
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem))
+        assert item.status is Status.READY_FOR_MERGE, "it trampled a newer answer"
+
+    async def test_failing_to_put_it_back_is_said_rather_than_raised(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The failure worth reporting is the one that brought us here. If the row cannot be put
+        back either, the person still needs to hear about Discord, and somebody reading the log
+        needs to know the row is now ahead of what Discord shows."""
+        threads.fail_next_update = True
+        locked_reads = 0
+
+        class _TheSecondWriteFails(TrackedItemStore):
+            async def get_by_id(self, tracked_item_id: int, *, lock: bool = False) -> TrackedItem:
+                nonlocal locked_reads
+                locked_reads += lock
+                if lock and locked_reads > 1:
+                    raise RuntimeError("the database went away")
+                return await super().get_by_id(tracked_item_id, lock=lock)
+
+        monkeypatch.setattr(workflow_module, "TrackedItemStore", _TheSecondWriteFails)
+
+        with caplog.at_level(logging.WARNING), pytest.raises(DiscordGatewayError):
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert "could not put tracked item" in caplog.text, "it went back silently ahead of Discord"

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.threads import LocksThread
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
@@ -68,6 +68,10 @@ class _Lock:
     locked: bool
     refused: bool = False
     permanent: bool = False
+    # The thread this was asked to lock is not there any more, which is a different answer from
+    # a refusal: nothing about the lock is wrong and asking again for the same thread can only
+    # fail the same way. What it needs is the thread rebuilt.
+    thread_missing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +145,8 @@ class ItemWorkflow:
             # status but DONE for one. So the only thread this ever opens is one this path shut.
             wants_lock = status is Status.DONE
             lock = await self._set_lock(thread_id, wants_lock)
+            if lock.thread_missing:
+                thread_id, lock = await self._rebuild_and_lock(found, snapshot, change, wants_lock)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -153,7 +159,11 @@ class ItemWorkflow:
 
         await self._apply(found, change)
         previous = await self._store_status(found.tracked_item_id, status)
-        written = await self._rerender(found, snapshot, change)
+        try:
+            written = await self._rerender(found, snapshot, change)
+        except Exception:
+            await self._give_the_status_back(found.tracked_item_id, status, previous)
+            raise
 
         # Touched only when DONE is on one side of the move or the other, so an ordinary status
         # change still costs no Discord call. Moving OUT of DONE has to give the thread back:
@@ -322,6 +332,9 @@ class ItemWorkflow:
         """
         try:
             await self._threads.set_locked(thread_id=thread_id, locked=locked)
+        except ThreadNotFoundError as error:
+            logger.info("thread %s is gone, so there was nothing to lock: %s", thread_id, error)
+            return _Lock(locked=False, refused=True, thread_missing=True)
         except DiscordGatewayError as error:
             logger.warning("could not set the lock on thread %s: %s", thread_id, error.message)
             return _Lock(locked=False, refused=True, permanent=isinstance(error, PermanentError))
@@ -350,6 +363,70 @@ class ItemWorkflow:
             previous = item.status
             item.status = status
             return previous
+
+    async def _rebuild_and_lock(
+        self,
+        found: _Found,
+        snapshot: TrackedSnapshot,
+        change: labels.StatusChange,
+        wants_lock: bool,
+    ) -> tuple[int, _Lock]:
+        """Open a replacement for a thread that has gone, and lock that one instead.
+
+        Only reached from the branch with nothing to write, which is the one branch that skips
+        the render. Everywhere else the render runs first and rebuilds a missing thread on its
+        own, because the write path turns Discord saying a thread is gone into a replacement.
+
+        Here the lock is the only Discord call made, and it is the one step that needs the thread
+        to already exist, so a thread deleted while this bot was not connected to hear about it
+        could be noticed here and repaired nowhere. For a card on a board that never ended: the
+        poller reads a refused lock as a bad moment worth another go, the column is what ends a
+        retry and is deliberately not written, and the one thing that would have rebuilt the
+        thread sits on the other side of the branch. A GitHub read, a thread fetch and two
+        warnings for that card, once a minute, with nothing able to clear it.
+        """
+        rebuilt = await self._rerender(found, snapshot, change)
+        thread_id = rebuilt or found.thread_id
+        return thread_id, await self._set_lock(thread_id, wants_lock)
+
+    async def _give_the_status_back(
+        self, tracked_item_id: int, written: Status, previous: Status
+    ) -> None:
+        """Put the row back when the step after it failed, so the move can be asked for again.
+
+        The status has to be written before the thread is rewritten, because the render reads it
+        off the row. So a render that fails leaves the row saying a move happened that nobody can
+        see, and for a card on a board that is the end of it. The poller's entire retry is the
+        column not being recorded, and both of its first-look guards read a card whose status
+        already agrees and whose column was never written down as one it has never seen. The move
+        it could not finish is written off on the very next poll, and no poll looks at that card
+        again, because nothing else rederives a status from a board. A person running the command
+        at least sees it fail and can run it again; nobody is standing over the poller.
+
+        Only where the row still says what this wrote. Another command or another poll may have
+        moved the item since, and theirs is the newer answer.
+
+        The label on GitHub is left where it was put. Setting it is idempotent, the next attempt
+        sets it again, and somebody reading GitHub in between sees where the card was dragged
+        rather than a value that flickers back on its own.
+
+        Its own failure is said out loud rather than raised, because the failure worth reporting
+        is the one that brought us here.
+        """
+        try:
+            async with self._sessionmaker() as session, session.begin():
+                item = await TrackedItemStore(session).get_by_id(tracked_item_id, lock=True)
+                if item is not None and item.status is written:
+                    item.status = previous
+        except Exception:
+            logger.warning(
+                "could not put tracked item %s back to %s after the move failed; it now reads "
+                "%s with nothing in Discord to show it",
+                tracked_item_id,
+                previous.value,
+                written.value,
+                exc_info=True,
+            )
 
     async def _locate(self, thread_id: int) -> _Found:
         """Which item this thread is, as plain values out of the session.
