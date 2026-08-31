@@ -3720,3 +3720,80 @@ is recorded anywhere. Doing it properly means the row remembering the state of i
 which is a column, a migration, and a change to what `/set_done` and the board poller write. That
 is worth doing deliberately rather than at the end of a long night, on the evidence of what the
 last four hurried fixes cost.
+
+## A sixteenth look, at a retry that disarms itself
+
+Five lenses went out and one came back. The account ran out of quota partway through and took the
+other four with it, along with both verifiers for the one that finished, so what follows was
+checked by hand rather than by an adversary. Tests that prove nothing, clocks, the comment mirror
+and upgrading a database that already has rows in it are all still unexamined.
+
+The lens that did run asked what every side effect does when it happens twice. It found two, both
+in the board poller, and they are the same mistake wearing different clothes: the retry is armed
+by one piece of state, and the failure it is meant to cover changes another piece that makes the
+retry never fire.
+
+### A card's first move, dropped and written off
+
+Moving a card is three steps. The label goes to GitHub, the status goes to the row, and the thread
+is rewritten last. The status has to be written before the render because the render reads it back
+off the row.
+
+When the render fails the poller deliberately does not record the column, and that is the whole of
+the retry: the card comes round again next poll because the column it is in is not the column
+recorded against it. That works for a card that has been seen before.
+
+It cannot work for a card's first move. The failed attempt has already put the new status on the
+row, and a null column means never seen, so the next poll meets a card whose status agrees with
+what the board wants and whose column has never been written down. Both of the guards that exist
+to protect a first look read exactly that pair, and either one writes the column off and returns.
+Nothing calls the move again. GitHub carries the new label, the row carries the new status, and
+the block at the top of the thread carries the old one for good, because nothing else rederives a
+status from a board.
+
+No rearrangement of those guards can tell the two apart, because there is nothing to tell apart:
+a card being seen for the first time and a card whose move half happened look identical in the
+row. So the row stops looking like that. A render that fails now puts the status back where it
+was, and only where the row still says what it wrote, since another command or another poll may
+have moved it since and theirs is the newer answer. The label on GitHub is left where it was put:
+setting it is idempotent, the next attempt sets it again, and somebody reading GitHub in between
+sees where the card was dragged rather than a value that flickers back on its own.
+
+### A card whose thread is gone, asked about for ever
+
+The other one needs the thread deleted while the bot is not connected, so the gateway listener
+never hears it and the row keeps pointing at a thread that is not there. Everything else recovers
+from that, because the write path turns Discord saying a thread is gone into a replacement.
+
+Except the one branch that does not write. A card dragged between two columns standing for the
+same status, which is what renaming a Status field does, or having both Doing and In Progress,
+reaches the branch with nothing to apply. That branch skips the render, which is the only thing
+that would have rebuilt the thread, and goes straight to the lock, which is the one step that
+needs the thread to already exist. So the failure is noticed in the one place that cannot repair
+it.
+
+It is then read as a bad moment worth another go. The column is what ends a retry and is
+withheld, so it never ends: a GitHub read, a thread fetch and two warning lines for that card,
+once a minute, for as long as the board exists, with nothing anywhere able to clear it. That is
+the same unbounded retry the permanent-refusal branch a few lines below was written to prevent,
+reached through a refusal classified as temporary that is in fact permanent.
+
+A thread that is gone is now a different answer from a lock that was refused, and it is answered
+by rebuilding the thread and locking that one instead.
+
+### Not checked
+
+The four lenses that never ran are worth running: tests that would pass with the code broken,
+everything decided by comparing two timestamps, the comment mirror end to end, and an upgrade of a
+database that already has months of rows in it.
+
+The mutation pass over the rewritten assignment store was started and killed partway through, so
+the newest code in that file has had no mutation coverage. Its logic is pinned by tests written
+against reproduced failures, which is stronger evidence than a mutation score, but the two answer
+different questions.
+
+What the lens that did run checked and found sound, so it is not asked again: the note mirror
+under a fault injected at each of its four Discord calls, the review ledger's replay guards,
+`reopen_request` and `reopen_if_newer`, the reviewer ping's claim and hand-back, `get_or_create`
+against two syncs of a new item, the thread pointer's conditional swap, the delivery lease and its
+attempt counting, `/register`, `/set_channel` and `/link`, and the draft half of the poller.
