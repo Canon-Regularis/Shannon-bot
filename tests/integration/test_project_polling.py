@@ -1137,6 +1137,65 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 1, "the lock nobody got round to was written off as done"
         assert threads.threads[thread_id].locked is True
 
+    async def test_a_cards_very_first_move_is_retried_when_discord_drops_it(
+        self, mirrored_pr: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The retry above works because that card had been seen before. The first one cannot.
+
+        A move is several steps: the label goes to GitHub, the status goes to the row, and the
+        thread is rewritten last. When the last step fails the column is deliberately not
+        recorded, so the card comes round again, and that is the whole of the retry.
+
+        For a card nobody has recorded a column for, the failed attempt has already put the
+        status on the row, and a null column means never seen. The next poll reads that pair as
+        the first look at a card that happens to agree with its item, writes the column down and
+        returns. Nothing calls the move again. GitHub carries the new label, the row carries the
+        new status, and the block at the top of the thread carries the old one for good, because
+        nothing else rederives a status from a board.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board)
+        threads.fail_next_update = True
+
+        assert await poller.run_once() == 0, "the move it could not finish was reported as done"
+
+        assert await poller.run_once() == 1, "the card was written off without being moved"
+        block = threads.metadata_of(threads.created[0].thread_id)
+        assert "**Status:** IN_REVIEW" in block, "the thread still shows the old status"
+
+    async def test_a_card_whose_thread_is_gone_does_not_come_round_for_ever(
+        self, mirrored_pr: int, poller_for, threads: FakeThreadGateway, github_client
+    ) -> None:
+        """A thread deleted while the bot is offline leaves the pointer on the row.
+
+        The gateway listener only hears about a deletion it is connected for, so a thread removed
+        during a restart is never let go of. The next thing to touch the item rebuilds it, and for
+        a card that is the re-render inside the move.
+
+        Except where the move has nothing to write. A card dragged between two columns that stand
+        for the same status, which is what renaming a Status field or having both Doing and In
+        Progress does, reaches the branch that skips the render and goes straight to the lock. The
+        lock is the one step that needs the thread to exist, and it cannot be reached without
+        going past the step that would have rebuilt it.
+
+        The refusal is then read as a bad moment worth another go, and the column is what ends a
+        retry, so it never ends: a GitHub read, a Discord fetch and two warnings for that card on
+        every poll, for ever, with nothing able to clear it.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+        opened = threads.created[0].thread_id
+        threads.threads.pop(opened)
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Doing")]
+        await poller.run_once()
+
+        reads = len(github_client.pull_request_calls)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+        assert github_client.pull_request_calls[reads:] == [], "it asks GitHub on every poll"
+
     async def test_a_wrapped_card_listed_twice_is_only_acted_on_once(
         self, mirrored_pr: int, poller_for, github_client
     ) -> None:
