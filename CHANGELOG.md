@@ -3842,3 +3842,48 @@ restart reads exactly that as a card it has never looked at and writes it off. C
 It now catches the stop as well and shields the putting back, so the cancellation cannot interrupt
 that too. This is the same bargain the reviewer ping already makes with its hand-back, for the same
 reason, and the comment there says so.
+
+### Two deliveries GitHub stamped with the same second
+
+Found by the one lens of the seventeenth hunt that survived its quota, and confirmed against a
+live database through the real sync, notifier, policy and parser.
+
+A pull request opened with a reviewer already in the box is two events milliseconds apart, and
+`pull_request.updated_at` has one-second resolution, so both carry the same value. The staleness
+guard reads equal as current deliberately, because several real changes share a second and all of
+them happened. Neither delivery is turned away, so whichever runs last is believed in full,
+including its list of who is on the item.
+
+The worker runs them newest first often enough to matter. One transient Discord error on the first
+does it: the retry goes behind the delivery after it, because the lease skips a row whose next
+attempt is in the future. Two POSTs handled out of order do it too. The plain sequence with
+nothing failing is fine, which is why this had never shown up.
+
+Then the payload from before the request deletes the row the request made. The reviewers line
+reverting to None is a mistake the next delivery puts right. `notified_at` going with the row is
+not: the next ordinary event on the item, a label or an edit or the merge, puts her back with
+nothing saying she has already been told, and asks her again for a review nobody asked for twice.
+On the merge it asks her to review a pull request that has already merged.
+
+The root cause was already recorded two looks earlier and deferred, on the grounds that the real
+repair is an ordering the timestamps do not carry and that the damage is metadata the next
+delivery corrects. The first half of that is still true. The second half was wrong, and this is
+the half that cannot be taken back.
+
+So a row that says it was asked for at or after the payload being applied is not a row that
+payload gets to remove, and only where somebody has already been pinged from it. A row nobody has
+been told about can be deleted and re-added freely: the same next delivery puts it back and pings
+once, which is the right number. What this costs is a reviewer genuinely removed in the same
+second they were asked for, who stays on the item until the next event says otherwise. That is a
+metadata mistake set against a duplicate notification, and which of those to prefer is already
+written down here.
+
+Six tests had to be given real timestamps to keep passing, and all six were wrong in the same way:
+they had somebody added and removed by two events sharing the fixture's single default stamp,
+which is a shape GitHub does not send, since changing the reviewer set is what moves that
+timestamp. The new guard reads that shape as the defect it is.
+
+The other nine timestamp comparisons in the project were swept in the same pass and none could be
+made to bite: the lease and prune boundaries, `now()` as transaction start time, naive datetimes
+getting in anywhere, the two-clock comparisons, and the review ledger's own boundaries. That is
+recorded so the ground is not walked again.
