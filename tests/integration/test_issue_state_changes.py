@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
+from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import Status
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy
@@ -13,6 +14,27 @@ from tests.fakes.threads import FakeThreadGateway
 pytestmark = pytest.mark.integration
 
 CLOSED = {"state": "closed", "closed_at": "2026-08-11T12:00:00Z"}
+
+
+async def test_a_lock_the_payload_asked_for_still_fails_the_delivery(
+    registered: Repository,
+    issue_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    issue_event,
+) -> None:
+    """The other side of stepping over a refusal nobody can wait out.
+
+    A pull request's lock is asked for by the row, and the row can be left saying the thread is
+    not shut, so granting the permission later is enough on its own and the delivery has nothing
+    left to do. An issue's is asked for by the payload, and that delivery is answering something
+    somebody just did. Stepping over it would leave the issue reading Closed in the block with an
+    open thread underneath and nothing recorded anywhere, so it fails and is recorded as failed.
+    """
+    await issue_service.sync(issue_event("opened"))
+    threads.refuses_every_lock = True
+
+    with pytest.raises(DiscordPermissionError):
+        await issue_service.sync(issue_event("closed", **CLOSED))
 
 
 async def test_closing_marks_the_issue_done(

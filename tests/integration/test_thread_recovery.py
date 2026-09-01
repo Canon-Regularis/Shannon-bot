@@ -4,17 +4,17 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
-from shannon.discord_bot.errors import ThreadStartedEmptyError
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror
-from shannon.services.sync.items import ItemSyncService, build_item_sync
+from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -398,6 +398,152 @@ class TestTheStalenessWatermark:
         await service.sync(pr_event("edited", updated_at=newer.isoformat()))
 
         assert (await stored(db_session)).github_updated_at == newer
+
+
+class TestAStaleDeliveryThatRebuiltTheThread:
+    """A delivery from before the close is the only thing left to rebuild a closed issue.
+
+    Nothing else is coming: a closed issue sends no more item events, and the note path needs a
+    comment. So when an old delivery is the one that finds the thread gone, it is the recovery.
+
+    It rebuilds the thread and then owes it a lock, decided from the row because its own payload
+    is out of date. Attaching the thread is committed before any of the Discord work that
+    follows, so the attempt that rebuilds also arms the staleness guard against its own retry.
+    One 503 on the lock and every retry was turned away as superseded, reported as handled, and
+    the owed lock dropped: a closed issue with a thread anybody could reply in, above a block
+    reading Closed, for good.
+    """
+
+    @pytest.fixture
+    def issues(
+        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    ) -> ItemSyncService:
+        return build_item_sync(db_sessionmaker, threads, IssuePolicy())
+
+    async def test_the_retry_is_not_turned_away_while_the_lock_is_owed(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        await issues.sync(issue_event("opened"))
+        await issues.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-11T12:00:00Z",
+                updated_at="2026-08-11T12:00:00Z",
+            )
+        )
+        first = threads.created[0].thread_id
+        assert threads.threads[first].locked is True, "the close never locked it"
+
+        # Somebody deletes the thread and the gateway listener lets go of the pointer.
+        threads.threads.pop(first)
+        item = await stored(db_session)
+        async with db_sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=first)
+
+        # A delivery from before the close, still in the queue. It rebuilds, and the lock fails.
+        stale = issue_event("edited")
+        threads.fail_next_lock = True
+        with pytest.raises(DiscordGatewayError):
+            await issues.sync(stale)
+
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != first, "nothing was rebuilt, so this proves nothing"
+        assert threads.threads[rebuilt].locked is False, "the lock landed, so this proves nothing"
+
+        await issues.sync(stale)
+
+        assert threads.threads[rebuilt].locked is True, "the retry was turned away as stale"
+
+    async def test_it_settles_the_lock_and_nothing_else(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The lock is the only thing a delivery this old is still right about.
+
+        Letting it through to the write instead reaches the block, and the block would be
+        rendered from a payload that is out of date: the assignees, the tags and every mention
+        revert, and for a closed issue nothing comes along afterwards to put them back. Being
+        late about a lock is worth fixing. Being late about everything else is what the guard is
+        for, and an earlier look proved what gets through it.
+        """
+        await issues.sync(issue_event("opened"))
+        await issues.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-11T12:00:00Z",
+                updated_at="2026-08-11T12:00:00Z",
+            )
+        )
+        thread = threads.created[0].thread_id
+        block = threads.metadata_of(thread)
+
+        # As an item closed before this column existed reads, and as one whose lock was refused
+        # reads: the row does not say the thread is shut.
+        item = await stored(db_session)
+        await db_session.execute(
+            update(TrackedItem).where(TrackedItem.id == item.id).values(discord_thread_locked=None)
+        )
+        await db_session.commit()
+        threads.threads[thread].locked = False
+
+        result = await issues.sync(issue_event("edited", labels=[{"name": "wontfix"}]))
+
+        assert result.outcome is SyncOutcome.STALE, "the old payload was believed"
+        assert threads.metadata_of(thread) == block, "an old payload rewrote the block"
+        assert threads.threads[thread].locked is True, "the lock it was owed was dropped"
+
+    async def test_a_thread_already_shut_costs_no_call(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The ordinary stale delivery, which is most of them. The row says the thread is shut,
+        so there is nothing owed and nothing to ask Discord."""
+        await issues.sync(issue_event("opened"))
+        await issues.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-11T12:00:00Z",
+                updated_at="2026-08-11T12:00:00Z",
+            )
+        )
+        settled = len(threads.locks)
+
+        await issues.sync(issue_event("edited"))
+
+        assert threads.locks[settled:] == [], "it asked Discord about a lock already recorded"
+
+    async def test_an_item_nobody_has_finished_costs_no_call(
+        self,
+        registered: Repository,
+        issues: ItemSyncService,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """An open issue's thread is one people are meant to be talking in, so a stale delivery
+        for one is owed nothing at all."""
+        await issues.sync(issue_event("opened", updated_at="2026-08-11T12:00:00Z"))
+        opened = len(threads.locks)
+
+        await issues.sync(issue_event("edited", updated_at="2026-08-11T09:00:00Z"))
+
+        assert threads.locks[opened:] == [], "it went looking for a lock on an open issue"
 
 
 class TestARebuildThatDidNotWorkTheFirstTime:

@@ -13,12 +13,13 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import ThreadNotFoundError
 from shannon.discord_bot.threads import LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Status
-from shannon.domain.errors import WrongPolicyError
+from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.policies import SyncPolicy
@@ -59,7 +60,16 @@ class SyncResult:
 class SyncsItems(Protocol):
     """Mirroring one snapshot, which is all any caller of this path asks for."""
 
-    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult: ...
+    async def sync(self, snapshot: TrackedSnapshot, *, settles_the_lock: bool = True) -> SyncResult:
+        """`settles_the_lock` is False for a caller that takes the lock itself afterwards.
+
+        Only `/set_done` and the commands beside it do, and they own it: they decide the status
+        the lock follows from, they report a refusal to the person who ran them rather than
+        failing everything before it, and they lock the thread the render actually wrote to. A
+        second attempt from in here would take the refusal away from them and fail the command
+        for something they were built to survive.
+        """
+        ...
 
 
 class OpensAndLocksThreads(LocksThread, OpensThreads, Protocol):
@@ -110,7 +120,7 @@ class ItemSyncService:
         self._policy = policy
         self._notifier = notifier
 
-    async def sync(self, snapshot: TrackedSnapshot) -> SyncResult:
+    async def sync(self, snapshot: TrackedSnapshot, *, settles_the_lock: bool = True) -> SyncResult:
         """Bring Discord in line with a snapshot."""
         if snapshot.object_type is not self._policy.object_type:
             # Wiring, not input: a policy paired with the wrong kind of snapshot would file the
@@ -125,6 +135,8 @@ class ItemSyncService:
         decision = await self._record(snapshot)
         # The database step either hands over work to do or answers on its own.
         if isinstance(decision, SyncResult):
+            if decision.outcome is SyncOutcome.STALE:
+                await self._settle_a_lock_still_owed(decision.tracked_item_id, decision.thread_id)
             return decision
         state = decision
 
@@ -143,6 +155,7 @@ class ItemSyncService:
             # open issue always unlocks, so a deleted thread would end its mirror for good.
             with contextlib.suppress(ThreadNotFoundError):
                 await self._threads.set_locked(thread_id=state.thread_id, locked=False)
+                await self._note_the_lock(state.tracked_item_id, state.thread_id, locked=False)
 
         written = await self._binding.write(
             state.target, name=state.thread_name, content=state.metadata
@@ -181,14 +194,29 @@ class ItemSyncService:
         # lock the original never had, and nothing would ever take it off again, which is the
         # thread nobody can answer in that `TicketPolicy.locked` refuses to make.
         #
-        # Only for a thread that was opened, so an ordinary delivery for a finished pull request
-        # still costs no Discord call, which is what answering None was protecting.
-        opened_shut = (
-            written.created and self._policy.lock_lives_in_the_row and state.shut_when_opened
+        # Decided from what the row remembers rather than from whether this attempt was the one
+        # that opened the thread. That was true for exactly one delivery attempt, and three
+        # ordinary things can fail after the thread is claimed onto the row and before the lock
+        # lands: the lock refused, the reviewer ping refused, a thread that opens but cannot be
+        # written to. Any of them and the retry found the thread already there, asked for
+        # nothing, and recorded the delivery handled, which left the replacement open for good.
+        #
+        # An ordinary delivery for a finished pull request still costs no Discord call, because
+        # the row says the thread is already shut. That is what answering None was protecting.
+        #
+        # `written.created` as well as the row, because the row was read before the write and a
+        # thread opened since is not the thread it was describing. `claim_thread` clears the
+        # answer when the pointer moves, so the row catches up a moment later; this is the same
+        # fact, a moment earlier.
+        shut_by_the_row = (
+            settles_the_lock
+            and self._policy.lock_lives_in_the_row
+            and state.shut_when_opened
+            and (written.created or state.thread_locked is not True)
         )
 
-        if asked_for or opened_shut:
-            await self._threads.set_locked(thread_id=handle.thread_id, locked=True)
+        if asked_for or shut_by_the_row:
+            await self._shut(state.tracked_item_id, handle.thread_id, asked_for=asked_for)
 
         return SyncResult(
             outcome=SyncOutcome.SYNCED,
@@ -198,6 +226,76 @@ class ItemSyncService:
             created=written.created,
             notified=notified,
         )
+
+    async def _settle_a_lock_still_owed(self, tracked_item_id: int, thread_id: int | None) -> None:
+        """Shut a thread the item is owed, even where the delivery itself is out of date.
+
+        A superseded delivery is turned away because a newer one has already done the work, and
+        that is right about everything the payload says. It is wrong about the lock exactly once:
+        the rebuild path runs only for an item with no thread, and attaching the thread is
+        committed before the Discord work that follows, so the attempt that rebuilds a deleted
+        thread also arms the guard against its own retry. One 503 on the lock after that and
+        every retry is turned away, reported as handled, and the lock is dropped. A closed issue
+        sends no further event, so nothing else was ever coming for it.
+
+        Only the lock. Letting the delivery through instead reaches the write, and the write
+        rewrites the live thread's block from a payload that is out of date: the reviewers, the
+        assignees, the tags and every mention revert, and for a finished item nothing comes along
+        afterwards to put them back. Being late about a lock is worth fixing; being late about
+        everything else is what the guard is for.
+
+        The row is read again rather than carried down, because the answer wanted here is the
+        row's and not the payload's, and this runs after the transaction that read it has closed.
+        """
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+        # The thread cannot be missing here, because both answers of STALE require the item to
+        # have one, but it is checked with the rest rather than trusted: the cost of being wrong
+        # about that is a Discord call made against nothing.
+        if item is None or thread_id is None or item.discord_thread_locked is True:
+            return
+        if not self._policy.shut_by_the_row(status=item.status, github_state=item.github_state):
+            return
+        await self._shut(tracked_item_id, thread_id, asked_for=False)
+
+    async def _shut(self, tracked_item_id: int, thread_id: int, *, asked_for: bool) -> None:
+        """Close the thread, and write down that it is closed.
+
+        Writing it down is what makes a second attempt possible. The lock used to be asked for
+        only on the delivery attempt that opened the thread, and that fact lives for one attempt:
+        anything failing after the thread was claimed onto the row and before the lock landed
+        left the retry finding a thread already there, asking for nothing, and recording the
+        delivery handled. A finished pull request kept a thread anybody could post in above a
+        block reading DONE, and nothing revisited it.
+
+        A permission this bot has never been granted is a different answer from a bad moment, and
+        only where the row is what asked. Failing the delivery over one would drop it on the first
+        attempt, and every later event for the item would drop the same way, for a thread nobody
+        can shut until somebody grants the permission. It is said and stepped over instead, with
+        the row left saying the thread is not shut, so granting it later is enough on its own. A
+        bad moment still fails the delivery, because that is what gets it another go.
+
+        A payload that asked for the lock fails on either, which is what it did before any of
+        this: that delivery is answering a state change somebody made, and dropping it silently
+        would leave a closed issue looking open with nothing recorded anywhere.
+        """
+        try:
+            await self._threads.set_locked(thread_id=thread_id, locked=True)
+        except PermanentError as refusal:
+            if asked_for:
+                raise
+            logger.warning(
+                "could not shut the thread for tracked item %s: %s", tracked_item_id, refusal
+            )
+            return
+        await self._note_the_lock(tracked_item_id, thread_id, locked=True)
+
+    async def _note_the_lock(self, tracked_item_id: int, thread_id: int, *, locked: bool) -> None:
+        """Its own transaction, because the Discord call it records happens outside one."""
+        async with self._sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).note_the_lock(
+                tracked_item_id, thread_id=thread_id, locked=locked
+            )
 
     async def _still_current(self, tracked_item_id: int, snapshot: TrackedSnapshot) -> bool:
         """Whether a newer sync has been through this item since this one read it.
@@ -457,6 +555,7 @@ class ItemSyncService:
             wants_locked=self._policy.locked(shown),
             locked_from_the_row=superseded,
             shut_when_opened=item.status is Status.DONE,
+            thread_locked=item.discord_thread_locked,
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -580,9 +679,13 @@ class _SyncState:
     # Whether that answer came from the row rather than from the payload, which decides whether
     # the staleness guard below applies to it at all.
     locked_from_the_row: bool
-    # Whether a thread opened by this sync belongs shut. Only consulted for a thread that was
-    # actually opened, and only for a kind whose lock the payload says nothing about.
+    # Whether a thread opened by this sync belongs shut, read off the row's status. Only for a
+    # kind whose lock the payload says nothing about.
     shut_when_opened: bool
+    # What the row remembers this bot last making the lock on the thread it points at. Null means
+    # it has not set one, which is what a thread just opened is and what every row written before
+    # the column existed says.
+    thread_locked: bool | None
 
     @property
     def target(self) -> ThreadTarget:

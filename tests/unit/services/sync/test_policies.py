@@ -14,7 +14,7 @@ from shannon.domain.models import (
     RepositorySnapshot,
 )
 from shannon.services.sync.items import build_item_sync
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 
 REPO = RepositorySnapshot(
     github_repo_id=1,
@@ -99,3 +99,34 @@ class TestAPolicyHandedTheWrongKindOfSnapshot:
 
     async def test_it_is_permanent_so_the_worker_does_not_retry_a_wiring_bug(self) -> None:
         assert issubclass(WrongPolicyError, PermanentError)
+
+
+class TestWhatTheRowAloneSaysAboutTheLock:
+    """Asked where there is no payload to ask instead: a delivery turned away as superseded is
+    refused before anything reads its snapshot, so the row is the only thing that knows whether
+    the item's thread is finished with.
+
+    Each kind answers from a different column, and the differences are the point.
+    """
+
+    def test_a_pull_request_is_finished_when_somebody_says_so(self) -> None:
+        """`/set_done` is the only thing that shuts one, and it writes the status."""
+        policy = PullRequestPolicy()
+
+        assert policy.shut_by_the_row(status=Status.DONE, github_state="open") is True
+        assert policy.shut_by_the_row(status=Status.IN_REVIEW, github_state="closed") is False
+
+    def test_an_issue_is_finished_when_github_closes_it(self) -> None:
+        """Its state, not its status. `/set_done` can put an open issue at DONE, and an open
+        issue's thread is one people are still meant to be talking in."""
+        policy = IssuePolicy()
+
+        assert policy.shut_by_the_row(status=Status.NOT_REVIEWED, github_state="closed") is True
+        assert policy.shut_by_the_row(status=Status.DONE, github_state="open") is False
+
+    def test_a_ticket_is_never_finished_with(self) -> None:
+        """A card in Done is a card somebody can drag back out, and nothing in this bot would
+        ever unlock its thread again."""
+        policy = TicketPolicy()
+
+        assert policy.shut_by_the_row(status=Status.DONE, github_state="open") is False

@@ -64,6 +64,19 @@ class SyncPolicy(Protocol):
         """Whether the thread should be locked, or None to leave it as it is."""
         ...
 
+    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+        """Whether an item in this state belongs in a thread that is shut, from the row alone.
+
+        Asked where there is no payload to ask instead. A delivery turned away as superseded is
+        the case: it is refused before anything reads its snapshot, and the only thing that knows
+        what the item's thread should look like is the row.
+
+        Not the same question as `locked`, which answers about a payload and is allowed to say
+        None. This one has to answer yes or no, because its caller is deciding whether the
+        mirror is finished rather than what to do next.
+        """
+        ...
+
     def thread_name(self, snapshot: TrackedSnapshot) -> str:
         """What the item's Discord thread is called.
 
@@ -119,6 +132,10 @@ class PullRequestPolicy:
         """Pull request threads are never locked automatically; MVP 3 owns that."""
         return None
 
+    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+        """`/set_done` is the only thing that shuts one, and it writes the status."""
+        return status is Status.DONE
+
     def thread_name(self, snapshot: PullRequestSnapshot) -> str:
         return formatting.thread_name(snapshot)
 
@@ -167,6 +184,12 @@ class IssuePolicy:
 
     def locked(self, snapshot: IssueSnapshot) -> bool | None:
         return snapshot.closed
+
+    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+        """The same answer `locked` gives, read from the column the payload writes into rather
+        than from the payload. Not the status: `/set_done` can put an open issue at DONE, and an
+        open issue's thread is one people are still meant to be talking in."""
+        return github_state == "closed"
 
     def thread_name(self, snapshot: IssueSnapshot) -> str:
         return formatting.thread_name(snapshot)
@@ -217,6 +240,10 @@ class TicketPolicy:
         """Left alone. A board column is not a closed state, and a ticket that moves back out of
         Done would be locked in a thread nobody could answer in."""
         return None
+
+    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+        """Never, for the reason above. A card in Done is a card somebody can drag back out."""
+        return False
 
     def thread_name(self, snapshot: TicketSnapshot) -> str:
         """No number in front. A draft item has none, and the board is where it is found."""
