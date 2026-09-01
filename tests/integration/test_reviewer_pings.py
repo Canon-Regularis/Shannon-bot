@@ -148,10 +148,18 @@ async def test_a_removed_and_re_requested_reviewer_is_pinged_again(
     pr_event,
 ) -> None:
     await notifying_sync_service.sync(pr_event("opened"))
-    await notifying_sync_service.sync(pr_event("edited", requested_reviewers=[]))
+    # Three separate things somebody did, and GitHub moves the pull request's timestamp on each
+    # of them. Sharing one stamp is a shape it does not send.
+    await notifying_sync_service.sync(
+        pr_event("edited", requested_reviewers=[], updated_at="2026-08-11T10:30:00Z")
+    )
 
     result = await notifying_sync_service.sync(
-        pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)])
+        pr_event(
+            "review_requested",
+            requested_reviewers=[payloads.user("monalisa", 200)],
+            updated_at="2026-08-11T11:30:00Z",
+        )
     )
 
     assert result is not None
@@ -268,6 +276,56 @@ class _RefusingToPost(FakeThreadGateway):
         if self.refusing:
             raise DiscordGatewayError("Discord refused to post to the thread")
         return await super().post(thread_id=thread_id, content=content)
+
+
+class TestTwoDeliveriesGitHubStampedWithTheSameSecond:
+    """A pull request opened with a reviewer already in the box is two events milliseconds apart.
+
+    `pull_request.updated_at` has one-second resolution, so both carry the same value, and the
+    staleness guard reads equal as current on purpose: several real changes share a second and all
+    of them happened. So neither delivery is turned away and whichever runs last is believed in
+    full, including its list of who is on the item.
+
+    The worker runs them newest first often enough to matter. One transient Discord error on the
+    first is all it takes: the retry goes behind the delivery after it, because the lease skips a
+    row whose next attempt is in the future. The two POSTs arriving out of order does it too.
+
+    Then the payload from before the request deletes the row the request made. The reviewers line
+    reverting is a mistake the next delivery puts right. `notified_at` going with the row is not:
+    the next ordinary event on the item puts her back with nothing saying she has been told, and
+    asks her again for a review nobody asked for twice. On the merge it asks her to review a pull
+    request that has already been merged.
+    """
+
+    async def test_the_older_one_does_not_take_the_ping_back(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        await notifying_sync_service.sync(
+            pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)])
+        )
+        told = len(threads.posts)
+        assert told == 1, "she was never asked, so this proves nothing"
+
+        # The `opened` payload, from before she was asked, carrying the same second.
+        await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]))
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row is not None, "the older payload deleted the request that had just been made"
+        assert row.notified_at is not None, "it kept the row and threw away the record of telling"
+
+        # The next ordinary thing to happen to the pull request, which is where the second ping
+        # would land.
+        await notifying_sync_service.sync(pr_event("labeled", updated_at="2026-08-11T10:30:00Z"))
+
+        assert len(threads.posts) == told, "it asked her again for a review nobody asked for twice"
 
 
 class TestAReviewSubmittedUnderANewName:
@@ -783,7 +841,11 @@ class TestAReviewerWhoRenamedTheirAccount:
 
         # alice is gone and bob is called alice now.
         await notifying_sync_service.sync(
-            pr_event("labeled", requested_reviewers=[payloads.user("alice", 2)])
+            pr_event(
+                "labeled",
+                requested_reviewers=[payloads.user("alice", 2)],
+                updated_at="2026-08-11T10:30:00Z",
+            )
         )
 
         db_session.expire_all()
@@ -834,7 +896,11 @@ class TestAReviewerWhoRenamedTheirAccount:
         await notifying_sync_service.sync(pr_event("opened"))
 
         await notifying_sync_service.sync(
-            pr_event("labeled", requested_reviewers=[payloads.user("somebody-else", 900)])
+            pr_event(
+                "labeled",
+                requested_reviewers=[payloads.user("somebody-else", 900)],
+                updated_at="2026-08-11T10:30:00Z",
+            )
         )
 
         db_session.expire_all()

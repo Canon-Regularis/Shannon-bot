@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import ItemAssignment
 from shannon.domain.enums import ActorRole
 from shannon.domain.models import Actor
+from shannon.domain.time import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,11 @@ class ItemAssignmentStore:
         # Whoever is left over is not on the item any more, under any name. Their names are
         # freed here, before any rename below is allowed to take one.
         kept = {row.id for row in mine.values() if row is not None}
-        removed = sorted(row.github_username for row in rows if row.id not in kept)
+        removed = sorted(
+            row.github_username
+            for row in rows
+            if row.id not in kept and not self._already_told_and_newer(row, as_of)
+        )
         if removed:
             await self._session.execute(
                 delete(ItemAssignment).where(
@@ -113,6 +118,38 @@ class ItemAssignmentStore:
                 )
                 .on_conflict_do_nothing(constraint="uq_item_assignments_item_user_role")
             )
+
+    @staticmethod
+    def _already_told_and_newer(row: ItemAssignment, as_of: datetime | None) -> bool:
+        """Whether this payload is too old to be asked to remove this row.
+
+        GitHub stamps `pull_request.updated_at` to the second, and an item opened with a reviewer
+        already on it is two deliveries milliseconds apart carrying the same one. The staleness
+        guard reads equal as current on purpose, because several real changes share a second, so
+        neither delivery is turned away and whichever runs last is believed in full. The worker
+        runs them newest first often enough: one transient Discord error puts a delivery behind
+        the one after it, since the lease skips a row whose next attempt is in the future.
+
+        So the older payload, which was written before the reviewer was asked for, deletes the
+        row the newer one made. On its own that is a reviewers line the next delivery puts right.
+        What goes with the row is `notified_at`, and that is not recoverable: the next ordinary
+        event on the item, a label or an edit or the merge, puts the person back with nothing
+        saying they have already been told, and pings them a second time for a review nobody
+        asked for twice. On the merge it asks them to review something already merged.
+
+        Only for a row somebody has been pinged from, which is the half that cannot be taken
+        back. A row nobody has been told about can be deleted and re-added freely: it is put back
+        by the same next delivery and pinged once, which is the right number.
+
+        Equal counts as too old, because equal is exactly the case this exists for and there is
+        nothing in the two timestamps to separate them. The cost is a reviewer genuinely removed
+        in the same second they were asked for, who stays on the item until the next event says
+        otherwise. That is a metadata mistake against a duplicate notification, and this project
+        has already written down which of those it would rather make.
+        """
+        if row.notified_at is None or as_of is None or row.requested_at is None:
+            return False
+        return as_utc(row.requested_at) >= as_utc(as_of)
 
     @staticmethod
     def _match(
@@ -159,7 +196,7 @@ class ItemAssignmentStore:
                 and row.github_user_id is not None
                 and row.github_user_id != account
             )
-            if row is None or row.id in claimed:
+            if row is None or disputed or row.id in claimed:
                 mine[login] = None
                 continue
             mine[login] = row
