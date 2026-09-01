@@ -3887,3 +3887,79 @@ The other nine timestamp comparisons in the project were swept in the same pass 
 made to bite: the lease and prune boundaries, `now()` as transaction start time, naive datetimes
 getting in anywhere, the two-clock comparisons, and the review ledger's own boundaries. That is
 recorded so the ground is not walked again.
+
+## The thread lock, remembered on the row
+
+The two defects the sixteenth look wrote down and did not fix. Both are about the same thing: the
+lock on a thread this bot opened was decided from something that lived for one delivery attempt.
+
+### A lock asked for once and never again
+
+`opened_shut` was gated on the thread having been created by this attempt. Three ordinary things
+can fail after the thread is claimed onto the row and before the lock lands: the lock itself
+refused, the reviewer ping refused, a thread that opens but cannot be written to. Any of them and
+the retry found a thread already there, asked for nothing, and recorded the delivery handled. A
+finished pull request kept a thread anybody could post in above a block reading DONE, and nothing
+revisited it, because nothing else locks a pull request.
+
+Asking Discord on every delivery instead was tried first and is wrong: a lock a permission will
+never grant would be asked for again on every event, which is the unbounded retry an earlier look
+wrote a guard against on the board poller. The suite already pinned that, and said so.
+
+So the row remembers. `discord_thread_locked` is what this bot last made the lock on the thread it
+currently points at, cleared whenever the pointer moves, because a replacement starts open however
+the one it replaced ended. Null is read as "not shut", so an existing row for a finished item is
+locked once on its next delivery and then left alone.
+
+A permission that will never be granted is stepped over rather than raised, but only where the row
+is what asked. A payload that asked still fails, which is what it did before: that delivery is
+answering a state change somebody made, and dropping it silently would leave a closed issue looking
+open with nothing recorded anywhere.
+
+### A stale delivery that dropped the lock it owed
+
+The rebuild path runs only for an item with no thread, and attaching the thread is committed before
+the Discord work that follows. So the attempt that rebuilds a deleted thread also arms the
+staleness guard against its own retry: one 503 on the lock after that and every retry was turned
+away as superseded, reported as handled, and the lock dropped. A closed issue sends no further
+event, so nothing else was ever coming for it.
+
+A delivery turned away now settles the lock and nothing else.
+
+The first attempt at this let the delivery through the guard instead, which was much too much and
+is worth recording as the mistake it was. Everything past that guard reaches the write, and the
+write rewrites the live thread's block from a payload that is out of date: the reviewers, the
+assignees, the tags and every mention revert, and for a finished item nothing comes along to put
+them back. Being late about a lock is worth fixing. Being late about everything else is what the
+guard is for.
+
+### Who owns the lock
+
+`/set_status` and the commands beside it own the lock on a pull request. They decide the status it
+follows from, they report a refusal to the person who ran them rather than failing everything
+before it, and they lock the thread the render actually wrote to. The sync taking a second one on
+that path would take the refusal away from them and fail a command for something it was built to
+survive, which is a decision already recorded here.
+
+So the sync is told to leave it, by the callers that take it, and those callers write down what
+they made it. Only those: `/set_priority` goes through the same render and touches no lock, so
+telling the sync to leave it there would mean nobody shut a thread it had just rebuilt.
+
+### What the review caught
+
+This change went to three reviewers before it was handed over, and they were right to be there.
+Two defects in it were found that the tests, the coverage gate and the author had all missed.
+
+`claim_thread` cleared the new column on every ordinary delivery, not only when the pointer moved.
+The write path swaps a thread for itself after every update, to put the metadata message id back
+when Discord has moved it, and that swap matched the same condition. So the column was wiped
+constantly: the sync asked Discord to shut a thread it had already shut on every other delivery,
+and the guard above stood open for every finished item. The whole change rested on a column that
+never held its value.
+
+And `/set_priority` was left rebuilding a finished pull request's thread and leaving it open,
+because the instruction to leave the lock alone was put in the shared render rather than on the two
+callers that take it.
+
+Both are the same kind of mistake and it is worth naming: a condition written from what a function
+is called for rather than from everywhere it is called.
