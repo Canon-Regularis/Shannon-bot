@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.threads import LocksThread
@@ -149,6 +150,7 @@ class ItemWorkflow:
             lock = await self._set_lock(thread_id, wants_lock)
             if lock.thread_missing:
                 thread_id, lock = await self._rebuild_and_lock(found, snapshot, change, wants_lock)
+            await self._write_the_lock_down(found.tracked_item_id, thread_id, lock)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -162,7 +164,7 @@ class ItemWorkflow:
         await self._apply(found, change)
         previous = await self._store_status(found.tracked_item_id, status)
         try:
-            written = await self._rerender(found, snapshot, change)
+            written = await self._rerender(found, snapshot, change, settles_the_lock=False)
         except BaseException:
             # BaseException because being cancelled counts as a failure here. The poller is
             # cancelled where it stands when the process is asked to stop, and a card being
@@ -183,11 +185,14 @@ class ItemWorkflow:
         # commands to move it back are all allowed and all reported success, and left the thread
         # shut against the discussion they had just reopened.
         wants_lock = status is Status.DONE
+        touched = wants_lock or previous is Status.DONE
         lock = (
             await self._set_lock(written or thread_id, wants_lock)
-            if wants_lock or previous is Status.DONE
+            if touched
             else _Lock(locked=False)
         )
+        if touched:
+            await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
@@ -308,7 +313,12 @@ class ItemWorkflow:
             await self._github.add_label(found.owner, found.name, found.number, change.add)
 
     async def _rerender(
-        self, found: _Found, snapshot: TrackedSnapshot, change: labels.LabelChange
+        self,
+        found: _Found,
+        snapshot: TrackedSnapshot,
+        change: labels.LabelChange,
+        *,
+        settles_the_lock: bool = True,
     ) -> int | None:
         """Bring the thread in line, through the same path a webhook takes.
 
@@ -320,7 +330,9 @@ class ItemWorkflow:
         was run in, and is not when somebody deleted that thread in between: the sync opens a
         replacement, and locking the id the command arrived on would lock nothing.
         """
-        result = await self._kinds[found.object_type].sync.sync(_relabelled(snapshot, change))
+        result = await self._kinds[found.object_type].sync.sync(
+            _relabelled(snapshot, change), settles_the_lock=settles_the_lock
+        )
         return result.thread_id
 
     async def _set_lock(self, thread_id: int, locked: bool) -> _Lock:
@@ -375,6 +387,28 @@ class ItemWorkflow:
             item.status = status
             return previous
 
+    async def _write_the_lock_down(self, tracked_item_id: int, thread_id: int, lock: _Lock) -> None:
+        """Tell the row what this command just made the thread, so the sync path stops asking.
+
+        These commands own the lock on a pull request: nothing else takes one, and the sync is
+        told to leave it alone on this path so a refusal reaches the person who ran the command
+        rather than failing everything before it. The row is how the two halves agree. Without
+        this it never hears, so it goes on reading a finished pull request as one whose thread
+        has not been shut: every later delivery asks Discord to shut a thread already shut, and
+        the staleness guard, which lets a delivery through while a lock is owed, lets every
+        superseded delivery for that item straight past a guard that exists to stop an old
+        payload overwriting newer state.
+
+        Nothing is written for a refusal. The thread is not where it was asked to be, and the row
+        saying otherwise is the one mistake that cannot be recovered from here.
+        """
+        if lock.refused:
+            return
+        async with self._sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).note_the_lock(
+                tracked_item_id, thread_id=thread_id, locked=lock.locked
+            )
+
     async def _rebuild_and_lock(
         self,
         found: _Found,
@@ -396,7 +430,7 @@ class ItemWorkflow:
         thread sits on the other side of the branch. A GitHub read, a thread fetch and two
         warnings for that card, once a minute, with nothing able to clear it.
         """
-        rebuilt = await self._rerender(found, snapshot, change)
+        rebuilt = await self._rerender(found, snapshot, change, settles_the_lock=False)
         thread_id = rebuilt or found.thread_id
         return thread_id, await self._set_lock(thread_id, wants_lock)
 

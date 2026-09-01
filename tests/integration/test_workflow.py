@@ -22,7 +22,7 @@ from shannon.domain.enums import Priority, Status
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.errors import GitHubUnavailableError
 from shannon.services import workflow as workflow_module
-from shannon.services.sync.items import ItemSyncService, build_item_sync
+from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.workflow import (
     ItemWorkflow,
@@ -679,6 +679,103 @@ class TestWhatAReviewFound:
         rebuilt = threads.created[-1].thread_id
         assert rebuilt != thread_id, "nothing was rebuilt, so this proves nothing"
         assert threads.threads[rebuilt].locked is True, "a finished item got an open thread"
+
+    async def test_a_lock_missed_on_the_rebuild_is_taken_on_the_next_delivery(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """The lock was asked for on the one attempt that opened the thread, and never again.
+
+        That fact lives for a single delivery attempt. Three ordinary things can fail after the
+        thread is claimed onto the row and before the lock lands: the lock refused, the reviewer
+        ping refused, a thread that opens but cannot be written to. Any of them and the retry
+        found a thread already there, asked for nothing, and recorded the delivery handled. The
+        replacement was left open to replies above a block reading DONE, permanently, because
+        nothing else locks a pull request.
+
+        The row remembers now, so any later delivery finishes what the first one started.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        threads.threads.pop(thread_id)
+
+        sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+        threads.fail_next_lock = True
+        with pytest.raises(DiscordGatewayError):
+            await sync.sync(pr_event("edited", title="Rebuilt after somebody deleted the thread"))
+
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != thread_id, "nothing was rebuilt, so this proves nothing"
+        assert threads.threads[rebuilt].locked is False, "the lock landed, so this proves nothing"
+
+        await sync.sync(
+            pr_event(
+                "edited",
+                title="Rebuilt after somebody deleted the thread",
+                updated_at="2026-08-11T10:30:00Z",
+            )
+        )
+
+        assert threads.threads[rebuilt].locked is True, "the lock nobody got round to was lost"
+
+    async def test_set_priority_rebuilding_one_brings_it_back_shut(
+        self,
+        registered: Repository,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Only the commands that take the lock themselves tell the sync to leave it alone.
+
+        `/set_status` does, and reports a refusal to the person who ran it rather than failing
+        everything before it. `/set_priority` does not touch the lock at all, so telling the sync
+        to leave it would mean nobody shut a thread it had just rebuilt: a finished pull request
+        would come back open to replies above a block reading DONE, which is the thing this pair
+        of fixes exists to stop, reintroduced through the other command.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        threads.threads.pop(thread_id)
+
+        await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != thread_id, "nothing was rebuilt, so this proves nothing"
+        assert threads.threads[rebuilt].locked is True, "a finished item got an open thread"
+
+    async def test_a_lock_no_permission_will_ever_grant_does_not_fail_the_delivery(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        caplog: pytest.LogCaptureFixture,
+        pr_event,
+    ) -> None:
+        """A permission is not a bad moment, and this one is asked for by the row.
+
+        Failing over it would drop the delivery on the first attempt, and every later event for
+        the item would drop the same way, for a thread nobody can shut until somebody grants the
+        permission. Everything else in the delivery has already landed by then.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        threads.threads.pop(thread_id)
+
+        sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+        threads.refuses_every_lock = True
+
+        with caplog.at_level(logging.WARNING):
+            result = await sync.sync(pr_event("edited", title="Rebuilt"))
+
+        assert result.outcome is SyncOutcome.SYNCED, "one permission failed the whole delivery"
+        assert "could not shut the thread" in caplog.text, "it gave up on the lock silently"
 
     async def test_a_replacement_for_an_unfinished_one_is_left_open(
         self,
