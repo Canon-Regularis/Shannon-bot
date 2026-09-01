@@ -179,7 +179,9 @@ class TestClosingATeamsRequest:
         fresh ping if the team is ever asked again."""
         await notifying.sync(asked_of("backend", "design"))
 
-        await notifying.sync(asked_of("backend"))
+        # Later, because dropping a team is a separate thing somebody did and GitHub moves the
+        # pull request's timestamp for it.
+        await notifying.sync(asked_of("backend", at="2026-08-11T10:30:00Z"))
 
         db_session.expire_all()
         rows = (

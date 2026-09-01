@@ -99,7 +99,11 @@ async def test_a_reassignment_reaches_the_metadata_and_the_database(
     await deliver(
         tracked,
         "issues",
-        payloads.issue_event("assigned", assignees=[payloads.user("monalisa", 200)]),
+        payloads.issue_event(
+            "assigned",
+            assignees=[payloads.user("monalisa", 200)],
+            updated_at="2026-08-11T10:30:00Z",
+        ),
         delivery="i1",
     )
 
@@ -180,7 +184,10 @@ async def test_removing_an_assignee_clears_it_from_the_metadata(
 ) -> None:
     """Removals used to wait for some later event to correct the thread."""
     await deliver(
-        tracked, "issues", payloads.issue_event("unassigned", assignees=[]), delivery="i1"
+        tracked,
+        "issues",
+        payloads.issue_event("unassigned", assignees=[], updated_at="2026-08-11T10:30:00Z"),
+        delivery="i1",
     )
 
     assert "**Assignees:** None" in threads.metadata_of(threads.created[0].thread_id)
