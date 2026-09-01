@@ -4,7 +4,7 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -159,7 +159,7 @@ class ItemAssignmentStore:
                 and row.github_user_id is not None
                 and row.github_user_id != account
             )
-            if row is None or disputed or row.id in claimed:
+            if row is None or row.id in claimed:
                 mine[login] = None
                 continue
             mine[login] = row
@@ -289,7 +289,12 @@ class ItemAssignmentStore:
         )
 
     async def mark_fulfilled(
-        self, tracked_item_id: int, role: ActorRole, github_username: str, when: datetime | None
+        self,
+        tracked_item_id: int,
+        role: ActorRole,
+        github_username: str,
+        when: datetime | None,
+        account: int | None = None,
     ) -> bool:
         """Record that the review this row asked for has been submitted.
 
@@ -299,6 +304,14 @@ class ItemAssignmentStore:
         they just approved. `reopen_if_newer` compares a later request against this stamp,
         which is GitHub's clock, not ours.
 
+        Matched by account where the row knows one, because the two sides of this comparison are
+        further apart in time than they look. The row carries the name the reviewer had when
+        GitHub asked them; the review carries the name they have now. Nothing between the two
+        updates the row, since a rename reaches this bot on the next `pull_request` event and
+        submitting a review does not send one. So a reviewer who renamed closed nothing, and the
+        request stayed open with the ping still owed: the next ordinary event asked them to review
+        what they had already reviewed, which is the one thing this stamp exists to stop.
+
         Never onto a request made since the review. This handler runs before its Discord post and
         again on every retry of the delivery, so a re-request made during a review delivery's
         backoff was closed a second time by the next attempt: the stamp read as an answered
@@ -307,12 +320,23 @@ class ItemAssignmentStore:
         review's own timestamp is on.
         """
         submitted = when or func.now()
+        by_name = ItemAssignment.github_username == github_username.lower()
+        # A deleted account arrives with no id, and a row written before the column existed has
+        # none either. Both fall back to the name, which is what they were matched on before.
+        same_person = (
+            by_name
+            if account is None
+            else or_(
+                ItemAssignment.github_user_id == account,
+                and_(ItemAssignment.github_user_id.is_(None), by_name),
+            )
+        )
         result = await self._session.execute(
             update(ItemAssignment)
             .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
                 ItemAssignment.role_type == role,
-                ItemAssignment.github_username == github_username.lower(),
+                same_person,
                 or_(
                     ItemAssignment.requested_at.is_(None),
                     ItemAssignment.requested_at <= submitted,

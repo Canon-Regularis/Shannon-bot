@@ -62,7 +62,11 @@ class ReviewRequestLedger:
             # stamps on the next ordinary event with a later timestamp and pinged the role again,
             # once per review round, for a request nobody had answered or re-made.
             cleared = await ItemAssignmentStore(session).mark_fulfilled(
-                item.id, ActorRole.REVIEWER, snapshot.author.login, snapshot.created_at
+                item.id,
+                ActorRole.REVIEWER,
+                snapshot.author.login,
+                snapshot.created_at,
+                snapshot.author.github_user_id,
             )
 
         if cleared:

@@ -270,6 +270,70 @@ class _RefusingToPost(FakeThreadGateway):
         return await super().post(thread_id=thread_id, content=content)
 
 
+class TestAReviewSubmittedUnderANewName:
+    """The review closes the request by matching a login, and the reviewer may have changed it.
+
+    The row records the name they had when GitHub asked them. The review payload carries the name
+    they have now, and nothing between the two updates the row: a rename reaches this bot only on
+    the next `pull_request` event, and a review does not send one. So the login on the row and the
+    login on the review disagree for as long as that takes, which is usually until somebody
+    touches the pull request again.
+
+    The account id is on both and says they are the same person. Every other place that matches a
+    stored person was moved onto it; this one closes the review request and was left behind.
+    """
+
+    async def test_the_request_is_closed_anyway(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        await sync_service.sync(pr_event("opened"))
+
+        # Same account, the name GitHub uses now.
+        renamed = payloads.pull_request_review_event()
+        renamed["review"]["user"] = payloads.user("mona-lisa", 200)
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", renamed)
+        )
+
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row.fulfilled_at is not None, "the review they gave closed nothing"
+
+    async def test_so_they_are_not_asked_for_it_again(
+        self,
+        registered: Repository,
+        db_sessionmaker,
+        sync_service: ItemSyncService,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """What the stamp is for. Synced without the notifier first, so the ping is still owed
+        when the review lands, which is what happens when the ping was handed back after Discord
+        refused it. A request the review has answered is not owed one.
+        """
+        await sync_service.sync(pr_event("opened"))
+
+        renamed = payloads.pull_request_review_event()
+        renamed["review"]["user"] = payloads.user("mona-lisa", 200)
+        await ReviewRequestLedger(db_sessionmaker).fulfilled(
+            parse_review_event("submitted", renamed)
+        )
+
+        await notifying_sync_service.sync(pr_event("labeled"))
+
+        assert [content for _, content in threads.posts] == [], (
+            "it asked them to review what they had already reviewed"
+        )
+
+
 class TestReRequestingAReviewAfterOneWasGiven:
     """The single moment the reviewer ping exists for, and it used to say nothing at all.
 
