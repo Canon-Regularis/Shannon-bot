@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -102,6 +103,15 @@ class TrackedItem(TimestampMixin, Base):
     github_state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # What this bot last made the lock on the thread it currently points at. Null means it has
+    # not set one, which is what a thread just opened is. Cleared whenever the pointer moves,
+    # because a replacement thread starts open however the one it replaced ended.
+    #
+    # Here because the lock was otherwise decided from something that lives for one delivery
+    # attempt: whether that attempt was the one that opened the thread. Anything failing after
+    # the thread was claimed onto the row and before the lock landed lost the lock for good, and
+    # asking Discord on every delivery instead would retry a refused permission for ever.
+    discord_thread_locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[Status] = mapped_column(
         varchar_enum(Status, "item_status"), nullable=False, default=Status.NOT_REVIEWED
     )

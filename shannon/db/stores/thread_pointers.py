@@ -37,10 +37,30 @@ class ThreadPointerStore:
                 TrackedItem.id == tracked_item_id,
                 TrackedItem.discord_thread_id == dead_thread_id,
             )
-            .values(discord_thread_id=None, discord_message_id=None)
+            # The lock goes with the pointer. Whatever this bot had made the dead thread, the
+            # replacement starts open.
+            .values(discord_thread_id=None, discord_message_id=None, discord_thread_locked=None)
             .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)
+
+    async def note_the_lock(self, tracked_item_id: int, *, thread_id: int, locked: bool) -> None:
+        """Record what this bot has just made the lock on a thread.
+
+        Against the thread it was made on, like everything else here, so a sync that locked a
+        thread another sync has since replaced does not describe the replacement. That one is
+        open, and the row saying otherwise would leave a finished item with a thread anybody can
+        post in and nothing left to notice it.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.id == tracked_item_id,
+                TrackedItem.discord_thread_id == thread_id,
+            )
+            .values(discord_thread_locked=locked)
+            .execution_options(synchronize_session=False)
+        )
 
     async def claim_thread(
         self,
@@ -61,13 +81,26 @@ class ThreadPointerStore:
         keeps an item pointing at one thread. `replacing` is None on first creation and the id
         of the dead thread when rebuilding, and `IS NOT DISTINCT FROM` makes those one case.
         """
+        moving = {"discord_thread_id": thread_id, "discord_message_id": message_id}
+        if replacing != thread_id:
+            # The item is being pointed at a different thread, so whatever this bot had made the
+            # old one says nothing about the new one, which starts open.
+            #
+            # Only when it is a different thread. The write path swaps a thread for itself after
+            # every ordinary update, to put the metadata message id back when Discord moved it,
+            # and that is not a new thread. Clearing on those said every thread was freshly
+            # opened, which is the state that means the lock has not been settled: the sync asked
+            # Discord to shut a thread it had already shut on every delivery, and the staleness
+            # guard let every superseded delivery for a finished item straight through.
+            moving["discord_thread_locked"] = None
+
         await self._session.execute(
             update(TrackedItem)
             .where(
                 TrackedItem.id == tracked_item_id,
                 TrackedItem.discord_thread_id.is_not_distinct_from(replacing),
             )
-            .values(discord_thread_id=thread_id, discord_message_id=message_id)
+            .values(**moving)
             .execution_options(synchronize_session=False)
         )
         row = (
