@@ -3797,3 +3797,48 @@ under a fault injected at each of its four Discord calls, the review ledger's re
 `reopen_request` and `reopen_if_newer`, the reviewer ping's claim and hand-back, `get_or_create`
 against two syncs of a new item, the thread pointer's conditional swap, the delivery lease and its
 attempt counting, `/register`, `/set_channel` and `/link`, and the draft half of the poller.
+
+## A seventeenth look, at the last place a name was still an identity
+
+Found by reading rather than by a lens, on the reasoning that the fifteenth look moved two methods
+off matching people by name and nobody had checked whether it had found all of them. It had not.
+
+### A review submitted under a new name closed nothing
+
+`mark_fulfilled` is what records that the review a row asked for has been given, and it found the
+row by login. The two sides of that comparison are further apart in time than they look. The row
+carries the name the reviewer had when GitHub asked them. The review carries the name they have
+now. Nothing between the two updates the row, because a rename reaches this bot on the next
+`pull_request` event and submitting a review does not send one, so the two disagree until somebody
+touches the pull request again.
+
+The reviewer renames, then reviews. No row matches, the stamp is not written, and the request
+stays open with the ping still owed. The next ordinary event on the item then asks them to review
+what they have already reviewed, which is the one thing that stamp exists to stop. Proved through
+the real ledger and the real notifier:
+
+    it asked them to review what they had already reviewed
+    ['Review requested from monalisa.'] != []
+
+It is matched by account now, where the row knows one, falling back to the name for a row written
+before that column existed and for a deleted account, which arrives with no id at all.
+
+The two neighbouring methods that also take logins, `reopen_request` and `reopen_if_newer`, are
+fine and were left alone. They run in the same transaction as `replace` and after it, so the rows
+have already been given the payload's names by the time either of them compares one. Only
+`mark_fulfilled` is reached down a path with no `replace` in front of it, which is what exposed it.
+
+### A move interrupted by the process stopping
+
+The sixteenth look made a failed render put the status back, so the board poller's retry is not
+disarmed by the row its own failure advanced. It caught the wrong set of failures.
+
+Being asked to stop is not an error and does not arrive as one. The poller is cancelled where it
+stands on shutdown, and a card part way through a move at that moment is the one case that cannot
+recover by itself: the row keeps a status nothing in Discord shows, and the first poll after the
+restart reads exactly that as a card it has never looked at and writes it off. Catching only
+`Exception` let every one of those through.
+
+It now catches the stop as well and shields the putting back, so the cancellation cannot interrupt
+that too. This is the same bargain the reviewer ping already makes with its hand-back, for the same
+reason, and the comment there says so.
