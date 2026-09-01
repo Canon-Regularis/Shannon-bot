@@ -766,6 +766,32 @@ class TestAMoveWhoseLastStepFailed:
         item = await db_session.scalar(select(TrackedItem))
         assert item.status is Status.READY_FOR_MERGE, "it trampled a newer answer"
 
+    async def test_being_cancelled_at_the_render_still_puts_the_row_back(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        db_session: AsyncSession,
+    ) -> None:
+        """The process being asked to stop is the one failure that is not an error.
+
+        The poller is cancelled where it stands on shutdown, and a card part way through a move
+        at that moment is the case that cannot recover by itself: the row keeps a status nothing
+        in Discord shows, and the first poll after the restart reads that as a card it has never
+        looked at and writes it off.
+        """
+
+        async def stopped(*args: object, **kwargs: object) -> int | None:
+            raise asyncio.CancelledError
+
+        workflow._rerender = stopped
+
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem))
+        assert item.status is Status.NOT_REVIEWED, "shutting down left a move nobody can see"
+
     async def test_failing_to_put_it_back_is_said_rather_than_raised(
         self,
         workflow: ItemWorkflow,

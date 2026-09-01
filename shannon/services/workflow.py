@@ -9,6 +9,8 @@ leaves Discord claiming something GitHub never agreed to.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -161,8 +163,17 @@ class ItemWorkflow:
         previous = await self._store_status(found.tracked_item_id, status)
         try:
             written = await self._rerender(found, snapshot, change)
-        except Exception:
-            await self._give_the_status_back(found.tracked_item_id, status, previous)
+        except BaseException:
+            # BaseException because being cancelled counts as a failure here. The poller is
+            # cancelled where it stands when the process is asked to stop, and a card being
+            # moved at that moment would otherwise keep a row nothing in Discord shows, which
+            # the next poll after a restart writes off. Shielded so the cancellation cannot
+            # interrupt the putting back as well; under it the await returns at once and the
+            # write lands a moment later.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    self._give_the_status_back(found.tracked_item_id, status, previous)
+                )
             raise
 
         # Touched only when DONE is on one side of the move or the other, so an ordinary status
