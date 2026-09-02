@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -217,13 +216,36 @@ class ItemNoteMirror:
             )
 
     async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
-        """Give a claim back, best effort.
+        """Give a claim back, best effort, and say so when the effort fails.
 
-        Shielded so a cancellation mid-flight cannot interrupt the hand-back. Suppressed because
-        the note stays unposted either way and the original error is the one that says why.
+        Shielded so a cancellation mid-flight cannot interrupt the hand-back. Still swallowed,
+        because the delivery is already failing on something and that error is the one that says
+        why, and raising a second from here would replace it.
+
+        Said out loud rather than passed over, which is what this used to do on the grounds that
+        the note stays unposted either way. It does not. The claim is what a retry reads to decide
+        the note is already in the thread, so a claim that could not be given back is a comment
+        that will never be posted and a delivery that reports itself done: the next attempt takes
+        the already-claimed branch, answers PROCESSED, and the queue clears the error with it.
+        Nothing revisits it, because nothing re-reads comments from GitHub and the row is removed
+        only by this method or by the item going away.
+
+        It needs two failures at once, this one and the Discord call before it, so it is rare
+        enough to live with and far too quiet to leave unsaid. Closing it properly means a retry
+        being able to tell its own claim from somebody else's, which is the delivery id on the
+        row, a migration, and that id threaded through a handler that is not given one today.
         """
-        with contextlib.suppress(Exception):
+        try:
             await asyncio.shield(self._release(tracked_item_id, note_key))
+        except Exception:
+            logger.error(
+                "could not give back the claim on %s for tracked item %s. It is recorded as "
+                "mirrored and was never posted, so the retry will report it done and the comment "
+                "is lost; remove that row from mirrored_notes to have it posted again",
+                note_key,
+                tracked_item_id,
+                exc_info=True,
+            )
 
     async def _release(self, tracked_item_id: int, note_key: str) -> None:
         async with self._sessionmaker() as session, session.begin():
