@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,7 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadHandle
+from shannon.domain.enums import Status
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror
@@ -513,7 +515,12 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         issue_event,
     ) -> None:
         """The ordinary stale delivery, which is most of them. The row says the thread is shut,
-        so there is nothing owed and nothing to ask Discord."""
+        so there is nothing owed and nothing to ask Discord.
+
+        Asserted on what Discord was asked rather than on where the lock ended up. Setting a lock
+        to what it already is moves nothing, so a test written against `locks` here passes
+        whether the call was made or not, which is what this one did when it was written.
+        """
         await issues.sync(issue_event("opened"))
         await issues.sync(
             issue_event(
@@ -523,11 +530,11 @@ class TestAStaleDeliveryThatRebuiltTheThread:
                 updated_at="2026-08-11T12:00:00Z",
             )
         )
-        settled = len(threads.locks)
+        settled = len(threads.lock_calls)
 
         await issues.sync(issue_event("edited"))
 
-        assert threads.locks[settled:] == [], "it asked Discord about a lock already recorded"
+        assert threads.lock_calls[settled:] == [], "it asked Discord about a lock already recorded"
 
     async def test_an_item_nobody_has_finished_costs_no_call(
         self,
@@ -544,6 +551,98 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         await issues.sync(issue_event("edited", updated_at="2026-08-11T09:00:00Z"))
 
         assert threads.locks[opened:] == [], "it went looking for a lock on an open issue"
+
+
+class TestTheLockSurvivingAnOrdinaryDelivery:
+    """The single line the thread lock rests on, and nothing was watching it.
+
+    The write path swaps a thread for itself after every update, to put the metadata message id
+    back where Discord has moved it. That swap goes through the same conditional write as a
+    genuine replacement, so clearing the lock on it wiped the column on every ordinary delivery:
+    the sync asked Discord to shut a thread it had already shut, and the staleness guard stood
+    open for every finished item. Three reviewers caught it by eye and the suite did not notice,
+    which is why this is here.
+    """
+
+    async def test_the_column_is_not_cleared_by_a_thread_swapped_for_itself(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """A pull request, deliberately. An issue's lock is asked for by its payload on every
+        delivery, so it writes the column back down each time and the mistake cannot be seen in
+        the row at all. A pull request's is asked for only when the row says it is owed, so a
+        column that has been wiped shows up as a Discord call nobody needed.
+        """
+        prs = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+        await prs.sync(pr_event("opened"))
+
+        # Finished, the way `/set_done` leaves it.
+        item = await stored(db_session)
+        await db_session.execute(
+            update(TrackedItem).where(TrackedItem.id == item.id).values(status=Status.DONE)
+        )
+        await db_session.commit()
+
+        await prs.sync(pr_event("labeled", updated_at="2026-08-11T10:30:00Z"))
+        assert (await stored(db_session)).discord_thread_locked is True, "it never shut it"
+        shut_it = len(threads.lock_calls)
+        assert shut_it == 1, "it did not ask Discord to shut it, so this proves nothing"
+
+        # Two more, because the row is read before the write that would have wiped it. Wiping it
+        # shows up one delivery later, and then on every other one after that.
+        await prs.sync(pr_event("edited", updated_at="2026-08-11T11:30:00Z"))
+        await prs.sync(pr_event("edited", updated_at="2026-08-11T12:30:00Z"))
+
+        assert threads.lock_calls[shut_it:] == [], (
+            "an ordinary delivery forgot the thread was shut and asked Discord again"
+        )
+
+
+class _RefusesThePost(FakeThreadGateway):
+    """Discord having the ordinary bad moment the whole retry mechanism exists for."""
+
+    async def post(self, *, thread_id: int, content: str) -> int | None:
+        raise DiscordGatewayError("Discord refused the post")
+
+
+class TestAClaimThatCouldNotBeGivenBack:
+    """The claim is taken before the post so a retry cannot put the same comment in twice. Which
+    means a claim that is not given back is a comment that will never be posted: the retry reads
+    it as already there, answers PROCESSED, and the queue clears the error with it.
+
+    It needs the Discord post and the hand-back to fail together, which is rare. It used to be
+    rare and silent.
+    """
+
+    async def test_it_says_the_comment_is_lost(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+        issue_event,
+    ) -> None:
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+
+        mirror = ItemNoteMirror(
+            db_sessionmaker, _RefusesThePost(), render=lambda note, mentions: "hello"
+        )
+
+        async def the_database_went_away(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("could not check out a connection")
+
+        mirror._release = the_database_went_away
+
+        with caplog.at_level(logging.ERROR), pytest.raises(DiscordGatewayError):
+            await mirror.mirror(parse_comment_event("created", payloads.issue_comment_event()))
+
+        assert "could not give back the claim" in caplog.text, "the comment was lost in silence"
 
 
 class TestARebuildThatDidNotWorkTheFirstTime:
