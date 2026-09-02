@@ -143,7 +143,7 @@ at the door.
 | `SHANNON_GITHUB_TOKEN` | empty | REST token. Needs **write** access to issues: `/register`, `/pr` and `/issue` only read, but every `/set_*` command and every board move puts a label on the item |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
-| `SHANNON_ROLE_REVIEWER` | `Reviewer` | |
+| `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
 | `SHANNON_ROLE_DEVELOPER` | `Developer` | |
 | `SHANNON_API_HOST` | `0.0.0.0` | |
 | `SHANNON_API_PORT` | `8000` | |
@@ -152,6 +152,7 @@ at the door.
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
 | `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | The project board to mirror, by the number in its URL. Zero means none |
 | `SHANNON_PROJECT_POLL_SECONDS` | `60.0` | How often that board is read |
+| `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
 | `SHANNON_WORKER_BATCH_SIZE` | `10` | |
 | `SHANNON_WORKER_MAX_ATTEMPTS` | `16` | Roughly two hours of backoff before a delivery is dropped |
@@ -184,8 +185,8 @@ Retention bounds it and the payload goes with the row.
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
-| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Reviewer, Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
-| `/set_high_priority` `/set_med_priority` `/set_low_priority` | Reviewer, Project Manager | Same, for priority |
+| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
+| `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
 
 Guild only, replies always ephemeral. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding

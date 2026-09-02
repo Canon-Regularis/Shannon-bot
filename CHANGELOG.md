@@ -4300,3 +4300,63 @@ is not in that server at the moment" from "this bot is not allowed to do that", 
 cannot: it is handed a thread id, and the guild that would answer the question is exactly the one
 that has gone from the cache. Telling them apart means the caller passing down what it knows,
 which every caller does have.
+
+## Who may move an item
+
+Asked for, after the twenty-first look found that the two answers this project gives to that
+question disagreed with each other.
+
+`_permissions.py` said status was a reviewer's or a project manager's, and said why developers
+were excluded: the author of a change moving it to ready for merge is the review step going
+missing. The board said nothing at all. Dragging a card called the same `set_status` the command
+calls, through a poller that has no gate and cannot have the one the command has, because nothing
+GitHub sends with a board says who moved a card. So anybody with access to the board could do what
+a developer was refused in Discord, and the refusal was the only place the policy was written down.
+
+Both halves are closed now.
+
+In Discord, moving an item is the project manager's alone. Reviewers are no longer on that list:
+deciding that a change is good and recording that the project has accepted it are different jobs,
+and only the second is what this bot writes down. `CommandRole.REVIEWER` and its setting are kept
+rather than removed. The tier is what the denial message offers, and it is where a later command
+that is genuinely a reviewer's would go; the settings table says plainly that it grants nothing
+today, which is better than a role that quietly does.
+
+From the board, an item's status does not move unless somebody has said it may.
+`SHANNON_BOARD_MAY_SET_STATUS` is off, and off the board still does everything else: it mirrors
+its cards, opens their threads, follows their titles and records which column each one is in. It
+just stops deciding. Turning it on is a deliberate statement that access to the board is meant to
+carry the same weight as the Project Manager role, which for a small team it often is.
+
+A card whose move is declined is written down as seen, the same as a move refused for any other
+final reason. Otherwise it would come round on every poll for as long as the setting was off,
+which is for ever, costing a GitHub read each time. The reason is said once per move rather than
+once per poll, and it names the setting.
+
+A draft card is untouched by any of this. Its status is its column, it exists nowhere but the
+board, and there is no Discord command that can move one, so there is no second answer for it to
+disagree with.
+
+### What the same look checked and found sound
+
+Two of the four lenses finished before the account ran out, and both came back with nothing, which
+is worth recording as carefully as a finding.
+
+Every one of the fourteen commands is built with the gate, checks it against the interaction's own
+user before deferring and before any service call, and returns immediately on a refusal; driving
+all fourteen with a role-less member reached no service method at all. `guild_only` is on every one
+of them and each handler checks for a missing guild itself. The permissions table in the README
+matched the code exactly, which is how the disagreement above was found: both were right, and the
+board was the thing neither of them mentioned.
+
+The gate fails closed on everything that is not a guild member: a direct message, a bare object, a
+user-installed-app interaction where discord.py leaves a sentinel in place of the member, and a
+guild the client has not cached. Role membership is read from the interaction payload rather than
+from the cache, so a role revoked a moment ago is already gone. Nothing found could make it fail
+open.
+
+Registration cannot be stolen. A second guild claiming a repository another has registered is
+refused by the check and by the unique constraint behind it, the webhook is matched on the id
+GitHub sends behind the signature gate rather than on anything a caller types, and `/pr` confirms
+the link against the stored numeric id twice so a freed and retaken repository name cannot be used
+to reach another guild's item.
