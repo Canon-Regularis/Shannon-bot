@@ -31,7 +31,7 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
-from shannon.domain.errors import ShannonError
+from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.errors import GitHubRateLimitError
@@ -308,6 +308,26 @@ class ProjectPoller:
                 column,
                 item.title,
                 refusal.message,
+            )
+            await self._remember_column(tracked, column, readable)
+            return 0
+        except PermanentError as refusal:
+            # A channel deleted, the bot removed from the server, a permission taken away. None
+            # of those is a bad moment and none of them is waited out, so coming round again
+            # cannot help. Nothing else advances the column, so the card would be tried on every
+            # poll for as long as the refusal lasts, costing a GitHub read and a Discord call
+            # each time, and every card the team moves after it joins the set and never leaves.
+            #
+            # That is the same unbounded retry the refused-lock branch below was written to
+            # prevent, reached through the render rather than through the lock. So the move is
+            # written off as seen and said once, and the board and the thread disagree until
+            # somebody fixes what is wrong and moves the card again.
+            logger.warning(
+                "could not move %s to %s and no waiting will change that, so it will not be "
+                "tried again: %s",
+                item.title,
+                wanted.value,
+                refusal,
             )
             await self._remember_column(tracked, column, readable)
             return 0

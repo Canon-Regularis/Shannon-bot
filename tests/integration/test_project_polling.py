@@ -1196,6 +1196,40 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 0
         assert github_client.pull_request_calls[reads:] == [], "it asks GitHub on every poll"
 
+    async def test_a_move_discord_will_never_accept_is_not_tried_every_minute(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        github_client,
+        db_session: AsyncSession,
+    ) -> None:
+        """A channel deleted, the bot removed from the server, a permission taken away: each of
+        those makes the render fail with an answer no waiting changes.
+
+        The retry below is for a bad moment. These are not bad moments, and the branch that
+        writes off a permanently refused lock a few lines down says why: nothing else advances
+        the column, so a card whose move cannot be carried out comes round on every poll for as
+        long as the refusal lasts, and every card the team finishes joins the set and never
+        leaves it. A GitHub read and a Discord call each, once a minute, growing with the team's
+        throughput, for a channel that is not coming back.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board)
+        assert await poller.run_once() == 1, "the first move never happened"
+
+        # A move a pull request is allowed to make, so the refusal under test is Discord's and
+        # not the workflow declining the status itself.
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Ready for merge")]
+        threads.refuses_every_update = True
+        assert await poller.run_once() == 0, "it reported a move Discord refused outright"
+
+        reads = len(github_client.pull_request_calls)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+
+        assert github_client.pull_request_calls[reads:] == [], "it asked GitHub on every poll"
+
     async def test_a_wrapped_card_listed_twice_is_only_acted_on_once(
         self, mirrored_pr: int, poller_for, github_client
     ) -> None:
