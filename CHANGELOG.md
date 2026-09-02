@@ -4199,3 +4199,104 @@ Teams are otherwise sound: they resolve against their own table, so a slug canno
 login, and the sync keeps slugs out of the map that people are looked up in with a comment at both
 ends saying that removing the exclusion changes nothing today, which is exactly why it needs
 saying. A linked role that has since been deleted renders as a mention that reaches nobody.
+
+## A twentieth look: the Discord side going away
+
+A deleted thread was covered a while ago. Everything larger than a thread was not: the channel it
+lives in, the server itself, the permissions that let the bot act, and the connection it acts
+over. Four lenses, four findings, all of them real.
+
+### Deleting a channel starved everything else of a connection
+
+Discord deletes every thread in a channel when the channel goes, and discord.py dispatches one
+thread deletion for each of them, scheduling every listener as its own task. So the listener added
+two looks ago ran once per thread, all at once, each opening a transaction of its own against a
+pool of fifteen that the delivery worker, the board poller and every slash command draw on.
+
+Measured against a live database, a channel holding nine hundred threads: an ordinary query waited
+sixteen seconds for a connection, and the wait grows with the channel until it reaches the pool's
+own timeout and deliveries begin failing outright. Bounded to two at a time, the same channel
+leaves that query waiting one second, and the clearing takes twice as long, which costs nothing:
+the item recovers on its own even if the clearing never happens, because the write path turns
+Discord saying a thread is gone into a replacement. This exists for the one kind of item that has
+no other way of finding out, and taking an hour over a channel nobody is using is no loss to it.
+
+This was a regression from adding the listener. Before it, deleting a channel did nothing at all.
+
+### A move Discord will never accept, tried again every minute
+
+`PermanentError` appeared nowhere in the board poller. A channel deleted, the bot removed from the
+server, a permission taken away: each of those makes the render fail with an answer no waiting
+changes, and each was caught as a bad moment. The column is what ends a retry and it was
+deliberately withheld, so the card came round on every poll, costing a GitHub read and a Discord
+call each time, and every card the team moved after it joined the set and never left.
+
+That is the same unbounded retry the refused-lock branch thirty lines below was written to
+prevent, reached through the render rather than through the lock. It is written off as seen now
+and said once.
+
+Worth recording how nearly this went unproven. The first test written for it moved a card straight
+to Done, which a pull request cannot do from IN_REVIEW, so the workflow refused the status before
+Discord was ever asked, and that refusal logs at INFO, which the test runner hides. The test passed
+while demonstrating nothing at all. What found it was instrumenting every exit of the function and
+seeing that none of them was taken.
+
+### The unlock that took the whole delivery with it
+
+Unlocking is the first Discord call a delivery makes, and it suppressed only the thread being gone.
+A permission is permanent, so a refusal there was raised, and the worker drops a permanent failure
+on its first attempt rather than over two hours. Everything after it was lost: the block was never
+rewritten and the row was left ahead of the thread.
+
+So a server that has never granted Manage Threads had every reopened issue stop mirroring
+altogether, rather than mirror into a thread that stays shut. Locking makes the same bargain and
+can afford it, being last. This one is stepped over and said out loud.
+
+### A health check that could only ever say yes
+
+`/health` asked `is_ready`, which reports whether the client's cache has ever been filled.
+discord.py sets it once, when READY arrives, and clears it only in `close`. So it answers the case
+of a connection never made, which is what it was written for, and cannot answer the case of a
+connection made and then lost, which is the more likely one: discord.py reconnects for ever by
+design, so a client whose reconnection keeps failing sat there reporting itself well and delivering
+nothing, with an orchestrator reading it and doing nothing about it.
+
+The client keeps the answer itself now, from the connect and disconnect events it already receives,
+and a resumed session counts as well as a fresh one: a reconnection that resumes sends no READY, so
+watching only for READY would leave a gateway that is up reading as down until something forced a
+new session.
+
+### Known and not fixed
+
+**A channel deleted takes the archived threads inside it without saying so.** discord.py builds
+those thread deletions from its own cache, and it drops a thread from that cache the moment the
+thread archives. So a channel deletion reports the live threads and says nothing about the quiet
+ones, which is the exact case the listener exists for: a draft card parked in a column nobody
+touches, its thread archived by age. The poller decides from a stored timestamp and a stored
+pointer without asking Discord, so that card is mirrored nowhere, permanently, with no log line.
+Pull requests and issues are unaffected, since their next webhook rebuilds either way.
+
+The obvious repair does not work and it is worth writing down why. Clearing the pointers of every
+item whose channel mapping names the deleted channel is wrong, because a mapping that has been
+changed since no longer describes where the older threads are: `/set_channel` moves where new
+threads go and leaves the existing ones where they were, so deleting the new channel would clear
+pointers for items whose threads are alive in the old one, and open a second thread beside each.
+Doing it correctly means the row remembering which channel its thread is in, which is a column and
+a migration.
+
+**Being out of a server for five minutes drops every delivery that lands in it.** An admin kicks
+the bot and re-invites it. While it is out, discord.py empties the guild cache, so every call falls
+through to a fetch and Discord answers with a refusal that this project files as a missing
+permission, which is permanent, which the worker drops on the first attempt. The sixteen attempts
+over two hours that exist for exactly this kind of temporary unreachability are never used.
+
+The row has already been committed by then, so it is current and the thread is not. Most items
+recover, because the next event for them rewrites the block. What does not recover is an item that
+gets no further event after the window, which is a just-closed issue or a just-merged pull request:
+the thread says open, unlocked, for good.
+
+Filing a 403 as permanent is deliberate and recorded. What is missing is a way to tell "this bot
+is not in that server at the moment" from "this bot is not allowed to do that", and the gateway
+cannot: it is handed a thread id, and the guild that would answer the question is exactly the one
+that has gone from the cache. Telling them apart means the caller passing down what it knows,
+which every caller does have.
