@@ -143,12 +143,22 @@ async def test_closing_twice_locks_once(
     issue_event,
     threads: FakeThreadGateway,
 ) -> None:
-    """The second close finds the thread already locked, and a redundant edit is a wasted call."""
+    """An issue's lock is decided from its payload, so both closes ask for it and only the first
+    moves anything. The gateway compares before it edits, so the second costs a lookup and no
+    write, which is the cost worth having: the payload is the newest word on whether the thread
+    belongs shut, and skipping the ask on a row that says it is already would not notice somebody
+    unlocking it by hand.
+
+    Both counted, because they are different questions and the second was written as though it
+    answered the first. `locks` records where the lock ended up and only when it moved, so on its
+    own it cannot tell one ask from two.
+    """
     await issue_service.sync(issue_event("opened"))
     await issue_service.sync(issue_event("closed", **CLOSED))
     await issue_service.sync(issue_event("closed", **CLOSED))
 
-    assert len(threads.locks) == 1
+    assert len(threads.locks) == 1, "it edited the thread twice for one close"
+    assert threads.lock_calls == [(threads.created[0].thread_id, True)] * 2
 
 
 async def test_a_locked_thread_still_accepts_metadata_updates(

@@ -38,7 +38,14 @@ class FakeThreadGateway:
         # content, which is what a card mirrored twice looks like.
         self.updates: list[int] = []
         self.renames: list[tuple[int, str]] = []
+        # Where the lock ENDED UP, recorded only when it moved. A test asking whether a thread
+        # is shut wants this one.
         self.locks: list[tuple[int, bool]] = []
+        # Every time Discord was ASKED, whether or not the answer changed anything and whether or
+        # not it was refused. The two are not the same question, and a test meaning to say "this
+        # cost no Discord call" cannot use the one above: setting a lock to what it already is
+        # records nothing there, so the assertion passes whether the call was made or not.
+        self.lock_calls: list[tuple[int, bool]] = []
         self.deleted: list[int] = []
         self.unarchived: list[int] = []
         # Set by a test that needs the next thread creation to fail the way a Discord outage
@@ -108,6 +115,7 @@ class FakeThreadGateway:
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
     async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+        self.lock_calls.append((thread_id, locked))
         if self.refuses_every_lock:
             raise DiscordPermissionError("Discord will not let the bot lock the thread")
         if self.fail_next_lock:
