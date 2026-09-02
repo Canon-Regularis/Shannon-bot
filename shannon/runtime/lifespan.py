@@ -84,6 +84,15 @@ class Gateway(Protocol):
 
     def is_ready(self) -> bool: ...
 
+    def gateway_is_up(self) -> bool:
+        """Whether Discord can be reached right now, which is not what `is_ready` answers.
+
+        `is_ready` reports whether the cache has ever been filled. It is set once and cleared
+        only by `close`, so a connection that came up and later died still reads as ready, and
+        the health check built on it could never report the one failure it was written for.
+        """
+        ...
+
     async def close(self) -> None: ...
 
 
@@ -194,9 +203,10 @@ async def _start(
     # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
-    # Asked only when there is a bot. `is_ready` is safe at any point in a client's life: it
-    # checks the sentinel before the event.
-    liveness.gateway_is_ready = bot.is_ready if bot_task is not None else None
+    # Asked only when there is a bot. Safe at any point in a client's life: it reads a flag the
+    # client keeps from its own connect and disconnect events, and `is_ready` behind it checks
+    # the sentinel before the event.
+    liveness.gateway_is_ready = bot.gateway_is_up if bot_task is not None else None
     return _Running(
         shutdown=shutdown, worker_task=worker_task, bot_task=bot_task, poller_task=poller_task
     )

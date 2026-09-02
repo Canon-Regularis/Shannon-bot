@@ -31,6 +31,9 @@ class FakeBot:
         self.started = False
         self.closed = False
         self._ready = asyncio.Event()
+        # The real client keeps this from its own connect and disconnect events, and it is what
+        # the health check asks. Settable here so a test can drop the connection under it.
+        self.connected = False
 
     async def start(self, token: str) -> None:
         self.started = True
@@ -38,6 +41,7 @@ class FakeBot:
             raise RuntimeError("Improper token has been passed")
         if self.reaches_the_gateway:
             self._ready.set()
+            self.connected = True
         await asyncio.sleep(3600)
 
     async def wait_until_ready(self) -> None:
@@ -45,6 +49,9 @@ class FakeBot:
 
     def is_ready(self) -> bool:
         return self._ready.is_set()
+
+    def gateway_is_up(self) -> bool:
+        return self.connected and self._ready.is_set()
 
     async def close(self) -> None:
         self.closed = True
