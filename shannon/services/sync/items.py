@@ -136,6 +136,7 @@ class ItemSyncService:
         # The database step either hands over work to do or answers on its own.
         if isinstance(decision, SyncResult):
             if decision.outcome is SyncOutcome.STALE:
+                await self._reopen_what_this_one_asked_for(decision.tracked_item_id, snapshot)
                 await self._settle_a_lock_still_owed(decision.tracked_item_id, decision.thread_id)
             return decision
         state = decision
@@ -226,6 +227,51 @@ class ItemSyncService:
             created=written.created,
             notified=notified,
         )
+
+    async def _reopen_what_this_one_asked_for(
+        self, tracked_item_id: int, snapshot: TrackedSnapshot
+    ) -> None:
+        """Hand back the ping on a request this payload made, even where it is out of date.
+
+        A request made again is the one fact that arrives on exactly one delivery and nowhere
+        else. GitHub puts the team it has just asked at the top level of a single
+        `review_requested` payload; every later payload carries the same unchanged list, so
+        `replace` leaves the row alone and nothing in it says the ask happened twice.
+
+        For a person there is a second route: their row is stamped when they review, and any
+        later payload measured against that stamp reopens it. A team's row is never stamped,
+        deliberately, because stamping it made the row look answered and reopened it once per
+        review round for an ask nobody had made. So for a team the single delivery is the whole
+        of it, and a delivery turned away as superseded loses the ask for the life of the pull
+        request: the role is never told, and every later event finds the row exactly as it was.
+        A person re-requested in the same breath is told, which is how this looks from Discord.
+
+        Safe to do from a delivery that is out of date about everything else, because this one
+        write is not decided from the payload's view of the world. It compares the moment the
+        payload was made against the moment the row already holds and does nothing unless the
+        first is later, both on GitHub's clock, which is what makes a replayed delivery harmless
+        and makes an out-of-order one harmless for the same reason.
+
+        The ping itself is left to whoever claims it next, which is the delivery this one was
+        turned away for if it has not passed the notifier yet, and otherwise the next event on
+        the item. Sending it here would mean a superseded delivery posting to Discord, and the
+        thing it would be posting is owed either way.
+        """
+        asked = self._policy.asked_again(snapshot)
+        if not any(actors for actors in asked.values()):
+            return
+        async with self._sessionmaker() as session, session.begin():
+            assignments = ItemAssignmentStore(session)
+            for role, actors in asked.items():
+                reopened = await assignments.reopen_request(
+                    tracked_item_id, role, [actor.login for actor in actors], snapshot.updated_at
+                )
+                if reopened:
+                    logger.info(
+                        "review requested again from %s, on a delivery that was out of date "
+                        "about everything else",
+                        ", ".join(reopened),
+                    )
 
     async def _settle_a_lock_still_owed(self, tracked_item_id: int, thread_id: int | None) -> None:
         """Shut a thread the item is owed, even where the delivery itself is out of date.

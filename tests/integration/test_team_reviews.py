@@ -329,6 +329,30 @@ class TestAskingATeamAgain:
 
         assert told(threads) == 2, "the second ask of a team told nobody"
 
+    async def test_an_ask_that_arrives_out_of_order_still_reaches_them(
+        self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
+    ) -> None:
+        """The ask arrives on exactly one delivery and nowhere else, so a delivery turned away
+        as superseded used to lose it for the life of the pull request.
+
+        Nothing orders webhook deliveries, and the worker leases by row id and skips a row whose
+        next attempt is in the future, so an event landing out of order is ordinary. For a person
+        it costs nothing: their row is stamped when they review, so any later payload measured
+        against that stamp reopens it. A team's row is never stamped, deliberately, so the single
+        delivery was the whole of it and every later event found the row exactly as it was.
+        """
+        await notifying.sync(asked_of("backend", now="backend", at="2026-08-10T12:00:00Z"))
+        first = told(threads)
+
+        # A later event for the same pull request overtakes the second ask.
+        await notifying.sync(asked_of("backend", at="2026-08-12T09:00:00Z"))
+        await notifying.sync(asked_of("backend", now="backend", at="2026-08-11T09:00:00Z"))
+
+        # Whoever comes past next sends what is owed.
+        await notifying.sync(asked_of("backend", at="2026-08-13T09:00:00Z"))
+
+        assert told(threads) == first + 1, "the ask never reached the team"
+
     async def test_the_same_delivery_arriving_twice_tells_them_once(
         self, registered: Repository, notifying: ItemSyncService, threads: FakeThreadGateway
     ) -> None:
