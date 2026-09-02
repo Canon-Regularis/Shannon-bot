@@ -102,7 +102,11 @@ def workflow(
 def poller_for(
     db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway, workflow: ItemWorkflow
 ):
-    def build(board: FakeBoard, *, project_number: int = PROJECT) -> ProjectPoller:
+    def build(
+        board: FakeBoard, *, project_number: int = PROJECT, may_set_status: bool = True
+    ) -> ProjectPoller:
+        """Allowed to move things unless a test says otherwise. Off is the shipped default and
+        has its own tests; every other test here is about what a board that may move does."""
         return ProjectPoller(
             db_sessionmaker,
             board,
@@ -110,6 +114,7 @@ def poller_for(
             workflow,
             project_number=project_number,
             interval=0.01,
+            may_set_status=may_set_status,
         )
 
     return build
@@ -340,6 +345,76 @@ def wraps(kind: ObjectType, content_id: int, column: str = "Done", item_id: int 
         content_id=content_id,
         updated_at=datetime.fromisoformat("2026-08-20T10:00:00+00:00"),
     )
+
+
+class TestABoardThatMayNotSetAStatus:
+    """The shipped default, and the reason for it.
+
+    Moving an item is a project manager's job in Discord. A board is the other way an item's
+    status can change, and it does not pass through that check at all: nothing GitHub sends with
+    a board says who dragged the card, so the poller cannot ask the question the command asks.
+    Anybody with access to the board could otherwise do what only a project manager is allowed to
+    do in the server.
+
+    Off, the board still does everything else it does. It is the mirror that stops deciding.
+    """
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        pr_event,
+    ) -> int:
+        """A pull request already mirrored, and the GitHub id it was stored under."""
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_it_mirrors_the_card_and_leaves_the_status_alone(
+        self, mirrored_pr: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board, may_set_status=False)
+
+        assert await poller.run_once() == 0, "the board moved something it may not move"
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.NOT_REVIEWED, "the board set a status it may not set"
+
+    async def test_the_card_is_not_asked_about_again(
+        self, mirrored_pr: int, poller_for, github_client
+    ) -> None:
+        """A final answer rather than a bad moment, so the column is written down. Otherwise the
+        card would come round on every poll for as long as the setting is off, which is for
+        ever, costing a GitHub read each time."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board, may_set_status=False)
+        await poller.run_once()
+
+        reads = len(github_client.pull_request_calls)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+
+        assert github_client.pull_request_calls[reads:] == [], "it asked GitHub on every poll"
+
+    async def test_turning_it_on_is_what_lets_the_board_decide(
+        self, mirrored_pr: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """The other side of it, so this pins a setting rather than a removal."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+
+        assert await poller_for(board, may_set_status=True).run_once() == 1
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.IN_REVIEW
 
 
 class TestCardsWrappingSomethingAlreadyMirrored:
@@ -1086,6 +1161,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
             moves,
             project_number=PROJECT,
             interval=0.01,
+            may_set_status=True,
         )
 
         with caplog.at_level("ERROR", logger="shannon.services.projects"):

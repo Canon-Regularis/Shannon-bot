@@ -297,6 +297,7 @@ def build_container(
             workflow,
             project_number=settings.github_project_number,
             interval=settings.project_poll_seconds,
+            may_set_status=settings.board_may_set_status,
         ),
         event_router=event_router,
         pr_sync=pr_sync,

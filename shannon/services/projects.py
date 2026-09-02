@@ -76,6 +76,7 @@ class ProjectPoller:
         *,
         project_number: int,
         interval: float = 60.0,
+        may_set_status: bool = False,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._projects = projects
@@ -83,6 +84,7 @@ class ProjectPoller:
         self._workflow = workflow
         self._project_number = project_number
         self._interval = interval
+        self._may_set_status = may_set_status
         self._stopping = False
         self._stopped = asyncio.Event()
 
@@ -296,6 +298,24 @@ class ProjectPoller:
         # that succeeded as the whole. The column is the record of a move having been carried
         # through, and it says this one was not. Repeating a status nothing changed costs one
         # read of the item and writes nothing, which is what makes it safe to send round again.
+        if not self._may_set_status:
+            # The board is not allowed to decide this one. Moving an item is a project manager's
+            # in Discord, and nothing GitHub sends with a board says who dragged the card, so a
+            # board that could move items would be a way around that permission for anybody with
+            # access to the board.
+            #
+            # Written down as seen all the same, because the column is what stops a card being
+            # looked at again and this is a final answer rather than a bad moment. Said once per
+            # move rather than once per poll, for the same reason.
+            logger.info(
+                "not moving %s to %s: the board is not allowed to set a status. Set "
+                "SHANNON_BOARD_MAY_SET_STATUS to turn that on",
+                item.title,
+                wanted.value,
+            )
+            await self._remember_column(tracked, column, readable)
+            return 0
+
         try:
             moved = await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
         except WorkflowRefusedError as refusal:

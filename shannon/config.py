@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     # note on two replicas in CHANGELOG.md. Set this to zero everywhere but one.
     github_project_number: int = Field(default=0, ge=0)
     project_poll_seconds: float = Field(default=60.0, gt=0)
+    # Whether dragging a card may change the item's status, which is off.
+    #
+    # Moving an item is a permission in Discord and this is the one road around it: nothing
+    # GitHub sends with a board says who moved a card, so the poller cannot ask the question the
+    # slash commands ask, and anybody with access to the board could do what only a project
+    # manager is allowed to do in Discord. Off, the board still mirrors its cards, opens their
+    # threads and records which column each one is in; it just does not decide anything.
+    #
+    # A draft card is unaffected either way. Its status IS its column, it exists nowhere but the
+    # board, and no Discord command can move one.
+    board_may_set_status: bool = False
 
     # The webhook endpoint only writes a delivery down; these govern the worker that then acts
     # on it. The defaults ride out roughly two hours of Discord being unreachable.
