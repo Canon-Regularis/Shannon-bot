@@ -3963,3 +3963,163 @@ callers that take it.
 
 Both are the same kind of mistake and it is worth naming: a condition written from what a function
 is called for rather than from everywhere it is called.
+
+## Upgrading a database that already has rows in it
+
+Never checked before, and different from checking the migrations, which an earlier look did. Every
+test builds the schema fresh with `Base.metadata.create_all`, so every row a test sees was written
+by the code that owns it, with every column filled in. A server upgrading has the opposite: rows
+written before half these columns existed, all of them null, and nothing had ever run against one.
+
+So one was built. A database at revision 0001, filled with what a server that has been up for
+months looks like: a repository, two channel mappings, a finished pull request, a live one, a
+closed issue, four people on them under the names they had then, two links, and a processed
+delivery. Then `alembic upgrade head`, twelve revisions, and a look at what the rows became.
+
+The schema half is sound. All twelve apply with data present, nothing is lost, and downgrade and
+upgrade round-trip. Only one column added to an existing table is NOT NULL and it carries a server
+default. No index or constraint added later fails against real rows. No upgrade both adds and
+drops, so no step quietly moves data between columns without saying so.
+
+The behaviour half is where the questions were, and three of them answered well.
+
+A mention still resolves when neither side knows the account, which is every row after an upgrade:
+the link has no `github_user_id` because it predates the column and neither does the assignment,
+so both fall back to the name and the ping goes out as `<@555>` exactly as before. It also resolves
+in the state that actually persists for weeks afterwards, where the assignment row has learned its
+account from a payload and the link has not, because nobody re-runs `/link` for fun. Null is read
+as no evidence on each side independently, which is what makes both work.
+
+`discord_thread_locked` heals itself on the first delivery and costs nothing to do it. The finished
+pull request's row went from null to true without a single Discord call: the metadata write wakes
+the thread, the lock call finds it already shut and returns without editing, and the row is written
+down. That is the whole intent of the column, run against the one database state that cannot be
+tested any other way.
+
+And a row carrying a value its enum no longer has takes the whole table with it rather than itself.
+The decision to store enums as VARCHAR with no CHECK is deliberate and recorded where it is made;
+what was not recorded is that SQLAlchemy raises on the way out for the entire query, so one such
+row makes every read of that table fail. Nothing in the application can write one, and adding an
+enum value is safe in both directions, but taking one away needs the rows carrying it moved first.
+That is now written where the decision is.
+
+### What the first poll after an upgrade does to a board
+
+The one thing worth knowing before deploying this.
+
+A card's stored column is null until a poll records it, and null means never seen. The poller has
+two guards that refuse to act on the first look at a card, so the board cannot overwrite a status
+somebody set in Discord: from a null column the two are indistinguishable, and only one of them was
+deliberate.
+
+After an upgrade every card is a first look, including every card the board has been driving for
+months. So the first poll walks the board, writes down where each card is, and acts on none of it.
+Where the board and the item already agree, which is most of them, nothing is lost. Where they
+disagree, the board's answer is discarded, once, and no later poll revisits it because the column
+now matches. Proved end to end: a card in Done wrapping a pull request the row calls IN_REVIEW came
+out of the first poll still IN_REVIEW, with `leaving ... at IN_REVIEW: the board says 'Done' but
+this is the first look at its card` in the log and the column recorded.
+
+It is not being changed, because the alternative is worse: letting the board win on first sight
+would overwrite exactly the deliberate decisions the guard exists to protect, across a whole board
+at once, and the migration cannot know what each card's column was without asking GitHub. It is
+one-time, bounded, said once per card in the log, and undone by dragging the card. Worth reading
+the log after the first poll following an upgrade, and worth knowing that a board and a set of
+statuses that disagree at that moment stay disagreeing.
+
+## The comment mirror, and a test that could not fail
+
+Two of the three areas nobody had ever looked at. The third, upgrading a database with rows in it,
+is above.
+
+### A comment lost, and the delivery reported as done
+
+The note mirror claims a comment before posting it, because the queue is at-least-once and
+recording afterwards put the same comment in a thread twice. Its own comment says what that rests
+on: the claim has to go back when the post fails, or the retry reads it as already posted and the
+note is lost for good.
+
+The hand-back is a second transaction on its own connection, and it swallowed every failure. So a
+Discord post refused in the ordinary way, with a connection that cannot be checked out at the same
+moment, leaves the claim standing on a comment that was never posted. Every retry then takes the
+already-claimed branch, answers PROCESSED, and the queue clears the error with it. Nothing revisits
+it: `mirrored_notes` rows go only when this method removes one or when the item itself goes, and
+nothing re-reads comments from GitHub. Reproduced end to end against a real database with one
+refused post and one refused connection: no message in the thread, the claim standing after every
+retry, the delivery PROCESSED with no error recorded.
+
+The docstring justified swallowing it with "the note stays unposted either way", which is the part
+that was wrong. It does not stay unposted; it becomes permanently recorded as posted.
+
+It needs two failures at once, so it is rare enough to live with and was far too quiet to leave
+unsaid. It now says so: an error naming the note, the item, and the row to remove to have it
+posted again. Closing it properly means a retry being able to tell its own claim from another
+delivery's, which is the delivery id on the row, a migration, and that id threaded through a
+handler that is not given one today. That is written down rather than done.
+
+### A test that could not fail
+
+The lens looking for tests that pass whether or not the code is right found one written an hour
+earlier, in this same round of work.
+
+`test_a_thread_already_shut_costs_no_call` asserts that a stale delivery for an item whose lock is
+already recorded asks Discord for nothing. It asserted on the fake's `locks`, which records where a
+lock ENDED UP and only when it moved. The thread in that test is already shut, so setting it again
+changes nothing and records nothing, and the assertion passes whether the call was made or not. A
+test whose whole subject is "this costs no Discord call" could not see a Discord call.
+
+The fake now keeps the two questions apart: `locks` for where a lock ended up, `lock_calls` for
+every time Discord was asked, whether or not the answer changed anything and whether or not it was
+refused. The test asks the second one, and now fails when the guard it is watching is removed,
+which is what it never did.
+
+Worth keeping the shape of this one. The test was green, the suite was green, branch coverage was
+at 100%, and the line it was written to protect was covered by it. None of that says a test can
+fail. The only thing that does is making the code wrong on purpose and watching, which is what
+found it.
+
+### What was checked and found sound
+
+The comment mirror was read whole a second time by hand alongside the lens. An edited or deleted
+comment is deliberately not mirrored, and it is written down where the handled actions are listed:
+the thread records what was said when it was said. A comment and a review that happen to share a
+number cannot collide, because the kind is in the note key. The claim is taken before the post and
+given back on every failure path including cancellation, which is shielded. A comment on a pull
+request is recognised by the key GitHub marks it with rather than by its number, so it cannot be
+looked up as an issue. A note whose thread has gone lets the pointer go and asks for a rebuild on
+the way out, where the ask repeats, rather than from the one branch that cannot be reached twice.
+
+### Every "no lock call" assertion was written against the wrong log
+
+The lens's second point, which the fix above answered only for the one test it named. The fake
+records where a lock ENDED UP, and only when it moved, and every assertion in the project meaning
+"this cost no Discord call" was written against that. A call that changes nothing records nothing,
+so none of them could see one.
+
+Two of those assertions were actually wrong. The rest describe scenarios that make no lock call at
+all, so they say what they mean by accident and are left alone.
+
+`test_closing_twice_locks_once` claimed the second close costs no call. It costs one: an issue's
+lock is decided from its payload, so both closes ask, and the gateway compares before it edits, so
+only the first moves anything. That is the cost worth having, because the payload is the newest
+word on whether the thread belongs shut and skipping the ask on a row that says it already is
+would not notice somebody unlocking it by hand. The test now counts both, and its docstring says
+which question each log answers.
+
+And nothing at all pinned `claim_thread`'s guard, which is the single line the whole column rests
+on: the write path swaps a thread for itself after every update, and clearing the lock on that
+swap wiped the column on every ordinary delivery. Three reviewers caught it by eye before handover
+and the suite stayed green through it, including green through reverting it afterwards.
+
+Writing the test that catches it took three goes, and each failure is worth keeping.
+
+The first used a closed issue, where the payload asks for the lock on every delivery and writes
+the column back down each time, so the mistake cannot be seen in the row at all. The second used a
+pull request but looked one delivery too early: the row is read before the write that wipes it, so
+the first delivery after the wipe still has the old answer in hand and asks for nothing. The third
+runs two more deliveries, which is where a wiped column shows up as a Discord call nobody needed,
+and then on every other one after that.
+
+All three were green against correct code. Only the third is green against correct code and red
+against the mutation, which is the only property that makes a test worth having, and the only one
+that running it against the code as written cannot tell you.
