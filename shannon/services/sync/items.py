@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -154,8 +153,25 @@ class ItemSyncService:
             # A thread that has been deleted is rebuilt by the write below, and a new thread is
             # never locked. Letting this raise instead would stop the rebuild ever running: an
             # open issue always unlocks, so a deleted thread would end its mirror for good.
-            with contextlib.suppress(ThreadNotFoundError):
+            #
+            # A permission nobody has granted is stepped over for a harder reason. This is the
+            # first Discord call a delivery makes, so raising here loses everything after it:
+            # the block is never rewritten, and because the refusal is permanent the worker drops
+            # the delivery on its first attempt. A server that has never granted Manage Threads
+            # would have every reopened issue stop mirroring entirely, rather than mirror with a
+            # thread that stays shut. Locking has the same bargain and can afford it more easily,
+            # being last.
+            try:
                 await self._threads.set_locked(thread_id=state.thread_id, locked=False)
+            except ThreadNotFoundError:
+                pass
+            except PermanentError as refusal:
+                logger.warning(
+                    "could not give back the thread for tracked item %s, so it stays shut: %s",
+                    state.tracked_item_id,
+                    refusal,
+                )
+            else:
                 await self._note_the_lock(state.tracked_item_id, state.thread_id, locked=False)
 
         written = await self._binding.write(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,6 +37,40 @@ async def test_a_lock_the_payload_asked_for_still_fails_the_delivery(
 
     with pytest.raises(DiscordPermissionError):
         await issue_service.sync(issue_event("closed", **CLOSED))
+
+
+async def test_a_refused_unlock_does_not_take_the_rest_of_the_delivery_with_it(
+    registered: Repository,
+    issue_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    caplog: pytest.LogCaptureFixture,
+    db_session: AsyncSession,
+    issue_event,
+) -> None:
+    """Unlocking is the first Discord call a delivery makes, and a permission is permanent.
+
+    So raising here lost everything after it, and lost it on the first attempt rather than over
+    two hours: the block was never rewritten and the delivery was dropped. A server that has
+    never granted Manage Threads had every reopened issue stop mirroring altogether, which is a
+    great deal worse than one that mirrors with a thread that stays shut. Locking makes the same
+    bargain and can afford it, being last.
+    """
+    await issue_service.sync(issue_event("opened"))
+    await issue_service.sync(issue_event("closed", **CLOSED))
+    threads.refuses_every_lock = True
+
+    with caplog.at_level(logging.WARNING):
+        await issue_service.sync(
+            issue_event("reopened", title="Reopened after all", updated_at="2026-08-11T13:00:00Z")
+        )
+
+    thread = threads.created[0].thread_id
+    assert "Reopened after all" in threads.metadata_of(thread), "the delivery was lost entirely"
+    assert "so it stays shut" in caplog.text, "it gave up on the thread silently"
+
+    db_session.expire_all()
+    item = await db_session.scalar(select(TrackedItem))
+    assert item.title == "Reopened after all", "the row never caught up either"
 
 
 async def test_closing_marks_the_issue_done(
