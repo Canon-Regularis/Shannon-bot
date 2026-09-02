@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # on nothing. Polled rather than delivered: GitHub sends projects_v2 webhooks for
     # organisation projects only, and a personal account gets no such event at all, so a timer
     # is the only mechanism that works for both.
+    #
+    # Run this in ONE replica. Nothing elects a leader, so every replica with a number set polls
+    # the same board on the same interval and the two ask for the same status for the same card.
+    # A move whose Discord half is refused in one replica while the other is mid-poll can end
+    # with the item's row put back and the other's finished move undone, permanently: see the
+    # note on two replicas in CHANGELOG.md. Set this to zero everywhere but one.
     github_project_number: int = Field(default=0, ge=0)
     project_poll_seconds: float = Field(default=60.0, gt=0)
 

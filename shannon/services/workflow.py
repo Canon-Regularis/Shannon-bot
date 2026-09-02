@@ -448,8 +448,21 @@ class ItemWorkflow:
         again, because nothing else rederives a status from a board. A person running the command
         at least sees it fail and can run it again; nobody is standing over the poller.
 
-        Only where the row still says what this wrote. Another command or another poll may have
-        moved the item since, and theirs is the newer answer.
+        Only where the row still says what this wrote, which is enough for one process and not
+        for two. Nothing in the deployment stops a second replica, and every replica with a
+        project number set polls the same board on the same interval, so the two ask for the same
+        status for the same card. The other one, polling while this one is in Discord, finds the
+        row already saying DONE and records the column, which is this one's whole retry marker;
+        then this one cannot tell that from its own write and puts the row back, undoing a move
+        the other had finished. Comparing a stamp instead does not help: the render's own sync
+        writes the row before the Discord call it dies on, so the stamp has moved in the ordinary
+        single-process case too, and nothing on the row separates somebody else having acted from
+        the step being compensated for.
+
+        That is the shape of a compensating write rather than a fault in this guard, and the fix
+        is the per-item lock across the Discord phase already recorded as owed. Until then the
+        poller belongs in one replica, which is said where the setting that enables it is
+        defined.
 
         The label on GitHub is left where it was put. Setting it is idempotent, the next attempt
         sets it again, and somebody reading GitHub in between sees where the card was dragged
