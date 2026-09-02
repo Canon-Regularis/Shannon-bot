@@ -7,6 +7,8 @@ tree does not fail: it stops existing in Discord and nothing anywhere says so.
 
 from __future__ import annotations
 
+import asyncio
+
 import discord
 import pytest
 from discord import app_commands
@@ -109,6 +111,59 @@ class TestWhatTheGatewayIsAskedFor:
         assert client._connection._chunk_guilds is False
 
 
+class TestWhetherDiscordCanBeReached:
+    """What the health check asks, and what it used to ask instead.
+
+    `is_ready` reports whether the client's cache has ever been filled. discord.py sets it once,
+    when READY arrives, and clears it only in `close`, so a gateway that came up and later fell
+    over still reads as ready for the life of the process. The health check built on it could
+    report the connection never being made, which is the case it was written for, and could never
+    report the connection being lost, which is the more likely one: discord.py reconnects for
+    ever by design, so a client whose reconnection keeps failing sits there answering healthy and
+    delivering nothing.
+    """
+
+    async def test_a_client_that_has_never_connected_is_down(self) -> None:
+        assert ShannonBot(explain_error=lambda error: "no").gateway_is_up() is False
+
+    async def test_it_comes_up_when_the_cache_is_filled(self) -> None:
+        bot = ShannonBot(explain_error=lambda error: "no")
+        _pretend_the_cache_is_filled(bot)
+
+        await bot.on_ready()
+
+        assert bot.gateway_is_up() is True
+
+    async def test_it_goes_down_when_the_connection_does(self) -> None:
+        """The half `is_ready` cannot answer."""
+        bot = ShannonBot(explain_error=lambda error: "no")
+        _pretend_the_cache_is_filled(bot)
+        await bot.on_ready()
+
+        await bot.on_disconnect()
+
+        assert bot.is_ready() is True, "discord.py stopped latching, so this proves nothing"
+        assert bot.gateway_is_up() is False, "a gateway that has gone still reads as up"
+
+    async def test_it_comes_back_on_a_resumed_session(self) -> None:
+        """A reconnection that resumes sends this and no READY, so watching only for READY would
+        leave a gateway that is up reading as down until something forced a fresh session."""
+        bot = ShannonBot(explain_error=lambda error: "no")
+        _pretend_the_cache_is_filled(bot)
+        await bot.on_ready()
+        await bot.on_disconnect()
+
+        await bot.on_resumed()
+
+        assert bot.gateway_is_up() is True
+
+
+def _pretend_the_cache_is_filled(bot: ShannonBot) -> None:
+    """discord.py leaves `_ready` as a sentinel until the client is actually started."""
+    bot._ready = asyncio.Event()
+    bot._ready.set()
+
+
 class TestBeingToldAThreadHasGone:
     """The only gateway event this listens to besides READY, and it earns its place.
 
@@ -143,6 +198,39 @@ class TestBeingToldAThreadHasGone:
         bot.tell_when_a_thread_goes(refuses)
 
         await bot.on_raw_thread_delete(_deleted(4242))
+
+    async def test_a_whole_channel_going_does_not_run_all_at_once(self) -> None:
+        """Deleting a channel deletes every thread in it, and discord.py dispatches one of these
+        for each of them at once, each running a transaction of its own against a pool the
+        delivery worker, the poller and every slash command are drawing on.
+
+        Measured against a live database before this was bounded: a channel holding nine hundred
+        threads made an ordinary query wait sixteen seconds for a connection, and the wait grows
+        with the channel until it reaches the pool's own timeout and deliveries fail outright.
+        Letting go of a thread is housekeeping and must never be why a delivery is late.
+        """
+        now = 0
+        most = 0
+        released = asyncio.Event()
+
+        async def slowly(thread_id: int) -> None:
+            nonlocal now, most
+            now += 1
+            most = max(most, now)
+            await released.wait()
+            now -= 1
+
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_thread_goes(slowly)
+
+        letting_go = [asyncio.create_task(bot.on_raw_thread_delete(_deleted(n))) for n in range(50)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        running = most
+        released.set()
+        await asyncio.gather(*letting_go)
+
+        assert running <= 2, f"a channel going ran {running} of these at once"
 
     def test_the_cached_event_is_deliberately_not_handled(self) -> None:
         """`on_thread_delete` is the same event with the thread already resolved, and discord.py

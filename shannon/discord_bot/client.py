@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
@@ -71,7 +72,26 @@ class ShannonBot(discord.Client):
         self.tree.on_error = self._command_failed
         self._explain_error = explain_error
         self._thread_gone = thread_gone
+        # Letting go of a thread is housekeeping, and it must never be the reason a delivery is
+        # late. Deleting a channel deletes every thread in it, and discord.py dispatches one of
+        # these for each of them at once, each running a transaction of its own against a pool
+        # the delivery worker, the board poller and every slash command are drawing on. Measured
+        # against a live database: a channel holding nine hundred threads made an ordinary query
+        # wait sixteen seconds for a connection, and the wait grows with the channel until it
+        # reaches the pool's own timeout and deliveries start failing outright.
+        #
+        # Two at a time, because the work is short and there is no hurry: the item recovers on
+        # its own even if this never runs, since the write path turns Discord saying a thread is
+        # gone into a replacement. This exists to save the ONE kind of item that has no other way
+        # of finding out, and taking an hour over a channel nobody is using any more costs that
+        # item nothing.
+        self._letting_go = asyncio.Semaphore(2)
         self._pending: list[app_commands.Command] = []
+        # Whether the websocket is up right now, kept from the events discord.py already sends.
+        # `is_ready` cannot answer it: it reports whether the cache has ever been filled, is set
+        # once when READY arrives and cleared only by `close`, so a connection that came up and
+        # later died still reads as ready for the life of the process.
+        self._connected = False
 
     async def _command_failed(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -120,7 +140,34 @@ class ShannonBot(discord.Client):
         )
 
     async def on_ready(self) -> None:
+        self._connected = True
         logger.info("connected to Discord as %s", self.user)
+
+    async def on_resumed(self) -> None:
+        """The other way back. A reconnection that resumes an existing session sends this and no
+        READY, so watching only for READY would leave the health check reporting a gateway that
+        is up as down until something forced a fresh session."""
+        self._connected = True
+        logger.info("the connection to Discord came back")
+
+    async def on_disconnect(self) -> None:
+        """discord.py reconnects for ever by design, so this is not an error and nothing is done
+        about it here. It is recorded because the health check has no other way to know: a
+        gateway that has stopped answering leaves the task running and the cache filled, and
+        without this the process reports itself well while delivering nothing."""
+        self._connected = False
+        logger.info("lost the connection to Discord, waiting for it to come back")
+
+    def gateway_is_up(self) -> bool:
+        """Whether Discord can be reached right now, for the health check to answer with.
+
+        Both halves. The cache has to have been filled at least once, because a client that has
+        never connected has nothing to write with, and the socket has to be up now, because one
+        that has fallen over will not answer either. A reconnection in progress reads as down for
+        as long as it lasts, which is the honest answer and what the health check's own start
+        period and retries are for.
+        """
+        return self._connected and self.is_ready()
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
         """Somebody removed a thread. Let go of it before anything tries to write there again.
@@ -149,5 +196,6 @@ class ShannonBot(discord.Client):
         """
         if self._thread_gone is None:
             return
-        with contextlib.suppress(Exception):
-            await self._thread_gone(payload.thread_id)
+        async with self._letting_go:
+            with contextlib.suppress(Exception):
+                await self._thread_gone(payload.thread_id)
