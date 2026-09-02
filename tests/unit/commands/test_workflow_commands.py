@@ -76,7 +76,7 @@ def test_every_command_the_requirements_name_is_built() -> None:
 async def test_each_status_command_sets_its_own_status(name: str, status: Status) -> None:
     service = StubWorkflow()
 
-    await run(name, service, member_with("Reviewer"))
+    await run(name, service, member_with("Project Manager"))
 
     assert service.calls == [("status", THREAD_ID, status)]
 
@@ -85,7 +85,7 @@ async def test_each_status_command_sets_its_own_status(name: str, status: Status
 async def test_each_priority_command_sets_its_own_priority(name: str, priority: Priority) -> None:
     service = StubWorkflow()
 
-    await run(name, service, member_with("Reviewer"))
+    await run(name, service, member_with("Project Manager"))
 
     assert service.calls == [("priority", THREAD_ID, priority)]
 
@@ -113,7 +113,7 @@ async def test_a_developer_may_not() -> None:
 async def test_the_reply_names_the_item_and_what_it_became() -> None:
     service = StubWorkflow()
 
-    interaction = await run("set_in_review", service, member_with("Reviewer"))
+    interaction = await run("set_in_review", service, member_with("Project Manager"))
 
     assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now IN_REVIEW."
 
@@ -121,7 +121,7 @@ async def test_the_reply_names_the_item_and_what_it_became() -> None:
 async def test_a_repeat_says_so_rather_than_claiming_a_change() -> None:
     service = StubWorkflow(outcome=WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=False))
 
-    interaction = await run("set_backlog", service, member_with("Reviewer"))
+    interaction = await run("set_backlog", service, member_with("Project Manager"))
 
     assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is already BACKLOG."
 
@@ -131,7 +131,7 @@ async def test_finishing_says_the_thread_is_locked() -> None:
         outcome=WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True, locked=True)
     )
 
-    interaction = await run("set_done", service, member_with("Reviewer"))
+    interaction = await run("set_done", service, member_with("Project Manager"))
 
     assert said(interaction).endswith("is now DONE, and this thread is locked.")
 
@@ -154,7 +154,7 @@ async def test_a_lock_discord_refused_says_what_did_happen_as_well() -> None:
         )
     )
 
-    interaction = await run("set_done", service, member_with("Reviewer"))
+    interaction = await run("set_done", service, member_with("Project Manager"))
 
     answer = said(interaction)
     assert answer.startswith("Canon-Regularis/Shannon-bot#7 is DONE")
@@ -180,7 +180,7 @@ async def test_a_refused_unlock_says_nobody_can_reply_rather_than_the_opposite()
         )
     )
 
-    interaction = await run("set_in_review", service, member_with("Reviewer"))
+    interaction = await run("set_in_review", service, member_with("Project Manager"))
 
     answer = said(interaction)
     assert "could not be unlocked" in answer
@@ -192,7 +192,7 @@ async def test_a_refusal_comes_back_as_a_sentence() -> None:
     who ran it watching a spinner until Discord gives up."""
     service = StubWorkflow(error=NotAnItemThreadError("Run this inside the item's thread."))
 
-    interaction = await run("set_in_review", service, member_with("Reviewer"))
+    interaction = await run("set_in_review", service, member_with("Project Manager"))
 
     assert said(interaction) == "Run this inside the item's thread."
 
@@ -200,7 +200,7 @@ async def test_a_refusal_comes_back_as_a_sentence() -> None:
 async def test_a_priority_reply_reads_as_a_priority() -> None:
     service = StubWorkflow()
 
-    interaction = await run("set_high_priority", service, member_with("Reviewer"))
+    interaction = await run("set_high_priority", service, member_with("Project Manager"))
 
     assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now HIGH priority."
 
@@ -208,7 +208,7 @@ async def test_a_priority_reply_reads_as_a_priority() -> None:
 async def test_it_refuses_outside_a_server() -> None:
     """Guild-only is declared to Discord, and checked again because a declaration is not a gate."""
     service = StubWorkflow()
-    interaction = FakeInteraction(user=member_with("Reviewer"), guild_id=None)
+    interaction = FakeInteraction(user=member_with("Project Manager"), guild_id=None)
 
     await commands(service)["set_in_review"].callback(interaction)
 
@@ -219,7 +219,7 @@ async def test_it_refuses_outside_a_server() -> None:
 async def test_it_refuses_with_no_channel_to_act_on() -> None:
     """The thread is the whole input, so an interaction without one has nothing to work from."""
     service = StubWorkflow()
-    interaction = FakeInteraction(user=member_with("Reviewer"), channel_id=None)
+    interaction = FakeInteraction(user=member_with("Project Manager"), channel_id=None)
 
     await commands(service)["set_in_review"].callback(interaction)
 
