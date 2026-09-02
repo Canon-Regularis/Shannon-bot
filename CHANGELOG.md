@@ -4123,3 +4123,79 @@ and then on every other one after that.
 All three were green against correct code. Only the third is green against correct code and red
 against the mutation, which is the only property that makes a test worth having, and the only one
 that running it against the code as written cannot tell you.
+
+## A nineteenth look: teams, two replicas, the endpoint, and hostile strings
+
+Four lenses on ground no hunt had named. Two found something, two came back with the code already
+defended and the reasoning already written down, which is worth recording as much as the findings.
+
+### A team asked again on a delivery that arrived out of order
+
+A team's re-request is the only fact in this system carried by exactly one delivery. GitHub puts
+the team it has just asked at the top level of a single `review_requested` payload; every later
+payload carries the same unchanged list, so `replace` leaves the row alone and nothing in it says
+the ask happened twice.
+
+A person has a second route. Their row is stamped when they review, and any later payload measured
+against that stamp reopens it. A team's row is never stamped, deliberately: stamping it made the
+row look answered and reopened it once per review round for an ask nobody had made, which an
+earlier look found and removed. So for a team the single delivery is the whole of it.
+
+Nothing orders webhook deliveries, and the worker leases by row id and skips a row whose next
+attempt is in the future, so an event overtaking another is ordinary rather than exotic. When the
+one carrying the ask is the one overtaken, the staleness guard turns it away before anything reads
+it, and the role is never told for the life of the pull request. Every later event finds the row
+exactly as it was. The person re-requested in the same breath is told, which is what this looks
+like from Discord: one of the two parties asked, silently, with no way back.
+
+A delivery turned away now hands back the ping the payload asked for, and nothing else. That one
+write is safe from an out-of-date delivery for the same reason it is safe from a replayed one: it
+is not decided from the payload's view of the world. It compares the moment the payload was made
+against the moment the row already holds, both on GitHub's clock, and does nothing unless the
+first is later. Sending the ping is left to whoever claims it next, because a superseded delivery
+posting to Discord is a different thing from one correcting a row, and the ping is owed either way.
+
+### Two replicas, and a move undone by the one that failed
+
+Nothing in the deployment stops a second replica, and the compose file anticipates them. Every
+replica with a project number set runs the poller, on the same interval, against the same board,
+with no leader election, so the two ask for the same status for the same card.
+
+One replica labels the pull request DONE on GitHub, writes the status, and is refused by Discord on
+the render. The other, polling inside that gap, finds the label and the row already saying DONE,
+takes the branch with nothing to write, locks the thread and records the column, which is the first
+one's entire retry marker. Then the first one's compensation lands, and its guard cannot tell the
+other's identical value from its own write, so it puts the row back. What is left is a pull request
+that is DONE on GitHub, a thread nobody can reply in, a row reading READY_FOR_MERGE, and a card no
+poll looks at again.
+
+It is not fixed, and the attempt is worth recording because it looked right. Stamping the row on
+write and refusing to compensate unless the stamp is untouched fails, because the render's own sync
+writes the row before the Discord call it dies on, so the stamp has moved in the ordinary
+single-process case too. There is nothing on the row that separates "somebody else acted on my
+intermediate state" from "the step I am compensating for wrote it".
+
+That is the shape of the problem rather than an accident of this guard: a compensating write is
+unsound wherever another actor can observe and act on the state it is compensating for. The
+recorded fix is the one already on the books, a per-item lock held across the Discord phase, which
+is a design change rather than a patch. Until then the poller belongs in one replica, which is now
+said where the setting that enables it is defined.
+
+### Checked and already defended
+
+Both of the other lenses came back refuted, and what they were refuted by is worth having written
+down in one place.
+
+A string somebody else chose cannot make this bot notify a server. `AllowedMentions` is built with
+`everyone=False`, and every scrap of GitHub-authored text goes through `defuse_mentions` on the way
+in, which puts a zero-width space inside the brackets of a role mention as well as a user one. A
+label reaching the content with `@everyone` intact is a difference in which neutraliser it gets and
+has no consequence, because the gate is what stops the ping and it is off.
+
+The endpoint reads at most 25 MB, counted as it arrives rather than trusted from `Content-Length`,
+because the signature covers the whole body and nothing obliges a client to declare its length.
+
+Teams are otherwise sound: they resolve against their own table, so a slug cannot collide with a
+login, and the sync keeps slugs out of the map that people are looked up in with a comment at both
+ends saying that removing the exclusion changes nothing today, which is exactly why it needs
+saying. A linked role that has since been deleted renders as a mention that reaches nobody.
