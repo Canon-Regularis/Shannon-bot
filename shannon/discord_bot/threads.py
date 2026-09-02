@@ -47,7 +47,54 @@ def why_threads_will_not_open(channel: object) -> str | None:
             "That forum requires a tag on every post, and this bot does not set one. "
             "Turn off Require Tags in the channel's settings, or pick another channel."
         )
-    return None
+    return _what_this_bot_cannot_do_there(channel)
+
+
+def _what_this_bot_cannot_do_there(channel: discord.abc.GuildChannel) -> str | None:
+    """Which of the permissions needed to open a thread here this bot has not been given.
+
+    The same reasoning as the checks above, for the thing that actually goes wrong most often. A
+    channel this bot cannot write in is accepted, written down, and then refuses every delivery
+    for the rest of its life: a missing permission is permanent, so the queue drops each one on
+    its first attempt with a line in a log nobody is reading, and the person who ran the command
+    was told it worked. Private channels and a role that was never given Create Public Threads
+    are the ordinary ways in, and both are invisible from the command's side.
+
+    Asked of the bot rather than of the caller. An administrator picking a channel they can see
+    says nothing about whether this bot can, and Discord will happily offer one it cannot.
+
+    Manage Threads is deliberately not required. It is needed only to lock a finished item's
+    thread, everything else works without it, and both paths that want it now step over a
+    refusal and say so rather than failing.
+
+    Skipped where the guild is not cached, which is a client that is still starting: the answer
+    would be a guess, and the checks above are the ones this exists for.
+    """
+    me = getattr(getattr(channel, "guild", None), "me", None)
+    if me is None:
+        return None
+
+    allowed = channel.permissions_for(me)
+    if isinstance(channel, discord.ForumChannel):
+        # A forum post is a thread, and creating one is Send Messages in the forum itself.
+        wanted = (
+            ("View Channel", allowed.view_channel),
+            ("Send Messages", allowed.send_messages),
+            ("Send Messages in Threads", allowed.send_messages_in_threads),
+        )
+    else:
+        # A text channel needs the thread opened and then written in, which are two separate
+        # permissions and are refused separately.
+        wanted = (
+            ("View Channel", allowed.view_channel),
+            ("Create Public Threads", allowed.create_public_threads),
+            ("Send Messages in Threads", allowed.send_messages_in_threads),
+        )
+
+    missing = [name for name, held in wanted if not held]
+    if not missing:
+        return None
+    return f"This bot has not been given {', '.join(missing)} there."
 
 
 # The longest window Discord offers before it archives a quiet thread by itself. An archived

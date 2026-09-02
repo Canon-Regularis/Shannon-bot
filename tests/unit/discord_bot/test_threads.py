@@ -17,8 +17,94 @@ from shannon.discord_bot.threads import (
     THREAD_NAME_LIMIT,
     DiscordThreadGateway,
     truncate_thread_name,
+    why_threads_will_not_open,
 )
 from shannon.domain.errors import PermanentError
+
+
+def a_channel(kind: type, **permissions: bool) -> MagicMock:
+    """A channel this bot has been given exactly the permissions named."""
+    stub = MagicMock(spec=kind)
+    if kind is discord.ForumChannel:
+        stub.flags.require_tag = False
+    held = discord.Permissions.none()
+    for name, granted in permissions.items():
+        setattr(held, name, granted)
+    stub.permissions_for = MagicMock(return_value=held)
+    return stub
+
+
+class TestWhatThisBotCanDoInTheChannelItIsGiven:
+    """A channel this bot cannot write in is the ordinary way `/set_channel` goes wrong, and it
+    used to be accepted without a word.
+
+    The type checks beside this one exist because a channel that refuses is otherwise found out
+    hours later and behind the queue. A missing permission is worse than the cases they cover: it
+    is permanent, so every delivery is dropped on its first attempt with a line in a log nobody
+    is reading, and the person who ran the command was told it worked. A private channel, or a
+    role that was never given Create Public Threads, is invisible from the command's side.
+    """
+
+    def test_a_text_channel_it_can_use_is_accepted(self) -> None:
+        channel = a_channel(
+            discord.TextChannel,
+            view_channel=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+        )
+
+        assert why_threads_will_not_open(channel) is None
+
+    def test_a_text_channel_it_cannot_open_a_thread_in_is_refused(self) -> None:
+        channel = a_channel(discord.TextChannel, view_channel=True, send_messages_in_threads=True)
+
+        refusal = why_threads_will_not_open(channel)
+
+        assert refusal is not None
+        assert "Create Public Threads" in refusal
+
+    def test_it_names_every_permission_that_is_missing(self) -> None:
+        """One at a time is a person coming back three times."""
+        channel = a_channel(discord.TextChannel)
+
+        refusal = why_threads_will_not_open(channel)
+
+        assert refusal is not None
+        for wanted in ("View Channel", "Create Public Threads", "Send Messages in Threads"):
+            assert wanted in refusal
+
+    def test_a_forum_is_judged_on_posting_rather_than_on_threads(self) -> None:
+        """A forum post is a thread, and creating one is Send Messages in the forum itself, so
+        asking a forum for Create Public Threads would refuse one that works perfectly well."""
+        forum = a_channel(
+            discord.ForumChannel,
+            view_channel=True,
+            send_messages=True,
+            send_messages_in_threads=True,
+        )
+
+        assert why_threads_will_not_open(forum) is None
+
+    def test_manage_threads_is_not_required(self) -> None:
+        """It is needed only to lock a finished item's thread, and both paths that want it step
+        over a refusal and say so rather than failing."""
+        channel = a_channel(
+            discord.TextChannel,
+            view_channel=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            manage_threads=False,
+        )
+
+        assert why_threads_will_not_open(channel) is None
+
+    def test_a_guild_that_is_not_cached_yet_is_not_guessed_about(self) -> None:
+        """A client still starting has no member object to ask with, and the answer would be a
+        guess. The type checks are the ones this function exists for."""
+        channel = MagicMock(spec=discord.TextChannel)
+        channel.guild.me = None
+
+        assert why_threads_will_not_open(channel) is None
 
 
 def message(message_id: int) -> MagicMock:
