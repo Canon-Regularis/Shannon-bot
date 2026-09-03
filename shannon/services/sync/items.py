@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
@@ -15,8 +17,8 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.errors import ThreadNotFoundError
-from shannon.discord_bot.threads import LocksThread, OpensThreads
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.threads import KnowsItsServers, LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
@@ -26,6 +28,22 @@ from shannon.services.sync.staleness import is_superseded
 from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
+
+# The first key of the per-item advisory lock, which makes a space of its own. Postgres keeps the
+# two-integer keys apart from the single-bigint ones, and `UserLinkStore` uses the second with a
+# guild id, so the two cannot collide however the numbers land.
+_ONE_ITEM_AT_A_TIME = 8_531
+
+
+def _lock_key(github_object_id: int) -> int:
+    """The item's own GitHub id, folded into the signed 32 bits an advisory key allows.
+
+    GitHub numbers every issue and pull request uniquely, so this separates items rather than
+    grouping them. Two items whose ids happen to fold together take turns for the length of a
+    Discord call, which costs nothing and cannot be wrong.
+    """
+    return (github_object_id % 2**32) - 2**31
+
 
 SnapshotParser = Callable[[str, Mapping[str, Any]], TrackedSnapshot | None]
 
@@ -59,8 +77,19 @@ class SyncResult:
 class SyncsItems(Protocol):
     """Mirroring one snapshot, which is all any caller of this path asks for."""
 
-    async def sync(self, snapshot: TrackedSnapshot, *, settles_the_lock: bool = True) -> SyncResult:
-        """`settles_the_lock` is False for a caller that takes the lock itself afterwards.
+    async def sync(
+        self,
+        snapshot: TrackedSnapshot,
+        *,
+        settles_the_lock: bool = True,
+        arrived: int | None = None,
+    ) -> SyncResult:
+        """`arrived` is the number the queue gave this delivery, which is the order it reached
+        this bot. It separates two deliveries carrying the same `updated_at`, which GitHub stamps
+        to the second so they routinely do. None for a sync that came from a command or the board
+        rather than from a delivery, and for one whose caller has no number to offer.
+
+        `settles_the_lock` is False for a caller that takes the lock itself afterwards.
 
         Only `/set_done` and the commands beside it do, and they own it: they decide the status
         the lock follows from, they report a refusal to the person who ran them rather than
@@ -71,7 +100,15 @@ class SyncsItems(Protocol):
         ...
 
 
-class OpensAndLocksThreads(LocksThread, OpensThreads, Protocol):
+class LocksAndKnowsServers(LocksThread, KnowsItsServers, Protocol):
+    """What the sync service itself needs of Discord: the lock, and whether the server is there.
+
+    The second is only ever asked about a refusal, to tell a permission this bot was never given
+    from a server it is no longer in.
+    """
+
+
+class OpensAndLocksThreads(LocksThread, OpensThreads, KnowsItsServers, Protocol):
     """Both thread roles, which only the wiring below needs.
 
     The service locks and the binding opens. Nothing holds this except the function that builds
@@ -108,7 +145,7 @@ class ItemSyncService:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: LocksThread,
+        threads: LocksAndKnowsServers,
         policy: SyncPolicy,
         binding: ThreadBinding,
         notifier: Notifier | None = None,
@@ -119,7 +156,13 @@ class ItemSyncService:
         self._policy = policy
         self._notifier = notifier
 
-    async def sync(self, snapshot: TrackedSnapshot, *, settles_the_lock: bool = True) -> SyncResult:
+    async def sync(
+        self,
+        snapshot: TrackedSnapshot,
+        *,
+        settles_the_lock: bool = True,
+        arrived: int | None = None,
+    ) -> SyncResult:
         """Bring Discord in line with a snapshot."""
         if snapshot.object_type is not self._policy.object_type:
             # Wiring, not input: a policy paired with the wrong kind of snapshot would file the
@@ -131,7 +174,52 @@ class ItemSyncService:
                 f"snapshot for {snapshot.repository.full_name}#{snapshot.number}"
             )
 
-        decision = await self._record(snapshot)
+        async with self._one_at_a_time(snapshot):
+            return await self._mirror(snapshot, settles_the_lock, arrived)
+
+    @asynccontextmanager
+    async def _one_at_a_time(self, snapshot: TrackedSnapshot) -> AsyncIterator[None]:
+        """Hold this item to one sync at a time, Discord included.
+
+        The row's own lock already orders what happens in the database, and that was never the
+        gap. Discord is called outside the transaction, deliberately, so that a slow gateway
+        cannot hold a connection, which leaves two syncs of one item free to interleave the calls
+        themselves: a superseded snapshot was reproduced locking a thread a newer one had just
+        unlocked. Two syncs of one item are ordinary rather than exotic, because `/pr` runs while
+        an event for the same item is in flight and nothing stops a second replica.
+
+        An advisory lock rather than a row lock, because this has to outlive the transaction that
+        reads the row and cover the calls that come after it. Keyed on the item's GitHub id,
+        which is known before anything is read, and taken before the read so the sync that waits
+        goes on to read a row the other one has already written: its staleness guard then turns
+        it away if it is the older of the two, which is the answer that was missing.
+
+        Waited for rather than skipped. The one that waits may be the newer delivery carrying the
+        work that matters, and a Discord phase is short.
+
+        Tied to a transaction rather than handed back by name. A session-scoped lock has to be
+        released explicitly, and the one moment that release cannot be made is the moment it
+        matters most: a cancelled task raises at the next await it reaches, the release included,
+        so a shutdown part way through a sync would return the connection to the pool still
+        holding the lock and that item would wait on it for ever. A transaction-scoped lock ends
+        when its transaction does, however it ends, and the pool rolls a connection back before
+        letting anything else have it.
+
+        What this gives up is a connection held for the length of the Discord phase, one per item
+        being synced at that moment, against a pool of fifteen and a handful ever in flight. It is
+        also not reentrant: nothing on this path may sync the same item from inside a sync, and
+        nothing does.
+        """
+        key = _lock_key(snapshot.github_object_id)
+        async with self._sessionmaker() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(_ONE_ITEM_AT_A_TIME, key)))
+            yield
+
+    async def _mirror(
+        self, snapshot: TrackedSnapshot, settles_the_lock: bool, arrived: int | None
+    ) -> SyncResult:
+        """One sync of one item, with that item held to this one."""
+        decision = await self._record(snapshot, arrived)
         # The database step either hands over work to do or answers on its own.
         if isinstance(decision, SyncResult):
             if decision.outcome is SyncOutcome.STALE:
@@ -140,6 +228,36 @@ class ItemSyncService:
             return decision
         state = decision
 
+        try:
+            return await self._show_it(state, snapshot, settles_the_lock)
+        except PermanentError:
+            # A refusal that looks like a permission, from a bot that may simply not be in the
+            # server any more. discord.py empties the guild from its cache the moment it is
+            # removed, and Discord answers for a channel it can no longer see with the same
+            # refusal it gives for one it is not allowed to touch.
+            #
+            # Told apart because the two want opposite things. A missing permission is permanent
+            # and is dropped on the first attempt, which is right: nobody grants a permission by
+            # waiting. Being out of a server is minutes long, an admin removing the bot and
+            # putting it back or re-authorising the integration, and the sixteen attempts over
+            # two hours exist for exactly that. Dropped as permanent, every delivery in the
+            # window was lost, and the row had already been committed, so the item was left
+            # saying one thing while its thread said another with nothing coming to correct it.
+            if self._threads.is_in(state.guild_id):
+                raise
+            raise DiscordGatewayError(
+                f"this bot is not in server {state.guild_id} at the moment, so nothing about "
+                f"{snapshot.repository.full_name}#{snapshot.number} could be written"
+            ) from None
+
+    async def _show_it(
+        self, state: _SyncState, snapshot: TrackedSnapshot, settles_the_lock: bool
+    ) -> SyncResult:
+        """Everything this sync says to Discord, which is everything that can be refused.
+
+        Its own method so the refusal above has something to wrap. Nothing here is decided again:
+        the row was read and written by the step before it.
+        """
         # Discord is called outside the transaction. Holding one open across a network call
         # would let a slow gateway block the database, and a rollback would throw away work
         # Discord had already done.
@@ -382,20 +500,22 @@ class ItemSyncService:
         )
         return False
 
-    async def _record(self, snapshot: TrackedSnapshot) -> _SyncState | SyncResult:
+    async def _record(
+        self, snapshot: TrackedSnapshot, arrived: int | None = None
+    ) -> _SyncState | SyncResult:
         """The database half, in one transaction: work out where this goes, then write it.
 
         Split in two because the two halves fail differently. Resolving can decide there is
         nothing to do at all, and writing cannot.
         """
         async with self._sessionmaker() as session, session.begin():
-            placement = await self._resolve(session, snapshot)
+            placement = await self._resolve(session, snapshot, arrived)
             if isinstance(placement, SyncResult):
                 return placement
-            return await self._write(session, snapshot, placement)
+            return await self._write(session, snapshot, placement, arrived)
 
     async def _resolve(
-        self, session: AsyncSession, snapshot: TrackedSnapshot
+        self, session: AsyncSession, snapshot: TrackedSnapshot, arrived: int | None = None
     ) -> _Placement | SyncResult:
         """Find the repository, the channel and the item, or give a reason there is no work."""
         object_type = self._policy.object_type
@@ -442,7 +562,12 @@ class ItemSyncService:
             github_object_id=snapshot.github_object_id,
             lock=True,
         )
-        superseded = item is not None and is_superseded(snapshot.updated_at, item.github_updated_at)
+        superseded = item is not None and is_superseded(
+            snapshot.updated_at,
+            item.github_updated_at,
+            arrived=arrived,
+            applied=item.last_delivery_id,
+        )
 
         if superseded and item.discord_thread_id is not None:
             logger.info(
@@ -467,7 +592,11 @@ class ItemSyncService:
         )
 
     async def _write(
-        self, session: AsyncSession, snapshot: TrackedSnapshot, placement: _Placement
+        self,
+        session: AsyncSession,
+        snapshot: TrackedSnapshot,
+        placement: _Placement,
+        arrived: int | None = None,
     ) -> _SyncState | SyncResult:
         """Bring the stored item in line with the snapshot, and render what Discord will show."""
         object_type = self._policy.object_type
@@ -502,7 +631,12 @@ class ItemSyncService:
             # time it returns, that sync's timestamp is on the row and held. Nothing to compare
             # against means this sync wrote the row itself, and a mark equal to its own snapshot
             # reads as current, which it is.
-            superseded = is_superseded(snapshot.updated_at, item.github_updated_at)
+            superseded = is_superseded(
+                snapshot.updated_at,
+                item.github_updated_at,
+                arrived=arrived,
+                applied=item.last_delivery_id,
+            )
             if superseded and item.discord_thread_id is not None:
                 logger.info(
                     "ignoring a stale %s.%s for %s#%s, another sync created it first",
@@ -556,6 +690,12 @@ class ItemSyncService:
         else:
             self._apply(items, item, snapshot)
             await self._store_people(session, item.id, roles, snapshot)
+            # Which delivery this was, so the next one carrying the same second can be placed
+            # against it. Only on the branch that believes the payload: a rebuild from an old
+            # delivery is deliberately not adopting anything it says, and recording its number
+            # would tell the guard that an older delivery is the newest thing applied.
+            if arrived is not None:
+                item.last_delivery_id = arrived
 
         # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
         # and `/link` lets anybody bind a name to their own account without GitHub being asked
@@ -697,11 +837,13 @@ def build_item_handler(service: SyncsItems, parse: SnapshotParser) -> EventHandl
     than each having its own near-identical handler module.
     """
 
-    async def handle(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+    async def handle(
+        action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
         snapshot = parse(action, payload)
         if snapshot is None:
             return WebhookOutcome.IGNORED
-        result = await service.sync(snapshot)
+        result = await service.sync(snapshot, arrived=arrived)
         return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED
 
     return handle

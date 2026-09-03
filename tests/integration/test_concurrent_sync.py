@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.models import Actor
 from shannon.domain.time import as_utc
@@ -517,6 +519,40 @@ async def test_a_brand_new_item_the_loser_knows_more_about_is_still_written(
     assert as_utc(stored.github_updated_at) == datetime(2026, 8, 10, 18, 0, 5, tzinfo=UTC)
 
 
+async def test_two_syncs_of_one_item_do_not_share_the_discord_phase(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker,
+    issue_event,
+) -> None:
+    """The Discord phase is the one part of a sync that nothing used to order.
+
+    The row's lock settles what happens in the database and is let go at the commit, which comes
+    before the first Discord call. Two syncs of one item could therefore be talking to Discord
+    at the same time, in either order, and whichever finished last decided what the thread
+    looked like however old its payload was: a superseded close was watched locking a thread the
+    reopen beside it had just unlocked.
+
+    Both payloads carry the same `updated_at` so that neither is turned away as stale and both
+    reach Discord, which is what there has to be two of for this to prove anything.
+
+    Nothing about the outcome is asserted, only that the two phases do not overlap. That is the
+    property on its own, and it is the one every guard downstream is allowed to assume.
+    """
+    threads = _RecordsWhoIsInside()
+    service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+    await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
+    threads.inside.clear()
+
+    await asyncio.gather(
+        service.sync(issue_event("edited", title="one", updated_at="2026-08-01T11:00:00Z")),
+        service.sync(issue_event("edited", title="two", updated_at="2026-08-01T11:00:00Z")),
+    )
+
+    assert threads.inside == ["in", "out", "in", "out"], (
+        f"the two syncs were in Discord together: {threads.inside}"
+    )
+
+
 async def blocked_on_a_row(sessionmaker: async_sessionmaker, task: asyncio.Task) -> None:
     """Wait until the task is genuinely waiting on a lock somebody else holds.
 
@@ -555,3 +591,34 @@ async def _create(store: TrackedItemStore) -> TrackedItem:
         github_state="open",
         status=Status.NOT_REVIEWED,
     )
+
+
+class _RecordsWhoIsInside(FakeThreadGateway):
+    """Writes down when a sync enters the Discord phase and when it leaves it.
+
+    The first one in holds the door open until the second joins it, so that an overlap happens
+    if one is allowed to. A plain sleep was not enough: the other sync has a whole database
+    round of its own to get through first, and it took longer than any sleep worth writing, so
+    the two took turns on timing alone and the test passed with the lock taken out.
+
+    The wait has to give up rather than hang, because when the lock is doing its job the second
+    one is not coming: it is queued behind this one and cannot reach here until this returns.
+    Giving up is therefore the passing case, and it costs the test that one second.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inside: list[str] = []
+        self._joined = asyncio.Event()
+        self._entered = 0
+
+    async def update(self, **kwargs) -> ThreadHandle:
+        self.inside.append("in")
+        self._entered += 1
+        if self._entered > 1:
+            self._joined.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._joined.wait(), timeout=1)
+        handle = await super().update(**kwargs)
+        self.inside.append("out")
+        return handle

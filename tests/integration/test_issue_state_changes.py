@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -283,18 +284,21 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         """The other half of the window, and the half the arrival order cannot catch.
 
         The close above was already stale when it started, so it never got past the database.
-        This one is current when it reads and is overtaken while it is talking to Discord, which
-        is the only phase of a sync that is not ordered. Locking is the last step and is decided
-        from what the snapshot said several calls ago, so without a second look the reopened
-        issue ends up in a thread nobody can post in. A stale metadata block rights itself on the
-        next delivery; a locked thread does not.
+        This one is current when it reads and is overtaken while it is talking to Discord.
+        Locking is the last step and is decided from what the snapshot said several calls ago,
+        so without a second look the reopened issue ends up in a thread nobody can post in. A
+        stale metadata block rights itself on the next delivery; a locked thread does not.
+
+        The reopen is written onto the row rather than run as a sync, because a sync of this
+        item would wait for this one: one at a time is what the item's lock buys, and nothing in
+        this process can interleave with a Discord phase any more. A second replica holds
+        nothing against this one, so the row can still move under a sync that has already read
+        it, and writing it here is that.
         """
         threads = _ReopensMidWrite()
         service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await service.sync(issue_event("opened", updated_at="2026-08-01T10:00:00Z"))
-        threads.during = lambda: service.sync(
-            issue_event("reopened", state="open", closed_at=None, updated_at="2026-08-01T13:00:00Z")
-        )
+        threads.during = lambda: _reopened_where_this_one_cannot_see(db_sessionmaker)
 
         await service.sync(
             issue_event(
@@ -332,11 +336,23 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         assert thread.locked is True
 
 
-class _ReopensMidWrite(FakeThreadGateway):
-    """Runs another sync from inside a Discord call, which is where the window actually is.
+async def _reopened_where_this_one_cannot_see(sessionmaker: async_sessionmaker) -> None:
+    """What a reopen leaves on the row: a later stamp, and the issue open again.
 
-    Once only. The sync it runs writes through this same gateway, and letting that one fire the
-    hook again would recurse rather than reproduce anything.
+    Only the stamp decides anything, because that is what the second look reads. The status is
+    written with it so the row says one thing rather than half of each.
+    """
+    async with sessionmaker() as session, session.begin():
+        item = await session.scalar(select(TrackedItem))
+        assert item is not None
+        item.github_updated_at = datetime(2026, 8, 1, 13, 0, tzinfo=UTC)
+        item.status = Status.NOT_REVIEWED
+
+
+class _ReopensMidWrite(FakeThreadGateway):
+    """Moves the item on from inside a Discord call, which is where the window actually is.
+
+    Once only, or every update it makes would move the item again.
     """
 
     def __init__(self) -> None:

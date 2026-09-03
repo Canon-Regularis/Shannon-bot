@@ -136,7 +136,17 @@ class LocksThread(Protocol):
     async def set_locked(self, *, thread_id: int, locked: bool) -> None: ...
 
 
-class ThreadGateway(OpensThreads, PostsToThread, LocksThread, Protocol):
+class KnowsItsServers(Protocol):
+    """Whether this bot is in a particular server at the moment.
+
+    Its own role because it is the only question here that is not about a thread, and because the
+    one caller that needs it needs nothing else from the client.
+    """
+
+    def is_in(self, guild_id: int) -> bool: ...
+
+
+class ThreadGateway(OpensThreads, PostsToThread, LocksThread, KnowsItsServers, Protocol):
     """Everything this project does to Discord threads.
 
     The container passes one object satisfying all three roles, because one Discord client is
@@ -245,6 +255,21 @@ class DiscordThreadGateway:
             # that have to reach its metadata. Unarchiving rides along with the lock change
             # rather than costing a second call. The bot needs Manage Threads to write here.
             await thread.edit(archived=False, locked=locked)
+
+    def is_in(self, guild_id: int) -> bool:
+        """Whether this bot is in that server at the moment.
+
+        Asked when Discord has refused something as though a permission were missing, to tell
+        that apart from being out of the server altogether. discord.py empties the guild from its
+        cache the moment the bot is removed, and answers a channel it can no longer see with a
+        refusal that looks exactly like one it is not allowed to touch.
+
+        A guild that is merely not cached yet, during a start or a reconnect, answers False as
+        well, which is the useful way round: the caller treats that as something to wait out, and
+        waiting is right for both.
+        """
+        self._require_a_connection()
+        return self._client.get_guild(guild_id) is not None
 
     async def delete(self, *, thread_id: int) -> None:
         """Remove a thread the sync path opened and then could not use.

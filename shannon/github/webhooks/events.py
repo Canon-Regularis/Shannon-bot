@@ -67,7 +67,15 @@ class WebhookOutcome(StrEnum):
 class EventHandler(Protocol):
     """Handles one GitHub event type. Implementations live in the services layer."""
 
-    async def __call__(self, action: str, payload: Mapping[str, Any]) -> WebhookOutcome: ...
+    async def __call__(
+        self, action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
+        """`arrived` is the number the queue gave this delivery, which is the order it reached
+        this bot. Handlers that have no use for it ignore it; the item sync uses it to place two
+        deliveries carrying the same `updated_at`, which GitHub stamps to the second so they
+        routinely do. None where there is no delivery behind the call.
+        """
+        ...
 
 
 def is_supported(event: str, action: str | None) -> bool:

@@ -15,7 +15,7 @@ from shannon.domain.enums import ActorRole
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.reviews import ReviewRequestLedger
-from shannon.services.sync.items import ItemSyncService, build_item_sync
+from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
@@ -326,6 +326,82 @@ class TestTwoDeliveriesGitHubStampedWithTheSameSecond:
         await notifying_sync_service.sync(pr_event("labeled", updated_at="2026-08-11T10:30:00Z"))
 
         assert len(threads.posts) == told, "it asked her again for a review nobody asked for twice"
+
+
+class TestTwoDeliveriesPlacedByTheOrderTheyArrived:
+    """What separates two deliveries GitHub stamped with the same second.
+
+    The timestamps cannot: GitHub stamps to the second and an item opened with a reviewer already
+    on it is two events milliseconds apart, so equal is the ordinary case. Nothing in a payload
+    says which came first either. The deliveries themselves are numbered, though: the queue gives
+    each one a number as it is written down, which is the order it reached this bot.
+
+    That order only matters because things reorder. The worker leases by that same number, so
+    deliveries are handled in arrival order until one fails: a delivery that backs off is skipped
+    until its next attempt and the one behind it goes first. Then the older payload is the last to
+    be believed, and with equal timestamps nothing turned it away.
+    """
+
+    async def test_the_older_one_is_turned_away_when_it_lands_last(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        # The request arrived second and is handled first, which one transient failure does.
+        await notifying_sync_service.sync(
+            pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)]),
+            arrived=2,
+        )
+        told = len(threads.posts)
+
+        # The `opened` payload, from before she was asked, carrying the same second.
+        result = await notifying_sync_service.sync(
+            pr_event("opened", requested_reviewers=[]), arrived=1
+        )
+
+        assert result.outcome is SyncOutcome.STALE, "the older delivery was believed"
+        db_session.expire_all()
+        row = await db_session.scalar(
+            select(ItemAssignment).where(ItemAssignment.role_type == ActorRole.REVIEWER)
+        )
+        assert row is not None, "the older delivery deleted the request the newer one made"
+        assert len(threads.posts) == told
+
+    async def test_a_delivery_with_no_number_is_still_judged_on_its_timestamp(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        """A sync from a command or the board has no number to offer, and a row written before
+        the numbers were kept has none either. Both fall back to what happened before."""
+        await notifying_sync_service.sync(
+            pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)])
+        )
+
+        result = await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]))
+
+        assert result.outcome is SyncOutcome.SYNCED, "it invented an order it could not know"
+
+    async def test_the_newer_one_still_goes_through_when_it_lands_last(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        pr_event,
+    ) -> None:
+        """The ordinary order, which must not be turned away by the same comparison."""
+        await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]), arrived=1)
+
+        result = await notifying_sync_service.sync(
+            pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)]),
+            arrived=2,
+        )
+
+        assert result.outcome is SyncOutcome.SYNCED
 
 
 class TestAReviewSubmittedUnderANewName:

@@ -89,8 +89,10 @@ class UserLinkStore:
         conflict on either constraint and `ON CONFLICT` names a single one. Nor can a retry loop,
         since the retries collide with each other and not only with the original winner. Hence
         the advisory lock, held to the end of the transaction and keyed per guild so servers do
-        not wait on one another. Nothing else here takes advisory locks, so the guild id alone
-        is a safe key.
+        not wait on one another. The guild id alone is a safe key because this is the only lock
+        taken in that space: the other one in the project, held over an item's Discord phase,
+        gives Postgres two integers instead of one bigint, and Postgres keeps those two spaces
+        apart however the numbers land.
         """
         await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
 

@@ -63,6 +63,9 @@ class FakeThreadGateway:
         # A server that will never accept a rewrite, which is what a deleted channel, a bot
         # removed from the guild and a revoked permission all look like from here.
         self.refuses_every_update = False
+        # Servers this bot has been removed from, which is not the same as a permission it was
+        # never given even though Discord answers both the same way.
+        self.removed_from: set[int] = set()
         # Opening the thread and writing the first message in it are two Discord calls and two
         # permissions, so the second can be refused on its own. The thread is real by then, and
         # the real gateway hands its id back with the failure so the row can point at it.
@@ -118,6 +121,11 @@ class FakeThreadGateway:
         thread.messages[message_id] = content
         thread.metadata_message_id = message_id
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
+
+    def is_in(self, guild_id: int) -> bool:
+        """In every server, unless a test says otherwise. Set False to stand for a bot that has
+        been removed, which Discord reports as the same refusal as a missing permission."""
+        return guild_id not in self.removed_from
 
     async def set_locked(self, *, thread_id: int, locked: bool) -> None:
         self.lock_calls.append((thread_id, locked))

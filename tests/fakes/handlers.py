@@ -16,7 +16,12 @@ class RecordingHandler:
     def __init__(self, outcome: WebhookOutcome = WebhookOutcome.PROCESSED) -> None:
         self.outcome = outcome
         self.calls: list[tuple[str, Mapping[str, Any]]] = []
+        # The order each delivery reached this bot, which only the queue can say.
+        self.arrivals: list[int | None] = []
 
-    async def __call__(self, action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+    async def __call__(
+        self, action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
         self.calls.append((action, payload))
+        self.arrivals.append(arrived)
         return self.outcome

@@ -50,7 +50,9 @@ class Exploding:
         self.failures = failures
         self.calls = 0
 
-    async def __call__(self, action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+    async def __call__(
+        self, action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
         self.calls += 1
         if self.calls <= self.failures:
             raise RuntimeError("discord is down")
@@ -184,7 +186,9 @@ async def test_a_delivery_that_never_returns_is_not_allowed_to_wedge_the_queue(
 ) -> None:
     """discord.py sleeps through a rate limit rather than failing, so a handler can just hang."""
 
-    async def hang(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+    async def hang(
+        action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
         await asyncio.sleep(60)
         return WebhookOutcome.PROCESSED
 
@@ -230,7 +234,9 @@ class TestErrorsRetryingCannotFix:
     async def test_a_permission_error_is_given_up_on_at_once(
         self, queue: WebhookDeliveryQueue, db_session: AsyncSession
     ) -> None:
-        async def refused(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def refused(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             raise DiscordPermissionError("Discord will not let the bot create a thread")
 
         worker = build_worker(queue, refused)
@@ -244,7 +250,9 @@ class TestErrorsRetryingCannotFix:
         assert "DiscordPermissionError" in (event.last_error or "")
 
     async def test_it_is_not_leased_again(self, queue: WebhookDeliveryQueue) -> None:
-        async def refused(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def refused(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             raise DiscordPermissionError("nope")
 
         worker = build_worker(queue, refused, first_backoff=timedelta(seconds=-1))
@@ -338,7 +346,9 @@ class TestStoppingCleanly:
     ) -> None:
         handled: list[str] = []
 
-        async def stop_after_one(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def stop_after_one(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             handled.append(action)
             worker.stop()
             return WebhookOutcome.PROCESSED
@@ -361,7 +371,9 @@ class TestStoppingCleanly:
     ) -> None:
         """Nothing was tried on them, so a restart must not count it against their budget."""
 
-        async def stop_at_once(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def stop_at_once(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             worker.stop()
             return WebhookOutcome.PROCESSED
 
@@ -376,7 +388,9 @@ class TestStoppingCleanly:
     async def test_another_worker_can_take_them_immediately(
         self, queue: WebhookDeliveryQueue
     ) -> None:
-        async def stop_at_once(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def stop_at_once(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             stopping.stop()
             return WebhookOutcome.PROCESSED
 
@@ -611,7 +625,9 @@ class TestDrainingABacklog:
         handled = Exploding(failures=0)
         worker = build_worker(queue, handled, batch_size=2, poll_interval=self.NEVER)
 
-        async def stop_while_handling(action: str, payload: dict) -> WebhookOutcome:
+        async def stop_while_handling(
+            action: str, payload: dict, arrived: int | None = None
+        ) -> WebhookOutcome:
             worker.stop()
             return await handled(action, payload)
 
@@ -751,7 +767,9 @@ class TestBeingCancelledOutright:
     ) -> None:
         started = asyncio.Event()
 
-        async def hang(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+        async def hang(
+            action: str, payload: Mapping[str, Any], arrived: int | None = None
+        ) -> WebhookOutcome:
             started.set()
             await asyncio.sleep(60)
             return WebhookOutcome.PROCESSED
@@ -789,7 +807,7 @@ class TestWhatGetsWrittenToLastError:
     async def test_an_enormous_message_is_trimmed(
         self, queue: WebhookDeliveryQueue, db_session: AsyncSession
     ) -> None:
-        async def raises(action: str, payload: Any) -> WebhookOutcome:
+        async def raises(action: str, payload: Any, arrived: int | None = None) -> WebhookOutcome:
             raise RuntimeError("x" * 10_000)
 
         await enqueue(queue, "huge")
@@ -803,7 +821,7 @@ class TestWhatGetsWrittenToLastError:
     async def test_an_ordinary_message_is_left_alone(
         self, queue: WebhookDeliveryQueue, db_session: AsyncSession
     ) -> None:
-        async def raises(action: str, payload: Any) -> WebhookOutcome:
+        async def raises(action: str, payload: Any, arrived: int | None = None) -> WebhookOutcome:
             raise RuntimeError("the gateway said no")
 
         await enqueue(queue, "small")

@@ -26,7 +26,11 @@ class Dispatch(Protocol):
     """
 
     async def dispatch(
-        self, event: str, action: str | None, payload: Mapping[str, Any]
+        self,
+        event: str,
+        action: str | None,
+        payload: Mapping[str, Any],
+        arrived: int | None = None,
     ) -> WebhookOutcome: ...
 
 
@@ -259,7 +263,14 @@ class DeliveryWorker:
     async def _handle(self, delivery: Delivery) -> None:
         try:
             outcome = await asyncio.wait_for(
-                self._dispatch.dispatch(delivery.event_type, delivery.action, delivery.payload),
+                self._dispatch.dispatch(
+                    delivery.event_type,
+                    delivery.action,
+                    delivery.payload,
+                    # The order this reached us, which is the only thing that can separate two
+                    # deliveries GitHub stamped with the same second.
+                    delivery.id,
+                ),
                 timeout=self._settings.delivery_timeout.total_seconds(),
             )
         except asyncio.CancelledError:

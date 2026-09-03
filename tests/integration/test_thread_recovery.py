@@ -13,11 +13,12 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadStartedEmptyError
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.enums import Status
-from shannon.domain.errors import ItemNotReadyError
+from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror
 from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.threads import ItemThreads, ThreadTarget
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import build_stack
@@ -164,22 +165,72 @@ class TestTwoSyncsRacingToOpenAThread:
         assert len({r.thread_id for r in results}) == 1
         assert (await stored(db_session)).discord_thread_id == results[0].thread_id
 
-    async def test_the_thread_that_lost_is_cleaned_up(
+    async def test_no_second_thread_is_opened_to_be_cleaned_up(
         self,
         registered: Repository,
         sync_service: ItemSyncService,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
+        """Two syncs of one item are held to one at a time now, so the second finds a thread
+        already there and writes to it rather than opening a second one and losing.
+
+        This used to open two and remove the loser, which was the right answer to the wrong
+        question: the thread was created in Discord and deleted again, and anybody watching the
+        channel saw it appear and go. The claim that removes a loser is still there and still
+        right, because nothing should depend on a lock never being missed, but it is not the
+        ordinary path any more.
+        """
         results = await asyncio.gather(
             sync_service.sync(pr_event("opened")),
             sync_service.sync(pr_event("labeled")),
         )
 
-        # Whichever lost was removed, so the channel holds exactly the one that won.
         assert len(threads.threads) == 1
         assert list(threads.threads) == [results[0].thread_id]
-        assert len(threads.deleted) == 1
+        assert threads.deleted == [], "a thread was opened only to be taken away again"
+        assert len(threads.created) == 1, "two threads were opened for one item"
+
+    async def test_the_loser_is_still_taken_away_when_something_else_claimed_first(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        sync_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        pr_event,
+    ) -> None:
+        """The guard above, reached on its own, since no sync can reach it any more.
+
+        Two syncs of one item take turns now, and the lock is a Postgres one, so a second replica
+        takes its turn as well. What is left is a replica running a build from before the lock,
+        which is every rolling deploy while it lasts, and the guard is here for that.
+
+        `ItemThreads` is driven straight rather than through a sync, because a target saying the
+        item has no thread while the row says it has one is the whole of the race and there is no
+        longer any way to make a sync hold that view. Not a weaker test for it: the claim is
+        where the decision is made, and this is the claim losing.
+        """
+        await sync_service.sync(pr_event("opened"))
+        item = await stored(db_session)
+        won = item.discord_thread_id
+
+        # What the losing sync believed when it started: an item with no thread at all.
+        wrote = await ItemThreads(db_sessionmaker, threads).write(
+            ThreadTarget(
+                tracked_item_id=item.id,
+                channel_id=item.discord_channel_id,
+                thread_id=None,
+                message_id=None,
+            ),
+            name="#7 Add the webhook endpoint",
+            content="metadata",
+        )
+
+        assert wrote.handle.thread_id == won, "the loser overwrote the thread that had won"
+        assert threads.deleted, "the thread that lost was left in the channel for ever"
+        assert threads.deleted != [won], "the thread that won was the one taken away"
+        assert (await stored(db_session)).discord_thread_id == won
 
     async def test_a_burst_leaves_one_thread(
         self,
@@ -400,6 +451,137 @@ class TestTheStalenessWatermark:
         await service.sync(pr_event("edited", updated_at=newer.isoformat()))
 
         assert (await stored(db_session)).github_updated_at == newer
+
+
+class TestBeingOutOfTheServerForAWhile:
+    """An admin removes the bot and puts it back, or re-authorises the integration.
+
+    While it is out, discord.py empties the guild from its cache, so every call falls through to
+    a fetch and Discord answers for a channel it can no longer see with the same refusal it gives
+    for one the bot is not allowed to touch. Filed as a missing permission that is permanent, and
+    the worker drops a permanent failure on its first attempt, so every delivery in the window was
+    lost. The row is committed before any of it, so the item was left saying one thing while its
+    thread said another, and for an item that gets no further event, a just-closed issue or a
+    just-merged pull request, nothing was coming to correct it.
+
+    The sixteen attempts over two hours exist for exactly this kind of absence.
+    """
+
+    async def test_a_refusal_while_out_of_the_server_is_worth_waiting_out(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+
+        threads.refuses_every_update = True
+        threads.removed_from.add(registered.discord_guild_id)
+
+        with pytest.raises(DiscordGatewayError) as caught:
+            await issues.sync(issue_event("edited", updated_at="2026-08-11T13:00:00Z"))
+
+        assert not isinstance(caught.value, PermanentError), (
+            "a five minute absence was dropped on the first attempt"
+        )
+
+    async def test_a_permission_it_was_never_given_still_fails_at_once(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The other side of it, and the reason the two must be told apart. Nobody grants a
+        permission by waiting, so retrying one for two hours is two hours of nothing."""
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+
+        threads.refuses_every_update = True
+
+        with pytest.raises(PermanentError):
+            await issues.sync(issue_event("edited", updated_at="2026-08-11T13:00:00Z"))
+
+
+class TestTheChannelUnderneathBeingDeleted:
+    """Deleting a channel deletes every thread in it, and Discord reports each one only while
+    discord.py still has that thread cached. It drops one the moment the thread archives, so the
+    live threads announce themselves and the quiet ones do not.
+
+    The quiet ones are the whole reason any of this exists. A pull request or an issue is rebuilt
+    by its next webhook whether or not the pointer was cleared. A draft card parked in a column
+    nobody touches has no webhook and no visitor but the poller, which decides from a stored
+    pointer without asking Discord, so it was mirrored nowhere for good and said nothing.
+    """
+
+    async def test_every_thread_that_was_in_it_is_let_go_of(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        item = await stored(db_session)
+        assert item.discord_channel_id is not None, "the channel was never recorded"
+
+        async with db_sessionmaker() as session, session.begin():
+            forgotten = await ThreadPointerStore(session).forget_channel(item.discord_channel_id)
+
+        assert forgotten == [item.id]
+        db_session.expire_all()
+        after = await stored(db_session)
+        assert after.discord_thread_id is None, "it kept pointing at a thread that is gone"
+        assert after.discord_channel_id is None
+
+    async def test_a_channel_holding_nothing_of_ours_is_left_alone(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """Most of the channels Discord reports are nobody's business here."""
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+
+        async with db_sessionmaker() as session, session.begin():
+            forgotten = await ThreadPointerStore(session).forget_channel(999_999)
+
+        assert forgotten == []
+        assert (await stored(db_session)).discord_thread_id is not None
+
+    async def test_a_thread_whose_channel_nobody_recorded_is_left_alone(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """Every row written before the channel was recorded has none. Not knowing where a thread
+        is is not the same as knowing it was in the channel that went, and letting go of a thread
+        that is perfectly fine opens a second one beside it."""
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        item = await stored(db_session)
+        channel = item.discord_channel_id
+        await db_session.execute(
+            update(TrackedItem).where(TrackedItem.id == item.id).values(discord_channel_id=None)
+        )
+        await db_session.commit()
+
+        async with db_sessionmaker() as session, session.begin():
+            forgotten = await ThreadPointerStore(session).forget_channel(channel)
+
+        assert forgotten == []
+        db_session.expire_all()
+        assert (await stored(db_session)).discord_thread_id is not None
 
 
 class TestAStaleDeliveryThatRebuiltTheThread:
@@ -823,6 +1005,31 @@ class TestTheContainerLettingGoOnDiscordSaySo:
         await container.forget_thread(synced.thread_id)
 
         assert (await stored(db_session)).discord_thread_id is None
+
+    async def test_a_channel_going_lets_go_of_everything_that_was_in_it(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+    ) -> None:
+        """The half the per-thread event cannot cover, because Discord reports a thread deleted
+        with its channel only while discord.py still has that thread cached."""
+        container = build_stack(db_engine, threads=FakeThreadGateway())
+        await container.issue_sync.sync(issue_event("opened"))
+        item = await stored(db_session)
+
+        await container.forget_channel(item.discord_channel_id)
+
+        db_session.expire_all()
+        assert (await stored(db_session)).discord_thread_id is None
+
+    async def test_a_channel_holding_nothing_here_is_left_alone(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event
+    ) -> None:
+        """Which is most of the channels a server ever deletes."""
+        container = build_stack(db_engine, threads=FakeThreadGateway())
+        synced = await container.issue_sync.sync(issue_event("opened"))
+
+        await container.forget_channel(999_999)
+
+        assert (await stored(db_session)).discord_thread_id == synced.thread_id
 
     async def test_a_thread_nobody_here_owns_is_left_alone(
         self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession, issue_event

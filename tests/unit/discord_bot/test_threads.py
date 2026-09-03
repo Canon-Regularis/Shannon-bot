@@ -423,6 +423,38 @@ class TestPartialCreation:
         assert issubclass(DiscordPermissionError, PermanentError)
 
 
+class TestWhetherThisBotIsStillInTheServer:
+    """Told apart from a permission it was never given, which Discord answers the same way.
+
+    An admin kicks the bot and re-invites it. While it is out, discord.py empties the guild from
+    its cache and every call falls through to a fetch that Discord refuses, and this project
+    files that refusal as permanent, so the worker drops the delivery on its first attempt. The
+    sixteen attempts over two hours that exist for exactly this go unused. The one thing that
+    separates the two cases is whether the guild is there to be asked about.
+    """
+
+    def test_a_server_it_is_in_is_answered_yes(self) -> None:
+        client = client_with(None)
+        client.get_guild = MagicMock(return_value=MagicMock(spec=discord.Guild))
+
+        assert DiscordThreadGateway(client).is_in(guild_id=1) is True
+
+    def test_a_server_it_has_been_removed_from_is_answered_no(self) -> None:
+        client = client_with(None)
+        client.get_guild = MagicMock(return_value=None)
+
+        assert DiscordThreadGateway(client).is_in(guild_id=1) is False
+
+    def test_a_client_that_has_never_connected_is_not_asked(self) -> None:
+        """The same refusal every other call here makes. A client with nothing behind it answers
+        the cache lookup with an attribute error several frames down, and a guild that cannot be
+        looked up must not read as a guild the bot has been removed from."""
+        client = client_with(None, ready=False)
+
+        with pytest.raises(DiscordGatewayError):
+            DiscordThreadGateway(client).is_in(guild_id=1)
+
+
 class TestDeletingAThread:
     async def test_a_stranded_thread_is_removed(self) -> None:
         existing = thread()

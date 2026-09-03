@@ -50,7 +50,11 @@ class EventRouter:
         return is_supported(event, action) and event in self._handlers
 
     async def dispatch(
-        self, event: str, action: str | None, payload: Mapping[str, Any]
+        self,
+        event: str,
+        action: str | None,
+        payload: Mapping[str, Any],
+        arrived: int | None = None,
     ) -> WebhookOutcome:
         if not is_supported(event, action):
             logger.debug("ignoring unsupported webhook %s.%s", event, action)
@@ -61,4 +65,4 @@ class EventRouter:
             logger.warning("no handler registered for supported event %s", event)
             return WebhookOutcome.IGNORED
 
-        return await handler(action or "", payload)
+        return await handler(action or "", payload, arrived)

@@ -267,7 +267,9 @@ def build_note_handler(
     something beyond its own text: it closes the request that asked for it.
     """
 
-    async def handle(action: str, payload: Mapping[str, Any]) -> WebhookOutcome:
+    async def handle(
+        action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
         snapshot = parse(action, payload)
         if snapshot is None:
             return WebhookOutcome.IGNORED
