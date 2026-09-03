@@ -135,6 +135,31 @@ async def test_secondary_rate_limit_carries_retry_after() -> None:
     assert caught.value.retry_after == 60
 
 
+async def test_a_secondary_limit_answered_as_a_forbidden_is_still_a_rate_limit() -> None:
+    """GitHub has two limits and they answer differently.
+
+    The primary one is the hourly budget and says so in the counter. The secondary one is about
+    how fast requests arrive, does not spend the budget, and marks itself only by asking for a
+    wait: the counter beside it is untouched and often nowhere near zero. It is also the one this
+    bot can actually reach, because a write costs several times what a read does against it and
+    the poller writes.
+
+    Read on the counter alone it was a refusal, the wait GitHub asked for was thrown away, the
+    poller's one backoff could not fire, and it carried on at its ordinary interval, which is how
+    GitHub's own documentation says an integration gets banned.
+    """
+    handler = responds(
+        403,
+        {"message": "You have exceeded a secondary rate limit"},
+        {"retry-after": "60", "x-ratelimit-remaining": "4987"},
+    )
+    async with client_with(handler) as client:
+        with pytest.raises(GitHubRateLimitError) as caught:
+            await client.get_repository("owner", "repo")
+
+    assert caught.value.retry_after == 60, "the wait GitHub asked for was thrown away"
+
+
 async def test_forbidden_without_rate_limit_header_is_an_auth_error() -> None:
     async with client_with(responds(403, {"message": "Forbidden"})) as client:
         with pytest.raises(GitHubAuthError):

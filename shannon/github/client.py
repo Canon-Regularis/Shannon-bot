@@ -359,9 +359,28 @@ def _raise_for_status(response: httpx.Response, path: str) -> None:
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
-    # A spent rate limit arrives as 403, indistinguishable from a permission problem except
-    # for this header.
-    return response.status_code == 403 and response.headers.get("x-ratelimit-remaining") == "0"
+    """Whether a 403 is GitHub asking for a wait rather than refusing outright.
+
+    GitHub has two limits and they answer differently. The primary one is the hourly budget, and
+    a spent budget says so in the counter. The secondary one is about how fast requests arrive,
+    does not spend the budget at all, and marks itself only by asking for a wait: the counter
+    beside it is untouched and often nowhere near zero.
+
+    Reading the counter alone therefore recognised the limit this bot will almost never reach and
+    missed the one it actually trips. A write costs several times what a read does against the
+    secondary allowance, and a board with a handful of cards moving does exactly that, so it is
+    the poller that finds this limit. Filed as a refusal it lost the wait GitHub had asked for,
+    the poller's one backoff could not fire, and it carried on at its ordinary interval, which
+    GitHub's own documentation says is how an integration gets banned. Everybody running a
+    command was meanwhile told to go and check a token that was perfectly healthy.
+
+    A 429 is already a rate limit whatever else it carries, and is handled by the caller.
+    """
+    if response.status_code != 403:
+        return False
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        return True
+    return "retry-after" in response.headers
 
 
 def _retry_after(response: httpx.Response) -> int | None:
