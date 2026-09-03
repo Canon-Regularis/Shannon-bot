@@ -4472,3 +4472,102 @@ says something was used in one place and not in the one that reports a backgroun
 task ending on a timeout, which asyncio raises with no arguments at all, logged a colon with
 nothing after it. The traceback beside it still named the type, so nothing was lost, but the line
 that helper exists for was the line that did not use it.
+
+## Four that were carried as known, and two that still are
+
+Four findings that had been written down and left, taken in one batch. The two still left are now
+written where somebody reading the project will find them, which is the README rather than here.
+
+### One sync of an item at a time, Discord included
+
+Recorded twice before this. `/pr` runs beside the worker, several events for one item arrive at
+once, and nothing in the deployment stops a second replica. The row's lock settles the database
+half and is let go at the commit, which comes before the first Discord call, so two syncs of one
+item could be talking to Discord together and whichever finished last decided what the thread
+looked like however old its payload was. A superseded close was watched locking a thread the
+reopen beside it had just unlocked.
+
+An advisory lock keyed on the item's GitHub id, taken before the row is read and held to the end
+of the Discord phase. Before the read, so that the one which waits goes on to read a row the
+other has already written, and its staleness guard turns it away if it is the older of the two,
+which is the answer that was missing. Waited for rather than skipped, because the one waiting may
+be the newer delivery carrying the work that matters and a Discord phase is short.
+
+Two things went wrong building it, both worth keeping.
+
+The lock was session-scoped first, given back by name in a `finally`. That is wrong in the one
+place it matters: a cancelled task raises at the next await it reaches, and the release is an
+await, so a shutdown part way through a sync would return the connection to the pool still
+holding the lock, and that item would wait on it for ever. A transaction-scoped lock ends when
+its transaction does, however it ends, and the pool rolls a connection back before letting
+anything else have it. The `finally`, the shield and the invalidate went with it.
+
+The other was a test. `test_a_reopen_landing_mid_flight_stops_the_close_locking` ran a second
+sync of the same item from inside the first one's Discord call, which is how that window was
+reproduced in the first place, and against a lock that is not reentrant it deadlocked with
+itself. The whole integration tier stopped at 21%, with one connection holding the lock and idle
+in transaction and one waiting for it. The test writes the row directly now, which is what it was
+standing in for all along, since the writer the lock cannot reach is a second replica.
+
+Then the new test, the one that says the lock works, passed with the lock taken out. It gave the
+two syncs ten milliseconds to overlap in and the other sync had a whole database round to get
+through before it could take it, so they took turns on timing and nothing was being measured. The
+first one in holds the door now until the second joins it, and gives up after a second, because
+when the lock is doing its job the second one is not coming.
+
+What this gives up is a connection held for the length of the Discord phase, one per item being
+synced at that moment, against a pool of fifteen and a handful ever in flight. It is also not
+reentrant, so nothing on the sync path may sync the same item from inside a sync. Every call site
+was read; none does.
+
+### Which of two deliveries stamped with the same second came first
+
+GitHub stamps `updated_at` to the second and sends several events for one item inside one, so
+equal timestamps are ordinary rather than a corner of the thing. Nothing in a payload says which
+of two came first, and the guard read equal as not superseded, which is right when there is
+nothing else to go on and wrong the moment there is.
+
+The deliveries were already numbered. `webhook_events.id` is assigned as each is written down,
+which is the order they reached this bot, and that number now travels with the delivery through
+the router to the item handler. The item remembers the one that last wrote it, in
+`tracked_items.last_delivery_id`, and equal timestamps are settled by comparing the two. Unknown
+on either side answers as it always did, the timestamps deciding alone: a row written before the
+number was kept has none, and a sync from a command or the board has none to offer.
+
+The order matters because things reorder. The worker leases in arrival order, so deliveries are
+handled in that order until one fails: a delivery that backs off is skipped until its next
+attempt and the one behind it goes first. Then the older payload is the last to be believed, and
+with equal timestamps nothing turned it away.
+
+### A channel deleted takes the archived threads inside it
+
+The repair called for last time, done. `tracked_items` remembers which channel its thread is in,
+because the channel mapping cannot answer that: `/set_channel` moves where new threads go and
+leaves the existing ones behind, so a mapping changed since no longer describes where the older
+threads are. The column is written when a thread is claimed and cleared with the pointer.
+
+The bot listens for a channel going as well as a thread now, and clears the pointers of every
+item whose thread was in it, archived or not, so the next event rebuilds. The two listeners share
+a semaphore of two, because a channel deletion arrives as a burst: with nine hundred threads a
+delivery waited sixteen and a half seconds for a connection, and one and two tenths with it.
+
+### Being out of a server, told apart from a permission never granted
+
+An admin kicks the bot and re-invites it. While it is out, discord.py empties the guild from its
+cache, so every call falls through to a fetch, and Discord answers with a refusal this project
+files as a missing permission, which is permanent, which the worker drops on the first attempt.
+
+The caller does know which server it is talking about, and the gateway can be asked whether the
+bot is in it. A refusal is read as temporary when the answer is no, so the delivery keeps the
+sixteen attempts over two hours that exist for exactly this. A guild not cached yet during a
+start or a reconnect answers no as well, which is the useful way round, because waiting is right
+for both.
+
+### The two that are still known
+
+In the README, so they are somewhere a person reading the project will find them rather than only
+here. A review handled before the request row it answers exists, which pings a reviewer for a
+review they have already given and closes itself the next time they review. And a comment on an
+item that has never been tracked, which is logged and dropped, and which the hook that rebuilds a
+deleted thread could serve if it were worth a call to GitHub on every comment for anything
+untracked.

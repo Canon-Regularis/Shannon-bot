@@ -252,7 +252,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0013`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0015`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
@@ -280,6 +280,32 @@ that all is well. It is true where no board is configured, which is the default.
 
 `/docs`, `/redoc` and `/openapi.json` are served unconditionally, `/health` is unauthenticated,
 and there is no middleware of any kind.
+
+## Known limitations
+
+Two things the bot is known to get wrong. Both are narrow, and both are written down here rather
+than fixed. Neither leaves an item wrong for long, though the comment the second one drops is
+never mirrored afterwards.
+
+**A review handled before the request it answers.** GitHub sends the review request and the
+review as separate deliveries, and nothing guarantees the order they are handled in: a delivery
+that fails once backs off, and the one behind it goes first. Handle the review first and there
+is no request row for it to close, so the request written a moment later reads as outstanding
+and the reviewer is pinged for a review they have already given. What is wrong is the ping, not
+the state. The row closes the next time that person reviews, and a request GitHub has dropped is
+deleted on the next ordinary event for the pull request. The fix is for a review to write down
+that it happened even when the row it answers is not there yet, and that is left for later.
+
+**A comment on an item that has never been tracked.** A comment is not an item event and carries
+nothing to build a thread from, so where the repository is registered but the item has no row,
+the note is logged and dropped, and that comment is not mirrored later either. It is not the
+same as a thread that has been deleted, which is rebuilt: that item is tracked, and the sync has
+a number to read GitHub with. It happens for an item that was already open before the repository
+was registered, or one whose events all landed while the bot was down, and it stops the moment
+any item event for that number arrives and builds the thread. The hook that rebuilds a deleted
+thread could serve this case as well; what has kept it out is that every comment on anything
+untracked would then cost a call to GitHub, for a case that is mostly a first run. It may be
+fixed later.
 
 ## License
 
