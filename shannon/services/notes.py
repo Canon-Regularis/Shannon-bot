@@ -13,9 +13,9 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.errors import ThreadNotFoundError
-from shannon.discord_bot.threads import PostsToThread
-from shannon.domain.errors import ItemNotReadyError
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.threads import KnowsItsServers, PostsToThread
+from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.models import ItemNote
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 
@@ -40,13 +40,24 @@ class MirrorsNotes(Protocol):
     async def mirror(self, snapshot: ItemNote) -> bool: ...
 
 
+class PostsAndKnowsServers(PostsToThread, KnowsItsServers, Protocol):
+    """What this path needs of Discord: the post, and whether the server is still there.
+
+    The second is only ever asked about a refusal, to tell a permission this bot was never given
+    from a server it is no longer in.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class _NoteTarget:
-    """The thread a note goes into, and who to mention in it."""
+    """The thread a note goes into, who to mention in it, and the server it is all in."""
 
     tracked_item_id: int
     thread_id: int
     mentions: Mapping[str, int]
+    # Carried rather than read again at the point of the refusal, because it is already in hand:
+    # the same repository row that answers where the thread is answers which server it is in.
+    guild_id: int
 
 
 class ItemNoteMirror:
@@ -59,7 +70,7 @@ class ItemNoteMirror:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        threads: PostsToThread,
+        threads: PostsAndKnowsServers,
         *,
         render: Renderer,
         rebuild: Rebuild | None = None,
@@ -143,6 +154,7 @@ class ItemNoteMirror:
                 tracked_item_id=item.id,
                 thread_id=item.discord_thread_id,
                 mentions=mentions,
+                guild_id=repository.discord_guild_id,
             )
 
     async def _post(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
@@ -177,6 +189,25 @@ class ItemNoteMirror:
                 f"thread {target.thread_id} for {snapshot.repository.full_name}"
                 f"#{snapshot.item_number} is gone and has to be rebuilt"
             ) from error
+        except PermanentError:
+            # A refusal that reads as a permission, from a bot that may simply not be in the
+            # server any more. Once it is removed, discord.py drops the guild and its threads
+            # from the cache, so resolving a thread id falls through to a fetch and Discord
+            # answers for a thread it can no longer see exactly as it answers for one this bot
+            # is not allowed to touch.
+            #
+            # This path has more to lose by it than the item path does. A permanent failure is
+            # dropped on its first attempt, and nothing ever reads a comment back from GitHub,
+            # so the note is not mirrored on this delivery or on any later one: it is simply
+            # gone. An item is at least rewritten by its next event. Told apart, an absence
+            # keeps the sixteen attempts over two hours it was always meant to have.
+            await self._hand_back(target.tracked_item_id, snapshot.note_key)
+            if self._threads.is_in(target.guild_id):
+                raise
+            raise DiscordGatewayError(
+                f"this bot is not in server {target.guild_id} at the moment, so the note on "
+                f"{snapshot.repository.full_name}#{snapshot.item_number} could not be posted"
+            ) from None
         except BaseException:
             # Nothing was said, so the claim has to go back or the retry reads it as already
             # posted and the note is lost for good. Cancellation counts as a failure here, which

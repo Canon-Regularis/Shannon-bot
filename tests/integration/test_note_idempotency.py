@@ -14,7 +14,12 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import MirroredNote, Repository, WebhookEvent
-from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.errors import (
+    DiscordGatewayError,
+    DiscordPermissionError,
+    ThreadNotFoundError,
+)
+from shannon.domain.enums import DeliveryStatus
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -266,3 +271,96 @@ async def test_a_comment_and_a_review_sharing_a_number_are_different_notes(
     keys = set((await db_session.scalars(select(MirroredNote.note_key))).all())
     assert keys == {f"comment:{shared}", f"review:{shared}"}
     assert len(threads.posts) >= 2, "one of the two notes was dropped as a duplicate of the other"
+
+
+async def status_of(container, delivery: str) -> DeliveryStatus:
+    async with container.sessionmaker() as session:
+        return await session.scalar(
+            select(WebhookEvent.status).where(WebhookEvent.github_delivery_id == delivery)
+        )
+
+
+class TestBeingOutOfTheServerWhenANoteArrives:
+    """An admin removes the bot and puts it back, and a comment lands in the window.
+
+    Discord answers for a thread it can no longer see exactly as it answers for one this bot is
+    not allowed to touch, and a permission is permanent, so the delivery was dropped on its
+    first attempt. This path has more to lose by that than the item path does: nothing ever
+    reads a comment back from GitHub, so a note dropped here is not mirrored on this delivery or
+    on any later one. An item is at least rewritten by its next event.
+    """
+
+    async def test_the_delivery_is_kept_for_another_go(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+    ) -> None:
+        threads = FakeThreadGateway()
+        container = build_stack(db_engine, threads=threads)
+        client = build_http_client(container)
+
+        async with client:
+            await with_a_thread(client, container)
+            threads.removed_from.add(registered.discord_guild_id)
+
+            async def refuses_while_out(**kwargs):
+                raise DiscordPermissionError("Discord will not let the bot post there")
+
+            threads.post = refuses_while_out
+            await post(client, "issue_comment", a_comment(), delivery="comment-1")
+            await container.worker.run_once()
+
+            assert await status_of(container, "comment-1") != DeliveryStatus.FAILED, (
+                "a five minute absence lost the comment for good"
+            )
+            held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
+            assert held == 0, "a note that never reached the thread is recorded as posted"
+
+    async def test_the_note_arrives_once_the_bot_is_back(
+        self, registered: Repository, db_engine: AsyncEngine
+    ) -> None:
+        threads = FakeThreadGateway()
+        container = build_stack(db_engine, threads=threads)
+        client = build_http_client(container)
+
+        async with client:
+            await with_a_thread(client, container)
+            threads.removed_from.add(registered.discord_guild_id)
+            real_post = threads.post
+            out = {"still": True}
+
+            async def refuses_while_out(**kwargs):
+                if out["still"]:
+                    raise DiscordPermissionError("Discord will not let the bot post there")
+                return await real_post(**kwargs)
+
+            threads.post = refuses_while_out
+            await post(client, "issue_comment", a_comment(), delivery="comment-1")
+            await container.worker.run_once()
+            assert comment_posts(threads) == []
+
+            out["still"] = False
+            threads.removed_from.clear()
+            await let_the_backoff_elapse(container, "comment-1")
+            await container.worker.run_once()
+
+        assert len(comment_posts(threads)) == 1, "the note never arrived after the bot was back"
+
+    async def test_a_permission_it_was_never_given_still_fails_at_once(
+        self, registered: Repository, db_engine: AsyncEngine
+    ) -> None:
+        """The other side, and the reason the two have to be told apart. Retrying a permission
+        nobody has granted is sixteen attempts spent on something waiting does not fix."""
+        threads = FakeThreadGateway()
+        container = build_stack(db_engine, threads=threads)
+        client = build_http_client(container)
+
+        async with client:
+            await with_a_thread(client, container)
+
+            async def never_allowed(**kwargs):
+                raise DiscordPermissionError("Discord will not let the bot post there")
+
+            threads.post = never_allowed
+            await post(client, "issue_comment", a_comment(), delivery="comment-1")
+            await container.worker.run_once()
+
+            assert await status_of(container, "comment-1") == DeliveryStatus.FAILED
