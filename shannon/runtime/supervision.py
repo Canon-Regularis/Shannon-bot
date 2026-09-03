@@ -71,7 +71,7 @@ def report_exit(what: str, shutdown: Shutdown, halt: Callable[[], None] | None =
             return
         error = task.exception()
         if error is not None:
-            logger.error("the %s stopped: %s", what, error, exc_info=error)
+            logger.error("the %s stopped: %s", what, why(error), exc_info=error)
         elif not shutdown.asked:
             logger.warning("the %s stopped without an error", what)
         else:
