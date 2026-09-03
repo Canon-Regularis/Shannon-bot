@@ -370,20 +370,42 @@ class TestTwoDeliveriesPlacedByTheOrderTheyArrived:
         assert row is not None, "the older delivery deleted the request the newer one made"
         assert len(threads.posts) == told
 
-    async def test_a_delivery_with_no_number_is_still_judged_on_its_timestamp(
+    async def test_a_sync_with_no_number_is_not_placed_behind_a_row_that_has_one(
         self,
         registered: Repository,
         notifying_sync_service: ItemSyncService,
-        db_session: AsyncSession,
         pr_event,
     ) -> None:
-        """A sync from a command or the board has no number to offer, and a row written before
-        the numbers were kept has none either. Both fall back to what happened before."""
+        """`/pr`, `/issue` and every board poll arrive with no number to offer, against a row a
+        delivery has already numbered. That is the ordinary case rather than a corner of one, and
+        there is nothing in it to compare: not knowing when this one arrived is not evidence that
+        it arrived first. Treating a missing number as though it were zero puts every command
+        behind every delivery, and the item silently stops being rebuilt or re-rendered.
+        """
+        await notifying_sync_service.sync(
+            pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)]),
+            arrived=7,
+        )
+
+        result = await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]))
+
+        assert result.outcome is SyncOutcome.SYNCED, "a sync with no number was judged as older"
+
+    async def test_a_numbered_delivery_is_not_placed_against_a_row_that_has_none(
+        self,
+        registered: Repository,
+        notifying_sync_service: ItemSyncService,
+        pr_event,
+    ) -> None:
+        """The other way round: a row written before the numbers were kept, or last written by a
+        command, has none to be compared against."""
         await notifying_sync_service.sync(
             pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)])
         )
 
-        result = await notifying_sync_service.sync(pr_event("opened", requested_reviewers=[]))
+        result = await notifying_sync_service.sync(
+            pr_event("opened", requested_reviewers=[]), arrived=1
+        )
 
         assert result.outcome is SyncOutcome.SYNCED, "it invented an order it could not know"
 

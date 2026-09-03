@@ -113,7 +113,7 @@ class ActorNotifier:
                 tracked_item_id, self._role
             )
             if not claimed:
-                return (), {}
+                return {}, {}
             mentions = await self._mentions(session).resolve_many(guild_id=guild_id, people=claimed)
         # The account beside each name goes back to the caller as well, because the hand-back
         # below has to find these rows again after a gap long enough for a rename to land in.

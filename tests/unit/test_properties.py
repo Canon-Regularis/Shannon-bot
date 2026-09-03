@@ -14,7 +14,7 @@ from shannon.discord_bot.formatting import (
 )
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
 from shannon.discord_bot.threads import THREAD_NAME_LIMIT, truncate_thread_name
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import UnparseableLinkError
 from shannon.domain.models import (
     Actor,
@@ -190,6 +190,7 @@ class TestRendering:
             repository=REPO,
             item_number=1,
             comment_id=1,
+            object_type=ObjectType.ISSUE,
             html_url="https://github.com/o/n/issues/1#issuecomment-1",
             body=body,
             author=Actor("octocat"),
@@ -206,6 +207,7 @@ class TestRendering:
             repository=REPO,
             item_number=1,
             comment_id=1,
+            object_type=ObjectType.ISSUE,
             html_url="",
             body=body,
             author=Actor("octocat"),

@@ -4507,7 +4507,10 @@ sync of the same item from inside the first one's Discord call, which is how tha
 reproduced in the first place, and against a lock that is not reentrant it deadlocked with
 itself. The whole integration tier stopped at 21%, with one connection holding the lock and idle
 in transaction and one waiting for it. The test writes the row directly now, which is what it was
-standing in for all along, since the writer the lock cannot reach is a second replica.
+standing in for all along. The lock is a Postgres one, so a second replica waits its turn like
+anything else; what it cannot reach is a replica still running the build from before it, which is
+every rolling deploy while it lasts, and any writer that moves the row without going through a
+sync.
 
 Then the new test, the one that says the lock works, passed with the lock taken out. It gave the
 two syncs ten milliseconds to overlap in and the other sync had a whole database round to get
@@ -4516,9 +4519,10 @@ first one in holds the door now until the second joins it, and gives up after a 
 when the lock is doing its job the second one is not coming.
 
 What this gives up is a connection held for the length of the Discord phase, one per item being
-synced at that moment, against a pool of fifteen and a handful ever in flight. It is also not
-reentrant, so nothing on the sync path may sync the same item from inside a sync. Every call site
-was read; none does.
+synced at that moment, against a pool of fifteen and a handful ever in flight. It was also not
+reentrant to begin with, so nothing could take it twice; every call site was read and none did.
+That changed in the round below, where `/set_status` had to hold an item and then re-render it
+through the ordinary sync, which takes the same lock.
 
 ### Which of two deliveries stamped with the same second came first
 
@@ -4571,3 +4575,121 @@ review they have already given and closes itself the next time they review. And 
 item that has never been tracked, which is logged and dropped, and which the hook that rebuilds a
 deleted thread could serve if it were worth a call to GitHub on every comment for anything
 untracked.
+
+## Reviewing those four, and the doors they left open
+
+The four above were reviewed the way everything else here is, by pointing several readers at them
+with instructions to find fault and then making each finding argue for its life. Seven survived,
+and a fifth came out of reading the code alongside them. Then the fixes for those were reviewed
+the same way, which was worth doing: three of the tests written to prove the fixes could not fail.
+
+### The same absence, on three more paths
+
+Telling a bot that has been removed from a server apart from one that was never given the
+permission was fixed in one place. Discord answers both the same way, so the question is asked
+wherever a refusal is read, and it was asked in exactly one.
+
+**A comment.** The worst of them, because nothing ever reads a comment back from GitHub. The note
+path resolves a thread id, which for a bot no longer in the server falls through to a fetch and
+comes back as a permission, which is permanent, which the worker drops on the first attempt. Not
+mirrored on that delivery and not on any later one: simply gone. An item is at least rewritten by
+its next event. The note path asks now, and keeps the sixteen attempts over two hours it was
+always meant to have.
+
+**A lock a late delivery still owes.** A delivery turned away as stale can still owe the lock, and
+that step steps over a refusal deliberately, so that one missing permission does not fail the same
+delivery sixteen times over. It is only ever reached for an item that is finished, which sends no
+further event, and the delivery is reported handled either way, so while the bot was out the
+thread was left open above a block reading DONE with nothing coming back for it. It asks now,
+which needed the server threading down to it: the row is read with its repository in one go,
+because a caller holding the item and not the server has to invent an answer for a row that
+cannot exist.
+
+**A card dragged to Done.** Found by reading rather than reported. The board poller writes a move
+off as carried through when the lock refusal is permanent, and that is right: nothing else
+advances the column, so one missing permission would otherwise put every card the team ever
+finishes into a set retried once a minute for ever. Filed that way for an absence, every card
+finished during a five minute removal was recorded as moved with its thread open, and no poll ever
+looked at one again. The log line even told the admin to grant Manage Threads, which was not the
+problem. Whether a refusal is permanent is no longer decided by the exception type alone.
+
+### The lock, moved out and made reentrant
+
+`/set_status` sets a thread lock itself, which is a Discord call the sync path never makes and so
+was never covered. An event for the same item can be in its own Discord phase at that moment, and
+locking is the step where interleaving shows, because it is last on both sides and each side
+decided from what it read before it started. A pull request makes it permanent:
+`PullRequestPolicy.locked` answers None on every sync, so the lock `/set_done` takes is the only
+one it ever gets.
+
+Holding the item across it needed the lock to be something other than a private method of the sync
+service, so it is `ItemLock` now, and it needed to be reentrant, because the command holds the
+item and then re-renders through the ordinary sync, which takes the same lock. Without that it is
+one caller waiting on itself, which is not a hypothetical: it is exactly what stopped the
+integration tier earlier in the week.
+
+Reentrancy is recorded per task rather than globally, so that a caller already holding an item is
+let through and nothing else is. The note of it belongs to the module rather than to an instance,
+deliberately, because the two objects that nest are two different `ItemLock`s: the workflow's and
+the sync service's.
+
+Holding it turned out not to be enough on its own, and the review of the fix is what said so.
+The repeat branch is a repeat because the row already says what is being asked for, and that was
+read before the wait. So the one caller that now waits for the item went on to act on what it knew
+before it waited, which is the answer waiting was supposed to supply: `/set_done` repeated on an
+item another writer moves meanwhile shuts the thread against a status the row no longer holds, and
+for a pull request nothing lifts it. Waiting had made the window wider rather than narrower. It
+looks again inside the hold now, which is what the branch beside it was already doing through the
+re-read under the row's own lock.
+
+What the lock does not close is the compensating write two board pollers can undo for each other.
+That was written down as the thing the lock would fix, and it is not: the other poller decides
+from a batch of rows read before its move loop starts, a service and a step earlier, so it has
+already read the row by the time this could hold it out of anything. Closing it means deciding
+against the row being acted on rather than against a snapshot. The poller still belongs in one
+replica and the note saying so stays.
+
+### Tests that could not fail, twice over
+
+Four of them, found in the fixes above:
+
+The staleness test named for a delivery with no number never built that case, because both of its
+syncs went in without one, so the only pair the comparison ever saw was two nothings. Written as
+`(arrived or 0) < (applied or 0)` everything stayed green, while every `/pr`, `/issue` and board
+poll was placed behind every delivery and quietly stopped re-rendering anything.
+
+Nothing asserted the delivery number ever reached a handler. The row id, the worker reading it off
+the lease, the router passing it on: all of it could be deleted and the suite would not notice,
+because the tests that watch the number in action hand it to the sync service directly.
+
+The channel test took the channel it deleted off the column under test, so it asked the column to
+agree with itself and would have passed with the wrong channel written there. It comes off the
+Discord side now, which is where production gets it.
+
+And a claim about replicas that was backwards in two places. The lock is a Postgres one, so a
+second replica waits its turn like anything else. What it cannot reach is a replica still running
+the build from before it.
+
+Then the tests written to prove those fixes were reviewed, and three of them could not fail
+either. Both tests for letting the lock go re-took it from the same task, which `asyncio.wait_for`
+runs inline rather than in a task of its own, so the reentrant path answered them without touching
+Postgres; and the pool hands back the very connection the block just used, which Postgres grants
+an advisory lock to again for nothing. Deleting the line that gives back the note of holding an
+item left the whole suite green. They ask `pg_locks` directly now. The reentrancy test nested one
+`ItemLock` inside itself, which is not the shape production nests, so moving the note onto the
+instance would have kept it green and deadlocked the first `/set_status` of any item.
+
+The third was the opposite failure: a test where two writers of different items must both get
+inside, given one second to do it, against a pool the tier hands back with a single connection in
+it. On a loaded machine the second writer pays for a fresh handshake and arrives late, and a
+working lock reads as a broken one. The pool is warmed first now, and how long the door is held
+depends on which answer is the one under test.
+
+### Measured rather than assumed
+
+Two claims the whole scheme rests on, checked rather than reasoned about. Postgres keeps the
+one-bigint advisory keys apart from the two-integer ones: taking `(8531, 42)` and the bigint whose
+halves are the same numbers gives two rows in `pg_locks` differing only in `objsubid`, so the
+guild key `UserLinkStore` uses cannot collide with an item key however the numbers land. And the
+fold into a signed 32 bit key stays in range across two hundred thousand random GitHub ids and
+every boundary either side of it.

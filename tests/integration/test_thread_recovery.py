@@ -504,6 +504,66 @@ class TestBeingOutOfTheServerForAWhile:
         with pytest.raises(PermanentError):
             await issues.sync(issue_event("edited", updated_at="2026-08-11T13:00:00Z"))
 
+    async def test_a_lock_a_late_delivery_still_owes_is_not_stepped_over_while_out(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The same absence, on the one step that answers a refusal by carrying on regardless.
+
+        A delivery turned away as stale can still owe the lock, and that step steps over a
+        refusal on purpose: a permission nobody has granted must not fail one delivery sixteen
+        times for something no amount of waiting fixes. It is the wrong answer for a bot that
+        has been removed, and it is worse here than anywhere else. This is only ever reached for
+        an item that is finished, which sends no further event, and the delivery is reported
+        handled either way, so the thread is left open above a block reading DONE with nothing
+        coming back for it.
+        """
+        # Read before anything expires it: `stored` clears this session, and the repository is
+        # in it.
+        guild_id = registered.discord_guild_id
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        await issues.sync(
+            issue_event(
+                "closed",
+                state="closed",
+                closed_at="2026-08-11T12:00:00Z",
+                updated_at="2026-08-11T12:00:00Z",
+            )
+        )
+
+        # Somebody deletes the thread, and a delivery from before the close rebuilds it. The
+        # lock failing on the way is what leaves the item owing one.
+        first = threads.created[0].thread_id
+        threads.threads.pop(first)
+        item = await stored(db_session)
+        async with db_sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=first)
+
+        stale = issue_event("edited")
+        threads.fail_next_lock = True
+        with pytest.raises(DiscordGatewayError):
+            await issues.sync(stale)
+
+        rebuilt = threads.created[-1].thread_id
+        assert rebuilt != first, "nothing was rebuilt, so this proves nothing"
+        assert threads.threads[rebuilt].locked is False, "the lock landed, so this proves nothing"
+
+        threads.refuses_every_lock = True
+        threads.removed_from.add(guild_id)
+
+        with pytest.raises(DiscordGatewayError) as caught:
+            await issues.sync(stale)
+
+        assert not isinstance(caught.value, PermanentError), (
+            "a lock a finished item was owed was stepped over and never asked for again"
+        )
+        assert threads.threads[rebuilt].locked is False
+
 
 class TestTheChannelUnderneathBeingDeleted:
     """Deleting a channel deletes every thread in it, and Discord reports each one only while
@@ -526,11 +586,16 @@ class TestTheChannelUnderneathBeingDeleted:
     ) -> None:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
+        # Where Discord says the thread is, which is where this comes from in production: the
+        # listener is handed the channel that was deleted and knows nothing of the row. Taking
+        # it off the column instead asks the column to agree with itself, and would pass just as
+        # well with the wrong channel written there.
+        channel_id = threads.created[0].channel_id
         item = await stored(db_session)
-        assert item.discord_channel_id is not None, "the channel was never recorded"
+        assert item.discord_channel_id == channel_id, "the row recorded the wrong channel"
 
         async with db_sessionmaker() as session, session.begin():
-            forgotten = await ThreadPointerStore(session).forget_channel(item.discord_channel_id)
+            forgotten = await ThreadPointerStore(session).forget_channel(channel_id)
 
         assert forgotten == [item.id]
         db_session.expire_all()

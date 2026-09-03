@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 
 from shannon.discord_bot.formatting import format_comment
+from shannon.domain.enums import ObjectType
 from shannon.domain.models import Actor, CommentSnapshot, RepositorySnapshot
 from shannon.domain.time import as_utc
 from shannon.github.mapping import parse_timestamp
@@ -64,6 +65,7 @@ def test_a_rendered_timestamp_does_not_depend_on_the_host_timezone() -> None:
         repository=repo,
         item_number=1,
         comment_id=1,
+        object_type=ObjectType.ISSUE,
         html_url="",
         body="",
         author=Actor("octocat"),
@@ -73,6 +75,7 @@ def test_a_rendered_timestamp_does_not_depend_on_the_host_timezone() -> None:
         repository=repo,
         item_number=1,
         comment_id=1,
+        object_type=ObjectType.ISSUE,
         html_url="",
         body="",
         author=Actor("octocat"),

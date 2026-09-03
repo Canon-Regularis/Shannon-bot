@@ -11,7 +11,7 @@ from shannon.discord_bot.formatting import (
     thread_name,
 )
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
@@ -144,6 +144,7 @@ COMMENT = CommentSnapshot(
     repository=REPO,
     item_number=12,
     comment_id=999,
+    object_type=ObjectType.ISSUE,
     html_url="https://github.com/Canon-Regularis/Shannon-bot/issues/12#issuecomment-999",
     body="Reproduced on main.\n\nThe thread stays open.",
     author=Actor("monalisa"),

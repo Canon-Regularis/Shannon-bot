@@ -169,11 +169,14 @@ class CommentSnapshot:
     comment_id: int
     html_url: str
     body: str
+    # GitHub marks a pull request inside a comment payload, so the kind is known and worth
+    # carrying rather than being rediscovered downstream. Required, and above the fields that
+    # have defaults so that it has to be: the one place a note's kind is used is the read that
+    # finds its item, and a missing kind there does not fail, it matches nothing, which reads
+    # as an item nobody tracks and drops the comment for good.
+    object_type: ObjectType
     author: Actor | None = None
     created_at: datetime | None = None
-    # GitHub marks a pull request inside a comment payload, so the kind is known and worth
-    # carrying rather than being rediscovered downstream.
-    object_type: ObjectType | None = None
 
     @property
     def note_key(self) -> str:
@@ -214,13 +217,12 @@ class ItemNote(Protocol):
     """Something posted into a tracked item's thread that is not its metadata.
 
     Comments and reviews both satisfy this, which is what lets one mirror handle both.
-    `object_type` is None when the event does not say which kind of item it belongs to.
     """
 
     repository: RepositorySnapshot
     item_number: int
     author: Actor | None
-    object_type: ObjectType | None
+    object_type: ObjectType
     # What a renderer reads. Declared here so the seam that renders a note can say what it needs
     # instead of taking Any and hoping.
     body: str

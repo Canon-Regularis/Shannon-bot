@@ -17,6 +17,7 @@ from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
+from tests.fakes.handlers import RecordingHandler
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
@@ -88,6 +89,25 @@ async def test_running_the_worker_then_produces_the_thread(
 
     assert len(threads.created) == 1
     assert (await stored(db_session, "delivery-1")).status == DeliveryStatus.PROCESSED
+
+
+async def test_the_number_the_queue_gave_a_delivery_reaches_the_handler(
+    queue: WebhookDeliveryQueue, db_session: AsyncSession
+) -> None:
+    """The one thing that can separate two payloads GitHub stamped with the same second.
+
+    It is worth nothing unless it arrives, and every hop it makes was pinned by nothing: the row
+    id the queue assigned, the worker reading it off the lease, the router passing it on, the
+    handler taking it. All of that could be deleted and the suite would stay green, because the
+    only tests that watch the number in action hand it to the sync service directly.
+    """
+    handler = RecordingHandler()
+    worker = build_worker(queue, handler)
+    await enqueue(queue, "delivery-a")
+
+    assert await worker.run_once() == 1
+
+    assert handler.arrivals == [(await stored(db_session, "delivery-a")).id]
 
 
 async def test_an_empty_queue_gives_the_worker_nothing_to_do(client: DeliveryClient) -> None:
