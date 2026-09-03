@@ -12,6 +12,8 @@ to be worth designing against.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,10 +41,52 @@ class ThreadPointerStore:
             )
             # The lock goes with the pointer. Whatever this bot had made the dead thread, the
             # replacement starts open.
-            .values(discord_thread_id=None, discord_message_id=None, discord_thread_locked=None)
+            .values(
+                discord_thread_id=None,
+                discord_message_id=None,
+                discord_thread_locked=None,
+                discord_channel_id=None,
+            )
             .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)
+
+    async def forget_channel(self, channel_id: int) -> Sequence[int]:
+        """Let go of every thread that was in a channel, because the channel has gone.
+
+        Discord deletes the threads with it and reports each one, but only while discord.py still
+        has that thread cached, and it drops one the moment the thread archives. So the live
+        threads announce themselves and the quiet ones do not, and the quiet ones are the whole
+        reason any of this exists: a draft card parked in a column nobody touches has no webhook
+        to rebuild it and no visitor but the poller, which decides from a stored pointer without
+        asking Discord.
+
+        Matched on where the thread actually is rather than on where the mapping says new threads
+        go. Those are different questions the moment anybody runs `/set_channel`, which moves the
+        second and leaves the first alone, and answering with the mapping would let go of threads
+        that are alive in the previous channel.
+
+        A row written before the channel was recorded has none, and is left alone: it is not
+        known to have been in there, and letting go of a thread that is fine opens a second one
+        beside it. Those rows are covered from the first time their thread is rebuilt.
+
+        Answers with the items it let go of, for the caller to say so.
+        """
+        found = (
+            await self._session.scalars(
+                update(TrackedItem)
+                .where(TrackedItem.discord_channel_id == channel_id)
+                .values(
+                    discord_thread_id=None,
+                    discord_message_id=None,
+                    discord_thread_locked=None,
+                    discord_channel_id=None,
+                )
+                .returning(TrackedItem.id)
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
+        return list(found)
 
     async def note_the_lock(self, tracked_item_id: int, *, thread_id: int, locked: bool) -> None:
         """Record what this bot has just made the lock on a thread.
@@ -69,6 +113,7 @@ class ThreadPointerStore:
         thread_id: int,
         message_id: int | None,
         replacing: int | None,
+        channel_id: int | None = None,
     ) -> tuple[int | None, int | None]:
         """Point an item at a thread, but only if it still points where the caller thinks.
 
@@ -81,7 +126,14 @@ class ThreadPointerStore:
         keeps an item pointing at one thread. `replacing` is None on first creation and the id
         of the dead thread when rebuilding, and `IS NOT DISTINCT FROM` makes those one case.
         """
-        moving = {"discord_thread_id": thread_id, "discord_message_id": message_id}
+        moving: dict[str, object] = {
+            "discord_thread_id": thread_id,
+            "discord_message_id": message_id,
+        }
+        if channel_id is not None:
+            # Where the thread actually is, as opposed to where the mapping currently says new
+            # ones should go. A channel deletion has nothing else to go on.
+            moving["discord_channel_id"] = channel_id
         if replacing != thread_id:
             # The item is being pointed at a different thread, so whatever this bot had made the
             # old one says nothing about the new one, which starts open.

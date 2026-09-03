@@ -162,7 +162,11 @@ class ItemThreads:
         nothing for ever.
         """
         claimed_thread, claimed_message = await self._swap(
-            target.tracked_item_id, thread_id, message_id, replacing=target.thread_id
+            target.tracked_item_id,
+            thread_id,
+            message_id,
+            replacing=target.thread_id,
+            channel_id=target.channel_id,
         )
 
         # Nobody owns the item now. Somebody let go of the old thread while this one was being
@@ -172,7 +176,11 @@ class ItemThreads:
         # away with the item left holding nothing.
         if claimed_thread is None:
             claimed_thread, claimed_message = await self._swap(
-                target.tracked_item_id, thread_id, message_id, replacing=None
+                target.tracked_item_id,
+                thread_id,
+                message_id,
+                replacing=None,
+                channel_id=target.channel_id,
             )
 
         if claimed_thread is None:
@@ -197,7 +205,13 @@ class ItemThreads:
         return ThreadHandle(thread_id=claimed_thread, message_id=claimed_message)
 
     async def _swap(
-        self, tracked_item_id: int, thread_id: int, message_id: int | None, *, replacing: int | None
+        self,
+        tracked_item_id: int,
+        thread_id: int,
+        message_id: int | None,
+        *,
+        replacing: int | None,
+        channel_id: int | None = None,
     ) -> tuple[int | None, int | None]:
         async with self._sessionmaker() as session, session.begin():
             return await ThreadPointerStore(session).claim_thread(
@@ -205,6 +219,7 @@ class ItemThreads:
                 thread_id=thread_id,
                 message_id=message_id,
                 replacing=replacing,
+                channel_id=channel_id,
             )
 
     async def _remember(self, tracked_item_id: int, handle: ThreadHandle) -> None:

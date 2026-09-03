@@ -8,6 +8,7 @@ tree does not fail: it stops existing in Discord and nothing anywhere says so.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import discord
 import pytest
@@ -156,6 +157,70 @@ class TestWhetherDiscordCanBeReached:
         await bot.on_resumed()
 
         assert bot.gateway_is_up() is True
+
+
+class TestBeingToldAChannelHasGone:
+    """The deletions Discord does not report one by one.
+
+    Deleting a channel deletes every thread in it, and the per-thread events alongside cover only
+    the threads discord.py still had cached. It drops one the moment the thread archives, so the
+    quiet threads are announced by nothing, and a quiet thread is exactly what the per-thread
+    listener exists for.
+    """
+
+    async def test_the_channel_is_passed_on(self) -> None:
+        gone: list[int] = []
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_channel_goes(lambda channel_id: _record(gone, channel_id))
+
+        await bot.on_guild_channel_delete(_channel(4242))
+
+        assert gone == [4242]
+
+    async def test_nothing_wired_in_is_not_an_error(self) -> None:
+        await ShannonBot(explain_error=lambda error: "no").on_guild_channel_delete(_channel(1))
+
+    async def test_a_failure_letting_go_does_not_reach_discord(self) -> None:
+        async def refuses(channel_id: int) -> None:
+            raise RuntimeError("the database went away")
+
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_channel_goes(refuses)
+
+        await bot.on_guild_channel_delete(_channel(4242))
+
+    async def test_it_is_held_to_the_same_limit_as_a_thread_going(self) -> None:
+        """Housekeeping, and never the reason a delivery is late. A server tidying up several
+        channels at once would otherwise be several of these beside the per-thread ones."""
+        now = 0
+        most = 0
+        released = asyncio.Event()
+
+        async def slowly(channel_id: int) -> None:
+            nonlocal now, most
+            now += 1
+            most = max(most, now)
+            await released.wait()
+            now -= 1
+
+        bot = ShannonBot(explain_error=lambda error: "no")
+        bot.tell_when_a_channel_goes(slowly)
+
+        letting_go = [
+            asyncio.create_task(bot.on_guild_channel_delete(_channel(n))) for n in range(20)
+        ]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        running = most
+        released.set()
+        await asyncio.gather(*letting_go)
+
+        assert running <= 2, f"a tidy-up ran {running} of these at once"
+
+
+def _channel(channel_id: int):
+    """Enough of a Discord channel for the listener, which reads one attribute."""
+    return SimpleNamespace(id=channel_id)
 
 
 def _pretend_the_cache_is_filled(bot: ShannonBot) -> None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import runpy
+from types import SimpleNamespace
 
 import discord
 import pytest
@@ -111,6 +112,31 @@ class TestTheThreadDeleteListener:
         )
 
         assert letting_go == [4242], "a deleted thread never reached the container"
+
+    async def test_a_deleted_channel_reaches_it_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The second half of the same wiring, and the half nothing else can do: Discord reports
+        a thread deleted with its channel only while discord.py still has it cached."""
+        built: list[ShannonBot] = []
+        letting_go: list[int] = []
+        real = shannon.main.ShannonBot
+
+        def remember(**kwargs: object) -> ShannonBot:
+            bot = real(**kwargs)
+            built.append(bot)
+            return bot
+
+        async def record(self: Container, channel_id: int) -> None:
+            letting_go.append(channel_id)
+
+        monkeypatch.setattr(shannon.main, "ShannonBot", remember)
+        monkeypatch.setattr(Container, "forget_channel", record)
+
+        build_app(SETTINGS)
+
+        assert len(built) == 1, "build_app made no bot"
+        await built[0].on_guild_channel_delete(SimpleNamespace(id=99))
+
+        assert letting_go == [99], "a deleted channel never reached the container"
 
 
 class TestStartingTheProcess:

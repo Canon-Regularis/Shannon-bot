@@ -19,6 +19,7 @@ ExplainError = Callable[[BaseException], str]
 # Told that a thread has gone, so whatever was pointing at it can stop. Injected for the same
 # reason: which table holds a thread id is not this package's business.
 ThreadGone = Callable[[int], Awaitable[None]]
+ChannelGone = Callable[[int], Awaitable[None]]
 
 
 def build_intents() -> discord.Intents:
@@ -72,6 +73,7 @@ class ShannonBot(discord.Client):
         self.tree.on_error = self._command_failed
         self._explain_error = explain_error
         self._thread_gone = thread_gone
+        self._channel_gone: ChannelGone | None = None
         # Letting go of a thread is housekeeping, and it must never be the reason a delivery is
         # late. Deleting a channel deletes every thread in it, and discord.py dispatches one of
         # these for each of them at once, each running a transaction of its own against a pool
@@ -111,6 +113,15 @@ class ShannonBot(discord.Client):
 
     def install(self, *commands: app_commands.Command) -> None:
         self._pending.extend(commands)
+
+    def tell_when_a_channel_goes(self, gone: ChannelGone) -> None:
+        """Wire up the channel-delete listener, for the same reason as the one below.
+
+        A separate event because Discord treats it as one: deleting a channel deletes the threads
+        in it, and the per-thread events that follow cover only the ones discord.py still had
+        cached.
+        """
+        self._channel_gone = gone
 
     def tell_when_a_thread_goes(self, gone: ThreadGone) -> None:
         """Wire up the thread-delete listener, once the thing that owns the rows exists.
@@ -168,6 +179,23 @@ class ShannonBot(discord.Client):
         period and retries are for.
         """
         return self._connected and self.is_ready()
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        """A whole channel has gone, and with it every thread that was in it.
+
+        The per-thread events Discord sends alongside this cover only the threads discord.py
+        still had cached, and it drops one the moment the thread archives, so a quiet thread is
+        announced by nothing. That is the case the thread listener below was written for and the
+        one shape of it that listener cannot see.
+
+        Behind the same limit as that one, and for the same reason: this is housekeeping and must
+        never be why a delivery is late.
+        """
+        if self._channel_gone is None:
+            return
+        async with self._letting_go:
+            with contextlib.suppress(Exception):
+                await self._channel_gone(channel.id)
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
         """Somebody removed a thread. Let go of it before anything tries to write there again.

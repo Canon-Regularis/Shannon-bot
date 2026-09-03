@@ -37,6 +37,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     # Both of these are a second step for the same reason: the gateway has to exist before the
     # container that needs it, so neither can be handed to the constructor.
     bot.tell_when_a_thread_goes(container.forget_thread)
+    bot.tell_when_a_channel_goes(container.forget_channel)
 
     return create_app(
         settings=settings,

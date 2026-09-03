@@ -84,6 +84,26 @@ class Container:
     issue_sync: ItemSyncService
     commands: tuple[app_commands.Command, ...]
 
+    async def forget_channel(self, channel_id: int) -> None:
+        """Let go of every thread that was in a channel Discord says has gone.
+
+        The companion to `forget_thread`, for the deletions Discord does not report one by one.
+        It reports a thread deleted with its channel only while discord.py still has that thread
+        cached, and it drops one the moment the thread archives, so the quiet threads are
+        announced by nothing. A draft card parked in a column nobody touches is exactly that, and
+        it has no webhook to rebuild it either.
+
+        Silent about a channel holding nothing of ours, which is most of the ones Discord reports.
+        """
+        async with self.sessionmaker() as session, session.begin():
+            forgotten = await ThreadPointerStore(session).forget_channel(channel_id)
+        if forgotten:
+            logger.info(
+                "channel %s was deleted, so %s tracked items let go of their threads",
+                channel_id,
+                len(forgotten),
+            )
+
     async def forget_thread(self, thread_id: int) -> None:
         """Let go of a thread somebody deleted in Discord.
 
