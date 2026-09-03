@@ -4360,3 +4360,115 @@ refused by the check and by the unique constraint behind it, the webhook is matc
 GitHub sends behind the signature gate rather than on anything a caller types, and `/pr` confirms
 the link against the stored numeric id twice so a freed and retaken repository name cannot be used
 to reach another guild's item.
+
+## A twenty-second look: the GitHub side going away
+
+A repository being renamed was already handled. Everything else that can happen to the other end
+was not: the repository deleted, transferred or made private; the token revoked, expired or
+narrowed; the webhook quietly removed; and GitHub refusing for a long time. Four lenses, two
+findings, and they turned out to be the same defect approached from opposite sides.
+
+### A token that can still read and may no longer write
+
+Fine-grained tokens expire by default, and a scope can be narrowed from write to read without
+anybody meaning to break anything. Reads keep working, so the poller reaches the card and fails
+on the label write.
+
+A refused write arrives as `GitHubAuthError`, which is a plain GitHub error rather than a
+permanent one, so it went past the branch written two looks ago for exactly this and landed in the
+one that means "GitHub or Discord having a bad moment". That branch deliberately withholds the
+column, which is the only thing that stops a card being looked at again. A dead scope is not a bad
+moment: the card was asked about every minute for as long as the token was wrong, and every card
+moved after it joined that set and never left. Each one costs a GitHub read and a Discord call a
+minute, so a few dozen of them spend the hour's whole quota on work that cannot be done, and then
+nothing needing GitHub works either.
+
+The poller writes such a card off now. The error is not made permanent everywhere, deliberately,
+because the two callers want opposite things from it: a token being rotated is minutes long, and a
+delivery has sixteen attempts over two hours precisely so it can sit that out, where making it
+permanent would drop every delivery in the window instead. The poller has no such budget, so the
+poller is where the decision belongs.
+
+A revoked or expired token does not reach any of this, which is worth writing down because it is
+the case one expects to matter. It refuses the board read itself, so the pass ends before the
+cards are reached and the loop above logs and waits.
+
+### The rate limit this bot can actually reach was the one it could not see
+
+GitHub has two limits and they answer differently. The primary one is the hourly budget and says
+so in a counter. The secondary one is about how fast requests arrive, does not spend the budget at
+all, and marks itself only by asking for a wait, so the counter beside it is untouched and often
+nowhere near zero.
+
+The check read the counter alone. That recognised the limit this bot will almost never reach and
+missed the one it trips: a write costs several times what a read does against the secondary
+allowance, and a board with a few cards moving does exactly that. Filed as a refusal, the wait
+GitHub had asked for was thrown away, the poller's one backoff could not fire, and it carried on at
+its ordinary interval, which GitHub's own documentation says is how an integration gets banned.
+Everybody running a command was told to go and check a token that was perfectly healthy.
+
+A 403 that carries a wait is a rate limit now, whatever the counter says.
+
+The second half needed no misclassification at all. A rate limit raised while acting on a card was
+caught by the per-card handler, which exists so one bad card cannot end the pass, and then again by
+the loop above it for the same reason. Both are right about every other failure and wrong about
+this one: GitHub is asking the whole process to wait, and the only thing that can wait is the loop
+outside both of them. It is let through now, and it is the only failure that is.
+
+### What the same look checked and found sound
+
+A repository deleted, transferred, or retaken under a freed name cannot mirror a stranger's work.
+The manual sync settles the repository twice by numeric id, and the workflow reads the item and
+compares the id before writing any label, so no label can land in a repository that has taken over
+a stored name.
+
+A GitHub outage costs deliveries nothing, because the webhook path makes no GitHub calls at all:
+every handler reads what it needs from the payload. The one exception is the note path asking for a
+thread to be rebuilt, and that swallows whatever GitHub raises and lets the note be retried on its
+own budget. The retry budget across sixteen attempts is a little over two hours, which covers a
+full primary rate-limit window with attempts to spare.
+
+The signature gate is in the right order: headers, then the body under its running size limit, then
+the check, then the decode, then the queue. Nothing before the check has a side effect, and an
+unset secret fails closed rather than waving deliveries through.
+
+Worth recording that the two lenses disagreed about the rate limit. The one looking at tokens saw
+it, called it a small blemish and did not report it; the one looking at a degraded GitHub reported
+it as the worst thing it found, and was right. Neither was careless. It is the same fact seen from
+two distances, and the reason for pointing more than one lens at a thing.
+
+## Supervision and the priority path
+
+Folded in, and both largely sound.
+
+### A board that stopped being read, and nothing saying so
+
+The poller is the one task with nothing wired to stop the process when it dies, which is right:
+webhooks keep arriving, threads keep being written, and only board movement stops, so a restart
+would throw away whatever the worker had in hand to fix something a restart may not fix.
+
+What was missing is that nothing said so either. It died with a line in the log and every health
+check afterwards answered that all was well. `/health` reports it now, and is the only thing there
+reported without being counted: an orchestrator reads the verdict and this must not restart a
+working process, but a person reading the fields should be able to see that the board has stopped.
+A warning is logged when the board is the only thing wrong, and no board configured reads as true,
+because nothing to run is not something stopped.
+
+### Two things that looked wrong and were not
+
+A task dying while the process is already shutting down calls the halt that asks for a stop, which
+looked like a graceful shutdown escalating itself into a forced one. It is not: the escalation to a
+forced exit happens on a second interrupt, and what is raised here is a termination signal, which
+the second time is a no-op.
+
+`priority_change` has no entry for UNSET in the table it looks up, so asking for it would raise. No
+command can ask for it: the three priority commands name high, medium and low, and that function
+has exactly one caller. The parser underneath it was walked through the awkward names as well,
+labels like `low-hanging fruit`, `bug: minor` and `priority: very high`, and reads none of them as
+a priority.
+
+The one real blemish was a message. The helper that exists so a failure with nothing to say still
+says something was used in one place and not in the one that reports a background task dying, so a
+task ending on a timeout, which asyncio raises with no arguments at all, logged a colon with
+nothing after it. The traceback beside it still named the type, so nothing was lost, but the line
+that helper exists for was the line that did not use it.

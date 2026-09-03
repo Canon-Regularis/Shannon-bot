@@ -25,6 +25,9 @@ class ProcessLiveness:
     # None means no token was configured, which is the deliberate no-bot mode. Otherwise a
     # finished task means the gateway has gone.
     bot_task: asyncio.Task | None = None
+    # None means no board was configured, which is the default. Otherwise a finished task means
+    # the board is no longer being read.
+    poller_task: asyncio.Task | None = None
     # Whether the client has actually reached the gateway, which the task being alive does not
     # say. None when there is no bot to ask.
     gateway_is_ready: Callable[[], bool] | None = None
@@ -68,6 +71,25 @@ class ProcessLiveness:
 
     def worker_running(self) -> bool:
         return self.worker_task is not None and not self.worker_task.done()
+
+    def poller_running(self) -> bool:
+        """Whether a configured board is still being read.
+
+        Reported without being part of the verdict, deliberately, and it is the only thing here
+        that is. The process can do its job without this one: webhooks keep arriving, threads
+        keep being written, and only board movement stops. Failing the check would have an
+        orchestrator restart a process that is still working, throwing away whatever the worker
+        had in hand to fix something a restart may not fix.
+
+        Reported all the same, because the alternative is what happens now: the poller is the one
+        task with no halt wired to it, so it dies with a line in the log and the process runs on
+        for ever answering that everything is fine. Board mirroring stops and nothing anybody
+        looks at says so.
+
+        True where there is no board, which is the default: nothing to run is not something
+        stopped.
+        """
+        return self.poller_task is None or not self.poller_task.done()
 
     def bot_connected(self) -> bool:
         """Whether the gateway is still there, if this deployment has one at all.

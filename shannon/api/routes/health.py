@@ -20,12 +20,15 @@ class Liveness(Protocol):
 
     def bot_connected(self) -> bool: ...
 
+    def poller_running(self) -> bool: ...
+
 
 class HealthResponse(BaseModel):
     healthy: bool
     database: bool
     worker: bool
     bot: bool
+    poller: bool
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -42,15 +45,25 @@ async def health(request: Request, response: Response) -> HealthResponse:
     if liveness is None:
         # Nothing was wired in, which is how the route-level tests run. Listening is all that
         # can honestly be claimed.
-        return HealthResponse(healthy=True, database=True, worker=True, bot=True)
+        return HealthResponse(healthy=True, database=True, worker=True, bot=True, poller=True)
 
     database = await liveness.database_reachable()
     worker = liveness.worker_running()
     bot = liveness.bot_connected()
+    poller = liveness.poller_running()
+
+    # The board is the one thing reported without being counted. This process is still doing its
+    # job without it: webhooks arrive, threads are written, and only board movement stops. Failing
+    # the check would have an orchestrator restart a working process and throw away whatever the
+    # worker had in hand. Saying nothing at all is the other mistake, and the one this is here to
+    # stop: the poller is the only task with nothing wired to halt the process when it dies, so it
+    # goes with a line in the log and everything after that answers that all is well.
     healthy = database and worker and bot
 
     if not healthy:
         logger.warning("reporting unhealthy: database=%s worker=%s bot=%s", database, worker, bot)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif not poller:
+        logger.warning("the board is no longer being read, though everything else is working")
 
-    return HealthResponse(healthy=healthy, database=database, worker=worker, bot=bot)
+    return HealthResponse(healthy=healthy, database=database, worker=worker, bot=bot, poller=poller)

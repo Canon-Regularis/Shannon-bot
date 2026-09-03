@@ -203,6 +203,7 @@ async def _start(
     # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
+    liveness.poller_task = poller_task
     # Asked only when there is a bot. Safe at any point in a client's life: it reads a flag the
     # client keeps from its own connect and disconnect events, and `is_ready` behind it checks
     # the sentinel before the event.

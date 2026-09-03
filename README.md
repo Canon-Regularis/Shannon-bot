@@ -264,12 +264,19 @@ and has no cleanup path.
 | Route | Answers |
 | --- | --- |
 | `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing header or unusable body, 401 for a bad signature, 413 past the 25MB cap, 500 if the secret is unset |
-| `GET /health` | `database`, `worker` and `bot` as booleans, 503 if any is false |
+| `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, 503 if any of the first three is false |
 
 `/health` reports what the process is doing rather than that it is listening. A dead worker or a
 dropped gateway leaves the endpoint accepting deliveries nothing will act on, which is worth a
 restart. The database probe is cached for a few seconds so the public endpoint cannot exhaust the
 pool the worker runs on.
+
+`poller` is reported without being counted, and it is the only one that is. This process still
+does its job without a board: webhooks arrive, threads are written, and only board movement stops,
+so failing the check would restart a working process and throw away whatever the worker had in
+hand. It is reported because the poller is the one task with nothing wired to stop the process
+when it dies, so without this it goes with a line in the log and everything after that answers
+that all is well. It is true where no board is configured, which is the default.
 
 `/docs`, `/redoc` and `/openapi.json` are served unconditionally, `/health` is unauthenticated,
 and there is no middleware of any kind.

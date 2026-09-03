@@ -132,6 +132,26 @@ class TestWhetherTheBackgroundWorkIsAlive:
 
         assert ProcessLiveness(FakeEngine(), worker_task=task).worker_running() is False
 
+    async def test_a_board_nobody_configured_is_not_something_stopped(self) -> None:
+        """Which is the default: no board is read unless somebody sets one up."""
+        assert ProcessLiveness(FakeEngine()).poller_running() is True
+
+    async def test_a_board_still_being_read_is_running(self) -> None:
+        task = asyncio.create_task(forever())
+        try:
+            assert ProcessLiveness(FakeEngine(), poller_task=task).poller_running() is True
+        finally:
+            task.cancel()
+
+    async def test_a_board_that_stopped_being_read_is_reported(self) -> None:
+        """The poller is the one task with nothing wired to stop the process when it dies, so
+        without this it goes with a line in the log and every check afterwards says all is well.
+        """
+        task = asyncio.create_task(fails())
+        await asyncio.wait({task})
+
+        assert ProcessLiveness(FakeEngine(), poller_task=task).poller_running() is False
+
     async def test_no_bot_configured_counts_as_connected(self) -> None:
         """Running without a token is deliberate, not a failure."""
         assert ProcessLiveness(FakeEngine()).bot_connected() is True

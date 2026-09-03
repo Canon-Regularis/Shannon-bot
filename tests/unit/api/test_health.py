@@ -18,7 +18,40 @@ async def test_a_working_process_reports_healthy() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"healthy": True, "database": True, "worker": True, "bot": True}
+    assert response.json() == {
+        "healthy": True,
+        "database": True,
+        "worker": True,
+        "bot": True,
+        "poller": True,
+    }
+
+
+async def test_a_dead_board_poller_is_reported_without_failing_the_check() -> None:
+    """The one thing here that is said without being counted.
+
+    This process is still doing its job without the board: webhooks arrive, threads are written,
+    and only board movement stops. Failing the check would have an orchestrator restart a working
+    process and throw away whatever the worker had in hand.
+
+    Saying nothing is the other mistake and the one this exists to stop. The poller is the only
+    task with nothing wired to halt the process when it dies, so it goes with one line in the log
+    and everything afterwards answers that all is well.
+    """
+    async with client_with(FakeLiveness(poller=False)) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["healthy"] is True, "a dead board restarted a working process"
+    assert response.json()["poller"] is False, "a dead board was not reported at all"
+
+
+async def test_no_board_configured_is_not_something_stopped() -> None:
+    """Which is the default: no board is set up unless somebody sets one up."""
+    async with client_with(FakeLiveness(poller=True)) as client:
+        response = await client.get("/health")
+
+    assert response.json()["poller"] is True
 
 
 async def test_a_dead_worker_makes_the_process_unhealthy() -> None:
