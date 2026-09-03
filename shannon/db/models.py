@@ -103,6 +103,20 @@ class TrackedItem(TimestampMixin, Base):
     github_state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Which channel that thread is in, recorded when the thread is claimed because that is the
+    # only moment it is known for certain. The channel mapping cannot answer it: `/set_channel`
+    # changes where new threads go and leaves the existing ones where they were.
+    #
+    # Here so that a channel being deleted can let go of the threads that were inside it. Discord
+    # reports a thread deleted with its channel only while discord.py still has it cached, and it
+    # drops one the moment it archives, so the quiet threads are reported by nothing at all.
+    discord_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Which delivery last wrote this item, by the number the queue gave it when it was written
+    # down, which is the order it reached this bot. What the staleness guard compares when two
+    # deliveries carry the same `updated_at`, which GitHub stamps to the second and so they
+    # routinely do. Null for a row written before this was kept, and for a write that came from
+    # a command or the board rather than from a delivery.
+    last_delivery_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # What this bot last made the lock on the thread it currently points at. Null means it has
     # not set one, which is what a thread just opened is. Cleared whenever the pointer moves,
     # because a replacement thread starts open however the one it replaced ended.
