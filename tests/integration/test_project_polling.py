@@ -1405,6 +1405,38 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 0
         assert github_client.pull_request_calls[reads:] == [], "it asked GitHub every poll"
 
+    async def test_a_lock_refused_while_out_of_the_server_is_not_written_off(
+        self,
+        registered: Repository,
+        mirrored_pr: int,
+        poller_for,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The same refusal, from a bot that has been removed rather than never allowed.
+
+        Discord answers the two identically, and the write-off above is the wrong answer for one
+        of them. Nobody is watching a poll, the column is what would send the card round again,
+        and it is deliberately not written. So an admin removing the bot for five minutes left
+        every card finished in that window recorded as moved with its thread open, and no poll
+        ever looked at one of them again.
+        """
+        guild_id = registered.discord_guild_id
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
+        threads.refuses_every_lock = True
+        threads.removed_from.add(guild_id)
+
+        assert await poller.run_once() == 0, "the move was written off while the bot was out"
+
+        threads.refuses_every_lock = False
+        threads.removed_from.clear()
+
+        assert await poller.run_once() == 1, "the card never came round again"
+        assert threads.threads[threads.created[0].thread_id].locked is True
+
     async def test_a_draft_whose_thread_edit_was_refused_is_mirrored_again(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
     ) -> None:

@@ -23,6 +23,7 @@ from shannon.domain.errors import ItemNotReadyError
 from shannon.github.errors import GitHubUnavailableError
 from shannon.services import workflow as workflow_module
 from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
+from shannon.services.sync.one_at_a_time import ItemLock
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.workflow import (
     ItemWorkflow,
@@ -917,3 +918,120 @@ class TestAMoveWhoseLastStepFailed:
             await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert "could not put tracked item" in caplog.text, "it went back silently ahead of Discord"
+
+
+class TestHoldingTheItemWhileItSetsTheLock:
+    """The lock this command sets is a Discord call the sync path never makes.
+
+    Everything a sync says to Discord is held to one writer per item, and this sat outside it: an
+    event for the same item could be in its own Discord phase right now, and locking is the step
+    where interleaving shows, because it is last on both sides and each side decided from what it
+    read before it started. A pull request makes it permanent. `PullRequestPolicy.locked` answers
+    None on every sync, so the lock `/set_done` takes is the only one it ever gets, and nothing
+    but another command was ever going to lift it again.
+    """
+
+    async def test_nothing_else_can_take_the_item_while_the_lock_is_being_set(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        # A pull request has to be ready for merge before it can be marked done.
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+
+        object_id = (await stored(db_session)).github_object_id
+        lock = ItemLock(db_sessionmaker)
+        reached = asyncio.Event()
+        answer: dict[str, bool] = {}
+        setting_it = threads.set_locked
+
+        async def waits_inside(**kwargs):
+            reached.set()
+            await asyncio.sleep(0.5)
+            return await setting_it(**kwargs)
+
+        threads.set_locked = waits_inside
+
+        async def anybody_else() -> None:
+            # Started from the test rather than from inside the command, so it asks for the item
+            # as a stranger would. A task made inside the command inherits what the command is
+            # already holding and would be let straight through, which is what reentrancy is for
+            # and not what is being asked here.
+            await reached.wait()
+            try:
+                await asyncio.wait_for(_takes_the_item(lock, object_id), timeout=0.25)
+                answer["blocked"] = False
+            except TimeoutError:
+                answer["blocked"] = True
+
+        watching = asyncio.create_task(anybody_else())
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        await watching
+
+        assert answer["blocked"] is True, "the command set the lock without holding the item"
+
+    async def test_a_repeat_gives_up_when_the_item_moved_while_it_waited(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        github: FakeGitHubClient,
+        db_sessionmaker: async_sessionmaker,
+        db_session: AsyncSession,
+    ) -> None:
+        """Waiting for the item is only half of it. The other half is looking again afterwards.
+
+        A repeat is a repeat because the row already says what is being asked for, and that was
+        read before the wait. Waiting made the window wider rather than narrower: the whole
+        reason to wait is that somebody else is writing, and this went on to act on what it knew
+        before they did.
+        """
+        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        tracked = await stored(db_session)
+        object_id, row_id = tracked.github_object_id, tracked.id
+        threads.threads[thread_id].locked = False
+
+        holding, release, read_it = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def somebody_else_has_the_item() -> None:
+            # In a task of its own, so the command below asks for the item as a stranger would.
+            async with ItemLock(db_sessionmaker).held(object_id):
+                holding.set()
+                await release.wait()
+
+        reading = github.get_pull_request
+
+        async def says_when_it_has_been_read(*args, **kwargs):
+            found = await reading(*args, **kwargs)
+            read_it.set()
+            return found
+
+        github.get_pull_request = says_when_it_has_been_read
+
+        blocker = asyncio.create_task(somebody_else_has_the_item())
+        await asyncio.wait_for(holding.wait(), timeout=5)
+        repeat = asyncio.create_task(workflow.set_status(thread_id=thread_id, status=Status.DONE))
+
+        # It has read the row and the labels and is now waiting for the item, which is exactly
+        # where the other writer's commit lands.
+        await asyncio.wait_for(read_it.wait(), timeout=5)
+        async with db_sessionmaker() as session, session.begin():
+            moved = await TrackedItemStore(session).get_by_id(row_id)
+            moved.status = Status.IN_REVIEW
+
+        asked = len(threads.lock_calls)
+        release.set()
+        await blocker
+        await repeat
+
+        assert len(threads.lock_calls) == asked, "it shut a thread against a status that had moved"
+        assert threads.threads[thread_id].locked is False
+
+
+async def _takes_the_item(lock: ItemLock, object_id: int) -> None:
+    async with lock.held(object_id):
+        pass

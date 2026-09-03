@@ -23,13 +23,13 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
-from shannon.discord_bot.threads import LocksThread
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
 from shannon.domain.models import Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
-from shannon.services.sync.items import SyncsItems
+from shannon.services.sync.items import LocksAndKnowsServers, SyncsItems
+from shannon.services.sync.one_at_a_time import ItemLock
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +115,11 @@ class ItemWorkflow:
         self,
         sessionmaker: async_sessionmaker,
         github: LabelsItems,
-        threads: LocksThread,
+        threads: LocksAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
     ) -> None:
         self._sessionmaker = sessionmaker
+        self._one_item = ItemLock(sessionmaker)
         self._github = github
         self._threads = threads
         self._kinds = kinds
@@ -147,10 +148,41 @@ class ItemWorkflow:
             # A closed issue cannot reach here asking to be unlocked: the guard above refuses any
             # status but DONE for one. So the only thread this ever opens is one this path shut.
             wants_lock = status is Status.DONE
-            lock = await self._set_lock(thread_id, wants_lock)
-            if lock.thread_missing:
-                thread_id, lock = await self._rebuild_and_lock(found, snapshot, change, wants_lock)
-            await self._write_the_lock_down(found.tracked_item_id, thread_id, lock)
+            # Held across the lock this sets, because this is a Discord call the sync path never
+            # makes and so never covered. An event for the same item can be in its own Discord
+            # phase right now, and locking is the step where interleaving shows: it is last on
+            # both sides and decided from what each read before it started. The rebuild inside
+            # goes through the ordinary sync, which takes this same lock and is let straight
+            # through, because a caller already holding it is not something to wait for.
+            async with self._one_item.held(found.github_object_id):
+                if not await self._row_still_says(found.tracked_item_id, status):
+                    # Somebody moved the item while this waited, and their lock is the current
+                    # one. Everything this branch acts on was read before the wait: the status
+                    # off `_locate`, the labels off a GitHub round trip after it. The branch
+                    # below never had this problem because it re-reads under the row's own lock
+                    # and decides from what that gave back.
+                    #
+                    # Setting the lock anyway is not a stale write that rights itself. It shuts
+                    # a thread against a state the row no longer holds, and for a pull request
+                    # nothing lifts one: `PullRequestPolicy.locked` answers None on every sync
+                    # and `shut_by_the_row` reads DONE off a row that has moved on, so no
+                    # webhook, sync or `/pr` reopens it and the reviewers are shut out of the
+                    # discussion they had just reopened until somebody thinks to run a status
+                    # command again.
+                    logger.info(
+                        "not setting the lock on %s#%s: it moved to %s while this waited",
+                        found.full_name,
+                        found.number,
+                        status.value,
+                    )
+                    return WorkflowOutcome(found.full_name, found.number, changed=False)
+
+                lock = await self._set_lock(thread_id, wants_lock, guild_id=found.guild_id)
+                if lock.thread_missing:
+                    thread_id, lock = await self._rebuild_and_lock(
+                        found, snapshot, change, wants_lock, thread_id
+                    )
+                await self._write_the_lock_down(found.tracked_item_id, thread_id, lock)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -162,37 +194,43 @@ class ItemWorkflow:
             )
 
         await self._apply(found, change)
-        previous = await self._store_status(found.tracked_item_id, status)
-        try:
-            written = await self._rerender(found, snapshot, change, settles_the_lock=False)
-        except BaseException:
-            # BaseException because being cancelled counts as a failure here. The poller is
-            # cancelled where it stands when the process is asked to stop, and a card being
-            # moved at that moment would otherwise keep a row nothing in Discord shows, which
-            # the next poll after a restart writes off. Shielded so the cancellation cannot
-            # interrupt the putting back as well; under it the await returns at once and the
-            # write lands a moment later.
-            with contextlib.suppress(Exception):
-                await asyncio.shield(
-                    self._give_the_status_back(found.tracked_item_id, status, previous)
-                )
-            raise
+        # Everything from the row write to the lock, held to this one writer. The labels
+        # above are GitHub's and are left outside it: what two writers of one item can
+        # spoil for each other is the thread, and holding a connection across a rate
+        # limited GitHub call would be paying for the wrong thing.
+        async with self._one_item.held(found.github_object_id):
+            previous = await self._store_status(found.tracked_item_id, status)
+            try:
+                written = await self._rerender(found, snapshot, change, settles_the_lock=False)
+            except BaseException:
+                # BaseException because being cancelled counts as a failure here. The poller is
+                # cancelled where it stands when the process is asked to stop, and a card being
+                # moved at that moment would otherwise keep a row nothing in Discord shows, which
+                # the next poll after a restart writes off. Shielded so the cancellation cannot
+                # interrupt the putting back as well; under it the await returns at once and the
+                # write lands a moment later.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        self._give_the_status_back(found.tracked_item_id, status, previous)
+                    )
+                raise
 
-        # Touched only when DONE is on one side of the move or the other, so an ordinary status
-        # change still costs no Discord call. Moving OUT of DONE has to give the thread back:
-        # `PullRequestPolicy.locked` returns None on every sync, so the lock `/set_done` takes is
-        # the only one a pull request ever gets and nothing else was ever going to lift it. The
-        # commands to move it back are all allowed and all reported success, and left the thread
-        # shut against the discussion they had just reopened.
-        wants_lock = status is Status.DONE
-        touched = wants_lock or previous is Status.DONE
-        lock = (
-            await self._set_lock(written or thread_id, wants_lock)
-            if touched
-            else _Lock(locked=False)
-        )
-        if touched:
-            await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
+            # Touched only when DONE is on one side of the move or the other, so an ordinary
+            # status change still costs no Discord call. Moving OUT of DONE has to give the
+            # thread back: `PullRequestPolicy.locked` returns None on every sync, so the lock
+            # `/set_done` takes is the only one a pull request ever gets and nothing else was
+            # ever going to lift it. The commands to move it back are all allowed and all
+            # reported success, and left the thread shut against the discussion they had just
+            # reopened.
+            wants_lock = status is Status.DONE
+            touched = wants_lock or previous is Status.DONE
+            lock = (
+                await self._set_lock(written or thread_id, wants_lock, guild_id=found.guild_id)
+                if touched
+                else _Lock(locked=False)
+            )
+            if touched:
+                await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
@@ -335,7 +373,19 @@ class ItemWorkflow:
         )
         return result.thread_id
 
-    async def _set_lock(self, thread_id: int, locked: bool) -> _Lock:
+    async def _row_still_says(self, tracked_item_id: int, status: Status) -> bool:
+        """Whether the row still says what this command is repeating.
+
+        Asked inside the hold and nowhere else. A repeat exists to give a lock that was refused
+        another go, and what makes it a repeat is the row already saying what is being asked for.
+        That was read before the wait for the hold, and the whole point of the wait is that
+        somebody else is writing.
+        """
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+        return item is not None and item.status is status
+
+    async def _set_lock(self, thread_id: int, locked: bool, *, guild_id: int) -> _Lock:
         """Close a finished item's thread to further replies, or open it again.
 
         Last, after the metadata is written. A locked thread still takes this bot's edits, so
@@ -352,6 +402,15 @@ class ItemWorkflow:
         Only the gateway errors, and only around this call. Anything else still raises, and
         anything that fails before this still fails the command outright, because then nothing
         did happen.
+
+        Whether a refusal is permanent is not the exception type alone. A bot that has been
+        removed from the server is answered exactly as one that was never given the permission,
+        and the two want opposite things: nobody grants a permission by waiting, and nobody
+        fixes an absence any other way. It matters most where nobody is watching. The board
+        poller writes a move off as carried through on a permanent refusal, deliberately, so
+        that one missing permission does not put every card ever dragged to Done into a set
+        retried once a minute for ever. Filed that way while the bot is out for five minutes,
+        the card is recorded as moved with its thread left open and no poll looks at it again.
         """
         try:
             await self._threads.set_locked(thread_id=thread_id, locked=locked)
@@ -360,7 +419,11 @@ class ItemWorkflow:
             return _Lock(locked=False, refused=True, thread_missing=True)
         except DiscordGatewayError as error:
             logger.warning("could not set the lock on thread %s: %s", thread_id, error.message)
-            return _Lock(locked=False, refused=True, permanent=isinstance(error, PermanentError))
+            return _Lock(
+                locked=False,
+                refused=True,
+                permanent=isinstance(error, PermanentError) and self._threads.is_in(guild_id),
+            )
         return _Lock(locked=locked)
 
     async def _store_status(self, tracked_item_id: int, status: Status) -> Status:
@@ -415,6 +478,7 @@ class ItemWorkflow:
         snapshot: TrackedSnapshot,
         change: labels.StatusChange,
         wants_lock: bool,
+        thread_id: int,
     ) -> tuple[int, _Lock]:
         """Open a replacement for a thread that has gone, and lock that one instead.
 
@@ -431,8 +495,13 @@ class ItemWorkflow:
         warnings for that card, once a minute, with nothing able to clear it.
         """
         rebuilt = await self._rerender(found, snapshot, change, settles_the_lock=False)
-        thread_id = rebuilt or found.thread_id
-        return thread_id, await self._set_lock(thread_id, wants_lock)
+        # The one the command arrived on, where the render answered with nothing. It used to
+        # reach for a field `_Found` does not have, which nothing noticed because nothing here
+        # is type checked and every route to it is closed by an invariant somewhere else: a
+        # repository row is never deleted, a channel mapping is never deleted, and a ticket is
+        # refused before this. All true, and none of them stated anywhere near this line.
+        on = rebuilt or thread_id
+        return on, await self._set_lock(on, wants_lock, guild_id=found.guild_id)
 
     async def _give_the_status_back(
         self, tracked_item_id: int, written: Status, previous: Status
@@ -459,10 +528,15 @@ class ItemWorkflow:
         single-process case too, and nothing on the row separates somebody else having acted from
         the step being compensated for.
 
-        That is the shape of a compensating write rather than a fault in this guard, and the fix
-        is the per-item lock across the Discord phase already recorded as owed. Until then the
-        poller belongs in one replica, which is said where the setting that enables it is
-        defined.
+        That is the shape of a compensating write rather than a fault in this guard, and the
+        per-item lock does not close it, though it was written down as the thing that would. The
+        lock is taken here, around the write and the render and the compensation together, so no
+        other writer can be in the middle of this one. What the other poller acts on is not read
+        here: it decides from a batch of rows read before its move loop starts, a service and a
+        step earlier, so it has already read DONE off the row by the time it asks for anything
+        this could hold it out of. Closing it means the decision being made against the row it is
+        acted on, not against a snapshot. Until then the poller belongs in one replica, which is
+        said where the setting that enables it is defined.
 
         The label on GitHub is left where it was put. Setting it is idempotent, the next attempt
         sets it again, and somebody reading GitHub in between sees where the card was dragged
@@ -533,6 +607,12 @@ class _Found:
     # last told us, and GitHub frees a name the moment a repository is renamed or deleted.
     github_repo_id: int
     number: int
+    # What the item lock is keyed on, and the only id that is the item's own:
+    # the number is unique per repository and this is unique across GitHub.
+    github_object_id: int
+    # The server the thread is in, for telling a refusal from a bot that has been removed
+    # apart from a permission it was never given. Discord answers both the same way.
+    guild_id: int
     status: Status
     priority: Priority
 
@@ -552,6 +632,8 @@ class _Found:
             full_name=repository.repo_name,
             github_repo_id=repository.github_repo_id,
             number=item.github_object_number,
+            github_object_id=item.github_object_id,
+            guild_id=repository.discord_guild_id,
             status=item.status,
             priority=item.priority,
         )
@@ -560,7 +642,7 @@ class _Found:
 def build_item_workflow(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
-    threads: LocksThread,
+    threads: LocksAndKnowsServers,
     *,
     pr_sync: SyncsItems,
     issue_sync: SyncsItems,

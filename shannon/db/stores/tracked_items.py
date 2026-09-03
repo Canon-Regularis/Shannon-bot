@@ -7,7 +7,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shannon.db.models import TrackedItem
+from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.time import as_utc
 
@@ -63,6 +63,25 @@ class TrackedItemStore:
         question and writing nothing.
         """
         return await self._session.get(TrackedItem, tracked_item_id, with_for_update=lock)
+
+    async def get_with_its_server(self, tracked_item_id: int) -> tuple[TrackedItem, int] | None:
+        """One item together with the Discord server its thread lives in.
+
+        In one read rather than two, because a caller holding the item and not the server has to
+        invent an answer for a row that cannot exist: the repository is a foreign key and every
+        registered repository names exactly one server. Asked for by the one caller that has to
+        tell a refusal from a bot that has been removed apart from a permission it was never
+        given, and reaches that point with no snapshot left to carry the server down from.
+        """
+        row = (
+            await self._session.execute(
+                select(TrackedItem, Repository.discord_guild_id).where(
+                    TrackedItem.id == tracked_item_id,
+                    Repository.id == TrackedItem.repository_id,
+                )
+            )
+        ).one_or_none()
+        return (row[0], row[1]) if row is not None else None
 
     def raise_updated_at(self, item: TrackedItem, incoming: datetime) -> None:
         """Move the item's high-water mark up, and never down.

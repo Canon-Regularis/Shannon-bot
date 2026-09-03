@@ -139,8 +139,9 @@ class LocksThread(Protocol):
 class KnowsItsServers(Protocol):
     """Whether this bot is in a particular server at the moment.
 
-    Its own role because it is the only question here that is not about a thread, and because the
-    one caller that needs it needs nothing else from the client.
+    Its own role because it is the only question here that is not about a thread. Both callers
+    ask it for the same reason and about the same moment: a refusal has come back that reads as a
+    permission, and being out of the server answers exactly the same way.
     """
 
     def is_in(self, guild_id: int) -> bool: ...
@@ -149,11 +150,12 @@ class KnowsItsServers(Protocol):
 class ThreadGateway(OpensThreads, PostsToThread, LocksThread, KnowsItsServers, Protocol):
     """Everything this project does to Discord threads.
 
-    The container passes one object satisfying all three roles, because one Discord client is
-    all there is. Callers name the role they use instead: the note mirror and the notifier only
-    post, the sync service only locks, and only the thread binding opens or removes anything.
-    Depending on the whole of this to call one method of it is how a collaborator ends up able
-    to delete a thread it had no reason to touch.
+    The container passes one object satisfying every role, because one Discord client is all
+    there is. Callers name the roles they use instead: the notifier only posts, the note mirror
+    posts and asks which servers this bot is in, the sync service locks and asks the same, and
+    only the thread binding opens or removes anything. Depending on the whole of this to call one
+    method of it is how a collaborator ends up able to delete a thread it had no reason to
+    touch.
     """
 
 

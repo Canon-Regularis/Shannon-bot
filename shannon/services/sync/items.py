@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
@@ -23,27 +21,12 @@ from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
+from shannon.services.sync.one_at_a_time import ItemLock
 from shannon.services.sync.policies import SyncPolicy
 from shannon.services.sync.staleness import is_superseded
 from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
-
-# The first key of the per-item advisory lock, which makes a space of its own. Postgres keeps the
-# two-integer keys apart from the single-bigint ones, and `UserLinkStore` uses the second with a
-# guild id, so the two cannot collide however the numbers land.
-_ONE_ITEM_AT_A_TIME = 8_531
-
-
-def _lock_key(github_object_id: int) -> int:
-    """The item's own GitHub id, folded into the signed 32 bits an advisory key allows.
-
-    GitHub numbers every issue and pull request uniquely, so this separates items rather than
-    grouping them. Two items whose ids happen to fold together take turns for the length of a
-    Discord call, which costs nothing and cannot be wrong.
-    """
-    return (github_object_id % 2**32) - 2**31
-
 
 SnapshotParser = Callable[[str, Mapping[str, Any]], TrackedSnapshot | None]
 
@@ -151,6 +134,7 @@ class ItemSyncService:
         notifier: Notifier | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
+        self._one_item = ItemLock(sessionmaker)
         self._threads = threads
         self._binding = binding
         self._policy = policy
@@ -174,46 +158,8 @@ class ItemSyncService:
                 f"snapshot for {snapshot.repository.full_name}#{snapshot.number}"
             )
 
-        async with self._one_at_a_time(snapshot):
+        async with self._one_item.held(snapshot.github_object_id):
             return await self._mirror(snapshot, settles_the_lock, arrived)
-
-    @asynccontextmanager
-    async def _one_at_a_time(self, snapshot: TrackedSnapshot) -> AsyncIterator[None]:
-        """Hold this item to one sync at a time, Discord included.
-
-        The row's own lock already orders what happens in the database, and that was never the
-        gap. Discord is called outside the transaction, deliberately, so that a slow gateway
-        cannot hold a connection, which leaves two syncs of one item free to interleave the calls
-        themselves: a superseded snapshot was reproduced locking a thread a newer one had just
-        unlocked. Two syncs of one item are ordinary rather than exotic, because `/pr` runs while
-        an event for the same item is in flight and nothing stops a second replica.
-
-        An advisory lock rather than a row lock, because this has to outlive the transaction that
-        reads the row and cover the calls that come after it. Keyed on the item's GitHub id,
-        which is known before anything is read, and taken before the read so the sync that waits
-        goes on to read a row the other one has already written: its staleness guard then turns
-        it away if it is the older of the two, which is the answer that was missing.
-
-        Waited for rather than skipped. The one that waits may be the newer delivery carrying the
-        work that matters, and a Discord phase is short.
-
-        Tied to a transaction rather than handed back by name. A session-scoped lock has to be
-        released explicitly, and the one moment that release cannot be made is the moment it
-        matters most: a cancelled task raises at the next await it reaches, the release included,
-        so a shutdown part way through a sync would return the connection to the pool still
-        holding the lock and that item would wait on it for ever. A transaction-scoped lock ends
-        when its transaction does, however it ends, and the pool rolls a connection back before
-        letting anything else have it.
-
-        What this gives up is a connection held for the length of the Discord phase, one per item
-        being synced at that moment, against a pool of fifteen and a handful ever in flight. It is
-        also not reentrant: nothing on this path may sync the same item from inside a sync, and
-        nothing does.
-        """
-        key = _lock_key(snapshot.github_object_id)
-        async with self._sessionmaker() as session:
-            await session.execute(select(func.pg_advisory_xact_lock(_ONE_ITEM_AT_A_TIME, key)))
-            yield
 
     async def _mirror(
         self, snapshot: TrackedSnapshot, settles_the_lock: bool, arrived: int | None
@@ -255,8 +201,11 @@ class ItemSyncService:
     ) -> SyncResult:
         """Everything this sync says to Discord, which is everything that can be refused.
 
-        Its own method so the refusal above has something to wrap. Nothing here is decided again:
-        the row was read and written by the step before it.
+        Its own method so the refusal above has something to wrap. Almost nothing here is
+        decided again: the row was read and written by the step before it. The exception is the
+        lock, which is the last thing said to Discord and therefore the one decision that can
+        have been overtaken while the calls above it were being made, so it looks at the row
+        once more before it commits to shutting anything.
         """
         # Discord is called outside the transaction. Holding one open across a network call
         # would let a slow gateway block the database, and a rollback would throw away work
@@ -351,7 +300,12 @@ class ItemSyncService:
         )
 
         if asked_for or shut_by_the_row:
-            await self._shut(state.tracked_item_id, handle.thread_id, asked_for=asked_for)
+            await self._shut(
+                state.tracked_item_id,
+                handle.thread_id,
+                asked_for=asked_for,
+                guild_id=state.guild_id,
+            )
 
         return SyncResult(
             outcome=SyncOutcome.SYNCED,
@@ -428,17 +382,20 @@ class ItemSyncService:
         row's and not the payload's, and this runs after the transaction that read it has closed.
         """
         async with self._sessionmaker() as session:
-            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+            found = await TrackedItemStore(session).get_with_its_server(tracked_item_id)
         # The thread cannot be missing here, because both answers of STALE require the item to
         # have one, but it is checked with the rest rather than trusted: the cost of being wrong
         # about that is a Discord call made against nothing.
-        if item is None or thread_id is None or item.discord_thread_locked is True:
+        if found is None or thread_id is None or found[0].discord_thread_locked is True:
             return
+        item, guild_id = found
         if not self._policy.shut_by_the_row(status=item.status, github_state=item.github_state):
             return
-        await self._shut(tracked_item_id, thread_id, asked_for=False)
+        await self._shut(tracked_item_id, thread_id, asked_for=False, guild_id=guild_id)
 
-    async def _shut(self, tracked_item_id: int, thread_id: int, *, asked_for: bool) -> None:
+    async def _shut(
+        self, tracked_item_id: int, thread_id: int, *, asked_for: bool, guild_id: int
+    ) -> None:
         """Close the thread, and write down that it is closed.
 
         Writing it down is what makes a second attempt possible. The lock used to be asked for
@@ -464,6 +421,19 @@ class ItemSyncService:
         except PermanentError as refusal:
             if asked_for:
                 raise
+            # Stepping over a refusal is right for a permission nobody has granted and wrong for
+            # a server this bot is no longer in, and Discord answers both the same way. The
+            # difference matters more here than anywhere: a delivery that reaches this step is
+            # reported handled either way, and both callers of this reach it for an item that is
+            # finished, which sends no further event. Stepped over while out of the server, the
+            # thread stays open above a block reading DONE and nothing is ever coming back for
+            # it. The refusal that is really an absence fails the delivery instead, which is
+            # what gets it another go once the bot is back.
+            if not self._threads.is_in(guild_id):
+                raise DiscordGatewayError(
+                    f"this bot is not in server {guild_id} at the moment, so the thread for "
+                    f"tracked item {tracked_item_id} could not be shut"
+                ) from None
             logger.warning(
                 "could not shut the thread for tracked item %s: %s", tracked_item_id, refusal
             )

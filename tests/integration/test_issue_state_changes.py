@@ -289,11 +289,14 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         so without a second look the reopened issue ends up in a thread nobody can post in. A
         stale metadata block rights itself on the next delivery; a locked thread does not.
 
-        The reopen is written onto the row rather than run as a sync, because a sync of this
-        item would wait for this one: one at a time is what the item's lock buys, and nothing in
-        this process can interleave with a Discord phase any more. A second replica holds
-        nothing against this one, so the row can still move under a sync that has already read
-        it, and writing it here is that.
+        The reopen is written onto the row rather than run as a sync, and neither way of
+        running one would reproduce anything. From another task it waits: one at a time is what
+        the item's lock buys, and the lock is a Postgres one, so that holds across replicas too.
+        From inside this Discord call, which is where this test used to run it, it is the same
+        task holding the same item and is let straight through, so it would interleave nothing
+        while looking exactly as though it had. What is left is a writer that moves the row
+        without going through a sync at all, and a replica still running the build from before
+        the lock, which is every rolling deploy while it lasts. Writing it here is those.
         """
         threads = _ReopensMidWrite()
         service = build_item_sync(db_sessionmaker, threads, IssuePolicy())
