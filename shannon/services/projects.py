@@ -34,7 +34,7 @@ from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
-from shannon.github.errors import GitHubRateLimitError
+from shannon.github.errors import GitHubAuthError, GitHubRateLimitError
 from shannon.github.projects import BoardItem
 from shannon.services.sync.items import SyncOutcome, SyncsItems
 from shannon.services.workflow import WorkflowRefusedError
@@ -235,6 +235,10 @@ class ProjectPoller:
         for item in wrapped:
             try:
                 moved += await self._move_one(board, item, state, readable)
+            except GitHubRateLimitError:
+                # The one failure that is about the pass rather than about the card. Waiting is
+                # the only thing that helps and `run_forever` is where the waiting is done.
+                raise
             except Exception:
                 # The same bargain the draft half makes, for the same reason. Everything below
                 # is per-card already; this is only about the failures nobody wrote a branch
@@ -331,17 +335,32 @@ class ProjectPoller:
             )
             await self._remember_column(tracked, column, readable)
             return 0
-        except PermanentError as refusal:
-            # A channel deleted, the bot removed from the server, a permission taken away. None
-            # of those is a bad moment and none of them is waited out, so coming round again
-            # cannot help. Nothing else advances the column, so the card would be tried on every
-            # poll for as long as the refusal lasts, costing a GitHub read and a Discord call
-            # each time, and every card the team moves after it joins the set and never leaves.
+        except GitHubRateLimitError:
+            # Not this card's problem and not something to step over. GitHub is asking the whole
+            # process to wait, and `run_forever` is the only thing that can: swallowed here, the
+            # poller went back on its ordinary timer and kept asking, which lengthens a secondary
+            # limit rather than waiting it out. Raised so it reaches that backoff, past the loop
+            # above which otherwise keeps a card's failure from ending the pass.
+            raise
+        except (PermanentError, GitHubAuthError) as refusal:
+            # A channel deleted, the bot removed from the server, a Discord permission taken
+            # away, or a GitHub token that can still read and may no longer write. None of those
+            # is a bad moment and none of them is waited out, so coming round again cannot help.
+            #
+            # A refused GitHub write is here rather than being permanent everywhere, because the
+            # two callers want opposite things from it. A token being rotated is minutes long,
+            # and a delivery has sixteen attempts over two hours precisely so it can sit out
+            # something like that; making the error permanent would drop every delivery in the
+            # window instead. The poller has no such budget: nothing else advances the column, so
+            # a card it cannot move is asked about every minute for as long as the token is
+            # wrong, and every card moved after it joins that set and never leaves. Each one
+            # costs a GitHub read and a Discord call every minute, so a token narrowed to
+            # read-only spends the hour's whole quota on cards it cannot move, and then nothing
+            # that needs GitHub works either.
             #
             # That is the same unbounded retry the refused-lock branch below was written to
-            # prevent, reached through the render rather than through the lock. So the move is
-            # written off as seen and said once, and the board and the thread disagree until
-            # somebody fixes what is wrong and moves the card again.
+            # prevent. So the move is written off as seen and said once, and the board and the
+            # thread disagree until somebody fixes what is wrong and moves the card again.
             logger.warning(
                 "could not move %s to %s and no waiting will change that, so it will not be "
                 "tried again: %s",

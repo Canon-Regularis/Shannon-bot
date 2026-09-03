@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.domain.enums import ObjectType, Priority, Status
-from shannon.github.errors import GitHubRateLimitError, GitHubUnavailableError
+from shannon.github.errors import GitHubAuthError, GitHubRateLimitError, GitHubUnavailableError
 from shannon.services.projects import BoardItem, ProjectPoller
 from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
@@ -1305,6 +1305,53 @@ class TestProgressRecordedForAStepThatFailed:
         assert await poller.run_once() == 0
 
         assert github_client.pull_request_calls[reads:] == [], "it asked GitHub on every poll"
+
+    async def test_a_token_that_may_no_longer_write_is_not_asked_every_minute(
+        self, mirrored_pr: int, poller_for, threads: FakeThreadGateway, github_client
+    ) -> None:
+        """A token narrowed from write to read, or a scope somebody removed. Reads keep working
+        and only the label write is refused, so the poller reaches the card and fails on it.
+
+        That is not a bad moment. Nothing else advances the column, so the card is asked about
+        every minute for as long as the token is wrong, and every card moved after it joins the
+        set and never leaves. Each one costs a GitHub read and a Discord call a minute, so a
+        handful of them spend the whole hour's quota on cards that cannot move, and then nothing
+        needing GitHub works either.
+
+        A refused write is not permanent everywhere, deliberately. A token being rotated is
+        minutes long and a delivery has two hours of attempts precisely so it can sit that out.
+        The poller has no such budget, so it is the poller that writes the card off.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board)
+        github_client.write_error = GitHubAuthError("Resource not accessible by personal token")
+
+        assert await poller.run_once() == 0, "it reported a move GitHub refused"
+
+        reads = len(github_client.pull_request_calls)
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+
+        assert github_client.pull_request_calls[reads:] == [], "it asked GitHub on every poll"
+
+    async def test_a_rate_limit_on_a_card_stops_the_whole_pass(
+        self, mirrored_pr: int, poller_for, github_client
+    ) -> None:
+        """The one failure that is about the pass rather than about the card.
+
+        Every other refusal is handled per card so one bad card cannot end the poll. A rate limit
+        is the opposite: GitHub is asking this process to wait, and carrying on to the next card
+        is what lengthens a secondary limit rather than waiting it out. The only thing that can
+        wait is the loop above, so it has to get there.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
+        poller = poller_for(board)
+        github_client.write_error = GitHubRateLimitError("slow down", retry_after=60)
+
+        with pytest.raises(GitHubRateLimitError) as caught:
+            await poller.run_once()
+
+        assert caught.value.retry_after == 60, "the wait GitHub asked for did not come out"
 
     async def test_a_wrapped_card_listed_twice_is_only_acted_on_once(
         self, mirrored_pr: int, poller_for, github_client
