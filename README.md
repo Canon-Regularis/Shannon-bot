@@ -2,6 +2,8 @@
 
 checking prs
 
+checking whether commits are registered
+
 GitHub repository activity, mirrored into Discord threads
 
 **shannon** binds one GitHub repository to one Discord server. Every pull request and issue gets a
