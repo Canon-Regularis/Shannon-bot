@@ -385,9 +385,14 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
 
 
 class TestARetryAfterTheCommentLanded:
-    """A retry re-runs the whole handler, and posting a message cannot be undone."""
+    """A retry re-runs the whole handler, and posting a message cannot be undone.
 
-    async def test_the_comment_is_not_posted_a_second_time(
+    The step beside the mirror runs first for that reason, so a failure in it costs nothing but
+    a repeat. What the repeat must not do is post the comment again, and the two tests below are
+    the two ways round it: the step failing before the post, and the post having already landed.
+    """
+
+    async def test_the_step_beside_it_failing_first_posts_nothing(
         self,
         registered: Repository,
         db_sessionmaker: async_sessionmaker,
@@ -402,6 +407,33 @@ class TestARetryAfterTheCommentLanded:
 
         with pytest.raises(RuntimeError):
             await handler("created", payloads.issue_comment_event())
+
+        assert threads.posts == [], "the post ran before the step that failed, so it is owed"
+
+        await handler("created", payloads.issue_comment_event())
+
+        assert [content for _, content in threads.posts].count("hello") == 1
+
+    async def test_a_handler_run_again_after_the_post_landed_does_not_post_twice(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The half the test above cannot reach, and the one the claim exists for.
+
+        Nothing inside the handler runs after the post, so nothing there can fail once the
+        comment has landed. What re-runs it is the queue: a delivery whose status could not be
+        written stays leased, comes back when the lease runs out, and is handled again from the
+        top. From here that is simply the handler being called twice.
+        """
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        handler = build_note_handler(mirror, parse_comment_event)
+
+        await handler("created", payloads.issue_comment_event())
         await handler("created", payloads.issue_comment_event())
 
         assert [content for _, content in threads.posts].count("hello") == 1
@@ -429,7 +461,11 @@ class TestARetryAfterTheCommentLanded:
 
 
 class _FailsAfterTheNote:
-    """Whatever runs alongside the mirror, failing the first time it is asked."""
+    """Whatever runs alongside the mirror, failing the first time it is asked.
+
+    Beside it rather than after it, whatever the name says: the handler runs this first so that
+    the one step it cannot undo is the last thing it does.
+    """
 
     def __init__(self) -> None:
         self.calls = 0
