@@ -43,8 +43,8 @@ Python 3.12 or newer, Docker for the database, and [uv](https://docs.astral.sh/u
 
 ```bash
 uv sync --extra dev --locked        # runtime and dev dependencies
-docker compose up -d db             # PostgreSQL 17 on localhost:5433
-cp .env.example .env                # set the webhook secret and the bot token
+cp .env.example .env                # fill in before the next line, not after
+docker compose up -d --wait db      # PostgreSQL 17 on localhost:5433
 uv run alembic upgrade head
 uv run shannon
 ```

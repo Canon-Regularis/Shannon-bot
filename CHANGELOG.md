@@ -1870,8 +1870,8 @@ subscribe to and no configuration that creates one.
 
 GitHub shipped a REST API for Projects v2 in September 2025, and unlike the webhooks it covers
 user-owned projects. `ProjectPoller` reads the board on a timer beside the delivery worker. The
-cost is latency, bounded by the interval; the saving is that a personal board and an organisation
-one work on one code path with no second webhook to install.
+cost is latency, bounded by the interval; the saving is that there is no second webhook to
+install.
 
 The board answers with every card every time, so the work is deciding which of them moved, and
 most of what is tested here is what does not happen: an unchanged board is not mirrored again, one
@@ -4693,3 +4693,66 @@ halves are the same numbers gives two rows in `pg_locks` differing only in `objs
 guild key `UserLinkStore` uses cannot collide with an item key however the numbers land. And the
 fold into a signed 32 bit key stays in range across two hundred thousand random GitHub ids and
 every boundary either side of it.
+
+## A third pass, and the half of a type checker that was missing
+
+The fixes above were reviewed again, and the review found nothing new in them that survived being
+argued with. What it did find was in the code around them, and one thing about the project as a
+whole.
+
+### An error that had to be its own kind
+
+The repeat branch of `/set_status` refuses now when the item moved while it waited, and the first
+version of that raised `WorkflowRefusedError`, on the reasoning that both callers already do the
+right thing with a refusal. The board poller does not. It catches that one before everything else
+and reads it as the board asking for something the item cannot hold, which is final, so it writes
+the column down and the card is never polled again. Which is exactly the outcome the refusal was
+introduced to avoid, and the comment beside it claimed the opposite in as many words.
+
+So it is `ItemMovedError` now, a sibling rather than a subclass, which lands in the ordinary
+`ShannonError` branch: said to whoever ran the command, and the column left unwritten so the next
+poll picks the card up. That last part is pinned by a test that injects one and asserts the card
+comes round.
+
+### Annotations that named nothing
+
+`from __future__ import annotations` is on everywhere, which is right, and it means an annotation
+is a string that nothing ever evaluates. A name that does not exist is therefore not an error
+anywhere: nothing raises, ruff has no opinion, and full branch coverage runs the line without
+reading it.
+
+Two were found this week. `_rebuild_and_lock` reached for `found.thread_id` on a slotted dataclass
+that has never had that field, which raises at runtime and never has, because every route to the
+line is closed by an invariant stated in a different file: a repository row is never deleted, a
+channel mapping is never deleted, a ticket is refused earlier. And a parameter was annotated
+`labels.StatusChange`, a class that was renamed to `LabelChange` at some point and left one
+reference behind.
+
+Both are the same shape and neither is visible to anything the project runs. So it runs one more
+thing now: a test that resolves every annotation in the package and fails on a name that is not
+there. It checks 1132 functions and classes, says nothing whatever about whether the types are
+right, and is the cheapest half of a type checker. The other half is a real one, which is worth
+having and is a job of its own: mypy against this tree reports about twenty things, most of them
+wanting annotations or suppressions rather than fixes.
+
+### What a first run walks into
+
+Three things in the install path, all of which cost an afternoon and none of which are code.
+
+The four line install block starts the database and then migrates it. `docker compose up -d`
+returns when the container has started, not when Postgres is answering, and a first start has to
+run `initdb` before it listens, so `alembic upgrade head` on the next line raced it and failed
+with a connection error naming neither cause nor fix. It says `--wait` now.
+
+The same block wrote `.env` after starting the database. Compose reads the Postgres credentials
+from there, and the image creates the role only against an empty data directory, so the volume was
+initialised from the defaults and every later change to those two settings was silently ignored.
+`.env` comes first now, and the README says what to do if they are changed later, which is to
+delete the volume and the data with it.
+
+And the board is only read for a user-owned account. Every call goes to
+`/users/{owner}/projectsV2/...` and there is no organisation path anywhere in the code, so an
+organisation's board answers 404 on every poll for ever. This entry claimed the opposite when the
+poller was written, in as many words: "a personal board and an organisation one work on one code
+path". That was never true of the code. It is written down in the README now, where somebody about
+to set the project number will find it.
