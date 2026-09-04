@@ -22,6 +22,7 @@ from shannon.domain.models import (
     Actor,
     CommentSnapshot,
     IssueSnapshot,
+    LabelMove,
     PullRequestSnapshot,
     ReviewSnapshot,
     TicketSnapshot,
@@ -156,6 +157,24 @@ def _role(team: str, mentions: Mapping[str, int] | None) -> str:
 def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
     """Announce newly assigned people, on the same terms as the reviewer ping."""
     return _ping("Assigned to", logins, mentions)
+
+
+def format_label_change(move: LabelMove) -> str:
+    """Announce one label going on or coming off.
+
+    The metadata block above already says which labels an item has, and it is rewritten on every
+    delivery, so this says nothing the reader could not scroll up for. It exists because an edit
+    to that block is invisible from the channel: Discord posts no message for one, notifies
+    nobody, and does not bump the thread, so tagging an item looked from outside like nothing had
+    happened at all.
+
+    "Tag" rather than "label", to match the word the block uses for the same thing.
+
+    Named in a code span like the block's own tags, and defused first: a label is named by
+    anybody with triage rights on the repository, so it is untrusted text like any other.
+    """
+    what = "added" if move.added else "removed"
+    return f"Tag {code_span(defuse_mentions(move.name))} {what}."
 
 
 def format_comment(snapshot: CommentSnapshot, mentions: Mapping[str, int] | None = None) -> str:

@@ -36,6 +36,20 @@ class Label:
 
 
 @dataclass(frozen=True, slots=True)
+class LabelMove:
+    """One label going on or coming off an item, which GitHub reports one at a time.
+
+    Its own type rather than a pair of strings because both halves are needed together and
+    neither means anything alone: the name says which label, and nothing else in the delivery
+    says whether it arrived or left. Four labels applied at once are four of these, in four
+    deliveries, because that is how GitHub sends them.
+    """
+
+    name: str
+    added: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RepositorySnapshot:
     github_repo_id: int
     owner: str

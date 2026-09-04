@@ -20,6 +20,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
     format_comment,
+    format_label_change,
     format_review,
     format_reviewer_ping,
     format_team_ping,
@@ -50,6 +51,7 @@ from shannon.services.sync.items import (
     build_item_handler,
     build_item_sync,
 )
+from shannon.services.sync.label_lines import LabelLine
 from shannon.services.sync.manual import build_issue_sync, build_pull_request_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import (
@@ -239,8 +241,14 @@ def _event_router(
     reviews = ItemNoteMirror(sessionmaker, threads, render=format_review, rebuild=rebuild)
 
     router = EventRouter()
-    router.register("pull_request", build_item_handler(pr_sync, parse_pull_request_event))
-    router.register("issues", build_item_handler(issue_sync, parse_issue_event))
+    # One announcer for both kinds, because a label moves the same way on either and the line
+    # says the same thing. Given to the item handlers rather than to the sync service: the sync
+    # runs for commands and the board as well, and neither of those has a delivery to announce.
+    tags = LabelLine(sessionmaker, threads, render=format_label_change)
+    router.register(
+        "pull_request", build_item_handler(pr_sync, parse_pull_request_event, announce=tags)
+    )
+    router.register("issues", build_item_handler(issue_sync, parse_issue_event, announce=tags))
     router.register("issue_comment", build_note_handler(comments, parse_comment_event))
     router.register(
         "pull_request_review",
