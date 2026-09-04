@@ -51,6 +51,17 @@ class WorkflowRefusedError(ShannonError):
     """The change is not one this item can be given right now."""
 
 
+class ItemMovedError(ShannonError):
+    """Somebody else moved the item while this was waiting its turn, so nothing was touched.
+
+    Deliberately not a `WorkflowRefusedError`, which the board poller reads as a final answer
+    and writes the card off for: the column is recorded, and since nothing else rederives a
+    status from a board, no poll looks at that card again. This is the opposite of final. The
+    only thing that brings the card round is the column being left unwritten, which is what the
+    poller does for any other `ShannonError`.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ItemKind:
     """How to read and re-render one kind of item.
@@ -155,27 +166,36 @@ class ItemWorkflow:
             # goes through the ordinary sync, which takes this same lock and is let straight
             # through, because a caller already holding it is not something to wait for.
             async with self._one_item.held(found.github_object_id):
-                if not await self._row_still_says(found.tracked_item_id, status):
+                moved_to = await self._status_now(found.tracked_item_id)
+                if moved_to is not status:
                     # Somebody moved the item while this waited, and their lock is the current
                     # one. Everything this branch acts on was read before the wait: the status
                     # off `_locate`, the labels off a GitHub round trip after it. The branch
-                    # below never had this problem because it re-reads under the row's own lock
+                    # below never had this problem, because it re-reads under the row's own lock
                     # and decides from what that gave back.
                     #
-                    # Setting the lock anyway is not a stale write that rights itself. It shuts
-                    # a thread against a state the row no longer holds, and for a pull request
-                    # nothing lifts one: `PullRequestPolicy.locked` answers None on every sync
-                    # and `shut_by_the_row` reads DONE off a row that has moved on, so no
-                    # webhook, sync or `/pr` reopens it and the reviewers are shut out of the
-                    # discussion they had just reopened until somebody thinks to run a status
-                    # command again.
-                    logger.info(
-                        "not setting the lock on %s#%s: it moved to %s while this waited",
-                        found.full_name,
-                        found.number,
-                        status.value,
+                    # Touching the lock anyway is not a stale write that rights itself. Locking
+                    # shuts a thread against a state the row no longer holds, and for a pull
+                    # request nothing lifts one: `PullRequestPolicy.locked` answers None on every
+                    # sync and `shut_by_the_row` wants a DONE the row has moved off, so no
+                    # webhook, sync or `/pr` reopens it. Unlocking is no safer, because the
+                    # writer that moved it may have shut the thread on purpose a moment ago.
+                    #
+                    # Raised rather than answered, and raised as its own kind. Answering with
+                    # an outcome was indistinguishable from the ordinary repeat that had nothing
+                    # to do, so the person was told their item was where it is not and the board
+                    # poller wrote the card off for good. A `WorkflowRefusedError` is no better
+                    # from the poller's side: it reads that as the board asking for something
+                    # the item cannot hold, which is final, and writes the column down for it.
+                    # This is the opposite of final, so it is the one error here that wants the
+                    # ordinary treatment: said to whoever ran it, and left for the next poll.
+                    raise ItemMovedError(
+                        f"{found.full_name}#{found.number} is "
+                        f"{moved_to.value if moved_to is not None else 'no longer tracked'} now, "
+                        f"not {status.value}: somebody moved it while this was running, so its "
+                        f"thread was left alone. Run this again if you still want it "
+                        f"{status.value}."
                     )
-                    return WorkflowOutcome(found.full_name, found.number, changed=False)
 
                 lock = await self._set_lock(thread_id, wants_lock, guild_id=found.guild_id)
                 if lock.thread_missing:
@@ -373,17 +393,20 @@ class ItemWorkflow:
         )
         return result.thread_id
 
-    async def _row_still_says(self, tracked_item_id: int, status: Status) -> bool:
-        """Whether the row still says what this command is repeating.
+    async def _status_now(self, tracked_item_id: int) -> Status | None:
+        """What the row says this moment, or None for a row that is no longer there.
 
         Asked inside the hold and nowhere else. A repeat exists to give a lock that was refused
         another go, and what makes it a repeat is the row already saying what is being asked for.
         That was read before the wait for the hold, and the whole point of the wait is that
         somebody else is writing.
+
+        Answers with the status rather than with yes or no, because whoever is told about this
+        wants to know what it moved to, and this is the only place that knows.
         """
         async with self._sessionmaker() as session:
             item = await TrackedItemStore(session).get_by_id(tracked_item_id)
-        return item is not None and item.status is status
+        return item.status if item is not None else None
 
     async def _set_lock(self, thread_id: int, locked: bool, *, guild_id: int) -> _Lock:
         """Close a finished item's thread to further replies, or open it again.
@@ -476,7 +499,7 @@ class ItemWorkflow:
         self,
         found: _Found,
         snapshot: TrackedSnapshot,
-        change: labels.StatusChange,
+        change: labels.LabelChange,
         wants_lock: bool,
         thread_id: int,
     ) -> tuple[int, _Lock]:

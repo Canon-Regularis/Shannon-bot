@@ -26,6 +26,7 @@ from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item
 from shannon.services.sync.one_at_a_time import ItemLock
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.workflow import (
+    ItemMovedError,
     ItemWorkflow,
     NotAnItemThreadError,
     WorkflowRefusedError,
@@ -1026,10 +1027,17 @@ class TestHoldingTheItemWhileItSetsTheLock:
         asked = len(threads.lock_calls)
         release.set()
         await blocker
-        await repeat
+        with pytest.raises(ItemMovedError) as refusal:
+            await repeat
 
-        assert len(threads.lock_calls) == asked, "it shut a thread against a status that had moved"
+        assert len(threads.lock_calls) == asked, "it touched a lock on a status that had moved"
         assert threads.threads[thread_id].locked is False
+        # Both callers have to be able to tell this from the ordinary repeat that had nothing to
+        # do. A person is told where the item actually is, and the board poller counts the card
+        # as not moved and leaves the column unwritten, which is what brings it round again.
+        assert Status.IN_REVIEW.value in str(refusal.value), (
+            f"it did not say where the item had gone: {refusal.value}"
+        )
 
 
 async def _takes_the_item(lock: ItemLock, object_id: int) -> None:

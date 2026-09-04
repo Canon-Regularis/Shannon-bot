@@ -24,7 +24,7 @@ from shannon.github.errors import (
 )
 from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
-from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
+from shannon.services.workflow import ItemMovedError, NotAnItemThreadError, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (InvalidGitHubTeamError, "{message}"),
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),
+    (ItemMovedError, "{message}"),
 )
 
 # Said when nothing above matches. Deliberately vague: whatever went wrong is a bug or an

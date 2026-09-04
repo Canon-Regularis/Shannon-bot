@@ -23,6 +23,7 @@ from shannon.services.projects import BoardItem, ProjectPoller
 from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 from shannon.services.workflow import (
+    ItemMovedError,
     ItemWorkflow,
     WorkflowRefusedError,
     build_item_workflow,
@@ -1436,6 +1437,40 @@ class TestProgressRecordedForAStepThatFailed:
 
         assert await poller.run_once() == 1, "the card never came round again"
         assert threads.threads[threads.created[0].thread_id].locked is True
+
+    async def test_an_item_that_moved_under_a_poll_is_not_written_off(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+    ) -> None:
+        """A card whose item somebody moved while the poll waited its turn is not a card that
+        was dealt with.
+
+        The column is the only thing that brings a card round again, so what this must not do is
+        write it down. Nothing else rederives a status from a board: recorded once, the card
+        matches from then on and no poll looks at it again. The status commands raise a refusal
+        for a board asking something the item cannot hold, which is final and is written off on
+        purpose, and this must not be read as one of those.
+        """
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        poller = poller_for(board)
+        await poller.run_once()
+
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
+        moving = workflow.set_status
+        first = {"go": True}
+
+        async def moved_while_this_waited(**kwargs):
+            if first["go"]:
+                first["go"] = False
+                raise ItemMovedError("somebody moved it while this was running")
+            return await moving(**kwargs)
+
+        workflow.set_status = moved_while_this_waited
+
+        assert await poller.run_once() == 0, "a card nothing was done to was counted as moved"
+        assert await poller.run_once() == 1, "the card was written off and never came round again"
 
     async def test_a_draft_whose_thread_edit_was_refused_is_mirrored_again(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
