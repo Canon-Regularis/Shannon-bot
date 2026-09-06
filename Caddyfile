@@ -1,0 +1,48 @@
+# The only thing on this host that faces the internet.
+#
+# Caddy asks Let's Encrypt for a certificate on first start and renews it on its own, which is
+# the whole reason it is here rather than a port mapping: GitHub sends a private repository's
+# issue titles and comment bodies in the request body, and a webhook secret proves who sent a
+# payload rather than hiding it from anyone reading the wire.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$SHANNON_HOSTNAME} {
+	# FastAPI serves these unconditionally and there is no middleware in front of them, so
+	# without this the full API surface, its schemas and an interactive client are published to
+	# anyone who asks. Nothing here needs them in production, and the endpoint they describe is
+	# the one place an attacker would start.
+	handle /docs* {
+		respond 404
+	}
+	handle /redoc* {
+		respond 404
+	}
+	handle /openapi.json {
+		respond 404
+	}
+
+	# Answers whether the database is reachable, the worker is alive and the gateway is up. That
+	# is useful to an uptime checker and to nobody else, so it is left reachable rather than
+	# blocked, on the grounds that a monitor with no credentials is the ordinary way to watch a
+	# service and the answer says nothing an attacker can act on.
+	handle /health {
+		reverse_proxy app:8000
+	}
+
+	handle /webhooks/* {
+		reverse_proxy app:8000
+	}
+
+	# Anything else is not part of this service.
+	handle {
+		respond 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

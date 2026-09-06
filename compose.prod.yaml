@@ -1,0 +1,94 @@
+# The stack as it runs on a server, as opposed to docker-compose.yml, which is for a laptop.
+#
+# Three differences, all of them because this one faces the internet:
+#
+#   - The image is pulled rather than built. CI builds it, tests it, signs its provenance and
+#     pushes it, so building again on the server would ship something nobody tested and would
+#     spend a small box's memory doing it.
+#   - Nothing but Caddy publishes a port. The database and the app talk over the compose network,
+#     which is not reachable from outside the host, so the only way in is through the one service
+#     whose job is to be reached.
+#   - Caddy terminates TLS. GitHub sends a repository's issue titles and comment bodies in the
+#     clear otherwise, and a webhook secret proves who sent a payload rather than hiding it.
+#
+# Usage:
+#   docker compose -f compose.prod.yaml up -d
+#   docker compose -f compose.prod.yaml pull && docker compose -f compose.prod.yaml up -d
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shannon}
+    # Deliberately no `ports`. On a laptop the 5433 mapping is how you look at the data; on a
+    # server it is a database on the public internet guarded by one password. Reach it with
+    # `docker compose -f compose.prod.yaml exec db psql -U "$POSTGRES_USER"` instead.
+    volumes:
+      - shannon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    image: ghcr.io/canon-regularis/shannon-bot:${SHANNON_IMAGE_TAG:-edge}
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-shannon}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Runs to completion on every `up`, and the app waits for it to succeed. That ordering is
+    # the whole migration story on this deployment: the app's own startup check proves the
+    # database has been migrated at all, not that it has been migrated to the revision this
+    # code expects, so nothing else would catch a deploy that skipped this step.
+    restart: "no"
+
+  app:
+    image: ghcr.io/canon-regularis/shannon-bot:${SHANNON_IMAGE_TAG:-edge}
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      # The one setting whose value inside the network differs from outside it, for the reason
+      # the development file explains at length: `.env` carries the host's localhost:5433 URL,
+      # and inside the network the database is a service name on 5432.
+      SHANNON_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-shannon}
+    # No `ports` either. Caddy reaches this over the compose network by service name.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # Sized against the two shutdown budgets that run one after the other, which the
+    # development file explains: about fifteen seconds end to end when discord.py is sitting
+    # out a rate limit, and a worker killed before it finishes leaves up to nine leased
+    # deliveries stuck until their fifteen minute lease lapses.
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Read by the Caddyfile. Set both in .env.
+      SHANNON_HOSTNAME: ${SHANNON_HOSTNAME:?set SHANNON_HOSTNAME in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here. Without the volume every restart asks Let's Encrypt for a new
+      # one and the rate limit is five per week per hostname.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  shannon-pgdata:
+  caddy-data:
+  caddy-config:

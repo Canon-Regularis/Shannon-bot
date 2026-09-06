@@ -129,6 +129,34 @@ is to add that permission to the invite; it is safe here because the bot refuses
 A forum channel set to **Require Tags** is refused by `/register` and `/set_channel`, because
 nothing here picks a tag and Discord rejects every post without one.
 
+## Running it on a server
+
+`compose.prod.yaml` and `Caddyfile` are the server stack. Three things they do that the laptop
+stack does not:
+
+- Pull the image CI built instead of building on the box, and publish no port but Caddy's, so the
+  database and the app are only reachable across the compose network.
+- Terminate TLS, and 404 `/docs`, `/redoc` and `/openapi.json`, which FastAPI otherwise serves to
+  anyone.
+- Run `alembic upgrade head` to completion before the app starts. Nothing else would catch a
+  deploy that skipped it: the startup check proves the database was migrated at all, not that it
+  reached the revision this code expects.
+
+Point an A record at the machine first, or Caddy cannot get a certificate. Then, on the machine,
+write `.env` with `SHANNON_HOSTNAME`, `ACME_EMAIL`, `POSTGRES_USER`, `POSTGRES_PASSWORD` and the
+three `SHANNON_*` secrets, and:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <user> --password-stdin   # classic PAT, read:packages
+docker compose -f compose.prod.yaml up -d
+```
+
+Point the GitHub webhook at `https://<hostname>/webhooks/github`. Upgrades are `pull` then `up -d`.
+
+Only one copy may run at a time: two would both hold the Discord gateway and both lease from the
+queue. `SHANNON_IMAGE_TAG` defaults to `edge`, which moves on every green push to main. The
+Postgres credentials are read once, when the volume is created.
+
 ## Configuration
 
 Read from the environment with a `SHANNON_` prefix, or from `.env`. Everything has a default and

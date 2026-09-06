@@ -4756,3 +4756,16 @@ organisation's board answers 404 on every poll for ever. This entry claimed the 
 poller was written, in as many words: "a personal board and an organisation one work on one code
 path". That was never true of the code. It is written down in the README now, where somebody about
 to set the project number will find it.
+
+## Somewhere for it to run
+
+- `compose.prod.yaml` and `Caddyfile` describe the server stack: the CI-built image rather than a
+  local build, no published port but Caddy's, TLS in front, and `/docs`, `/redoc` and
+  `/openapi.json` closed.
+- Serverless does not fit and was not chosen. The endpoint would suit it, but the bot holds a
+  websocket to Discord for its whole life and the worker is a loop that outlives every request, so
+  both need a container anyway.
+- Migrations run to completion before the app starts. The startup check proves the database was
+  migrated at all, not that it reached the revision the code expects, so that ordering is the only
+  thing standing between a skipped migration and a bot that starts, reports healthy, and fails on
+  the first delivery.
