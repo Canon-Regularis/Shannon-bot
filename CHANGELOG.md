@@ -4784,3 +4784,17 @@ to set the project number will find it.
   edit to the handler. Each claims its line before posting, because the queue is at-least-once
   by design; a third key namespace in `mirrored_notes` widens the one hole that has, which is a
   claim that cannot be given back after a post that did not land.
+
+## A tag written on GitHub reaches the person in Discord
+
+- `@someone` in a comment or review body is now a real Discord mention where that login has been
+  linked, and `@org/team` is a role mention where that team has. Anybody unlinked is still named
+  in plain text. Closes #63.
+- The swap runs on the escaped preview and nowhere else, so nothing the escaping defused can come
+  back: a zero-width space against a name is the mark of a mention already taken apart, and the
+  pattern refuses it. A name the preview cut in half is refused too, because what is left is a
+  prefix of somebody's name and rendering it would ping a person the comment never named.
+- Ten per comment, because without a limit one comment carried eighty-two live pings when it was
+  measured, from anybody who can comment on the repository. Sub-issues needed no code at all: a
+  sub-issue is an ordinary issue with its own thread and its own comments, which there is now a
+  test saying out loud.
