@@ -26,6 +26,21 @@ class Priority(StrEnum):
     UNSET = "UNSET"
 
 
+class StateChange(StrEnum):
+    """What a delivery did to an item, for the three moves worth saying out loud in a thread.
+
+    Not the states an item can be in, which is what the name would suggest and what
+    `display_state` actually answers. REOPENED is a move into `open` and has no state of its
+    own; CLOSED and MERGED are two ways of arriving at the same GitHub state. The three are here
+    because they are the three a reader of a thread would want announced, and there is no fourth
+    that a webhook can tell us about.
+    """
+
+    CLOSED = "CLOSED"
+    MERGED = "MERGED"
+    REOPENED = "REOPENED"
+
+
 class ActorRole(StrEnum):
     """How a GitHub user relates to a tracked item.
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from shannon.domain.enums import ObjectType, Priority
+from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.priority import parse_priority
 
 
@@ -43,10 +43,29 @@ class LabelMove:
     neither means anything alone: the name says which label, and nothing else in the delivery
     says whether it arrived or left. Four labels applied at once are four of these, in four
     deliveries, because that is how GitHub sends them.
+
+    What the two classifiers make of the name is carried rather than worked out again wherever
+    it is needed. Two reasons. The renderer would otherwise have to reach into `github` to find
+    out what a label means, which is a policy decision made in a module whose job is deciding
+    what a reader sees. And a classification stored once cannot come out differently from the
+    one the delivery was read with.
+
+    Two fields rather than a `kind` beside them, because a kind and a level can disagree and
+    these cannot: `priority is not UNSET` is the whole of the question "is this a priority
+    label", answered by the same parser that answers it everywhere else, and a `kind` of
+    PRIORITY beside a level of UNSET would be representable and mean nothing. A label cannot be
+    both, which `test_the_two_groups_cannot_both_claim_a_label` pins rather than assumes.
     """
 
     name: str
     added: bool
+    # UNSET where the name says nothing about priority, which is the ordinary case. Read off the
+    # name whichever way the label is moving: `urgent` is a priority label coming off as much as
+    # going on, and the line that says so has to know which group it belongs to either way.
+    priority: Priority = Priority.UNSET
+    # None where the name is not one of the five statuses. Exact spellings only, which is the
+    # rule `status_of` already holds to and the reason it is asked rather than guessed at.
+    status: Status | None = None
 
 
 @dataclass(frozen=True, slots=True)

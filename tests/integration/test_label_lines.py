@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import MirroredNote, Repository, WebhookEvent
+from shannon.db.models import MirroredNote, Repository
+from shannon.discord_bot import formatting
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_label_change
 from shannon.github.webhooks.issues import parse_issue_event
@@ -29,8 +30,20 @@ from tests.support.stack import build_http_client, build_stack
 pytestmark = pytest.mark.integration
 
 
+# Read off the renderer rather than restated. "Tag " stopped being the one lead when the line
+# split into three groups, and pasting the marks here instead would be a filter that quietly
+# matches nothing the moment one of them gains or loses a variation selector: every assertion
+# below would then pass against an empty list.
+MARKS = (
+    *formatting._PRIORITY_MARKS.values(),
+    formatting._PRIORITY_GONE,
+    formatting._STATUS_MARK,
+    formatting._TAG_MARK,
+)
+
+
 def lines(threads: FakeThreadGateway) -> list[str]:
-    return [body for _, body in threads.posts if body.startswith("Tag ")]
+    return [body for _, body in threads.posts if body.startswith(MARKS)]
 
 
 def labelled(action: str, name: str) -> dict:
@@ -43,21 +56,6 @@ def labelled(action: str, name: str) -> dict:
     payload = payloads.issue_event(action, labels=[{"name": name}])
     payload["label"] = {"name": name, "color": "d73a4a"}
     return payload
-
-
-async def expire_the_lease(container, delivery: str) -> None:
-    """Put the delivery where a dead worker's rows end up: leased, but not for much longer.
-
-    This is the redelivery that actually happens. The queue is at-least-once because a delivery
-    whose status could not be written stays leased and comes back, so the handler runs again from
-    the top with everything it did the first time already done.
-    """
-    async with container.sessionmaker() as session, session.begin():
-        await session.execute(
-            update(WebhookEvent)
-            .where(WebhookEvent.github_delivery_id == delivery)
-            .values(locked_until=text("now() - interval '1 hour'"))
-        )
 
 
 async def with_a_thread(client, container) -> None:
@@ -75,7 +73,7 @@ async def test_a_label_going_on_says_so(registered: Repository, db_engine: Async
         await post(client, "issues", labelled("labeled", "high priority"), delivery="tag-1")
         await container.worker.run_once()
 
-    assert lines(threads) == ["Tag `high priority` added."]
+    assert lines(threads) == ["🔴 **Priority set:** `high priority`"]
 
 
 async def test_a_label_coming_off_says_so(registered: Repository, db_engine: AsyncEngine) -> None:
@@ -88,7 +86,7 @@ async def test_a_label_coming_off_says_so(registered: Repository, db_engine: Asy
         await post(client, "issues", labelled("unlabeled", "wontfix"), delivery="tag-1")
         await container.worker.run_once()
 
-    assert lines(threads) == ["Tag `wontfix` removed."]
+    assert lines(threads) == ["🏷️ Tag `wontfix` removed."]
 
 
 async def test_the_same_delivery_handled_twice_says_it_once(
@@ -119,7 +117,7 @@ async def test_the_same_delivery_handled_twice_says_it_once(
     await handle("labeled", payload, 900_002)
     await handle("labeled", payload, 900_002)
 
-    assert lines(threads) == ["Tag `bug` added."]
+    assert lines(threads) == ["🏷️ Tag `bug` added."]
     held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
     assert held == 1, "the claim that makes it say it once was not taken"
 
@@ -145,7 +143,7 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
 
     await handle("labeled", payload, 900_002)
 
-    assert lines(threads) == ["Tag `bug` added."], "the claim was never given back"
+    assert lines(threads) == ["🏷️ Tag `bug` added."], "the claim was never given back"
 
 
 async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
@@ -237,4 +235,45 @@ async def test_the_block_is_still_written_on_the_same_delivery(
 
     thread_id = threads.created[0].thread_id
     assert "needs design" in threads.metadata_of(thread_id), "the block did not keep up"
-    assert lines(threads) == ["Tag `needs design` added."]
+    assert lines(threads) == ["🏷️ Tag `needs design` added."]
+
+
+async def test_a_status_label_is_not_announced_as_an_ordinary_tag(
+    registered: Repository, db_engine: AsyncEngine
+) -> None:
+    """The five statuses live as labels on the repository and this bot writes them itself, so a
+    `/set_done` and somebody tagging an issue `bug` arrive down the same webhook. Saying the same
+    sentence about both buried the one that matters under the one that does not.
+
+    Through the whole stack rather than against the renderer, because the classification happens
+    where the delivery is read and the renderer test cannot tell whether that is wired.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await with_a_thread(client, container)
+        await post(client, "issues", labelled("labeled", "IN_REVIEW"), delivery="tag-1")
+        await container.worker.run_once()
+
+    assert lines(threads) == ["📋 **Status set:** `IN_REVIEW`"]
+
+
+async def test_a_priority_the_repository_spells_its_own_way_is_still_read_as_one(
+    registered: Repository, db_engine: AsyncEngine
+) -> None:
+    """Priority has been read off whatever spelling a repository already uses since MVP 2, so
+    `urgent` is a priority coming off and not an ordinary tag. Named the way the repository
+    wrote it rather than translated into ours, because the label on GitHub is what somebody
+    looking for it will search for."""
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await with_a_thread(client, container)
+        await post(client, "issues", labelled("unlabeled", "urgent"), delivery="tag-1")
+        await container.worker.run_once()
+
+    assert lines(threads) == ["⚪ **Priority cleared:** `urgent`"]

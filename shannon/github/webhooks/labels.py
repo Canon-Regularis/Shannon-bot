@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from shannon.domain.models import LabelMove
+from shannon.domain.priority import parse_priority
+from shannon.github.labels import status_of
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,10 @@ def parse_label_move(action: str, payload: Mapping[str, Any]) -> LabelMove | Non
     None rather than an exception for anything unexpected, because this decides whether to say
     something and nothing else. A delivery this cannot read is one the item sync still handles
     in full; the thread keeps its metadata block and loses only the line announcing the change.
+
+    The label is classified here, at the one place a move is built, rather than wherever a move
+    is read. Both classifiers already exist and both are asked unconditionally, so this costs
+    two calls over a name GitHub caps at fifty characters and no branch at all.
     """
     if action not in LABEL_ACTIONS:
         return None
@@ -41,4 +47,9 @@ def parse_label_move(action: str, payload: Mapping[str, Any]) -> LabelMove | Non
         logger.info("%s arrived with an unusable label name, so nothing is said about it", action)
         return None
 
-    return LabelMove(name=name, added=action == "labeled")
+    return LabelMove(
+        name=name,
+        added=action == "labeled",
+        priority=parse_priority([name]),
+        status=status_of([name]),
+    )
