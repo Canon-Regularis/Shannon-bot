@@ -29,6 +29,7 @@ from shannon.domain.models import (
     TrackedSnapshot,
 )
 from shannon.domain.time import as_utc
+from shannon.github.mentions import rewrite
 
 UNKNOWN = "Unknown"
 
@@ -265,18 +266,26 @@ def format_state_change(change: StateChange, *, locked: bool) -> str:
     return f"{heading}\n{_LOCKED_UNTIL_REOPENED}"
 
 
-def format_comment(snapshot: CommentSnapshot, mentions: Mapping[str, int] | None = None) -> str:
+def format_comment(
+    snapshot: CommentSnapshot,
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> str:
     """Render a GitHub comment for its Discord thread."""
-    return _note(snapshot, "commented", mentions)
+    return _note(snapshot, "commented", mentions, roles)
 
 
-def format_review(snapshot: ReviewSnapshot, mentions: Mapping[str, int] | None = None) -> str:
+def format_review(
+    snapshot: ReviewSnapshot,
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> str:
     """Render a submitted review for its Discord thread.
 
     A review with an empty body is normal: approving without comment is the common case, and
     the verdict alone is the point.
     """
-    return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions)
+    return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions, roles)
 
 
 def _metadata(
@@ -314,18 +323,57 @@ def _metadata(
 
 
 def _note(
-    snapshot: CommentSnapshot | ReviewSnapshot, verb: str, mentions: Mapping[str, int] | None
+    snapshot: CommentSnapshot | ReviewSnapshot,
+    verb: str,
+    mentions: Mapping[str, int] | None,
+    roles: Mapping[str, int] | None = None,
 ) -> str:
-    """A comment or a review, posted under the metadata block."""
+    """A comment or a review, posted under the metadata block.
+
+    `roles` is kept apart from `mentions` rather than folded in with it, because a team slug that
+    happens to match a login is not that person. The two are looked up in different tables and
+    Discord writes them with different syntax, and a user id written as a role mention resolves
+    to nobody and reads as broken rather than as an error.
+
+    The names in the body are swapped in the quoted text and nowhere else. The line above it
+    carries a mention this bot built itself, live and never defused, and a GitHub login may be
+    all digits, so handing the assembled message to the swap would let `<@7>` be read as a name
+    and rewritten into somebody else.
+    """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
     lines = [f"**{author}** {verb} {_timestamp(snapshot.created_at)}"]
-    body = quote(snapshot.body)
+    body = _named_in(quote(snapshot.body), mentions, roles)
     if body:
         lines.append(body)
     if snapshot.html_url:
         lines.append(f"<{snapshot.html_url}>")
     return fit("\n".join(lines))
+
+
+def _named_in(
+    body: str, mentions: Mapping[str, int] | None, roles: Mapping[str, int] | None
+) -> str:
+    """Turn the names a comment writes into mentions, where this server knows who they are.
+
+    The whole point of the feature: tagging somebody on GitHub reached them on GitHub and reached
+    nobody here, which is where the team is actually reading.
+
+    Anybody not linked is left exactly as written, which is the bargain every other renderer in
+    this module already makes: the thread records who was named even where the server has no way
+    to reach them.
+    """
+    return rewrite(
+        body,
+        person=lambda login: _mention(login, mentions, "<@{}>"),
+        team=lambda slug: _mention(slug, roles, "<@&{}>"),
+    )
+
+
+def _mention(name: str, known: Mapping[str, int] | None, shape: str) -> str | None:
+    """The mention for a name this server has an id for, or None to leave it as written."""
+    found = (known or {}).get(name.lower())
+    return shape.format(found) if found else None
 
 
 def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) -> str:

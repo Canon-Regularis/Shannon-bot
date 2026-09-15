@@ -294,7 +294,9 @@ class TestANoteOnADeletedThread:
     def mirror(
         self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
     ) -> ItemNoteMirror:
-        return ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        return ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+        )
 
     @pytest.fixture
     def issues(
@@ -878,7 +880,7 @@ class TestAClaimThatCouldNotBeGivenBack:
         await issues.sync(issue_event("opened"))
 
         mirror = ItemNoteMirror(
-            db_sessionmaker, _RefusesThePost(), render=lambda note, mentions: "hello"
+            db_sessionmaker, _RefusesThePost(), render=lambda note, mentions, roles: "hello"
         )
 
         async def the_database_went_away(*args: object, **kwargs: object) -> None:
@@ -928,7 +930,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
             await issues.sync(issue_event("edited"))
 
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions: "hello", rebuild=rebuild
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello", rebuild=rebuild
         )
         synced = await issues.sync(issue_event("opened"))
         threads.threads.pop(synced.thread_id)
@@ -964,7 +966,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
             raise RuntimeError("GitHub answered 502")
 
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions: "hello", rebuild=rebuild
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello", rebuild=rebuild
         )
         synced = await issues.sync(issue_event("opened"))
         threads.threads.pop(synced.thread_id)

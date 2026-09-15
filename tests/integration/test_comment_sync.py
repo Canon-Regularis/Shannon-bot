@@ -370,7 +370,7 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
     The check sits ahead of it deliberately. An edited comment reaches this every time, and it
     is the one place the handler can answer without touching the database at all.
     """
-    mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+    mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions, roles: "hello")
     ran: list[object] = []
 
     async def then(snapshot: object) -> None:
@@ -401,7 +401,9 @@ class TestARetryAfterTheCommentLanded:
     ) -> None:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
-        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        mirror = ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+        )
         failures = _FailsAfterTheNote()
         handler = build_note_handler(mirror, parse_comment_event, then=failures)
 
@@ -430,7 +432,9 @@ class TestARetryAfterTheCommentLanded:
         """
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
-        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        mirror = ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+        )
         handler = build_note_handler(mirror, parse_comment_event)
 
         await handler("created", payloads.issue_comment_event())
@@ -447,7 +451,9 @@ class TestARetryAfterTheCommentLanded:
     ) -> None:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
-        mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions: "hello")
+        mirror = ItemNoteMirror(
+            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+        )
         seen: list[object] = []
 
         async def record(snapshot: object) -> None:

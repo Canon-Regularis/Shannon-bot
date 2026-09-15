@@ -10,18 +10,24 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.safe_text import quote
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread
 from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.models import ItemNote
+from shannon.github.mentions import names_in
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 
 logger = logging.getLogger(__name__)
 
-Renderer = Callable[[ItemNote, Mapping[str, int]], str]
+# The note, who it may mention, and which roles it may mention. Two mappings rather than one,
+# because a team slug that happens to match a login is not that person and Discord writes the
+# two with different syntax.
+Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], str]
 # Getting an item's thread built again, for the one case this path can detect and not mend.
 # A callable rather than a service, because what it needs is the item read from GitHub and
 # put through the ordinary sync, and this module has no business knowing either of those.
@@ -55,6 +61,7 @@ class _NoteTarget:
     tracked_item_id: int
     thread_id: int
     mentions: Mapping[str, int]
+    roles: Mapping[str, int]
     # Carried rather than read again at the point of the refusal, because it is already in hand:
     # the same repository row that answers where the thread is answers which server it is in.
     guild_id: int
@@ -142,18 +149,35 @@ class ItemNoteMirror:
                     f"{snapshot.repository.full_name}#{snapshot.item_number} has no thread yet"
                 )
 
-            mentions = (
-                await UserLinkStore(session).resolve_many(
-                    guild_id=repository.discord_guild_id,
-                    people={snapshot.author.login: snapshot.author.github_user_id},
-                )
-                if snapshot.author
-                else {}
+            # Read from the very string the renderer will swap names in, rather than from the
+            # body it was built out of. The two have to agree about what was named, and the
+            # preview is cut before the escaping with the cut landing mid-word, so reading the
+            # raw body would ask about `monalisa` where the renderer is handed `mona`. Handing
+            # both halves one string makes them agree by construction instead of by argument.
+            named = names_in(quote(snapshot.body))
+
+            # The author last, which is load-bearing. `resolve_many` lowercases into a fresh
+            # mapping, so the last entry for a name wins, and the author's is the one carrying a
+            # GitHub id. That id is the only evidence of identity anywhere on this path and it is
+            # what the changed-hands check runs on, so an author who writes their own name in
+            # their own comment must not have it replaced by the unverified one.
+            people: dict[str, int | None] = dict.fromkeys(named.people, None)
+            if snapshot.author:
+                people[snapshot.author.login] = snapshot.author.github_user_id
+
+            links = UserLinkStore(session)
+            mentions = await links.resolve_many(guild_id=repository.discord_guild_id, people=people)
+            # Neither store is guarded by a check for an empty mapping, because both answer one
+            # without asking the database anything.
+            roles = await TeamLinkStore(session).resolve_many(
+                guild_id=repository.discord_guild_id,
+                people=dict.fromkeys(named.teams, None),
             )
             return _NoteTarget(
                 tracked_item_id=item.id,
                 thread_id=item.discord_thread_id,
                 mentions=mentions,
+                roles=roles,
                 guild_id=repository.discord_guild_id,
             )
 
@@ -173,7 +197,8 @@ class ItemNoteMirror:
 
         try:
             await self._threads.post(
-                thread_id=target.thread_id, content=self._render(snapshot, target.mentions)
+                thread_id=target.thread_id,
+                content=self._render(snapshot, target.mentions, target.roles),
             )
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the
