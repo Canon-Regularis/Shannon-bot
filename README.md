@@ -16,6 +16,11 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   are not mirrored, so a thread records what was said at the time.
 - **Pings.** Reviewers and assignees are told once each, as mentions where the account is linked.
   The claim is taken before the message goes out and handed back if it fails.
+- **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
+  statuses told apart from ordinary labels. Closing, merging or reopening posts a header saying
+  what became of the thread. Both exist because a Discord edit is silent: it posts no message,
+  notifies nobody, and does not bump the thread, so a change that only moves the block looks from
+  the channel like nothing happening.
 - **Manual sync.** `/pr` and `/issue` pull an item from the REST API, for whatever the webhooks
   missed.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
@@ -311,9 +316,9 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Two things the bot is known to get wrong. Both are narrow, and both are written down here rather
-than fixed. Neither leaves an item wrong for long, though the comment the second one drops is
-never mirrored afterwards.
+Three things the bot is known to get wrong. All are narrow, and all are written down here rather
+than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
+afterwards.
 
 **A review handled before the request it answers.** GitHub sends the review request and the
 review as separate deliveries, and nothing guarantees the order they are handled in: a delivery
@@ -334,6 +339,14 @@ any item event for that number arrives and builds the thread. The hook that rebu
 thread could serve this case as well; what has kept it out is that every comment on anything
 untracked would then cost a call to GitHub, for a case that is mostly a first run. It may be
 fixed later.
+
+**A status label moved on GitHub, against a status the block still shows.** The five statuses live
+as labels on the repository, but nothing on the webhook path reads one back onto the item: only
+the slash commands and the board write that column. So labelling an item `BACKLOG` in GitHub posts
+a line saying so while the block above goes on reading `IN_REVIEW`, and both are true of different
+things. The line reports what somebody did to the labels, which is what every line in a thread
+reports. Making a GitHub label move the stored status is a decision about which of GitHub and
+Discord wins, and it is a bigger question than the line that made it visible.
 
 ## License
 

@@ -4769,3 +4769,18 @@ to set the project number will find it.
   migrated at all, not that it reached the revision the code expects, so that ordering is the only
   thing standing between a skipped migration and a bot that starts, reports healthy, and fails on
   the first delivery.
+
+## Two things a thread never said out loud
+
+- A tag moving now reads by group: priority coloured by its level, the five workflow statuses
+  told apart from ordinary labels, and each group worded differently going on and coming off.
+  Two of those groups are labels this bot writes itself, which is why saying one sentence about
+  all three buried the ones that matter. Closes #62.
+- Closing, merging or reopening posts a header. What it says about the thread is read off the
+  row rather than worked out from which kinds of item lock, because a refused unlock is stepped
+  over on purpose and a line promising a thread is open again would be a lie in the one case
+  that happens. Closes #73.
+- Both hang off one seam, so a third announcement is a constructor call in the wiring and no
+  edit to the handler. Each claims its line before posting, because the queue is at-least-once
+  by design; a third key namespace in `mirrored_notes` widens the one hole that has, which is a
+  claim that cannot be given back after a post that did not land.
