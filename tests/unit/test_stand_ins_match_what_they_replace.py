@@ -53,6 +53,7 @@ from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.projects import ReadsBoards
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -60,6 +61,7 @@ from shannon.services.sync.items import (
     SyncsItems,
     ThreadBinding,
 )
+from shannon.services.sync.label_lines import LabelLine
 from shannon.services.sync.manual import ManualSync
 from shannon.services.sync.notifications import ActorNotifier, ResolvesMentions
 from shannon.services.sync.policies import (
@@ -68,6 +70,7 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
+from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.github import FakeGitHubClient
@@ -118,6 +121,11 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),
     (EventHandler, RecordingHandler),
+    # Both announcers on one seam. Neither has a stand in, because a test that wants to
+    # know what reached a thread reads the fake gateway's posts instead, so these are the
+    # real-only shape `(Notifier, ActorNotifier)` already has.
+    (AnnouncesInThread, LabelLine),
+    (AnnouncesInThread, StateLine),
 ]
 
 

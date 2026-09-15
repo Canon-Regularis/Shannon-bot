@@ -19,9 +19,9 @@ from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.threads import KnowsItsServers, LocksThread, OpensThreads
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
-from shannon.domain.models import Actor, LabelMove, TrackedSnapshot
+from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.github.webhooks.labels import parse_label_move
+from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.one_at_a_time import ItemLock
 from shannon.services.sync.policies import SyncPolicy
 from shannon.services.sync.staleness import is_superseded
@@ -801,19 +801,11 @@ def build_item_sync(
     )
 
 
-class AnnouncesLabels(Protocol):
-    """Saying that a label moved, which is the one thing the metadata block cannot show."""
-
-    async def say(
-        self, *, tracked_item_id: int, thread_id: int, move: LabelMove, arrived: int
-    ) -> None: ...
-
-
 def build_item_handler(
     service: SyncsItems,
     parse: SnapshotParser,
     *,
-    announce: AnnouncesLabels | None = None,
+    announce: AnnouncesInThread | None = None,
 ) -> EventHandler:
     """Adapt a webhook event to the sync service.
 
@@ -821,8 +813,13 @@ def build_item_handler(
     than each having its own near-identical handler module.
 
     `announce` is optional and off by default, the same shape as the note handler's `then`: a
-    caller that only wants an item mirrored should not have to know that labels are announced,
-    and every test that builds this without one gets the behaviour it was written against.
+    caller that only wants an item mirrored should not have to know anything is announced, and
+    every test that builds this without one gets the behaviour it was written against.
+
+    One announcer, and this module knows nothing about what it says. Each reads the delivery and
+    decides for itself, so composing several is the wiring's business, the way the two notifiers
+    are already composed there. What used to be in this function was the label parse and its
+    null check, and both went with it.
     """
 
     async def handle(
@@ -833,20 +830,32 @@ def build_item_handler(
             return WebhookOutcome.IGNORED
         result = await service.sync(snapshot, arrived=arrived)
 
-        # After the sync, and only after it, because the line belongs under a block that says
-        # what the item is now. Which label moved is read from the delivery rather than worked
-        # out here: GitHub sends one delivery per label and names it at the top level.
+        # After the sync, and only after it, because a line belongs under a block that says what
+        # the item is now.
         #
         # `thread_id` rather than `result.synced`, because a delivery that is turned away as
-        # superseded still has a thread to say this in, and a retry of a delivery whose line was
-        # never posted is exactly that case.
-        move = parse_label_move(action, payload) if announce is not None else None
-        if move is not None and arrived is not None and result.thread_id is not None:
+        # superseded still has a thread to say something in, and a retry of a delivery whose
+        # line was never posted is exactly that case. An announcer that wants a narrower answer
+        # than that asks its own question.
+        #
+        # `tracked_item_id` is in the same test to narrow it rather than because it happens: the
+        # two are written together everywhere a thread is recorded, and nothing has one without
+        # the other.
+        if (
+            announce is not None
+            and arrived is not None
+            and result.thread_id is not None
+            and result.tracked_item_id is not None
+        ):
             await announce.say(
-                tracked_item_id=result.tracked_item_id,
-                thread_id=result.thread_id,
-                move=move,
-                arrived=arrived,
+                Arrival(
+                    action=action,
+                    snapshot=snapshot,
+                    payload=payload,
+                    tracked_item_id=result.tracked_item_id,
+                    thread_id=result.thread_id,
+                    arrived=arrived,
+                )
             )
 
         return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED

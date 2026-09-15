@@ -17,7 +17,7 @@ from shannon.discord_bot.safe_text import (
     fit,
     quote,
 )
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import Priority, StateChange, Status
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
@@ -159,8 +159,19 @@ def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
     return _ping("Assigned to", logins, mentions)
 
 
+# The first emoji in this project, which until now held nothing outside ASCII but an ellipsis
+# and a zero-width space. They are here because these lines are read at a glance in a busy
+# channel and the words alone do not carry that far: a colour says how urgent an item is before
+# anybody has read which label moved.
+_PRIORITY_MARKS = {Priority.HIGH: "🔴", Priority.MEDIUM: "🟠", Priority.LOW: "🟢"}
+# A priority coming off leaves no level behind, so it has no colour to carry.
+_PRIORITY_GONE = "⚪"
+_STATUS_MARK = "📋"
+_TAG_MARK = "🏷️"
+
+
 def format_label_change(move: LabelMove) -> str:
-    """Announce one label going on or coming off.
+    """Announce one label going on or coming off, in the words its group calls for.
 
     The metadata block above already says which labels an item has, and it is rewritten on every
     delivery, so this says nothing the reader could not scroll up for. It exists because an edit
@@ -168,13 +179,90 @@ def format_label_change(move: LabelMove) -> str:
     nobody, and does not bump the thread, so tagging an item looked from outside like nothing had
     happened at all.
 
+    Three groups rather than one, because two of them are labels this bot writes itself. Status
+    and priority both live as labels on the repository, so `/set_done` and somebody tagging an
+    issue `bug` arrive down the same webhook, and saying the same sentence about both buried the
+    one that matters under the one that does not.
+
+    Which group a label is in was decided where the move was read, so the order of the tests
+    below is a formality and not a precedence rule: no status name parses as a priority and no
+    priority spelling is one of the five statuses, which a test pins rather than assumes.
+
     "Tag" rather than "label", to match the word the block uses for the same thing.
 
     Named in a code span like the block's own tags, and defused first: a label is named by
-    anybody with triage rights on the repository, so it is untrusted text like any other.
+    anybody with triage rights on the repository, so it is untrusted text like any other. Not
+    put through `fit`, and deliberately: GitHub caps a label name at fifty characters and the
+    fence and marks add a handful, so this cannot approach the message limit.
+
+    One thing it does not claim. A status label moving does not move the item's stored status:
+    nothing on the webhook path reads a status off a label, so the block above may go on saying
+    something else. The line reports what somebody did to the labels, which is what every line
+    here reports, and the two are both true.
     """
-    what = "added" if move.added else "removed"
-    return f"Tag {code_span(defuse_mentions(move.name))} {what}."
+    named = code_span(defuse_mentions(move.name))
+
+    if move.priority is not Priority.UNSET:
+        if not move.added:
+            return f"{_PRIORITY_GONE} **Priority cleared:** {named}"
+        # UNSET is the only priority with no mark and the test above excluded it, so this
+        # lookup cannot miss.
+        return f"{_PRIORITY_MARKS[move.priority]} **Priority set:** {named}"
+
+    if move.status is not None:
+        return f"{_STATUS_MARK} **Status {'set' if move.added else 'cleared'}:** {named}"
+
+    return f"{_TAG_MARK} Tag {named} {'added' if move.added else 'removed'}."
+
+
+# Discord renders `###` as a heading and `-#` as small grey subtext in the content of an ordinary
+# message, which is what these are. A heading because a thread closing is the one event in it
+# worth finding by scrolling, and the tag lines above are deliberately quieter than this.
+_STATE_HEADINGS = {
+    StateChange.CLOSED: "### 🔒 Closed",
+    StateChange.MERGED: "### 🟣 Merged",
+    StateChange.REOPENED: "### 🔓 Reopened",
+}
+# Two ways of saying the thread is shut, because only one of them can be undone. A closed issue
+# reopens on GitHub and the thread comes back with it; a merged pull request does not reopen at
+# all, so pointing somebody at GitHub to undo it would send them looking for a button that is not
+# there. This is not a corner: `/set_done` is what locks a pull request and the requirements have
+# it run before the merge, so a merged item arriving in a shut thread is the ordinary order.
+_LOCKED = "-# This thread is locked."
+_LOCKED_UNTIL_REOPENED = "-# This thread is locked. Reopen the item on GitHub to reopen it here."
+_OPEN_AGAIN = "-# This thread is open again."
+
+
+def format_state_change(change: StateChange, *, locked: bool) -> str:
+    """Announce an item closing, merging or reopening, and say what became of the thread.
+
+    The same silence the tag line answers, one step louder. Closing an issue rewrites the block
+    and locks the thread, and Discord says nothing about either, so an item could close, shut
+    the discussion, and leave no trace in the channel at all.
+
+    `locked` is what the thread actually is, read off the row, rather than what this kind of
+    item usually does. Both halves of that matter. A pull request closes without its thread
+    being shut, so a line claiming otherwise would tell people they cannot reply where they can.
+    And a reopen whose unlock Discord refused is stepped over rather than failed, on purpose, so
+    a reopened item can reach here in a thread that is still shut: promising it is open again is
+    the one sentence here that would be a plain lie, in the one case that actually happens.
+
+    No untrusted text reaches this, which is why nothing is escaped and nothing is defused. The
+    words are all this module's own and the three headings are constants. Do not add `fit` for
+    symmetry with the block either; two short lines cannot approach the limit.
+    """
+    heading = _STATE_HEADINGS[change]
+
+    if change is StateChange.REOPENED:
+        if locked:
+            return heading
+        return f"{heading}\n{_OPEN_AGAIN}"
+
+    if not locked:
+        return heading
+    if change is StateChange.MERGED:
+        return f"{heading}\n{_LOCKED}"
+    return f"{heading}\n{_LOCKED_UNTIL_REOPENED}"
 
 
 def format_comment(snapshot: CommentSnapshot, mentions: Mapping[str, int] | None = None) -> str:

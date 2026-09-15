@@ -23,6 +23,7 @@ from shannon.discord_bot.formatting import (
     format_label_change,
     format_review,
     format_reviewer_ping,
+    format_state_change,
     format_team_ping,
 )
 from shannon.discord_bot.permissions import PermissionGate
@@ -45,6 +46,7 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
+from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -60,6 +62,7 @@ from shannon.services.sync.policies import (
     TicketPolicy,
     channel_fallbacks,
 )
+from shannon.services.sync.state_lines import StateLine
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
 
 logger = logging.getLogger(__name__)
@@ -169,6 +172,29 @@ def _both(people: Notifier, teams: Notifier) -> Notifier:
     return _Both(people, teams)
 
 
+@dataclass(frozen=True, slots=True)
+class _EveryAnnouncer:
+    """Every announcer behind the one seam the item handler has for saying something.
+
+    The same shape `_both` above gives the two notifiers, and for the same reason: which lines a
+    thread gets is a wiring decision, and the handler that runs them should not grow a parameter
+    for each. A third is a longer tuple here and no edit to `items.py`.
+
+    Order is not a behaviour. `labeled`/`unlabeled` and `closed`/`reopened` are disjoint, so at
+    most one of these ever has anything to say about a given delivery.
+    """
+
+    announcers: tuple[AnnouncesInThread, ...]
+
+    async def say(self, arrival: Arrival) -> None:
+        for announcer in self.announcers:
+            await announcer.say(arrival)
+
+
+def _every(*announcers: AnnouncesInThread) -> AnnouncesInThread:
+    return _EveryAnnouncer(announcers)
+
+
 def _sync_services(
     sessionmaker: async_sessionmaker, threads: ThreadGateway
 ) -> tuple[ItemSyncService, ItemSyncService]:
@@ -241,14 +267,17 @@ def _event_router(
     reviews = ItemNoteMirror(sessionmaker, threads, render=format_review, rebuild=rebuild)
 
     router = EventRouter()
-    # One announcer for both kinds, because a label moves the same way on either and the line
-    # says the same thing. Given to the item handlers rather than to the sync service: the sync
-    # runs for commands and the board as well, and neither of those has a delivery to announce.
-    tags = LabelLine(sessionmaker, threads, render=format_label_change)
-    router.register(
-        "pull_request", build_item_handler(pr_sync, parse_pull_request_event, announce=tags)
+    # One of each for both kinds of item, because a label moves the same way on either and so
+    # does a close. Given to the item handlers rather than to the sync service: the sync runs for
+    # commands and the board as well, and neither of those has a delivery to announce.
+    announce = _every(
+        LabelLine(sessionmaker, threads, render=format_label_change),
+        StateLine(sessionmaker, threads, render=format_state_change),
     )
-    router.register("issues", build_item_handler(issue_sync, parse_issue_event, announce=tags))
+    router.register(
+        "pull_request", build_item_handler(pr_sync, parse_pull_request_event, announce=announce)
+    )
+    router.register("issues", build_item_handler(issue_sync, parse_issue_event, announce=announce))
     router.register("issue_comment", build_note_handler(comments, parse_comment_event))
     router.register(
         "pull_request_review",
