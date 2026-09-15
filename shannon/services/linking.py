@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -9,18 +8,9 @@ from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.errors import ShannonError
 from shannon.github.client import LooksUpUsers
+from shannon.github.mentions import is_login, is_team_slug
 
 logger = logging.getLogger(__name__)
-
-# GitHub's own rule, which is narrower than "letters, digits and hyphens": a login may not
-# begin or end with a hyphen and may not carry two in a row. Written out because the loose
-# version accepted `mona--lisa` and `monalisa-`, names GitHub cannot issue, and a name nothing
-# can ever match is the one thing this command must not record.
-_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")
-
-# A team slug is more forgiving than a login: GitHub builds it from the display name, so it takes
-# underscores and full stops that an account name never would, and it can be longer.
-_GITHUB_TEAM = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})$")
 
 
 class InvalidGitHubUsernameError(ShannonError):
@@ -53,7 +43,7 @@ class UserLinkingService:
         person somebody meant rather than against whoever holds the name by then.
         """
         username = github_username.strip().lstrip("@")
-        if not _GITHUB_LOGIN.match(username):
+        if not is_login(username):
             raise InvalidGitHubUsernameError(f"{github_username!r} is not a GitHub username.")
         github_user_id = await self._github.user_id(username)
         if github_user_id is None:
@@ -96,7 +86,7 @@ class TeamLinkingService:
 
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> str:
         slug = github_team.strip().lstrip("@")
-        if not _GITHUB_TEAM.match(slug):
+        if not is_team_slug(slug):
             raise InvalidGitHubTeamError(f"{github_team!r} is not a GitHub team.")
 
         async with self._sessionmaker() as session, session.begin():

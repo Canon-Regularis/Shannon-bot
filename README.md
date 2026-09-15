@@ -14,6 +14,10 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   last updated.
 - **Comments and reviews.** Quoted into the item's thread with a link back. Edits and deletions
   are not mirrored, so a thread records what was said at the time.
+- **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
+  where that login has been linked, and `@org/team` becomes a role mention where that team has.
+  Anybody unlinked is still named in plain text. At most ten per comment are mentioned, because
+  without a limit one comment could ping every linked member of the server.
 - **Pings.** Reviewers and assignees are told once each, as mentions where the account is linked.
   The claim is taken before the message goes out and handed back if it fails.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
@@ -316,7 +320,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Three things the bot is known to get wrong. All are narrow, and all are written down here rather
+Four things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -347,6 +351,13 @@ a line saying so while the block above goes on reading `IN_REVIEW`, and both are
 things. The line reports what somebody did to the labels, which is what every line in a thread
 reports. Making a GitHub label move the stored status is a decision about which of GitHub and
 Discord wins, and it is a bigger question than the line that made it visible.
+
+**A tag resolved from a comment body cannot be checked against the account that wrote it.** Every
+other mention the bot builds is checked against the GitHub id the payload carries, so a login
+somebody freed and a stranger took does not inherit the previous holder's mention. A name read out
+of a comment body carries no id at all, so that check cannot run and the name alone decides. It
+follows the rule the link table already states for a payload with no id: no evidence is not
+evidence, and refusing on it would take away mentions that work.
 
 ## License
 
