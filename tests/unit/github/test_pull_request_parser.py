@@ -45,6 +45,7 @@ def test_a_real_github_payload_parses() -> None:
     assert [r.login for r in snapshot.reviewers] == ["monalisa"]
     assert snapshot.label_names == ("backend", "high priority")
     assert snapshot.merged is False
+    assert snapshot.body == "Closes #3"
     assert snapshot.updated_at is not None
     assert snapshot.updated_at.year == 2026
 

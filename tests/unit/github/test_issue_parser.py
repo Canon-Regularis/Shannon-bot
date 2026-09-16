@@ -43,6 +43,7 @@ def test_a_real_github_payload_parses() -> None:
     assert snapshot.priority is Priority.HIGH
     assert snapshot.closed is False
     assert snapshot.updated_at is not None
+    assert snapshot.body == "Closing an issue leaves its Discord thread open."
 
 
 def test_the_snapshot_is_always_typed_as_an_issue() -> None:

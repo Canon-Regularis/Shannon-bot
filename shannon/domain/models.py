@@ -100,6 +100,10 @@ class ItemSnapshot:
     labels: tuple[Label, ...] = ()
     updated_at: datetime | None = None
     action: str | None = None
+    # What somebody wrote when they opened it. Empty where they wrote nothing, which GitHub
+    # sends as a null rather than as an empty string, and which the block reads as a section to
+    # leave out rather than as one to render blank.
+    body: str = ""
 
     @property
     def label_names(self) -> tuple[str, ...]:
@@ -172,8 +176,13 @@ class TicketSnapshot(ItemSnapshot):
 
     The requirements give it a block of three lines against the eleven a pull request gets, and
     that is the shape of the thing rather than an omission: a draft has a title, a place on a
-    board, and nothing else. No author, no assignees, no labels, no state, so the inherited
-    fields keep their empty defaults and `priority` reads UNSET off an empty label list.
+    board, and nothing else worth three more lines. No author, no assignees, no labels, no
+    state, so the inherited fields keep their empty defaults and `priority` reads UNSET off an
+    empty label list.
+
+    A draft does have a description on GitHub's side, and this does not carry it. Reading one
+    would mean a field on `BoardItem` and a second read in the poller, for a block the
+    requirements fix at three lines.
 
     `repository` is the one the guild registered, not one the ticket belongs to. It is carried
     because resolving a Discord guild goes through a repository row and there is no other route,
@@ -295,6 +304,7 @@ class TrackedSnapshot(Protocol):
     action: str | None
     object_type: ObjectType
     closed: bool
+    body: str
 
     @property
     def label_names(self) -> tuple[str, ...]: ...

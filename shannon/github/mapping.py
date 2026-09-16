@@ -204,6 +204,9 @@ def _shared_fields(
 
     title = payload.get("title")
     state = payload.get("state")
+    # Read the way a comment's is next door, and for the same reason: GitHub sends a null for an
+    # item opened with no description, and every reader downstream wants a string.
+    body = payload.get("body")
     return {
         "repository": repo,
         "github_object_id": object_id,
@@ -216,6 +219,7 @@ def _shared_fields(
         "labels": labels(payload.get("labels")),
         "updated_at": parse_timestamp(payload.get("updated_at")),
         "action": action,
+        "body": body if isinstance(body, str) else "",
     }
 
 
