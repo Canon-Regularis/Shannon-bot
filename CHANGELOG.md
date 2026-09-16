@@ -4813,3 +4813,20 @@ to set the project number will find it.
   reference until the heading rule was made to require the space GitHub requires. And the section
   goes in whole or not at all, because the trim drops lines from the end and a block with room for
   the label and not for the text under it ended the message on a label and an ellipsis.
+
+## Knowing which build is answering
+
+- `/health` now reports the commit the running image was built from, stamped in at build time
+  from `github.sha`. It exists because of an afternoon spent reading a merged change as a broken
+  one: the description added above was on `main` and had never been pulled onto the server, and
+  from outside a change that is not deployed and a change that does not work look the same.
+  Nothing the bot served said which build it was, so the only way to tell was to get onto the box.
+- The one setting left out of `.env.example` on purpose, with a test on each side of that rule.
+  `compose.prod.yaml` hands `.env` to the container as real environment variables and those beat
+  the image's own, so a copied line would pin the answer to whatever the example said and it
+  would go on naming that commit through every deploy afterwards. Checked by running it rather
+  than reasoned about.
+- The answer is public and so is this repository, so the hash says which fixes the deployment has
+  and which it has not. Taken rather than missed: one route behind it does anything and it refuses
+  every request without a valid HMAC. `Caddyfile` says so, which is where somebody reversing that
+  decision would be looking.
