@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.container import _both
 from shannon.db.models import ItemAssignment, Repository
@@ -30,6 +30,7 @@ from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.stack import build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -77,9 +78,20 @@ def notifying(db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway) -
                 role=ActorRole.REVIEWER_TEAM,
                 render=format_team_ping,
                 mentions=TeamLinkStore,
+                the_block_pings_them=False,
             ),
         ),
     )
+
+
+async def with_a_thread(service: ItemSyncService) -> None:
+    """The thread already open, with nothing asked of anybody yet.
+
+    A block that is posted reaches every PERSON it names, so somebody asked on the delivery that
+    opens the thread has no line. A team has one either way, which is what the exemption on the
+    team notifier above is for: the block writes a team as plain text and never looks one up.
+    """
+    await service.sync(asked_of(at="2026-08-10T11:00:00Z"))
 
 
 async def link_team(session: AsyncSession, slug: str, role_id: int = ROLE) -> None:
@@ -127,6 +139,7 @@ class TestTellingATeam:
     ) -> None:
         """Different words off different tables, so two messages rather than one."""
         await link_team(db_session, "backend")
+        await with_a_thread(notifying)
 
         await notifying.sync(asked_of("backend", people=[payloads.user("monalisa", 3)]))
 
@@ -141,6 +154,26 @@ class TestTellingATeam:
         await notifying.sync(asked_of("backend"))
 
         assert told(threads) == 1
+
+
+class TestTheWiringKeepsTheTeamExemption:
+    async def test_a_team_is_told_on_the_delivery_that_opens_the_thread(
+        self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+    ) -> None:
+        """The exemption lives in the wiring, and nothing else in this file would notice it go.
+
+        A person on the item is reached by the block that opens the thread, so the line beside
+        it is dropped. A team is not reached by anything: the block names one as plain text and
+        never looks it up, so dropping the team line with the rest would have stopped a team
+        ever being told a review was asked of it.
+        """
+        await link_team(db_session, "backend")
+        threads = FakeThreadGateway()
+        container = build_stack(db_engine, threads=threads)
+
+        await container.pr_sync.sync(asked_of("backend"))
+
+        assert posts(threads) == [f"Review requested from <@&{ROLE}>."]
 
 
 class TestClosingATeamsRequest:
@@ -390,6 +423,7 @@ class TestAskingATeamAgain:
         person has the same hole a team does, and closes it the same way.
         """
         monalisa = [payloads.user("monalisa", 3)]
+        await with_a_thread(notifying)
         await notifying.sync(asked_of(people=monalisa, at="2026-08-10T12:00:00Z"))
 
         await notifying.sync(asked_of(people=monalisa, at="2026-08-12T09:00:00Z"))

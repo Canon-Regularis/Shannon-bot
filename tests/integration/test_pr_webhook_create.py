@@ -93,18 +93,22 @@ async def test_everyone_on_the_pull_request_is_recorded(
     ]
 
 
-async def test_the_reviewer_is_pinged_in_the_new_thread(
+async def test_the_reviewer_is_reached_by_the_block_and_nothing_else(
     client: AsyncClient, threads: FakeThreadGateway
 ) -> None:
+    """The opening block is a real message and names the reviewer, so it is the request. A line
+    beside it asked the same person twice for one event, which is issue #81."""
     await deliver(client, "pull_request", payloads.pull_request_event("opened"))
 
-    assert len(threads.posts) == 1
-    assert "monalisa" in threads.posts[0][1]
+    assert threads.posts == []
+    assert "monalisa" in threads.metadata_of(threads.created[0].thread_id)
 
 
 async def test_a_linked_reviewer_is_pinged_by_mention(
     client: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
+    """A mention notifies from a message Discord delivered. The first block is sent, so its
+    `<@id>` is the ping; every later one is an edit and reaches nobody."""
     await UserLinkStore(db_session).link(
         guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=777
     )
@@ -112,7 +116,8 @@ async def test_a_linked_reviewer_is_pinged_by_mention(
 
     await deliver(client, "pull_request", payloads.pull_request_event("opened"))
 
-    assert "<@777>" in threads.posts[0][1]
+    assert "<@777>" in threads.metadata_of(threads.created[0].thread_id)
+    assert threads.posts == []
 
 
 async def test_the_delivery_is_logged(client: AsyncClient, db_session: AsyncSession) -> None:

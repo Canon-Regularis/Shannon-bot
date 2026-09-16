@@ -86,8 +86,18 @@ class ItemThreads:
         # the queue has nobody to tell.
         self._relocates = relocates
 
-    async def write(self, target: ThreadTarget, *, name: str, content: str) -> ThreadWrite:
-        """Put `content` in the item's thread, opening or rebuilding one where needed."""
+    async def write(
+        self, target: ThreadTarget, *, name: str, content: str, replacement: str | None = None
+    ) -> ThreadWrite:
+        """Put `content` in the item's thread, opening or rebuilding one where needed.
+
+        A thread opened to REPLACE one gets `replacement`, which is the same block with the
+        people on it named in plain text. Opening a thread POSTS its block and a posted message
+        notifies everybody it mentions; the two branches below open one because somebody deleted
+        the old thread or moved the channel out from under it. Neither is anything happening to
+        the item, and neither is worth telling everybody on it about.
+        """
+        instead = content if replacement is None else replacement
         if target.thread_id is None:
             return ThreadWrite(await self._open(target, name=name, content=content), created=True)
 
@@ -103,7 +113,7 @@ class ItemThreads:
                 target.thread_channel_id,
                 target.channel_id,
             )
-            handle = await self._open(target, name=name, content=content)
+            handle = await self._open(target, name=name, content=instead)
             # Unconditional, and it has to be. After a successful swap the id that comes back is
             # never the old one, and after a lost race it is the winner's, so the old thread is
             # displaced either way and is worth saying so about either way.
@@ -125,7 +135,7 @@ class ItemThreads:
                 target.thread_id,
                 target.tracked_item_id,
             )
-            return ThreadWrite(await self._open(target, name=name, content=content), created=True)
+            return ThreadWrite(await self._open(target, name=name, content=instead), created=True)
 
         await self._remember(target.tracked_item_id, handle)
         return ThreadWrite(handle, created=False)

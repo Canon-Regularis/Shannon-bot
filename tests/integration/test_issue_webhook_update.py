@@ -118,6 +118,8 @@ async def test_a_reassignment_reaches_the_metadata_and_the_database(
 async def test_a_new_assignee_is_pinged_and_the_first_is_not(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:
+    """Somebody put on an item after the thread exists has to be told by a line, because every
+    block after the first is an edit and an edit notifies nobody."""
     await deliver(
         tracked,
         "issues",
@@ -127,9 +129,9 @@ async def test_a_new_assignee_is_pinged_and_the_first_is_not(
         delivery="i1",
     )
 
-    assert len(threads.posts) == 2
-    assert "monalisa" in threads.posts[1][1]
-    assert "hubot" not in threads.posts[1][1]
+    assert len(threads.posts) == 1, "the first was reached by the opening block, not by a line"
+    assert "monalisa" in threads.posts[0][1]
+    assert "hubot" not in threads.posts[0][1]
 
 
 async def test_no_update_ever_opens_a_second_thread(

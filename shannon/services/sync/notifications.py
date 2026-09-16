@@ -53,15 +53,24 @@ class ActorNotifier:
         role: ActorRole,
         render: Renderer,
         mentions: Mentions = UserLinkStore,
+        the_block_pings_them: bool = True,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
         self._role = role
         self._render = render
         self._mentions = mentions
+        # Whether the metadata block reaches these people on its own. True for anybody rendered
+        # through `_person`, which emits a live mention for a linked login; the block is a real
+        # message the first time it is posted, so it notifies them.
+        #
+        # False for reviewer TEAMS, and that exemption is load-bearing rather than tidy. The
+        # block names a team in plain text and never looks one up, so it reaches nobody, and a
+        # blanket rule would silently stop every team ever being told about a review.
+        self._the_block_pings_them = the_block_pings_them
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int
+        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
     ) -> tuple[str, ...]:
         """Ping whoever has not been pinged yet, returning the logins that were.
 
@@ -69,6 +78,10 @@ class ActorNotifier:
         overlap whenever somebody runs /pr while an event for it is in flight, and a delivery
         that fails partway through is retried from the top; either would send the same person
         the same ping twice if the claim came last.
+
+        `the_block_pinged` says the block went out as a new message carrying live mentions,
+        which means it has already reached everybody it names. See the guard below for why this
+        still claims rather than simply not running.
         """
         # Deliberately not shielded. Shielding this looks like it protects the claim, and does
         # the opposite: the await raises at once while the claim carries on and commits, so
@@ -80,6 +93,24 @@ class ActorNotifier:
         if not claimed:
             return ()
         logins = tuple(sorted(claimed))
+
+        if the_block_pinged and self._the_block_pings_them:
+            # Claimed and then thrown away, and that is the whole of this rather than a waste.
+            # The block that has just been POSTED carries a live mention for each of these
+            # people, so they have been reached; a second message beside it pings them twice for
+            # one event, which is what opening an issue with an assignee looked like.
+            #
+            # Spending the claim is the part that cannot be skipped. Leave the rows owed and the
+            # `labeled` delivery arriving in the same second finds them, and posts the very line
+            # this avoided. The bug would move one delivery later and look fixed to any test that
+            # sends `opened` on its own.
+            logger.info(
+                "the block named %s %s on tracked item %s, so nothing is said beside it",
+                self._role,
+                logins,
+                tracked_item_id,
+            )
+            return ()
 
         try:
             await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))

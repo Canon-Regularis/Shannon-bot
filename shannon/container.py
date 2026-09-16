@@ -161,13 +161,19 @@ class _Both:
     teams: Notifier
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int
+        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
     ) -> tuple[str, ...]:
         told = await self.people.notify(
-            tracked_item_id=tracked_item_id, thread_id=thread_id, guild_id=guild_id
+            tracked_item_id=tracked_item_id,
+            thread_id=thread_id,
+            guild_id=guild_id,
+            the_block_pinged=the_block_pinged,
         )
         told_teams = await self.teams.notify(
-            tracked_item_id=tracked_item_id, thread_id=thread_id, guild_id=guild_id
+            tracked_item_id=tracked_item_id,
+            thread_id=thread_id,
+            guild_id=guild_id,
+            the_block_pinged=the_block_pinged,
         )
         return (*told, *told_teams)
 
@@ -222,6 +228,11 @@ def _sync_services(
                     role=ActorRole.REVIEWER_TEAM,
                     render=format_team_ping,
                     mentions=TeamLinkStore,
+                    # The one notifier the block does not stand in for. A team is named in the
+                    # block as plain text and never looked up, so the block reaches nobody on
+                    # its behalf, and silencing this beside the others would stop a team ever
+                    # being told a review was asked of it.
+                    the_block_pings_them=False,
                 ),
             ),
         ),
@@ -318,8 +329,11 @@ def _refresh(
     return RepositoryRefresh(
         sessionmaker,
         github,
-        pull_requests=build_item_sync(sessionmaker, threads, PullRequestPolicy()),
-        issues=build_item_sync(sessionmaker, threads, IssuePolicy()),
+        # Mentions off, because every thread this opens is a FIRST one and a first block is
+        # posted. Twenty-five of them in a run would notify everybody on all twenty-five about a
+        # backlog that has been sitting there.
+        pull_requests=build_item_sync(sessionmaker, threads, PullRequestPolicy(), mentions=False),
+        issues=build_item_sync(sessionmaker, threads, IssuePolicy(), mentions=False),
     )
 
 
@@ -341,6 +355,11 @@ def _relocation(
         sessionmaker,
         threads,
         mirrors={
+            # Built with mentions, and it still pings nobody. Every thread this opens replaces
+            # one, and a replacement gets the block with the people named in plain text; the
+            # threads it only rewrites are edits, which notify nobody either way. Turning them
+            # off here as well would give one outcome two owners, and a later edit could undo
+            # the one that matters while the tests went on passing on the other.
             ObjectType.PR: Mirror(
                 service=build_item_sync(sessionmaker, threads, PullRequestPolicy(), relocates=True),
                 fetch=github.get_pull_request,
