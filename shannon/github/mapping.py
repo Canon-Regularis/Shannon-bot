@@ -137,8 +137,12 @@ def issue(
 ) -> IssueSnapshot | None:
     """Build a snapshot from an issue object.
 
-    The same shape comes back from `GET /repos/{owner}/{repo}/issues/{number}` and rides inside
-    `issues` webhook payloads.
+    The same shape comes back from `GET /repos/{owner}/{repo}/issues/{number}`, from a row of
+    `GET /repos/{owner}/{repo}/issues`, and inside `issues` webhook payloads.
+
+    A list row is the same object with the single-item extras left off, and none of them are read
+    here. What a list row does carry, and a caller has to handle, is pull requests: GitHub serves
+    those from the issues endpoint too, which is what `is_pull_request` below is for.
     """
     if not isinstance(payload, Mapping):
         return None
@@ -165,8 +169,13 @@ def pull_request(
 ) -> PullRequestSnapshot | None:
     """Build a snapshot from a pull request object.
 
-    The same object shape comes back from `GET /repos/{owner}/{repo}/pulls/{number}` and rides
-    inside `pull_request` webhook payloads, so both callers land here.
+    The same object shape comes back from `GET /repos/{owner}/{repo}/pulls/{number}`, from a row
+    of `GET /repos/{owner}/{repo}/pulls`, and inside `pull_request` webhook payloads, so all three
+    callers land here.
+
+    Read only from those. A pull request also appears in the *issues* list, and there it is the
+    issue shape: no requested reviewers, no requested teams, no repository on the base. This would
+    build a snapshot from one without complaining and quietly say nobody had been asked to review.
     """
     if not isinstance(payload, Mapping):
         return None
