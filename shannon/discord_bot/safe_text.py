@@ -18,8 +18,13 @@ TRUNCATED = "\n…"
 # A comment is a pointer to the discussion on GitHub, not a copy of it.
 COMMENT_PREVIEW_LIMIT = 700
 
+# And the same for the description an item was opened with. Its own name at the same number,
+# because the two are different things that happen to agree today: a comment is one message in a
+# conversation, and this is the standing answer to what the item is for.
+DESCRIPTION_PREVIEW_LIMIT = 700
 
-def quote(body: str) -> str:
+
+def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:
     """A comment body, made safe to drop into a Discord message.
 
     Blockquoting alone does not stop GitHub markdown rendering: bold, code fences and mentions
@@ -29,12 +34,77 @@ def quote(body: str) -> str:
     text = (body or "").strip()
     if not text:
         return ""
-    if len(text) > COMMENT_PREVIEW_LIMIT:
-        text = text[:COMMENT_PREVIEW_LIMIT].rstrip() + "…"
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
     return "\n".join(f"> {line}" if line else ">" for line in as_plain_text(text).splitlines())
 
 
+# GitHub's web form submits CRLF, and every rule below is anchored to a line. Folded first so
+# the rest of them see one kind of line ending, and so a blank line costs one character against
+# the preview limit rather than two.
+_LINE_ENDINGS = re.compile(r"\r\n?")
+
+# Invisible on GitHub and very much not here. A pull request template opens with one of these
+# and carries more between its sections, so without this the preview of a templated repository
+# is the instructions to the author rather than anything the author wrote.
+#
+# Non-greedy, so two comments do not merge into one match and swallow the description between
+# them. An unterminated `<!--` matches nothing and is left as written, which is the safe way
+# round: the alternative eats the rest of the body.
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# A space after the hashes is required, and that is the whole of what makes this safe. Without
+# it the rule also strips a line-leading issue reference, so a description beginning `#3 is
+# fixed by this` came out as `3 is fixed by this` with the reference gone. GitHub wants the
+# space for a heading anyway, so demanding it is the more correct reading as well as the safer.
+_HEADING = re.compile(r"^#{1,6}[ \t]+", re.MULTILINE)
+
+# The marker only. What was quoted stays, and it ends up inside the quote this is going into.
+_QUOTED = re.compile(r"^>+[ \t]*", re.MULTILINE)
+
+# `[ \t]*` rather than `\s*`, which is the bug this rule exists to avoid rather than a detail of
+# it: `\s` matches a newline, so with MULTILINE the match reaches back over the blank line above
+# and the escape lands at the end of the previous line. That is exactly what `escape_markdown`
+# does to a list today, and why one bullet comes out escaped and the next does not.
+_BULLET = re.compile(r"^[ \t]*[-*+][ \t]+", re.MULTILINE)
+
+# Anything but a bullet Discord will not escape back. `-`, `*` and `+` are all markdown to it,
+# so writing one of those here means `escape_markdown` puts the backslash straight back on.
+_BULLET_MARK = "• "
+
+_BLANK_RUN = re.compile(r"\n{3,}")
+
 _MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
+
+
+def as_prose(text: str) -> str:
+    """GitHub markdown with its structure flattened to something that reads as prose.
+
+    Nothing here makes text safe. It runs before the escaping, never instead of it, and what
+    comes out still goes through `as_plain_text` like any other GitHub-authored string. That
+    ordering is what lets this be as simple as it is: removing a comment can join whatever sat
+    either side of it, and the escaping downstream neutralises the result either way.
+
+    It exists because the escaping is the thing that makes a description unreadable. Discord's
+    escaper puts a backslash in front of a line-leading `#` and a line-leading `-`, so a perfectly
+    ordinary description comes out as a wall of backslashes with a stray one on a line of its own.
+    Flattening the structure first leaves nothing for it to escape, and a heading reads as a line
+    and a list reads as a list.
+
+    What it does not do is touch inline markup. `**bold**` and `` `code` `` still come out
+    escaped, because unpicking those needs a real markdown parser and getting it wrong is how
+    an unbalanced marker restyles the rest of the message.
+
+    One case it makes worse, which is worth knowing rather than hiding: nothing here parses
+    markdown, so a line inside a fenced code block that begins with a dash is given a bullet it
+    did not ask for. It is inside escaped backticks and reads as literal text either way.
+    """
+    text = _LINE_ENDINGS.sub("\n", text)
+    text = _HTML_COMMENT.sub("", text)
+    text = _HEADING.sub("", text)
+    text = _QUOTED.sub("", text)
+    text = _BULLET.sub(_BULLET_MARK, text)
+    return _BLANK_RUN.sub("\n\n", text).strip()
 
 
 def defuse_mentions(text: str) -> str:
