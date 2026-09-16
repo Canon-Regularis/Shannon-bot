@@ -128,14 +128,18 @@ def thread(
     *,
     archived: bool = False,
     locked: bool = False,
+    parent_id: int = 99,
 ) -> MagicMock:
     stub = MagicMock(spec=discord.Thread)
     stub.id = thread_id
     stub.name = name
     # Set explicitly: an unset attribute on a MagicMock is itself a Mock, which is truthy, so
-    # leaving these out would have every test look like an archived and locked thread.
+    # leaving these out would have every test look like an archived and locked thread. The
+    # parent is here for the same reason and a sharper one: a Mock is not an int, so a test
+    # asserting on a channel id would compare against something that equals nothing.
     stub.archived = archived
     stub.locked = locked
+    stub.parent_id = parent_id
     stub.send = AsyncMock(return_value=message(900))
     stub.edit = AsyncMock()
     stub.delete = AsyncMock()
@@ -416,6 +420,61 @@ class TestArchivedThreads:
         existing.edit.assert_not_awaited()
 
 
+class TestWhereAThreadIs:
+    """Asked when the row does not remember, which is every thread claimed before the column
+    existed. The answer decides whether an item is stranded in a channel nobody maps any more.
+    """
+
+    async def test_it_answers_the_channel_the_thread_is_in(self) -> None:
+        gateway = DiscordThreadGateway(client_with(thread(parent_id=4242)))
+
+        assert await gateway.channel_of(thread_id=500) == 4242
+
+    async def test_a_thread_that_is_gone_answers_nothing_rather_than_raising(self) -> None:
+        """Gone is an ordinary answer here and the caller acts on it: the pointer is worthless
+        either way, so it is let go of and the item gets a fresh thread from whatever visits it
+        next. Discord reports a deletion only while discord.py still has the thread cached.
+        """
+        client = client_with(None)
+        client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(), "gone"))
+
+        assert await DiscordThreadGateway(client).channel_of(thread_id=500) is None
+
+    async def test_an_id_that_is_not_a_thread_answers_nothing(self) -> None:
+        """The same answer, and correct: whatever the row is pointing at, it is not this item's
+        thread."""
+        gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.TextChannel)))
+
+        assert await gateway.channel_of(thread_id=500) is None
+
+    async def test_a_refusal_is_not_read_as_gone(self) -> None:
+        """The distinction the whole method turns on. Reading a refused lookup as "gone" would
+        let go of a live pointer and open a second thread beside a working one, which is the
+        failure this path exists to undo rather than cause.
+        """
+        client = client_with(None)
+        client.fetch_channel = AsyncMock(side_effect=discord.Forbidden(MagicMock(), "no"))
+
+        with pytest.raises(DiscordPermissionError):
+            await DiscordThreadGateway(client).channel_of(thread_id=500)
+
+    async def test_an_outage_is_not_read_as_gone_either(self) -> None:
+        client = client_with(None)
+        client.fetch_channel = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "503"))
+
+        with pytest.raises(DiscordGatewayError):
+            await DiscordThreadGateway(client).channel_of(thread_id=500)
+
+    async def test_a_cached_thread_costs_no_fetch(self) -> None:
+        """The rows this is asked about are the quiet ones, so most will miss the cache and pay
+        a fetch. The ones that do not should not."""
+        client = client_with(thread(parent_id=4242))
+
+        await DiscordThreadGateway(client).channel_of(thread_id=500)
+
+        client.fetch_channel.assert_not_awaited()
+
+
 class TestPartialCreation:
     """Opening a thread and writing in it are two calls and two separate permissions."""
 
@@ -624,6 +683,7 @@ class TestBeforeTheGatewayIsConnected:
             ("update", lambda g: g.update(thread_id=1, message_id=2, name="n", content="c")),
             ("post", lambda g: g.post(thread_id=1, content="c")),
             ("set_shut", lambda g: g.set_shut(thread_id=1, shut=True)),
+            ("channel_of", lambda g: g.channel_of(thread_id=1)),
         ],
     )
     async def test_it_says_so_rather_than_leaking_an_internal_error(self, what, call) -> None:
