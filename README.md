@@ -150,6 +150,16 @@ is to add that permission to the invite; it is safe here because the bot refuses
 A forum channel set to **Require Tags** is refused by `/register` and `/set_channel`, because
 nothing here picks a tag and Discord rejects every post without one.
 
+**Pointing a kind somewhere new takes its threads with it.** Discord cannot move a thread between
+channels, so each item gets a replacement in the new one, and the thread it leaves gains a line
+linking to that replacement and is then locked and archived. The mirrored comments stay readable
+where they were. Ten threads move per run and the reply says how many are left, so a long backlog
+is a few runs of the same command; running it again with the same channel is how you carry on.
+
+That is the fix for registering in the wrong channel, which used to be permanent: the mapping was
+corrected, new items landed correctly, and every item that already had a thread went on being
+written to in the wrong place for ever.
+
 ## Running it on a server
 
 `compose.prod.yaml` and `Caddyfile` are the server stack. Three things they do that the laptop
@@ -253,7 +263,7 @@ Retention bounds it and the payload goes with the row.
 | Command | Who | What |
 | --- | --- | --- |
 | `/register <github_repo_link>` | Admin, Project Manager | Binds a repository to this server and points PR threads at the current channel. One repository per server, and no way to undo it |
-| `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear |
+| `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/refresh [only]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
