@@ -4830,3 +4830,67 @@ to set the project number will find it.
   and which it has not. Taken rather than missed: one route behind it does anything and it refuses
   every request without a valid HMAC. `Caddyfile` says so, which is where somebody reversing that
   decision would be looking.
+
+## Revisiting the decision against deploying itself
+
+- The reason written down for doing this by hand was that Watchtower or a pull loop "would also
+  mean a green push to main restarting a live bot with no one watching". That is right about
+  `edge` and it is an argument about which tag is followed, not about whether anything follows
+  one. `deploy/` follows `stable`, which `release.yml` now moves on a `v*` tag and nowhere else,
+  so a merge to main publishes an image and deploys nothing, and a deploy is a `git push --tags`
+  somebody typed. Following `edge` is still a line in `.env` for anyone who wants it.
+- The server pulls. A systemd timer asks ghcr.io for one manifest every five minutes and compares
+  its digest with the one the app container is running, so the ordinary run downloads nothing.
+  Nothing pushes to the box, which is what makes this worth doing on a public repository with a
+  password-only root login: there is no deploy key in Actions to leak, because there is no
+  inbound path at all. The credential it reads is the GHCR pull token `docker login` already
+  wrote to `/root/.docker/config.json`.
+- The cost of a restart was smaller than this project had written down. `stop_grace_period` is
+  30s and the worker is asked to stop rather than cancelled, so it finishes the delivery in hand
+  and hands the rest of its batch back: `run_once` releases `deliveries[index:]` as soon as
+  `_stopping` is set. The fifteen minutes of stalled mirroring is what a SIGKILL costs. A clean
+  stop costs the one delivery that was mid-Discord-call and did not finish inside the five second
+  shutdown grace.
+- What it does cost, and what the timer cannot fix, is the twenty to forty seconds where Caddy
+  has nothing to proxy to and answers 502. GitHub does not retry a webhook, so a delivery landing
+  in that window is gone until somebody redelivers it by hand. That is true of the manual deploy
+  as well, and it is the strongest argument for the `stable` gate: a deploy you chose is a deploy
+  whose timing you chose.
+- A failed migration was already free. `app` waits on `service_completed_successfully`, so
+  `up -d` aborts before the old container is stopped and the previous build goes on serving. The
+  window worth fearing is the other one: a migration that succeeds and an app that will not start.
+  The script rolls the image back to `sha-<previous commit>`, pins it in `.env` so the next manual
+  `up -d` cannot undo the rollback, and holds further deploys. It cannot roll the schema back, and
+  says so in the Discord message rather than in a comment nobody reads.
+- `/health` earns the `version` field it got last week. The script reads the commit off the image
+  in the registry, deploys, and then asks the public endpoint which commit is answering; a deploy
+  that reports healthy while serving the old build is a failure like any other.
+
+## A finished item's thread gets out of the way
+
+- Closing an issue, or closing or merging a pull request, now shuts its thread: locked against
+  replies and archived out of the channel, which is what Discord's own client calls closing one.
+  Pull requests were never shut by any webhook before this, only by `/set_done`, so a merged one
+  kept a live thread for ever. Closes #76 and #77.
+- This file already said the opposite. "Locking no longer archives the thread" is further up,
+  and its reasoning was right: an archived thread rejects every edit, and a closed issue goes on
+  receiving labels, assignments and comments that have to reach it. What answers it is that every
+  write reopens the thread first and the delivery shuts it again afterwards, which is a step that
+  did not exist then. The closing header is the case that proves it is needed: it is posted after
+  the sync has shut the thread, so without it the bot reopened the thread it had just announced
+  the closing of.
+- Lock and archive are one state and go in one edit. Two calls could leave a thread archived and
+  unlocked, and anybody may reopen an unlocked thread, so the first reply would put it back in the
+  channel while the row went on saying it was shut. One edit is applied or refused whole.
+- `Manage Threads` is now refused at `/register` and `/set_channel` rather than warned about, and
+  a close Discord refuses says so in the thread. Both, because a gate cannot help a repository
+  registered before it existed and the permission can be taken away afterwards.
+- A refused close no longer fails the delivery. It used to raise, and a missing permission is
+  permanent, so the delivery was dropped on its first attempt and took the closing header down
+  with it: the thread said nothing at all rather than saying the wrong thing. Extending that to
+  pull requests would have lost every close on a server without the permission.
+- One thing found by running it. A pull request's policy has to answer three ways, not two.
+  Closed means shut, and open means give the thread back, but open *and* DONE has to mean leave it
+  alone, or the next `synchronize` webhook undoes `/set_done`. Answering only the first two also
+  meant the sync started unlocking threads during a command that had said it would handle the lock
+  itself, which failed the command outright on a refusal it was built to survive.
