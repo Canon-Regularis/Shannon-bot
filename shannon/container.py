@@ -62,6 +62,7 @@ from shannon.services.sync.policies import (
     TicketPolicy,
     channel_fallbacks,
 )
+from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
 
@@ -263,16 +264,25 @@ def _event_router(
         else:
             await issue_sync.sync(await github.get_issue(owner, name, note.item_number))
 
-    comments = ItemNoteMirror(sessionmaker, threads, render=format_comment, rebuild=rebuild)
-    reviews = ItemNoteMirror(sessionmaker, threads, render=format_review, rebuild=rebuild)
+    # Everything that posts into a thread gets one of these, because posting is what reopens a
+    # thread: Discord takes no message into an archived one, so a comment on a closed issue and
+    # the closing header itself both leave the thread open behind them unless it is shut again.
+    shut_again = KeepsThreadsShut(sessionmaker, threads)
+
+    comments = ItemNoteMirror(
+        sessionmaker, threads, render=format_comment, rebuild=rebuild, shut_again=shut_again
+    )
+    reviews = ItemNoteMirror(
+        sessionmaker, threads, render=format_review, rebuild=rebuild, shut_again=shut_again
+    )
 
     router = EventRouter()
     # One of each for both kinds of item, because a label moves the same way on either and so
     # does a close. Given to the item handlers rather than to the sync service: the sync runs for
     # commands and the board as well, and neither of those has a delivery to announce.
     announce = _every(
-        LabelLine(sessionmaker, threads, render=format_label_change),
-        StateLine(sessionmaker, threads, render=format_state_change),
+        LabelLine(sessionmaker, threads, render=format_label_change, shut_again=shut_again),
+        StateLine(sessionmaker, threads, render=format_state_change, shut_again=shut_again),
     )
     router.register(
         "pull_request", build_item_handler(pr_sync, parse_pull_request_event, announce=announce)

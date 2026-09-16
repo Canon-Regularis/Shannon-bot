@@ -36,15 +36,49 @@ PULL_REQUEST = PullRequestSnapshot(**COMMON)
 ISSUE = IssueSnapshot(**COMMON)
 
 
-class TestWhatEachPolicyLocks:
-    def test_a_pull_request_thread_is_left_alone(self) -> None:
-        assert PullRequestPolicy().locked(PULL_REQUEST) is None
+class TestWhatEachPolicyShuts:
+    """Three answers, and the pull request needs all three.
 
-    def test_an_open_issue_is_unlocked(self) -> None:
-        assert IssuePolicy().locked(ISSUE) is False
+    True and False are the thread being shut and given back. None is the one that is easy to
+    lose: it means leave the thread exactly as it is, and it is the only thing standing between
+    `/set_done` and the next `synchronize` webhook undoing it.
+    """
 
-    def test_a_closed_issue_is_locked(self) -> None:
-        assert IssuePolicy().locked(replace(ISSUE, state="closed")) is True
+    def test_a_closed_pull_request_is_shut(self) -> None:
+        closed = replace(PULL_REQUEST, state="closed")
+
+        assert PullRequestPolicy().shut(closed, status=Status.NOT_REVIEWED) is True
+
+    def test_a_merged_pull_request_is_shut(self) -> None:
+        """Merged and abandoned are one case here, which `display_state` already folds."""
+        merged = replace(PULL_REQUEST, state="closed", merged=True)
+
+        assert PullRequestPolicy().shut(merged, status=Status.NOT_REVIEWED) is True
+
+    def test_set_done_survives_the_next_webhook(self) -> None:
+        """The trap. `/set_done` shuts an OPEN pull request's thread and the payload has no idea,
+        so answering False here would give the thread back on the next `synchronize` and undo a
+        command somebody ran on purpose. Only the row's status can tell it apart.
+        """
+        assert PullRequestPolicy().shut(PULL_REQUEST, status=Status.DONE) is None
+
+    def test_a_reopened_pull_request_gets_its_thread_back(self) -> None:
+        """The other half, and the reason None is not the answer for every open one. Nothing else
+        on any path ever unshuts a pull request's thread."""
+        assert PullRequestPolicy().shut(PULL_REQUEST, status=Status.NOT_REVIEWED) is False
+
+    def test_an_open_issue_is_given_back(self) -> None:
+        assert IssuePolicy().shut(ISSUE, status=Status.NOT_REVIEWED) is False
+
+    def test_a_closed_issue_is_shut(self) -> None:
+        closed = replace(ISSUE, state="closed")
+
+        assert IssuePolicy().shut(closed, status=Status.NOT_REVIEWED) is True
+
+    def test_an_issue_does_not_read_the_status(self) -> None:
+        """It has no `/set_done` of its own: the command sends you to close it on GitHub, so the
+        payload is the whole story and DONE on an open issue means nothing here."""
+        assert IssuePolicy().shut(ISSUE, status=Status.DONE) is False
 
 
 class TestWhatEachPolicyStores:
@@ -109,12 +143,15 @@ class TestWhatTheRowAloneSaysAboutTheLock:
     Each kind answers from a different column, and the differences are the point.
     """
 
-    def test_a_pull_request_is_finished_when_somebody_says_so(self) -> None:
-        """`/set_done` is the only thing that shuts one, and it writes the status."""
+    def test_a_pull_request_is_finished_when_somebody_says_so_or_github_does(self) -> None:
+        """`/set_done` writes the status, and closing or merging writes the state. Either shuts
+        it, which is why both arms are asserted: an `or` short-circuits."""
         policy = PullRequestPolicy()
 
         assert policy.shut_by_the_row(status=Status.DONE, github_state="open") is True
-        assert policy.shut_by_the_row(status=Status.IN_REVIEW, github_state="closed") is False
+        assert policy.shut_by_the_row(status=Status.IN_REVIEW, github_state="closed") is True
+        assert policy.shut_by_the_row(status=Status.IN_REVIEW, github_state="merged") is True
+        assert policy.shut_by_the_row(status=Status.IN_REVIEW, github_state="open") is False
 
     def test_an_issue_is_finished_when_github_closes_it(self) -> None:
         """Its state, not its status. `/set_done` can put an open issue at DONE, and an open

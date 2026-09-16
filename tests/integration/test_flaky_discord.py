@@ -56,9 +56,9 @@ class FlakyGateway(FakeThreadGateway):
         self._maybe_fail("post")
         return await super().post(**kwargs)
 
-    async def set_locked(self, **kwargs):
+    async def set_shut(self, **kwargs):
         self._maybe_fail("lock")
-        return await super().set_locked(**kwargs)
+        return await super().set_shut(**kwargs)
 
 
 async def drain(container, *, rounds: int = 400) -> None:

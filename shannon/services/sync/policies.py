@@ -60,8 +60,13 @@ class SyncPolicy(Protocol):
 
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status: ...
 
-    def locked(self, snapshot: TrackedSnapshot) -> bool | None:
-        """Whether the thread should be locked, or None to leave it as it is."""
+    def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
+        """Whether the thread should be shut, or None to leave it as it is.
+
+        `status` is the row's, as this delivery leaves it. Only the pull request reads it, and
+        only because it is the one thing that separates a thread `/set_done` shut from one
+        nobody has shut, on an item whose payload says nothing about either.
+        """
         ...
 
     def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
@@ -128,13 +133,29 @@ class PullRequestPolicy:
         """Closing a pull request does not move its workflow status; MVP 3 owns that."""
         return current
 
-    def locked(self, snapshot: PullRequestSnapshot) -> bool | None:
-        """Pull request threads are never locked automatically; MVP 3 owns that."""
-        return None
+    def shut(self, snapshot: PullRequestSnapshot, *, status: Status) -> bool | None:
+        """Three answers, and it needs all three.
+
+        Closed covers merged and abandoned alike, which `display_state` already folds together.
+
+        An open one at DONE is the case the status exists for. `/set_done` shut that thread and
+        the payload has no idea: answering False here would give it back on the next
+        `synchronize`, undoing a command somebody ran on purpose.
+
+        Anything else is False rather than None, and that is what gives a reopened pull request
+        its thread back. Nothing else on any path ever does. Answering it on every delivery
+        rather than only on the reopen is what makes it self-healing, because a refusal is then
+        retried by whatever arrives next instead of being lost.
+        """
+        if snapshot.closed:
+            return True
+        if status is Status.DONE:
+            return None
+        return False
 
     def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
-        """`/set_done` is the only thing that shuts one, and it writes the status."""
-        return status is Status.DONE
+        """`/set_done` writes the status, and closing or merging writes the state."""
+        return status is Status.DONE or github_state != "open"
 
     def thread_name(self, snapshot: PullRequestSnapshot) -> str:
         return formatting.thread_name(snapshot)
@@ -182,11 +203,13 @@ class IssuePolicy:
             return Status.NOT_REVIEWED
         return current
 
-    def locked(self, snapshot: IssueSnapshot) -> bool | None:
+    def shut(self, snapshot: IssueSnapshot, *, status: Status) -> bool | None:
+        """GitHub decides, and the status is not asked. An issue has no `/set_done` of its own:
+        the command sends you to close it on GitHub instead, so the payload is the whole story."""
         return snapshot.closed
 
     def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
-        """The same answer `locked` gives, read from the column the payload writes into rather
+        """The same answer `shut` gives, read from the column the payload writes into rather
         than from the payload. Not the status: `/set_done` can put an open issue at DONE, and an
         open issue's thread is one people are still meant to be talking in."""
         return github_state == "closed"
@@ -236,9 +259,10 @@ class TicketPolicy:
         """
         return status_from_column(snapshot.column) or current
 
-    def locked(self, snapshot: TicketSnapshot) -> bool | None:
+    def shut(self, snapshot: TicketSnapshot, *, status: Status) -> bool | None:
         """Left alone. A board column is not a closed state, and a ticket that moves back out of
-        Done would be locked in a thread nobody could answer in."""
+        Done would be shut in a thread nobody could answer in, with no GitHub event coming to
+        open it again."""
         return None
 
     def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:

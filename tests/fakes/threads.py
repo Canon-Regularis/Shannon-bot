@@ -38,25 +38,25 @@ class FakeThreadGateway:
         # content, which is what a card mirrored twice looks like.
         self.updates: list[int] = []
         self.renames: list[tuple[int, str]] = []
-        # Where the lock ENDED UP, recorded only when it moved. A test asking whether a thread
+        # Where the thread ENDED UP, recorded only when it moved. A test asking whether a thread
         # is shut wants this one.
-        self.locks: list[tuple[int, bool]] = []
+        self.shuts: list[tuple[int, bool]] = []
         # Every time Discord was ASKED, whether or not the answer changed anything and whether or
         # not it was refused. The two are not the same question, and a test meaning to say "this
-        # cost no Discord call" cannot use the one above: setting a lock to what it already is
+        # cost no Discord call" cannot use the one above: shutting a thread that is already shut
         # records nothing there, so the assertion passes whether the call was made or not.
-        self.lock_calls: list[tuple[int, bool]] = []
+        self.shut_calls: list[tuple[int, bool]] = []
         self.deleted: list[int] = []
         self.unarchived: list[int] = []
         # Set by a test that needs the next thread creation to fail the way a Discord outage
         # would, so what happens to everything queued behind it can be observed.
         self.fail_next_create = False
-        # The same for locking, which is a separate permission on Discord's side: a server can
+        # The same for shutting, which is a separate permission on Discord's side: a server can
         # let this bot open and edit threads and not let it close one.
-        self.fail_next_lock = False
+        self.fail_next_shut = False
         # A server that will never let it close one, which is a different thing: no amount of
         # waiting grants a permission, and a caller with nobody to tell has to stop asking.
-        self.refuses_every_lock = False
+        self.refuses_every_shut = False
         # And for rewriting a thread that already exists, which is what a card that moves after
         # its first mirror needs.
         self.fail_next_update = False
@@ -127,23 +127,25 @@ class FakeThreadGateway:
         been removed, which Discord reports as the same refusal as a missing permission."""
         return guild_id not in self.removed_from
 
-    async def set_locked(self, *, thread_id: int, locked: bool) -> None:
-        self.lock_calls.append((thread_id, locked))
-        if self.refuses_every_lock:
-            raise DiscordPermissionError("Discord will not let the bot lock the thread")
-        if self.fail_next_lock:
-            self.fail_next_lock = False
-            raise DiscordGatewayError("Discord refused to lock the thread")
+    async def set_shut(self, *, thread_id: int, shut: bool) -> None:
+        self.shut_calls.append((thread_id, shut))
+        if self.refuses_every_shut:
+            raise DiscordPermissionError("Discord will not let the bot close the thread")
+        if self.fail_next_shut:
+            self.fail_next_shut = False
+            raise DiscordGatewayError("Discord refused to close the thread")
         thread = self.threads.get(thread_id)
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
-        if thread.locked == locked and not thread.archived:
+        if thread.locked == shut and thread.archived == shut:
             return
-        # The real gateway unarchives in the same edit that changes the lock.
-        thread.archived = False
-        if thread.locked != locked:
-            thread.locked = locked
-            self.locks.append((thread_id, locked))
+        # One edit setting both, the way the real gateway does it. Moving them together here is
+        # what makes a test able to catch a caller that leaves a thread archived and unlocked,
+        # which is the pairing that quietly reopens on the next reply.
+        thread.archived = shut
+        if thread.locked != shut:
+            thread.locked = shut
+            self.shuts.append((thread_id, shut))
 
     async def post(self, *, thread_id: int, content: str) -> int | None:
         thread = self._wake(thread_id)

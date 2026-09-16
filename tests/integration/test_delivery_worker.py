@@ -236,7 +236,7 @@ async def test_deliveries_for_one_item_are_handled_in_order(
 
     await client.drain()
 
-    assert [locked for _, locked in threads.locks] == [True, False]
+    assert [locked for _, locked in threads.shuts] == [True, False]
 
 
 async def test_the_worker_takes_a_whole_batch_at_once(queue: WebhookDeliveryQueue) -> None:

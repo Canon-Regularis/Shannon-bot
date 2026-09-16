@@ -22,7 +22,9 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   The claim is taken before the message goes out and handed back if it fails.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
   statuses told apart from ordinary labels. Closing, merging or reopening posts a header saying
-  what became of the thread. Both exist because a Discord edit is silent: it posts no message,
+  what became of the thread, and a finished item's thread is shut: locked and archived out of the
+  channel, and opened again if the item is. Both exist because a Discord edit is silent: it posts
+  no message,
   notifies nobody, and does not bump the thread, so a change that only moves the block looks from
   the channel like nothing happening.
 - **Manual sync.** `/pr` and `/issue` pull an item from the REST API, for whatever the webhooks
@@ -106,9 +108,20 @@ Discord counts that as reading history even though the bot wrote it. Without thi
 appears once, correctly, and then never changes again, and every later delivery for that item is
 refused as a missing permission rather than retried.
 
-`Manage Threads` fails later still. Everything works until an issue closes or somebody runs
-`/set_done`, and then the lock is refused; it is a separate permission from the ones that open and
-write to a thread.
+`Manage Threads` is refused by `/register` and `/set_channel` if it is missing, which is the only
+one of these checked at the door. It is what shuts a finished item's thread, meaning locked
+against replies and archived out of the channel, which is what Discord's client calls closing a
+thread. Both halves go in one edit, so a server without it gets neither and its threads simply
+stay open.
+
+It is also what reopens a shut thread to write in it, so a comment on a closed issue needs it as
+much as the close did. Grant it before anything closes. Adding it later is enough on its own,
+because the row remembers that a thread is owed a shut; taking it away afterwards is not, because
+those threads then cannot be reopened to write in and those items stop mirroring until it is put
+back.
+
+A repository registered before that check existed never passed it, and the permission can be
+revoked at any time, so a close that is refused says so in the thread rather than only in the log.
 
 On the very first start the commands are registered globally, and Discord serves those from a cache
 that can take up to an hour to catch up. The log says so. Until it does, typing `/` shows nothing
@@ -172,6 +185,23 @@ Only one copy may run at a time: two would both hold the Discord gateway and bot
 queue. `SHANNON_IMAGE_TAG` defaults to `edge`, which moves on every green push to main. The
 Postgres credentials are read once, when the volume is created.
 
+### Doing that without typing it
+
+`deploy/` is a systemd timer that does the two commands above for you, and nothing else. It asks
+ghcr.io every five minutes whether the tag it follows names a different image from the one the
+app container is running, and on the days the answer is no it downloads nothing and writes
+nothing. The server pulls; nothing pushes to it, and no credential for this machine exists in
+GitHub. `deploy/README.md` is the whole story; the short version is
+`bash install.sh` on the box and then a choice in `.env`:
+
+- `SHANNON_IMAGE_TAG=stable` deploys when you push a `v*` tag, and does nothing on a merge to
+  main. Recommended, and the reason the release workflow publishes a `stable` tag at all.
+- `SHANNON_IMAGE_TAG=edge` deploys every green merge, within five minutes, with nobody watching.
+
+A deploy announces itself in Discord through a webhook, rolls the image back if the new container
+never reports healthy, and stops deploying after a failure rather than retrying a bad image all
+night. It cannot roll the database back, which `deploy/README.md` is blunt about.
+
 ## Configuration
 
 Read from the environment with a `SHANNON_` prefix, or from `.env`. Everything has a default and
@@ -229,7 +259,7 @@ Retention bounds it and the payload goes with the row.
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
-| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` locks the thread, and a pull request has to be ready for merge first |
+| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
 
 Guild only, replies always ephemeral. Role names are configured strings, matched case

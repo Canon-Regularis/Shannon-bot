@@ -232,24 +232,36 @@ _STATE_HEADINGS = {
 # all, so pointing somebody at GitHub to undo it would send them looking for a button that is not
 # there. This is not a corner: `/set_done` is what locks a pull request and the requirements have
 # it run before the merge, so a merged item arriving in a shut thread is the ordinary order.
-_LOCKED = "-# This thread is locked."
-_LOCKED_UNTIL_REOPENED = "-# This thread is locked. Reopen the item on GitHub to reopen it here."
+_SHUT = "-# This thread is locked and archived."
+_SHUT_UNTIL_REOPENED = (
+    "-# This thread is locked and archived. Reopen the item on GitHub to reopen it here."
+)
 _OPEN_AGAIN = "-# This thread is open again."
+# Said in the thread rather than left in a log, because the log is read by nobody and the person
+# who just closed the item is looking at this. It names the permission because that is the whole
+# of the fix, and Discord's own refusal names nothing.
+_WOULD_NOT_SHUT = "-# This thread could not be closed: the bot needs Manage Threads."
 
 
-def format_state_change(change: StateChange, *, locked: bool) -> str:
+def format_state_change(change: StateChange, *, shut: bool, refused: bool = False) -> str:
     """Announce an item closing, merging or reopening, and say what became of the thread.
 
     The same silence the tag line answers, one step louder. Closing an issue rewrites the block
-    and locks the thread, and Discord says nothing about either, so an item could close, shut
-    the discussion, and leave no trace in the channel at all.
+    and shuts the thread, and Discord says nothing about either, so an item could close, end the
+    discussion, and leave no trace in the channel at all.
 
-    `locked` is what the thread actually is, read off the row, rather than what this kind of
-    item usually does. Both halves of that matter. A pull request closes without its thread
-    being shut, so a line claiming otherwise would tell people they cannot reply where they can.
-    And a reopen whose unlock Discord refused is stepped over rather than failed, on purpose, so
-    a reopened item can reach here in a thread that is still shut: promising it is open again is
-    the one sentence here that would be a plain lie, in the one case that actually happens.
+    `shut` is what the thread actually is, read off the row, rather than what this kind of item
+    usually does. Both halves of that matter. A thread this bot could not shut is one people can
+    still reply in, so a line claiming otherwise would be telling them they cannot. And a reopen
+    whose unlock Discord refused is stepped over rather than failed, on purpose, so a reopened
+    item can reach here in a thread that is still shut: promising it is open again is the one
+    sentence here that would be a plain lie, in the one case that actually happens.
+
+    `refused` separates the two ways of not being shut, which used to be one. A pull request
+    nobody has finished is not shut and there is nothing to say about that. A thread Discord
+    would not let this bot shut is not shut either, and saying nothing leaves somebody looking
+    at a closed item in a live thread with no idea why. The refusal is why this reaches here at
+    all: the delivery used to be dropped on it, taking the whole announcement with it.
 
     No untrusted text reaches this, which is why nothing is escaped and nothing is defused. The
     words are all this module's own and the three headings are constants. Do not add `fit` for
@@ -258,15 +270,15 @@ def format_state_change(change: StateChange, *, locked: bool) -> str:
     heading = _STATE_HEADINGS[change]
 
     if change is StateChange.REOPENED:
-        if locked:
+        if shut:
             return heading
         return f"{heading}\n{_OPEN_AGAIN}"
 
-    if not locked:
-        return heading
+    if not shut:
+        return f"{heading}\n{_WOULD_NOT_SHUT}" if refused else heading
     if change is StateChange.MERGED:
-        return f"{heading}\n{_LOCKED}"
-    return f"{heading}\n{_LOCKED_UNTIL_REOPENED}"
+        return f"{heading}\n{_SHUT}"
+    return f"{heading}\n{_SHUT_UNTIL_REOPENED}"
 
 
 def format_comment(

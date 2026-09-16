@@ -51,6 +51,7 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
             view_channel=True,
             create_public_threads=True,
             send_messages_in_threads=True,
+            manage_threads=True,
         )
 
         assert why_threads_will_not_open(channel) is None
@@ -81,13 +82,17 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
             view_channel=True,
             send_messages=True,
             send_messages_in_threads=True,
+            manage_threads=True,
         )
 
         assert why_threads_will_not_open(forum) is None
 
-    def test_manage_threads_is_not_required(self) -> None:
-        """It is needed only to lock a finished item's thread, and both paths that want it step
-        over a refusal and say so rather than failing."""
+    def test_manage_threads_is_required(self) -> None:
+        """Asked for here because this is the last moment anybody is looking. It is what shuts a
+        finished item's thread and what reopens one to write a late comment into, and the runtime
+        path steps over a refusal so the mirror survives it, which means a server that skipped it
+        would never find out except by noticing nothing had ever closed.
+        """
         channel = a_channel(
             discord.TextChannel,
             view_channel=True,
@@ -96,7 +101,10 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
             manage_threads=False,
         )
 
-        assert why_threads_will_not_open(channel) is None
+        refusal = why_threads_will_not_open(channel)
+
+        assert refusal is not None
+        assert "Manage Threads" in refusal
 
     def test_a_guild_that_is_not_cached_yet_is_not_guessed_about(self) -> None:
         """A client still starting has no member object to ask with, and the answer would be a
@@ -359,28 +367,51 @@ class TestArchivedThreads:
 
         existing.edit.assert_not_awaited()
 
-    async def test_locking_reopens_in_the_same_edit(self) -> None:
-        """One call rather than two, and a locked thread needs Manage Threads either way."""
-        existing = thread(archived=True, locked=False)
+    async def test_shutting_locks_and_archives_in_one_edit(self) -> None:
+        """One edit is one PATCH, which is the whole safety property. Two calls could leave a
+        thread archived and unlocked, and anybody may reopen an unlocked thread, so the first
+        reply would put it back in the channel while the row went on saying it was shut.
+        """
+        existing = thread(archived=False, locked=False)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.set_locked(thread_id=500, locked=True)
+        await gateway.set_shut(thread_id=500, shut=True)
 
-        existing.edit.assert_awaited_once_with(archived=False, locked=True)
+        existing.edit.assert_awaited_once_with(archived=True, locked=True)
 
-    async def test_an_archived_thread_is_reopened_even_when_the_lock_already_matches(self) -> None:
+    async def test_reopening_unlocks_and_unarchives_in_one_edit(self) -> None:
         existing = thread(archived=True, locked=True)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.set_locked(thread_id=500, locked=True)
+        await gateway.set_shut(thread_id=500, shut=False)
 
-        existing.edit.assert_awaited_once_with(archived=False, locked=True)
+        existing.edit.assert_awaited_once_with(archived=False, locked=False)
 
-    async def test_nothing_happens_when_the_thread_is_already_as_wanted(self) -> None:
+    async def test_a_thread_something_woke_is_shut_again(self) -> None:
+        """The case the whole feature rests on. Every write unarchives, so a shut thread that has
+        just had a comment posted into it is locked and not archived, and the two disagreeing is
+        exactly what has to be corrected rather than read as already done.
+        """
         existing = thread(archived=False, locked=True)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.set_locked(thread_id=500, locked=True)
+        await gateway.set_shut(thread_id=500, shut=True)
+
+        existing.edit.assert_awaited_once_with(archived=True, locked=True)
+
+    async def test_a_thread_already_shut_costs_no_call(self) -> None:
+        existing = thread(archived=True, locked=True)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_shut(thread_id=500, shut=True)
+
+        existing.edit.assert_not_awaited()
+
+    async def test_a_thread_already_open_costs_no_call(self) -> None:
+        existing = thread(archived=False, locked=False)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_shut(thread_id=500, shut=False)
 
         existing.edit.assert_not_awaited()
 
@@ -592,7 +623,7 @@ class TestBeforeTheGatewayIsConnected:
             ("create", lambda g: g.create(channel_id=10, name="n", content="c")),
             ("update", lambda g: g.update(thread_id=1, message_id=2, name="n", content="c")),
             ("post", lambda g: g.post(thread_id=1, content="c")),
-            ("set_locked", lambda g: g.set_locked(thread_id=1, locked=True)),
+            ("set_shut", lambda g: g.set_shut(thread_id=1, shut=True)),
         ],
     )
     async def test_it_says_so_rather_than_leaking_an_internal_error(self, what, call) -> None:

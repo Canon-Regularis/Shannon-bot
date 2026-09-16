@@ -31,9 +31,9 @@ from shannon.discord_bot.permissions import RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
-    LocksThread,
     OpensThreads,
     PostsToThread,
+    ShutsThread,
     ThreadGateway,
 )
 from shannon.github.client import GitHubClient, HttpGitHubClient, LooksUpUsers
@@ -57,7 +57,7 @@ from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
-    OpensAndLocksThreads,
+    OpensAndShutsThreads,
     SyncsItems,
     ThreadBinding,
 )
@@ -86,8 +86,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ThreadGateway, DiscordThreadGateway),
     (OpensThreads, DiscordThreadGateway),
     (PostsToThread, DiscordThreadGateway),
-    (LocksThread, DiscordThreadGateway),
-    (OpensAndLocksThreads, DiscordThreadGateway),
+    (ShutsThread, DiscordThreadGateway),
+    (OpensAndShutsThreads, DiscordThreadGateway),
     (GitHubClient, FakeGitHubClient),
     (GitHubClient, HttpGitHubClient),
     (LooksUpUsers, FakeGitHubClient),

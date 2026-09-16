@@ -99,14 +99,45 @@ async def test_closing_does_not_touch_the_workflow_status(
     assert item.status == Status.NOT_REVIEWED
 
 
-async def test_a_closed_thread_is_left_unlocked(
+async def test_a_closed_pull_request_is_shut(
     registered: Repository,
     sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    """Issues lock when they close. Pull requests do not, until /SET_DONE arrives in MVP 3."""
-    await sync_service.sync(pr_event("opened"))
+    """Issue #76. Pull request threads used to be left open by every webhook, with `/set_done`
+    the only thing that ever shut one, so a merged pull request kept a live thread for ever."""
+    opened = await sync_service.sync(pr_event("opened"))
     await sync_service.sync(pr_event("closed", state="closed"))
 
-    assert threads.locks == []
+    thread = threads.threads[opened.thread_id]
+    assert (thread.locked, thread.archived) == (True, True)
+
+
+async def test_a_merged_pull_request_is_shut(
+    registered: Repository,
+    sync_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    pr_event,
+) -> None:
+    opened = await sync_service.sync(pr_event("opened"))
+    await sync_service.sync(pr_event("closed", **MERGED))
+
+    thread = threads.threads[opened.thread_id]
+    assert (thread.locked, thread.archived) == (True, True)
+
+
+async def test_a_reopened_pull_request_gets_its_thread_back(
+    registered: Repository,
+    sync_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    pr_event,
+) -> None:
+    """Nothing else on any path ever unshuts a pull request's thread, which is why the policy
+    answers False for an open one rather than leaving it alone."""
+    opened = await sync_service.sync(pr_event("opened"))
+    await sync_service.sync(pr_event("closed", **MERGED))
+    await sync_service.sync(pr_event("reopened", state="open"))
+
+    thread = threads.threads[opened.thread_id]
+    assert (thread.locked, thread.archived) == (False, False)

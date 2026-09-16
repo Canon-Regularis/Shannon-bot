@@ -56,6 +56,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            # What the server follows, and the only tag here that means somebody decided. `edge`
+            # moves on every green push to main, which is the right thing for a tag nobody
+            # deploys from and the wrong thing for one a timer watches: a merge on a Friday
+            # evening would restart a live bot with nobody looking at it. Moving this one is a
+            # `git tag v0.6.0 && git push --tags`, which is a deliberate act, recorded in git,
+            # and already the thing this project writes a CHANGELOG entry for.
+            type=raw,value=stable,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # The immutable one. Rollback pins this: `sha-<full commit>` always names one build.
             type=sha,format=long
           labels: |
             org.opencontainers.image.title=Shannon Bot

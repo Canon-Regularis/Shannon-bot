@@ -63,9 +63,16 @@ def _what_this_bot_cannot_do_there(channel: discord.abc.GuildChannel) -> str | N
     Asked of the bot rather than of the caller. An administrator picking a channel they can see
     says nothing about whether this bot can, and Discord will happily offer one it cannot.
 
-    Manage Threads is deliberately not required. It is needed only to lock a finished item's
-    thread, everything else works without it, and both paths that want it now step over a
-    refusal and say so rather than failing.
+    Manage Threads is required, and it is the one here that costs a working feature rather than
+    the whole mirror. It is what shuts a finished item's thread, and what reopens one afterwards
+    to write a late comment into it, so without it every item that closes leaves its thread in
+    the channel for ever. Asked for at this door because it is the last moment anybody is
+    looking: the runtime path steps over a refusal so the mirror survives one, which means a
+    server that skipped it would never find out except by noticing nothing had closed.
+
+    That leaves a gap this cannot close, and the closing header carries the other half. A
+    repository registered before this check existed never passed it, and the permission can be
+    taken away afterwards, so a refusal still has to say so where somebody is reading.
 
     Skipped where the guild is not cached, which is a client that is still starting: the answer
     would be a guess, and the checks above are the ones this exists for.
@@ -81,6 +88,7 @@ def _what_this_bot_cannot_do_there(channel: discord.abc.GuildChannel) -> str | N
             ("View Channel", allowed.view_channel),
             ("Send Messages", allowed.send_messages),
             ("Send Messages in Threads", allowed.send_messages_in_threads),
+            ("Manage Threads", allowed.manage_threads),
         )
     else:
         # A text channel needs the thread opened and then written in, which are two separate
@@ -89,6 +97,7 @@ def _what_this_bot_cannot_do_there(channel: discord.abc.GuildChannel) -> str | N
             ("View Channel", allowed.view_channel),
             ("Create Public Threads", allowed.create_public_threads),
             ("Send Messages in Threads", allowed.send_messages_in_threads),
+            ("Manage Threads", allowed.manage_threads),
         )
 
     missing = [name for name, held in wanted if not held]
@@ -130,10 +139,17 @@ class PostsToThread(Protocol):
     async def post(self, *, thread_id: int, content: str) -> int | None: ...
 
 
-class LocksThread(Protocol):
-    """Closing a thread to further replies, or opening it again."""
+class ShutsThread(Protocol):
+    """Shutting a finished item's thread, or giving it back.
 
-    async def set_locked(self, *, thread_id: int, locked: bool) -> None: ...
+    Shut means locked against replies and archived out of the channel, which is what Discord's
+    own client calls closing a thread. One verb rather than two on purpose: the two halves go in
+    one edit, so they cannot end up disagreeing. Archived without the lock is the pairing that
+    matters, because anybody may reopen an unlocked thread and the first reply would do it,
+    silently, under a block saying the item is finished.
+    """
+
+    async def set_shut(self, *, thread_id: int, shut: bool) -> None: ...
 
 
 class KnowsItsServers(Protocol):
@@ -147,12 +163,12 @@ class KnowsItsServers(Protocol):
     def is_in(self, guild_id: int) -> bool: ...
 
 
-class ThreadGateway(OpensThreads, PostsToThread, LocksThread, KnowsItsServers, Protocol):
+class ThreadGateway(OpensThreads, PostsToThread, ShutsThread, KnowsItsServers, Protocol):
     """Everything this project does to Discord threads.
 
     The container passes one object satisfying every role, because one Discord client is all
     there is. Callers name the roles they use instead: the notifier only posts, the note mirror
-    posts and asks which servers this bot is in, the sync service locks and asks the same, and
+    posts and asks which servers this bot is in, the sync service shuts and asks the same, and
     only the thread binding opens or removes anything. Depending on the whole of this to call one
     method of it is how a collaborator ends up able to delete a thread it had no reason to
     touch.
@@ -246,17 +262,24 @@ class DiscordThreadGateway:
             message = await thread.send(content)
         return message.id
 
-    async def set_locked(self, *, thread_id: int, locked: bool) -> None:
+    async def set_shut(self, *, thread_id: int, shut: bool) -> None:
         thread = await self._thread(thread_id)
-        if thread.locked == locked and not thread.archived:
+        if thread.locked == shut and thread.archived == shut:
             return
 
-        with _translated("lock the thread" if locked else "unlock the thread"):
-            # Locked but deliberately not archived. Archiving hides the thread and makes every
-            # later edit fail, and a closed issue still receives label and assignment events
-            # that have to reach its metadata. Unarchiving rides along with the lock change
-            # rather than costing a second call. The bot needs Manage Threads to write here.
-            await thread.edit(archived=False, locked=locked)
+        with _translated("close the thread" if shut else "reopen the thread"):
+            # Both halves in one edit, which is one PATCH: Discord applies them together or
+            # refuses them together, so there is no attempt that could leave a thread archived
+            # and unlocked. That pairing is the dangerous one, because anybody may reopen an
+            # unlocked thread and the first reply would, while the row went on saying shut.
+            #
+            # Archiving used to be refused here, on the grounds that a closed issue still gets
+            # label and comment events and an archived thread rejects every edit. Still true.
+            # What answers it is `_wake` below: every write reopens the thread first, and the
+            # delivery shuts it again once it has finished writing.
+            #
+            # The bot needs Manage Threads for this, and for reopening a thread it shut.
+            await thread.edit(archived=shut, locked=shut)
 
     def is_in(self, guild_id: int) -> bool:
         """Whether this bot is in that server at the moment.

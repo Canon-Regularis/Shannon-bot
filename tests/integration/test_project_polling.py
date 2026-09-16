@@ -1205,7 +1205,7 @@ class TestProgressRecordedForAStepThatFailed:
         await poller.run_once()
 
         board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         assert await poller.run_once() == 0
 
         thread_id = threads.created[0].thread_id
@@ -1398,7 +1398,7 @@ class TestProgressRecordedForAStepThatFailed:
         await poller.run_once()
 
         board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
-        threads.refuses_every_lock = True
+        threads.refuses_every_shut = True
         assert await poller.run_once() == 1, "the move it did carry out was reported as none"
 
         reads = len(github_client.pull_request_calls)
@@ -1427,12 +1427,12 @@ class TestProgressRecordedForAStepThatFailed:
         await poller.run_once()
 
         board.items = [wraps(ObjectType.PR, mirrored_pr, column="Done")]
-        threads.refuses_every_lock = True
+        threads.refuses_every_shut = True
         threads.removed_from.add(guild_id)
 
         assert await poller.run_once() == 0, "the move was written off while the bot was out"
 
-        threads.refuses_every_lock = False
+        threads.refuses_every_shut = False
         threads.removed_from.clear()
 
         assert await poller.run_once() == 1, "the card never came round again"
@@ -1567,7 +1567,7 @@ class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:
 
         opened = threads.created[0].thread_id
         assert threads.threads[opened].locked is False, "it arrived shut before anybody saw it"
-        assert threads.locks == [], "it touched the lock at all, which costs a call per card"
+        assert threads.shuts == [], "it touched the lock at all, which costs a call per card"
 
     async def test_a_card_dragged_back_out_of_done_is_not_left_shut(
         self,

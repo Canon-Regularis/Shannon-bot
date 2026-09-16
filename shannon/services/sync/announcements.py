@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import TrackedSnapshot
+from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,11 @@ class Arrival:
     # The number the queue gave this delivery, which is the order it reached this bot. It is what
     # every announcement is keyed on, because the delivery is the thing that repeats.
     arrived: int
+    # Whether a permission refused to shut the thread on this delivery. The one thing here that
+    # is the sync's outcome rather than the delivery's, and it is carried because the row cannot
+    # say it: a thread nobody asked to shut and one Discord would not let this bot shut both
+    # leave the column reading open, and only one of them is worth a line in the thread.
+    shut_refused: bool = False
 
 
 class AnnouncesInThread(Protocol):
@@ -79,9 +85,15 @@ class ClaimedLine:
     the coverage floor, and that test would prove nothing the first one has not.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker, threads: PostsToThread) -> None:
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        threads: PostsToThread,
+        shut_again: KeepsThreadsShut,
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
+        self._shut_again = shut_again
 
     async def say_once(
         self, *, tracked_item_id: int, thread_id: int, note_key: str, content: str
@@ -109,6 +121,15 @@ class ClaimedLine:
             # failing, so where it stands is often exactly here.
             await self._hand_back(tracked_item_id, note_key)
             raise
+
+        # Posting reopened the thread, because Discord will not take a message into an archived
+        # one. This is where the closing header lands, a moment after the sync shut the thread
+        # it is describing, so without this the thread the header says is closed is open.
+        #
+        # Required rather than optional, and that is deliberate. A collaborator that can be
+        # left out is one every test leaves out, and what it would be hiding is a feature that
+        # silently does nothing.
+        await self._shut_again.again(tracked_item_id=tracked_item_id, thread_id=thread_id)
 
     async def _claim(self, tracked_item_id: int, note_key: str) -> bool:
         async with self._sessionmaker() as session, session.begin():

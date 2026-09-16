@@ -12,6 +12,7 @@ from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import StateChange
 from shannon.domain.state_changes import state_change_of
 from shannon.services.sync.announcements import Arrival, ClaimedLine
+from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
@@ -19,20 +20,20 @@ logger = logging.getLogger(__name__)
 class Renderer(Protocol):
     """The words, which are the one thing this does not decide.
 
-    A protocol rather than a `Callable` alias, because `locked` is keyword only and a `Callable`
+    A protocol rather than a `Callable` alias, because `shut` is keyword only and a `Callable`
     cannot say so. An alias here describes a call nobody makes, and the disagreement does not
     show up in either module: it arrives as a TypeError from inside a Discord phase, which fails
     the delivery and comes back every time it is retried.
     """
 
-    def __call__(self, change: StateChange, *, locked: bool) -> str: ...
+    def __call__(self, change: StateChange, *, shut: bool, refused: bool = False) -> str: ...
 
 
 class StateLine:
     """Posts a header into an item's thread when the item closes, merges or reopens.
 
     The same silence the tag line answers, and the loudest case of it. Closing an issue rewrites
-    the metadata block and locks the thread, and Discord says nothing about either, so an item
+    the metadata block and shuts the thread, and Discord says nothing about either, so an item
     could close, shut the discussion under it, and leave no trace whatever in the channel. The
     only text anybody saw was the `/set_done` reply, and every command reply here is ephemeral,
     so nobody but the person who ran it ever read one.
@@ -49,9 +50,10 @@ class StateLine:
         threads: PostsToThread,
         *,
         render: Renderer,
+        shut_again: KeepsThreadsShut,
     ) -> None:
         self._sessionmaker = sessionmaker
-        self._line = ClaimedLine(sessionmaker, threads)
+        self._line = ClaimedLine(sessionmaker, threads, shut_again)
         self._render = render
 
     async def say(self, arrival: Arrival) -> None:
@@ -101,5 +103,9 @@ class StateLine:
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"state:{arrival.arrived}",
-            content=self._render(change, locked=item.discord_thread_locked is True),
+            content=self._render(
+                change,
+                shut=item.discord_thread_locked is True,
+                refused=arrival.shut_refused,
+            ),
         )

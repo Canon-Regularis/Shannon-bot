@@ -1,0 +1,35 @@
+# Checks the registry and deploys if there is something new. Run by shannon-deploy.timer.
+#
+# Type=oneshot with no Restart: a check that fails is not retried at once, it is picked up by the
+# next fire of the timer five minutes later. Retrying a failing deploy in a tight loop against a
+# process that may be half started is the way to turn one bad image into an outage.
+
+[Unit]
+Description=Deploy Shannon bot when a new image is published
+Documentation=https://github.com/Canon-Regularis/Shannon-bot/blob/main/deploy/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/shannon-deploy.env
+ExecStart=/usr/local/sbin/shannon-deploy
+SyslogIdentifier=shannon-deploy
+# Long enough for a pull on a slow morning plus the three minutes the health wait can take.
+TimeoutStartSec=900
+
+# Creates and owns /var/lib/shannon-deploy, which is where the last check and the deploy history
+# are written. STATE_DIRECTORY is read by the script.
+StateDirectory=shannon-deploy
+
+# This talks to the Docker socket, which is root-equivalent, so what follows is tidiness rather
+# than a boundary. read-only rather than yes, because /root/.docker/config.json is where both
+# skopeo and docker find the GHCR credential.
+NoNewPrivileges=yes
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
