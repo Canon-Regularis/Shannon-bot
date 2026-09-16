@@ -21,6 +21,7 @@ from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.models import ItemNote
 from shannon.github.mentions import names_in
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
+from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +82,13 @@ class ItemNoteMirror:
         *,
         render: Renderer,
         rebuild: Rebuild | None = None,
+        shut_again: KeepsThreadsShut,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
         self._render = render
         self._rebuild = rebuild
+        self._shut_again = shut_again
 
     async def mirror(self, snapshot: ItemNote) -> bool:
         """Post the note, returning whether there was anywhere to post it."""
@@ -241,6 +244,13 @@ class ItemNoteMirror:
             # rather than failing, so where it stands is often exactly here.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             raise
+
+        # Posting reopened the thread, because Discord takes no message into an archived one.
+        # People go on commenting after an item is closed, and every one of those comments would
+        # otherwise pull the thread back into the channel and leave it there.
+        await self._shut_again.again(
+            tracked_item_id=target.tracked_item_id, thread_id=target.thread_id
+        )
 
         logger.info("mirrored a note on %s#%s", snapshot.repository.full_name, snapshot.item_number)
         return True

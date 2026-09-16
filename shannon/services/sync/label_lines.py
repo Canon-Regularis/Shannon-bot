@@ -10,6 +10,7 @@ from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import LabelMove
 from shannon.github.webhooks.labels import parse_label_move
 from shannon.services.sync.announcements import Arrival, ClaimedLine
+from shannon.services.sync.shutting import KeepsThreadsShut
 
 Renderer = Callable[[LabelMove], str]
 
@@ -37,8 +38,9 @@ class LabelLine:
         threads: PostsToThread,
         *,
         render: Renderer,
+        shut_again: KeepsThreadsShut,
     ) -> None:
-        self._line = ClaimedLine(sessionmaker, threads)
+        self._line = ClaimedLine(sessionmaker, threads, shut_again)
         self._render = render
 
     async def say(self, arrival: Arrival) -> None:

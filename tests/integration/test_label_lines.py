@@ -22,6 +22,7 @@ from shannon.github.webhooks.issues import parse_issue_event
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.label_lines import LabelLine
 from shannon.services.sync.policies import IssuePolicy
+from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
@@ -105,7 +106,12 @@ async def test_the_same_delivery_handled_twice_says_it_once(
     it passed on the row count alone.
     """
     threads = FakeThreadGateway()
-    announcer = LabelLine(db_sessionmaker, threads, render=format_label_change)
+    announcer = LabelLine(
+        db_sessionmaker,
+        threads,
+        render=format_label_change,
+        shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+    )
     handle = build_item_handler(
         build_item_sync(db_sessionmaker, threads, IssuePolicy()),
         parse_issue_event,
@@ -128,7 +134,12 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
     """A claim taken and not given back is worse than saying nothing: the retry reads it as
     already said and the line is lost for good, with the delivery reported handled."""
     threads = _RefusesTheFirstPost()
-    announcer = LabelLine(db_sessionmaker, threads, render=format_label_change)
+    announcer = LabelLine(
+        db_sessionmaker,
+        threads,
+        render=format_label_change,
+        shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+    )
     handle = build_item_handler(
         build_item_sync(db_sessionmaker, threads, IssuePolicy()),
         parse_issue_event,
@@ -154,7 +165,12 @@ async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
     """Both halves failing at once is rare and unrecoverable, so the one thing owed is a line
     saying which row to remove to have it said again."""
     threads = _RefusesTheFirstPost()
-    announcer = LabelLine(_FailsToGiveItBack(db_sessionmaker), threads, render=format_label_change)
+    announcer = LabelLine(
+        _FailsToGiveItBack(db_sessionmaker),
+        threads,
+        render=format_label_change,
+        shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+    )
     handle = build_item_handler(
         build_item_sync(db_sessionmaker, threads, IssuePolicy()),
         parse_issue_event,

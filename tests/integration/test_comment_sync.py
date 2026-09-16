@@ -15,6 +15,7 @@ from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy
+from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import deliver, registered_stack
@@ -169,16 +170,24 @@ async def test_an_edited_comment_is_not_mirrored(
     assert len(threads.posts) == before
 
 
-async def test_a_comment_on_a_closed_issue_still_lands(
+async def test_a_comment_on_a_closed_issue_lands_and_leaves_the_thread_shut(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:
-    """Closing locks the thread, and the bot still has to be able to write to it."""
+    """Both halves, because each without the other is a bug this change could have shipped.
+
+    Closing shuts the thread and the bot still has to be able to write to it, which is the half
+    that was always true. The new half is what happens afterwards: posting is what reopens an
+    archived thread, so without putting it back every late comment would drag a closed issue's
+    thread into the channel and leave it there. People comment after closing constantly.
+    """
     await deliver(
         tracked,
         "issues",
         payloads.issue_event("closed", state="closed", closed_at="2026-08-11T12:00:00Z"),
         delivery="i1",
     )
+    thread_id = threads.created[0].thread_id
+    assert threads.threads[thread_id].archived is True
     before = len(threads.posts)
 
     response = await deliver(
@@ -187,6 +196,8 @@ async def test_a_comment_on_a_closed_issue_still_lands(
 
     assert response.json()["status"] == "accepted"
     assert len(threads.posts) == before + 1
+    assert threads.unarchived[-1] == thread_id, "the comment did not reopen the thread to land"
+    assert threads.threads[thread_id].archived is True, "the comment left the thread open"
 
 
 async def test_the_number_of_tracked_items_never_changes(
@@ -370,7 +381,12 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
     The check sits ahead of it deliberately. An edited comment reaches this every time, and it
     is the one place the handler can answer without touching the database at all.
     """
-    mirror = ItemNoteMirror(db_sessionmaker, threads, render=lambda note, mentions, roles: "hello")
+    mirror = ItemNoteMirror(
+        db_sessionmaker,
+        threads,
+        render=lambda note, mentions, roles: "hello",
+        shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+    )
     ran: list[object] = []
 
     async def then(snapshot: object) -> None:
@@ -402,7 +418,10 @@ class TestARetryAfterTheCommentLanded:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         failures = _FailsAfterTheNote()
         handler = build_note_handler(mirror, parse_comment_event, then=failures)
@@ -433,7 +452,10 @@ class TestARetryAfterTheCommentLanded:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         handler = build_note_handler(mirror, parse_comment_event)
 
@@ -452,7 +474,10 @@ class TestARetryAfterTheCommentLanded:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         seen: list[object] = []
 

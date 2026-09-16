@@ -18,6 +18,7 @@ from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror
 from shannon.services.sync.items import ItemSyncService, SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.threads import ItemThreads, ThreadTarget
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -102,8 +103,29 @@ class TestAnArchivedThread:
 
         assert second.synced
         assert second.thread_id == first.thread_id
-        assert threads.unarchived == [first.thread_id]
+        assert threads.threads[first.thread_id].archived is False
         assert "Still moving" in threads.metadata_of(first.thread_id)
+
+    async def test_a_closed_item_is_written_to_and_left_shut(
+        self,
+        registered: Repository,
+        issue_service: ItemSyncService,
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """The other side, and the one the archive-on-close feature depends on. A closed issue
+        still gets `labeled` and `assigned` events, every write reopens the thread to make room
+        for itself, and the thread has to end up shut again rather than back in the channel.
+        """
+        first = await issue_service.sync(issue_event("opened"))
+        await issue_service.sync(issue_event("closed", state="closed"))
+        assert threads.threads[first.thread_id].archived is True
+
+        await issue_service.sync(issue_event("labeled", state="closed", title="Renamed while shut"))
+
+        assert threads.unarchived == [first.thread_id], "the write did not reopen the thread"
+        assert "Renamed while shut" in threads.metadata_of(first.thread_id)
+        assert threads.threads[first.thread_id].archived is True, "it was left open behind us"
 
 
 class TestAThreadThatWasOpenedButNotWrittenTo:
@@ -295,7 +317,10 @@ class TestANoteOnADeletedThread:
         self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
     ) -> ItemNoteMirror:
         return ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello"
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
 
     @pytest.fixture
@@ -547,7 +572,7 @@ class TestBeingOutOfTheServerForAWhile:
             await ThreadPointerStore(session).forget_thread(item.id, dead_thread_id=first)
 
         stale = issue_event("edited")
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         with pytest.raises(DiscordGatewayError):
             await issues.sync(stale)
 
@@ -555,7 +580,7 @@ class TestBeingOutOfTheServerForAWhile:
         assert rebuilt != first, "nothing was rebuilt, so this proves nothing"
         assert threads.threads[rebuilt].locked is False, "the lock landed, so this proves nothing"
 
-        threads.refuses_every_lock = True
+        threads.refuses_every_shut = True
         threads.removed_from.add(guild_id)
 
         with pytest.raises(DiscordGatewayError) as caught:
@@ -700,7 +725,7 @@ class TestAStaleDeliveryThatRebuiltTheThread:
 
         # A delivery from before the close, still in the queue. It rebuilds, and the lock fails.
         stale = issue_event("edited")
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         with pytest.raises(DiscordGatewayError):
             await issues.sync(stale)
 
@@ -779,11 +804,11 @@ class TestAStaleDeliveryThatRebuiltTheThread:
                 updated_at="2026-08-11T12:00:00Z",
             )
         )
-        settled = len(threads.lock_calls)
+        settled = len(threads.shut_calls)
 
         await issues.sync(issue_event("edited"))
 
-        assert threads.lock_calls[settled:] == [], "it asked Discord about a lock already recorded"
+        assert threads.shut_calls[settled:] == [], "it asked Discord about a lock already recorded"
 
     async def test_an_item_nobody_has_finished_costs_no_call(
         self,
@@ -795,11 +820,11 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         """An open issue's thread is one people are meant to be talking in, so a stale delivery
         for one is owed nothing at all."""
         await issues.sync(issue_event("opened", updated_at="2026-08-11T12:00:00Z"))
-        opened = len(threads.locks)
+        opened = len(threads.shuts)
 
         await issues.sync(issue_event("edited", updated_at="2026-08-11T09:00:00Z"))
 
-        assert threads.locks[opened:] == [], "it went looking for a lock on an open issue"
+        assert threads.shuts[opened:] == [], "it went looking for a lock on an open issue"
 
 
 class TestTheLockSurvivingAnOrdinaryDelivery:
@@ -838,7 +863,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
 
         await prs.sync(pr_event("labeled", updated_at="2026-08-11T10:30:00Z"))
         assert (await stored(db_session)).discord_thread_locked is True, "it never shut it"
-        shut_it = len(threads.lock_calls)
+        shut_it = len(threads.shut_calls)
         assert shut_it == 1, "it did not ask Discord to shut it, so this proves nothing"
 
         # Two more, because the row is read before the write that would have wiped it. Wiping it
@@ -846,7 +871,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
         await prs.sync(pr_event("edited", updated_at="2026-08-11T11:30:00Z"))
         await prs.sync(pr_event("edited", updated_at="2026-08-11T12:30:00Z"))
 
-        assert threads.lock_calls[shut_it:] == [], (
+        assert threads.shut_calls[shut_it:] == [], (
             "an ordinary delivery forgot the thread was shut and asked Discord again"
         )
 
@@ -879,8 +904,12 @@ class TestAClaimThatCouldNotBeGivenBack:
         issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
         await issues.sync(issue_event("opened"))
 
+        refusing = _RefusesThePost()
         mirror = ItemNoteMirror(
-            db_sessionmaker, _RefusesThePost(), render=lambda note, mentions, roles: "hello"
+            db_sessionmaker,
+            refusing,
+            render=lambda note, mentions, roles: "hello",
+            shut_again=KeepsThreadsShut(db_sessionmaker, refusing),
         )
 
         async def the_database_went_away(*args: object, **kwargs: object) -> None:
@@ -930,7 +959,11 @@ class TestARebuildThatDidNotWorkTheFirstTime:
             await issues.sync(issue_event("edited"))
 
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello", rebuild=rebuild
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            rebuild=rebuild,
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         synced = await issues.sync(issue_event("opened"))
         threads.threads.pop(synced.thread_id)
@@ -966,7 +999,11 @@ class TestARebuildThatDidNotWorkTheFirstTime:
             raise RuntimeError("GitHub answered 502")
 
         mirror = ItemNoteMirror(
-            db_sessionmaker, threads, render=lambda note, mentions, roles: "hello", rebuild=rebuild
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: "hello",
+            rebuild=rebuild,
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         synced = await issues.sync(issue_event("opened"))
         threads.threads.pop(synced.thread_id)
