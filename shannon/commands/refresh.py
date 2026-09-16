@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import logging
+from typing import Protocol
+
+import discord
+from discord import app_commands
+
+from shannon.commands._permissions import SYNC_ROLES
+from shannon.commands._replies import reply_for
+from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.responses import defer, reply
+from shannon.domain.errors import ShannonError
+from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
+
+logger = logging.getLogger(__name__)
+
+# What the counts are counting, in the reply. Read from a table rather than branched over, so the
+# three scopes cannot drift into saying different shapes of thing about the same numbers.
+_KINDS = {
+    RefreshScope.EVERYTHING: "open items",
+    RefreshScope.PULL_REQUESTS: "open pull requests",
+    RefreshScope.ISSUES: "open issues",
+}
+
+# Discord shows the description, and the value is what reaches the callback.
+_CHOICES = [
+    app_commands.Choice(name="pull requests", value=RefreshScope.PULL_REQUESTS.value),
+    app_commands.Choice(name="issues", value=RefreshScope.ISSUES.value),
+]
+
+# Said only where something was mirrored. It is the one surprising thing about this command, and
+# it is what lets somebody run it against a real backlog without wondering who they just woke up.
+_QUIET = "Nobody was pinged."
+
+
+class RefreshesARepository(Protocol):
+    """Mirroring every open item that has no thread yet."""
+
+    async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome: ...
+
+
+def build_refresh_command(
+    service: RefreshesARepository, gate: PermissionGate
+) -> app_commands.Command:
+    @app_commands.command(
+        name="refresh", description="Open threads for any GitHub items that do not have one"
+    )
+    @app_commands.describe(only="Limit it to one kind; leave this out for both")
+    @app_commands.choices(only=_CHOICES)
+    @app_commands.guild_only()
+    async def refresh(
+        interaction: discord.Interaction, only: app_commands.Choice[str] | None = None
+    ) -> None:
+        if interaction.guild_id is None:
+            await reply(interaction, "Run this inside a server channel.")
+            return
+        if not gate.allows(interaction.user, SYNC_ROLES):
+            await reply(interaction, gate.denial("refresh", SYNC_ROLES))
+            return
+
+        scope = RefreshScope.EVERYTHING if only is None else RefreshScope(only.value)
+
+        await defer(interaction)
+        try:
+            outcome = await service.refresh(guild_id=interaction.guild_id, scope=scope)
+        except ShannonError as error:
+            # `repository` rather than a kind, and it reads correctly in every row of the table
+            # this can reach: the failures that get here are about the repository or about GitHub,
+            # never about one item, because an item that fails is counted rather than raised.
+            logger.warning("/refresh could not finish: %s", error.message)
+            await reply(interaction, reply_for(error, noun="repository"))
+        else:
+            await reply(interaction, _said(outcome, _KINDS[scope]))
+
+    return refresh
+
+
+def _said(outcome: RefreshOutcome, kind: str) -> str:
+    """The counts, as a sentence somebody can act on.
+
+    `left` is the number that matters and it is always named when it is not zero, because it is
+    the difference between "done" and "run it again". The failures are inside it rather than
+    beside it, and are mentioned separately only so nobody reads a shortfall as a miscount.
+    """
+    if outcome.mirrored == 0 and outcome.left == 0:
+        if outcome.already == 0:
+            return f"{outcome.full_name} has no {kind} right now, so there was nothing to mirror."
+        return (
+            f"Nothing to mirror. All {outcome.already} {kind} on {outcome.full_name} already "
+            "have a thread."
+        )
+
+    said = (
+        f"Mirrored {outcome.mirrored} {kind} from {outcome.full_name}, and left alone the "
+        f"{outcome.already} that already had a thread."
+    )
+    if outcome.left:
+        # Deliberately not explaining whether the cap or a failure left them. Both mean the same
+        # thing to whoever is reading: there is more to do and running it again does it.
+        is_are = "is" if outcome.left == 1 else "are"
+        said += f" {outcome.left} {is_are} still untracked, so run /refresh again to carry on."
+    if outcome.failed:
+        said += (
+            f" {outcome.failed} could not be mirrored just now and are among those still "
+            "untracked; the log says why."
+        )
+    return f"{said} {_QUIET}"

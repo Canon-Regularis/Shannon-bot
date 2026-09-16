@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
+from shannon.commands.refresh import build_refresh_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
@@ -62,6 +63,7 @@ from shannon.services.sync.policies import (
     TicketPolicy,
     channel_fallbacks,
 )
+from shannon.services.sync.refresh import RepositoryRefresh
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
@@ -298,6 +300,28 @@ def _event_router(
     return router
 
 
+def _refresh(
+    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+) -> RepositoryRefresh:
+    """The refresh path's own sync services, built with no notifier.
+
+    A refresh mirrors a backlog, and everybody on it was asked when their item was opened, often
+    months ago. Built without a notifier rather than told not to ping: there is nothing to fire,
+    so no later edit to the sync path can make one fire, and nothing about being silent is a rule
+    somebody has to keep reading.
+
+    Two more services is two more constructor calls. Each holds a sessionmaker, a stateless lock,
+    the one thread gateway, a stateless binding and a stateless policy: no connection, no task,
+    no cache. The poller already pays this for tickets, one line down.
+    """
+    return RepositoryRefresh(
+        sessionmaker,
+        github,
+        pull_requests=build_item_sync(sessionmaker, threads, PullRequestPolicy()),
+        issues=build_item_sync(sessionmaker, threads, IssuePolicy()),
+    )
+
+
 def _commands(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
@@ -305,6 +329,7 @@ def _commands(
     workflow: ItemWorkflow,
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
+    refresh: RepositoryRefresh,
 ) -> tuple[app_commands.Command, ...]:
     """Every slash command the bot installs.
 
@@ -316,6 +341,7 @@ def _commands(
         build_set_channel_command(ChannelMappingService(sessionmaker, channel_fallbacks()), gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
+        build_refresh_command(refresh, gate),
         build_link_command(UserLinkingService(sessionmaker, github), gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
         *build_workflow_commands(workflow, gate),
@@ -376,5 +402,6 @@ def build_container(
             workflow,
             pr_sync,
             issue_sync,
+            _refresh(sessionmaker, github, threads),
         ),
     )
