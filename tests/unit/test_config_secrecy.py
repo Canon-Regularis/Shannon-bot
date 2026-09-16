@@ -116,6 +116,17 @@ def test_the_example_env_file_holds_no_real_credentials() -> None:
         assert value == "" or value.startswith("your-"), f"{name} looks like a real value"
 
 
+# Settings nobody deploying this is meant to set, which is the one reason to leave something out
+# of a file whose whole instruction is to copy it and fill it in.
+#
+# `SHANNON_BUILD` is the commit the image was built from and the Dockerfile writes it. Naming it
+# here would not merely be noise: `compose.prod.yaml` hands `.env` to the container as real
+# environment variables, and those beat the image's own, so a copied line would pin `/health` to
+# whatever the example said and it would go on naming that commit through every deploy afterwards.
+# The endpoint exists to say which build is running, so that is the one wrong answer it can give.
+STAMPED_BY_THE_BUILD = {"SHANNON_BUILD"}
+
+
 def test_the_example_env_file_names_every_setting() -> None:
     """The file says to copy it and fill it in, so a setting it leaves out is a feature nobody
     setting the bot up will find. `SHANNON_GITHUB_PROJECT_NUMBER` was the one that mattered: it
@@ -130,9 +141,27 @@ def test_the_example_env_file_names_every_setting() -> None:
         for line in example.read_text(encoding="utf-8").splitlines()
         if line.startswith("SHANNON_") and "=" in line
     }
-    wanted = {f"SHANNON_{field.upper()}" for field in Settings.model_fields}
+    wanted = {f"SHANNON_{field.upper()}" for field in Settings.model_fields} - STAMPED_BY_THE_BUILD
 
     assert not wanted - named, f"missing from .env.example: {sorted(wanted - named)}"
+
+
+def test_nothing_stamped_by_the_build_is_offered_to_fill_in() -> None:
+    """The other half, or the exclusion above is a hole rather than a rule: a line added to the
+    example for one of these would be waved through by the test that is supposed to police it."""
+    from pathlib import Path
+
+    example = Path(__file__).parents[2] / ".env.example"
+    named = {
+        line.partition("=")[0].strip()
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    }
+
+    assert not named & STAMPED_BY_THE_BUILD, (
+        f"{sorted(named & STAMPED_BY_THE_BUILD)} is written by the image. A value here reaches "
+        "the container and overrides it, so /health would report a build that is not running."
+    )
 
 
 def test_no_credential_reaches_the_api_response_model() -> None:

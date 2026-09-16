@@ -7,8 +7,14 @@ from shannon.config import Settings
 from tests.fakes.liveness import FakeLiveness
 
 
-def client_with(liveness: object | None) -> AsyncClient:
-    app = create_app(settings=Settings(github_webhook_secret="x"))
+def client_with(liveness: object | None, **overrides: str) -> AsyncClient:
+    """Overrides passed through rather than named with defaults of their own.
+
+    `build` has a default in `Settings` and giving this one to match would mean every test that
+    reads it back is asserting the value written here. Which is what happened: changing the real
+    default to an empty string went green.
+    """
+    app = create_app(settings=Settings(github_webhook_secret="x", **overrides))
     app.state.liveness = liveness
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
@@ -24,6 +30,7 @@ async def test_a_working_process_reports_healthy() -> None:
         "worker": True,
         "bot": True,
         "poller": True,
+        "version": "unknown",
     }
 
 
@@ -77,6 +84,45 @@ async def test_with_nothing_wired_in_it_only_claims_to_be_listening() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
+
+
+class TestWhichBuildIsAnswering:
+    """The question `/health` could not answer, and the reason this field exists.
+
+    A change that was merged and never deployed and a change that does not work look the same
+    from outside: the thread renders without it either way. Telling them apart meant getting onto
+    the box, and key auth was never set up on that one.
+    """
+
+    async def test_the_stamped_commit_is_reported(self) -> None:
+        async with client_with(FakeLiveness(), build="e261061") as client:
+            response = await client.get("/health")
+
+        assert response.json()["version"] == "e261061"
+
+    async def test_an_unstamped_image_says_so_rather_than_nothing(self) -> None:
+        """An empty string reads as a bug in the reporting. `unknown` reads as what it is, which
+        is an image somebody built on their laptop."""
+        async with client_with(FakeLiveness()) as client:
+            response = await client.get("/health")
+
+        assert response.json()["version"] == "unknown"
+
+    async def test_a_process_with_nothing_wired_in_still_says_which_build_it_is(self) -> None:
+        """The route's other return, which claims the least it can about everything else. Which
+        commit is running is not something it needs a worker to be able to say."""
+        async with client_with(None, build="e261061") as client:
+            response = await client.get("/health")
+
+        assert response.json()["version"] == "e261061"
+
+    async def test_an_unhealthy_process_still_says_which_build_it_is(self) -> None:
+        """The answer is wanted most when something is wrong, and 503 takes the other return."""
+        async with client_with(FakeLiveness(worker=False), build="e261061") as client:
+            response = await client.get("/health")
+
+        assert response.status_code == 503
+        assert response.json()["version"] == "e261061"
 
 
 async def test_a_dead_gateway_makes_the_process_unhealthy() -> None:

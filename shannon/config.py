@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # The commit the running image was built from, stamped in by the Dockerfile and reported by
+    # `/health`. The one setting here that nobody is meant to set, and the only one deliberately
+    # left out of `.env.example`: compose hands that file to the container as real environment
+    # variables, which beat the image's own, so a line there would pin the answer to whatever was
+    # typed and it would go on naming that commit through every deploy afterwards.
+    build: str = "unknown"
+
     github_api_url: str = "https://api.github.com"
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
