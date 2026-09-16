@@ -64,6 +64,7 @@ from shannon.services.sync.policies import (
     channel_fallbacks,
 )
 from shannon.services.sync.refresh import RepositoryRefresh
+from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
@@ -322,6 +323,36 @@ def _refresh(
     )
 
 
+def _relocation(
+    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+) -> ThreadRelocation:
+    """The relocation path's own sync services: built to relocate, and built without a notifier.
+
+    Both halves are properties of the object rather than arguments to a call, for the same reason
+    the refresh path's are. A binding that cannot relocate cannot be talked into it by a later
+    edit, which is what keeps a webhook delivery from moving a thread and leaving the old one open
+    with nothing said in it; and a service with no notifier cannot ping a backlog of reviewers
+    because their threads were rehoused.
+
+    Tickets are deliberately absent. A draft board card has no endpoint to fetch it by number, so
+    it takes the other route: its pointer is let go of and the poller opens the replacement.
+    """
+    return ThreadRelocation(
+        sessionmaker,
+        threads,
+        mirrors={
+            ObjectType.PR: Mirror(
+                service=build_item_sync(sessionmaker, threads, PullRequestPolicy(), relocates=True),
+                fetch=github.get_pull_request,
+            ),
+            ObjectType.ISSUE: Mirror(
+                service=build_item_sync(sessionmaker, threads, IssuePolicy(), relocates=True),
+                fetch=github.get_issue,
+            ),
+        },
+    )
+
+
 def _commands(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
@@ -330,6 +361,7 @@ def _commands(
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
     refresh: RepositoryRefresh,
+    relocation: ThreadRelocation,
 ) -> tuple[app_commands.Command, ...]:
     """Every slash command the bot installs.
 
@@ -338,7 +370,9 @@ def _commands(
     """
     return (
         build_register_command(RepositoryRegistrationService(sessionmaker, github), gate),
-        build_set_channel_command(ChannelMappingService(sessionmaker, channel_fallbacks()), gate),
+        build_set_channel_command(
+            ChannelMappingService(sessionmaker, channel_fallbacks()), relocation, gate
+        ),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
@@ -403,5 +437,6 @@ def build_container(
             pr_sync,
             issue_sync,
             _refresh(sessionmaker, github, threads),
+            _relocation(sessionmaker, github, threads),
         ),
     )

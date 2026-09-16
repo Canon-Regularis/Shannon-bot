@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,23 @@ class BoardRow:
     thread_id: int | None
     status: Status
     column: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StrandedThread:
+    """One item whose thread may be in a channel nothing maps any more, out of its session.
+
+    `channel_id` is None where the row does not remember, which is every thread claimed before
+    that column existed. Unknown is a candidate here rather than an exclusion, which is the whole
+    difference from `forget_channel`: reading it the other way would leave behind exactly the old
+    quiet threads this exists to move.
+    """
+
+    tracked_item_id: int
+    object_type: ObjectType
+    number: int
+    thread_id: int
+    channel_id: int | None
 
 
 class TrackedItemStore:
@@ -181,6 +199,43 @@ class TrackedItemStore:
             ).where(TrackedItem.repository_id == repository_id)
         )
         return {(row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5]) for row in rows.all()}
+
+    async def stranded_threads(
+        self, *, repository_id: int, kinds: Sequence[ObjectType], channel_id: int
+    ) -> list[StrandedThread]:
+        """Items of these kinds whose thread is not known to be in `channel_id`.
+
+        One query for the whole repository rather than one per item, the way the board reads its
+        state. What comes back is a candidate list and not an answer: a row remembering no channel
+        is included, and only asking Discord settles whether it was in the right place all along.
+
+        `kinds` is plural because the mapping a command changes is not the only one it moves.
+        Issues fall back to the pull request channel, so pointing pull requests somewhere new
+        moves where issue threads go too, on a server that never mapped issues.
+
+        Ordered by what moved most recently, because a run is capped and the order decides which
+        half of a backlog goes today. The items people are reading should go first.
+        """
+        rows = await self._session.execute(
+            select(
+                TrackedItem.id,
+                TrackedItem.github_object_type,
+                TrackedItem.github_object_number,
+                TrackedItem.discord_thread_id,
+                TrackedItem.discord_channel_id,
+            )
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type.in_(kinds),
+                TrackedItem.discord_thread_id.is_not(None),
+                or_(
+                    TrackedItem.discord_channel_id.is_(None),
+                    TrackedItem.discord_channel_id != channel_id,
+                ),
+            )
+            .order_by(TrackedItem.github_updated_at.desc().nullslast(), TrackedItem.id.desc())
+        )
+        return [StrandedThread(row[0], row[1], row[2], row[3], row[4]) for row in rows.all()]
 
     async def remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record the board column this item was last seen in.

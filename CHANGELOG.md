@@ -4921,3 +4921,36 @@ to set the project number will find it.
 - An item with a row and no thread counts as untracked. The row is committed before the Discord
   call that gives it a thread, so a refused create leaves an item recorded and invisible; reading
   the row alone would have called that finished and left it that way for good.
+
+## A thread in the wrong channel now follows the mapping
+
+- `/set_channel` moves the threads already open into the channel it points at, rather than
+  leaving them where they were. Registering into the wrong forum used to be permanent: correcting
+  the mapping fixed where new items landed and every existing one went on being written to in the
+  wrong place for ever, because the sync reuses whatever thread the row points at and never asked
+  where that was. Closes #78.
+- **This overturns a decision recorded twice in this file.** "/set_channel said threads had moved
+  when nothing moves" and the later "Considered and left alone" both settled on telling the admin
+  the threads stay put, and a test asserted the word "moved" never appeared in the reply. That was
+  right while the alternative was a misleading word. It is the wrong answer to somebody who wants
+  the threads to follow, and there was no other way to get them there.
+- Discord still cannot move a thread between channels, so a move is a replacement in the right one
+  and a line in the old thread linking to it, before it is locked and archived. Before, never
+  after: posting reopens an archived thread, so shutting first is undone by the very line meant to
+  close it. The comments already mirrored stay readable where they are.
+- The swap is one guarded UPDATE from the old thread to the new, which is what makes a failure
+  safe. A replacement Discord refused leaves the row pointing at the old thread, still open and
+  still being written to, and a later run tries again. Nothing on this path can leave an item
+  mirrored nowhere.
+- The column this needed already existed. Migration `0014` added it with a docstring describing
+  this bug in advance, and it had exactly one reader, for channel deletion. **No migration.**
+- Two things the design turned up that the issue does not mention. Issues fall back to the pull
+  request channel, so pointing pull requests somewhere new moves where issue threads go too, and
+  relocating only the named kind would have reproduced this very bug for the other one while
+  fixing it. And a board card has no GitHub endpoint to rebuild it from, so its pointer is let go
+  of instead and the poller opens the replacement on its next pass.
+- Ten per run. A move costs four Discord calls typically and seven at worst against a refresh's
+  two, so it is the same budget rather than a smaller one. Leaning on the fifteen minutes a
+  command gets would be worse here than elsewhere: creating threads is what Discord rate-limits
+  hardest and discord.py sleeps through a 429 rather than raising, so the one thing that would
+  spend the budget gives no warning before it does.

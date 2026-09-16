@@ -57,6 +57,13 @@ class FakeThreadGateway:
         # A server that will never let it close one, which is a different thing: no amount of
         # waiting grants a permission, and a caller with nobody to tell has to stop asking.
         self.refuses_every_shut = False
+        # And for asking where a thread is. Its own switch because a refusal there means
+        # something different from every other one: the answer is unknown rather than no, and
+        # a caller that read it as no would let go of a live thread.
+        self.refuses_every_lookup = False
+        # Every thread whose channel was asked about, so a test can say a second run asked
+        # nothing because the first wrote the answer down.
+        self.lookups: list[int] = []
         # And for rewriting a thread that already exists, which is what a card that moves after
         # its first mirror needs.
         self.fail_next_update = False
@@ -146,6 +153,19 @@ class FakeThreadGateway:
         if thread.locked != shut:
             thread.locked = shut
             self.shuts.append((thread_id, shut))
+
+    async def channel_of(self, *, thread_id: int) -> int | None:
+        """Where a thread is, from the channel it was created in.
+
+        The fake already records that and never changes it, which is the real constraint: a
+        thread's channel is fixed at birth. A thread nobody has answers None rather than raising,
+        the way the real gateway does.
+        """
+        self.lookups.append(thread_id)
+        if self.refuses_every_lookup:
+            raise DiscordPermissionError("Discord will not let the bot see that thread")
+        thread = self.threads.get(thread_id)
+        return None if thread is None else thread.channel_id
 
     async def post(self, *, thread_id: int, content: str) -> int | None:
         thread = self._wake(thread_id)

@@ -242,6 +242,41 @@ _OPEN_AGAIN = "-# This thread is open again."
 # of the fix, and Discord's own refusal names nothing.
 _WOULD_NOT_SHUT = "-# This thread could not be closed: the bot needs Manage Threads."
 
+# Left in a thread the item has been moved off, because Discord cannot move a thread between
+# channels and the only honest thing to do with the old one is say where its item went.
+#
+# Neither line claims the thread is locked, and that is deliberate rather than an omission. This
+# has to be posted BEFORE the lock, because posting reopens an archived thread and shutting first
+# would be undone by the line itself; at the moment these words are written nobody knows whether
+# the lock will land. A server without Manage Threads would otherwise be told it cannot reply
+# somewhere it can. "Nothing more will be posted here" is true either way, because the row has
+# already stopped pointing at this thread.
+_MOVED = "-# This item is now mirrored in {}. Nothing more will be posted in this thread."
+_MOVING = "-# This item will be mirrored in {} from now on. Nothing more will be posted here."
+
+
+def format_thread_moved(thread_id: int) -> str:
+    """Point the old thread at the one that replaced it.
+
+    `<#id>` renders a thread mention as readily as a channel one, and the thread is where somebody
+    reading this wants to be taken, so it names the replacement itself rather than the channel it
+    is in.
+
+    No untrusted text reaches here, which is why nothing is escaped: the words are this module's
+    and the id is one Discord gave us.
+    """
+    return _MOVED.format(f"<#{thread_id}>")
+
+
+def format_thread_moving(channel_id: int) -> str:
+    """The same, for an item with no replacement to name yet.
+
+    A board card has no GitHub endpoint to rebuild it from, so its thread is let go of and the
+    poller opens the new one on its next pass. Until then the channel is the most this can say,
+    and it is enough to stop somebody waiting in a thread nothing will be posted in.
+    """
+    return _MOVING.format(f"<#{channel_id}>")
+
 
 def format_state_change(change: StateChange, *, shut: bool, refused: bool = False) -> str:
     """Announce an item closing, merging or reopening, and say what became of the thread.

@@ -152,6 +152,17 @@ class ShutsThread(Protocol):
     async def set_shut(self, *, thread_id: int, shut: bool) -> None: ...
 
 
+class FindsThreads(Protocol):
+    """Where a thread actually is, as opposed to where the mapping says new ones should go.
+
+    Its own role because it is the only question in this module answered by reading Discord rather
+    than writing to it, and because one caller has any business asking it. The row remembers this
+    too, and is the cheaper answer where it has one; this is for the rows written before it did.
+    """
+
+    async def channel_of(self, *, thread_id: int) -> int | None: ...
+
+
 class KnowsItsServers(Protocol):
     """Whether this bot is in a particular server at the moment.
 
@@ -163,7 +174,9 @@ class KnowsItsServers(Protocol):
     def is_in(self, guild_id: int) -> bool: ...
 
 
-class ThreadGateway(OpensThreads, PostsToThread, ShutsThread, KnowsItsServers, Protocol):
+class ThreadGateway(
+    OpensThreads, PostsToThread, ShutsThread, FindsThreads, KnowsItsServers, Protocol
+):
     """Everything this project does to Discord threads.
 
     The container passes one object satisfying every role, because one Discord client is all
@@ -280,6 +293,29 @@ class DiscordThreadGateway:
             #
             # The bot needs Manage Threads for this, and for reopening a thread it shut.
             await thread.edit(archived=shut, locked=shut)
+
+    async def channel_of(self, *, thread_id: int) -> int | None:
+        """Which channel a thread is actually in, or None if it is not there any more.
+
+        Gone is an ordinary answer rather than a failure, and the caller acts on it: the pointer
+        is worthless either way, so it is let go of and the item gets a fresh thread from whatever
+        visits it next. Discord reports a thread deleted only while discord.py still has it
+        cached, and it drops one the moment it archives, so a quiet thread can have gone with
+        nothing having said so. An id that resolves to something which is not a thread answers the
+        same way, and correctly.
+
+        A refusal and an outage still raise. Neither says where the thread is, and reading either
+        as "gone" would let go of a live pointer and open a second thread beside a working one,
+        which is the failure this whole path exists to undo.
+
+        Free for a thread discord.py has cached, one fetch for an archived one. Archived is the
+        common case here, since the rows with no channel recorded are the old quiet ones.
+        """
+        try:
+            thread = await self._thread(thread_id)
+        except ThreadNotFoundError:
+            return None
+        return thread.parent_id
 
     def is_in(self, guild_id: int) -> bool:
         """Whether this bot is in that server at the moment.

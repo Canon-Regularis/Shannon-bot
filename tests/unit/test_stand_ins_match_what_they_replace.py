@@ -20,7 +20,7 @@ from shannon.api.routes.health import Liveness
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.register import RegistersRepositories
-from shannon.commands.set_channel import MapsChannels
+from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.workflow import MovesItems
 from shannon.container import Container
@@ -31,6 +31,7 @@ from shannon.discord_bot.permissions import RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
+    FindsThreads,
     OpensThreads,
     PostsToThread,
     ShutsThread,
@@ -75,6 +76,7 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
+from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
 from shannon.services.workflow import ItemWorkflow, LabelsItems
@@ -92,6 +94,11 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (OpensThreads, DiscordThreadGateway),
     (PostsToThread, DiscordThreadGateway),
     (ShutsThread, DiscordThreadGateway),
+    (FindsThreads, DiscordThreadGateway),
+    (FindsThreads, FakeThreadGateway),
+    (MovesThreadsBetweenChannels, DiscordThreadGateway),
+    (MovesThreadsBetweenChannels, FakeThreadGateway),
+    (RelocatesThreads, ThreadRelocation),
     (OpensAndShutsThreads, DiscordThreadGateway),
     (GitHubClient, FakeGitHubClient),
     (GitHubClient, HttpGitHubClient),

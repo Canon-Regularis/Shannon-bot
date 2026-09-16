@@ -55,6 +55,9 @@ class SyncResult:
     # A permission refused the thread being shut. Carried rather than raised, because the closing
     # header is written after the sync and is the only place anybody will read it.
     shut_refused: bool = False
+    # The thread this sync moved the item off, for a caller with something to say in it. Only ever
+    # set by a binding built to relocate, which is the one behind `/set_channel`.
+    displaced: int | None = None
 
     @property
     def synced(self) -> bool:
@@ -328,6 +331,7 @@ class ItemSyncService:
             created=written.created,
             notified=notified,
             shut_refused=shut_refused,
+            displaced=written.displaced,
         )
 
     async def _reopen_what_this_one_asked_for(
@@ -743,6 +747,7 @@ class ItemSyncService:
             shut_from_the_row=superseded,
             shut_when_opened=item.status is Status.DONE,
             thread_locked=item.discord_thread_locked,
+            thread_channel_id=item.discord_channel_id,
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -803,15 +808,24 @@ def build_item_sync(
     threads: OpensAndShutsThreads,
     policy: SyncPolicy,
     notifier: Notifier | None = None,
+    *,
+    relocates: bool = False,
 ) -> ItemSyncService:
     """Assemble a sync service and the thread binding it drives.
 
     The service locks threads and nothing else, so its constructor asks for nothing else. The
     binding is what opens and rewrites them, and it needs a wider handle; composing the two is
     this function's whole job.
+
+    `relocates` off means a thread in the wrong channel is written to where it is, which is what
+    every delivery wants. Only the wiring behind `/set_channel` turns it on.
     """
     return ItemSyncService(
-        sessionmaker, threads, policy, ItemThreads(sessionmaker, threads), notifier
+        sessionmaker,
+        threads,
+        policy,
+        ItemThreads(sessionmaker, threads, relocates=relocates),
+        notifier,
     )
 
 
@@ -920,6 +934,9 @@ class _SyncState:
     # not shut one, which is what a thread just opened is and what every row written before the
     # column existed says.
     thread_locked: bool | None
+    # Where the row says that thread actually is, which is not where the mapping says new ones
+    # go the moment anybody has run `/set_channel`.
+    thread_channel_id: int | None
 
     @property
     def target(self) -> ThreadTarget:
@@ -928,4 +945,5 @@ class _SyncState:
             channel_id=self.channel_id,
             thread_id=self.thread_id,
             message_id=self.message_id,
+            thread_channel_id=self.thread_channel_id,
         )
