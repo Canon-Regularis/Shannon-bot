@@ -24,10 +24,16 @@
 		respond 404
 	}
 
-	# Answers whether the database is reachable, the worker is alive and the gateway is up. That
-	# is useful to an uptime checker and to nobody else, so it is left reachable rather than
-	# blocked, on the grounds that a monitor with no credentials is the ordinary way to watch a
-	# service and the answer says nothing an attacker can act on.
+	# Answers whether the database is reachable, the worker is alive and the gateway is up, and
+	# which commit is answering. Left reachable rather than blocked because a monitor with no
+	# credentials is the ordinary way to watch a service.
+	#
+	# The commit is the one thing here that gives something away, and it is worth writing down
+	# rather than leaving to be discovered. This repository is public, so the hash names a tree
+	# anybody can read: it says which fixes this deployment has and, more to the point, which
+	# ones it has not. That is accepted rather than overlooked. There is one route behind this
+	# that does anything, it refuses every request without a valid HMAC, and knowing the commit
+	# does not help anybody forge one. Take this field out if the calculation changes.
 	handle /health {
 		reverse_proxy app:8000
 	}

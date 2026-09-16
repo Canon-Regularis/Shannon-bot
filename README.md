@@ -160,7 +160,13 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u <user> --password-stdin   # classic
 docker compose -f compose.prod.yaml up -d
 ```
 
-Point the GitHub webhook at `https://<hostname>/webhooks/github`. Upgrades are `pull` then `up -d`.
+Point the GitHub webhook at `https://<hostname>/webhooks/github`.
+
+Upgrades are `pull` then `up -d`, in that order and both of them. Nothing on the box watches for a
+new image and the compose file sets no `pull_policy`, so `up -d` on its own reuses whatever is
+already there, reports success and changes nothing. That has cost real time: a merged change was
+read as a bug in the bot for an afternoon. `curl https://<hostname>/health` gives back the commit
+that is actually running, which is the quick way to tell a broken change from an undeployed one.
 
 Only one copy may run at a time: two would both hold the Discord gateway and both lease from the
 queue. `SHANNON_IMAGE_TAG` defaults to `edge`, which moves on every green push to main. The
@@ -185,6 +191,7 @@ at the door.
 | `SHANNON_API_HOST` | `0.0.0.0` | |
 | `SHANNON_API_PORT` | `8000` | |
 | `SHANNON_LOG_LEVEL` | `INFO` | Uppercased, not validated |
+| `SHANNON_BUILD` | `unknown` | The commit the image was built from, reported by `/health`. Written by the Dockerfile, so do not set it: compose passes `.env` into the container and it would override the real one. It is the only setting missing from `.env.example`, for that reason |
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
 | `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | The project board to mirror, by the number in its URL. Zero means none |
@@ -301,7 +308,13 @@ and has no cleanup path.
 | Route | Answers |
 | --- | --- |
 | `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing header or unusable body, 401 for a bad signature, 413 past the 25MB cap, 500 if the secret is unset |
-| `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, 503 if any of the first three is false |
+| `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, `version` as the commit answering, 503 if any of the first three is false |
+
+`version` is the commit the image was built from. It is there because a change that was merged
+and never deployed and a change that does not work look identical from outside, and telling them
+apart used to mean getting onto the box. `unknown` means an image built by hand rather than by CI.
+It is served to anyone, and against a public repository that says which fixes this deployment has
+and which it has not; `Caddyfile` says why that is accepted.
 
 `/health` reports what the process is doing rather than that it is listening. A dead worker or a
 dropped gateway leaves the endpoint accepting deliveries nothing will act on, which is worth a

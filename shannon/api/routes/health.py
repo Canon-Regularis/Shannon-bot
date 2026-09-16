@@ -29,6 +29,11 @@ class HealthResponse(BaseModel):
     worker: bool
     bot: bool
     poller: bool
+    # Which commit is answering. Everything else here is whether the process works; this is
+    # whether it is the process somebody thinks they deployed, and from outside the two look
+    # identical. A change that was merged and never pulled reads exactly like a change that
+    # does not work, and the only way to tell them apart was to go onto the box.
+    version: str
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -41,11 +46,17 @@ async def health(request: Request, response: Response) -> HealthResponse:
     every one of them. Both are reported here so an orchestrator can restart the process
     instead of leaving it to look healthy while the queue grows.
     """
+    # Read without a fallback because `create_app` sets it unconditionally, and a fallback here
+    # would be a branch nothing can reach standing in for a state nothing can produce.
+    build: str = request.app.state.settings.build
+
     liveness: Liveness | None = getattr(request.app.state, "liveness", None)
     if liveness is None:
         # Nothing was wired in, which is how the route-level tests run. Listening is all that
         # can honestly be claimed.
-        return HealthResponse(healthy=True, database=True, worker=True, bot=True, poller=True)
+        return HealthResponse(
+            healthy=True, database=True, worker=True, bot=True, poller=True, version=build
+        )
 
     database = await liveness.database_reachable()
     worker = liveness.worker_running()
@@ -66,4 +77,11 @@ async def health(request: Request, response: Response) -> HealthResponse:
     elif not poller:
         logger.warning("the board is no longer being read, though everything else is working")
 
-    return HealthResponse(healthy=healthy, database=database, worker=worker, bot=bot, poller=poller)
+    return HealthResponse(
+        healthy=healthy,
+        database=database,
+        worker=worker,
+        bot=bot,
+        poller=poller,
+        version=build,
+    )
