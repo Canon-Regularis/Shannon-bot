@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.container import _refresh
 from shannon.db.models import ItemAssignment, Repository, TrackedItem
+from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError
@@ -98,14 +99,38 @@ def refresh_with(
     pull_requests=None,
     issues=None,
 ) -> RepositoryRefresh:
-    """The service as the container builds it: both sync services with NO notifier."""
+    """The service as the container builds it: both sync services with no notifier, and blocks
+    that name people in plain text."""
     return RepositoryRefresh(
         sessionmaker,
         github,
-        pull_requests=pull_requests or build_item_sync(sessionmaker, threads, PullRequestPolicy()),
-        issues=issues or build_item_sync(sessionmaker, threads, IssuePolicy()),
+        pull_requests=pull_requests
+        or build_item_sync(sessionmaker, threads, PullRequestPolicy(), mentions=False),
+        issues=issues or build_item_sync(sessionmaker, threads, IssuePolicy(), mentions=False),
         cap=cap,
     )
+
+
+async def link_everybody(session: AsyncSession) -> None:
+    """Both people the backlog below names, with Discord accounts against them.
+
+    Without this there is no mention for a block to carry, and an assertion that it carries none
+    holds on a server where nobody has ever run `/link`, which is not the claim being made.
+    """
+    store = UserLinkStore(session)
+    await store.link(
+        guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
+    )
+    await store.link(guild_id=1, github_username="hubot", github_user_id=100, discord_user_id=444)
+    await session.commit()
+
+
+def mentions_in_the_blocks(threads: FakeThreadGateway) -> list[str]:
+    return [
+        threads.metadata_of(thread.thread_id)
+        for thread in threads.created
+        if "<@" in threads.metadata_of(thread.thread_id)
+    ]
 
 
 class TestMirroringTheBacklog:
@@ -135,7 +160,12 @@ class TestMirroringTheBacklog:
         """The whole reason this service gets its own sync services rather than the ones `/pr`
         holds. A backlog is not news, and the claim on `item_assignments` means a run that pinged
         would be quiet the second time, so this would look fine in every test after the first.
+
+        The block counts as a ping. Opening a thread posts one, a posted message notifies
+        everybody it mentions, and forty of them in one go is exactly what this command must not
+        do. Looking only at `threads.posts` missed that for as long as it was the only assertion.
         """
+        await link_everybody(db_session)
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
 
         await refresh_with(db_sessionmaker, threads, github).refresh(
@@ -143,6 +173,7 @@ class TestMirroringTheBacklog:
         )
 
         assert threads.posts == [], "a refresh said something in a thread"
+        assert mentions_in_the_blocks(threads) == [], "a refresh notified people through a block"
         stamps = await db_session.scalars(select(ItemAssignment.notified_at))
         assert list(stamps) != [], "no assignment rows, so this proves nothing"
         assert all(stamp is None for stamp in stamps), "a refresh spent somebody's one ping"
@@ -160,6 +191,7 @@ class TestMirroringTheBacklog:
         proves it is handed them, which is the half that lives in the wiring and the half a later
         edit can undo without any of the rest of this file noticing.
         """
+        await link_everybody(db_session)
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
 
         await _refresh(db_sessionmaker, github, threads).refresh(
@@ -168,6 +200,7 @@ class TestMirroringTheBacklog:
 
         assert len(threads.created) == 2, "it mirrored nothing, so this proves nothing"
         assert threads.posts == [], "the wiring gave /refresh a sync service that pings"
+        assert mentions_in_the_blocks(threads) == [], "the wiring gave it one that mentions"
         stamps = await db_session.scalars(select(ItemAssignment.notified_at))
         assert all(stamp is None for stamp in stamps)
 
