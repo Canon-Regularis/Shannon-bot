@@ -1,0 +1,227 @@
+name: Deployed
+
+# Asks the running bot which commit it is, hourly, and says so out loud when that is not the head
+# of main.
+#
+# This is the other half of scripts/deploy.sh. The script makes the deploy one command; this makes
+# forgetting to run it impossible to miss. Nothing here can deploy anything and nothing here holds
+# a credential that could: no SSH key, no password, no registry token. It reads one public
+# unauthenticated endpoint and writes an issue. That is the whole reason the trigger stayed manual
+# rather than becoming a push-to-deploy job, which would have needed a key to the box sitting in a
+# public repository's secrets.
+#
+# The failure it exists for is the one that has already happened here: a change merged to main and
+# never pulled onto the server reads exactly like a change that does not work. /health reports the
+# commit precisely so something can ask, and until now nothing did.
+
+on:
+  schedule:
+    # Hourly, off the hour, because everything scheduled on the hour queues behind everything else
+    # scheduled on the hour. GitHub runs these late or not at all under load, so treat this as
+    # "within a couple of hours" rather than a clock.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: deployed
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Is main what is running
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # A secret rather than a variable so it is masked in this public repository's run logs. It
+      # protects very little on its own: the hostname is in a certificate transparency log and the
+      # endpoint behind it is unauthenticated by design. It keeps the address of the box out of
+      # public logs and public issue bodies, which is worth the one setup step.
+      HEALTH_URL: ${{ secrets.SHANNON_HEALTH_URL }}
+      # Below this, drift is just CI still running. A push that has not finished building is not
+      # something to open an issue about.
+      GRACE_MINUTES: "45"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The label these issues carry
+        # Created here rather than by hand so there is no setup step that can be skipped. --force
+        # makes it an upsert.
+        run: gh label create deployment --color 1D76DB --description "Deploy state of the server" --force
+
+      - name: Ask the server which commit it is
+        id: probe
+        run: |
+          set -uo pipefail
+          if [ -z "${HEALTH_URL:-}" ]; then
+            echo "::error::SHANNON_HEALTH_URL is not set. Add it as a repository secret."
+            exit 1
+          fi
+
+          body=$(mktemp)
+          # Retries because one refused connection during a deploy is not an outage, and this runs
+          # while deploys happen.
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 \
+                   --retry 3 --retry-delay 10 --retry-all-errors "$HEALTH_URL" || echo 000)
+
+          running="unreachable"
+          healthy="false"
+          if [ "$code" = "200" ] || [ "$code" = "503" ]; then
+            running=$(jq -r '.version // "unknown"' <"$body" 2>/dev/null || echo unknown)
+            healthy=$(jq -r '.healthy // false' <"$body" 2>/dev/null || echo false)
+            # Deliberately not echoing the body: it is small, but it comes from outside this
+            # workflow and this log is public.
+            jq -c '{database,worker,bot,poller}' <"$body" 2>/dev/null || true
+          fi
+
+          {
+            echo "code=$code"
+            echo "running=$running"
+            echo "healthy=$healthy"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Decide
+        id: decide
+        env:
+          CODE: ${{ steps.probe.outputs.code }}
+          RUNNING: ${{ steps.probe.outputs.running }}
+          HEALTHY: ${{ steps.probe.outputs.healthy }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          age_minutes=$(( ( $(date +%s) - $(git log -1 --format=%ct "$HEAD_SHA") ) / 60 ))
+
+          state=ok
+          if [ "$CODE" != "200" ] && [ "$CODE" != "503" ]; then
+            state=down
+          elif [ "$HEALTHY" != "true" ]; then
+            state=unhealthy
+          elif [ "$RUNNING" != "$HEAD_SHA" ]; then
+            if [ "$age_minutes" -lt "$GRACE_MINUTES" ]; then
+              echo "main moved $age_minutes minutes ago; inside the ${GRACE_MINUTES}m grace, saying nothing"
+            else
+              state=drift
+            fi
+          fi
+
+          # A red CI publishes no image, so drift nobody can fix reads differently from drift
+          # somebody forgot. Worth the one API call to say which.
+          published=unknown
+          if [ "$state" = "drift" ]; then
+            published=$(gh run list --workflow=ci.yml --commit "$HEAD_SHA" \
+                          --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+          fi
+
+          {
+            echo "state=$state"
+            echo "age_minutes=$age_minutes"
+            echo "published=$published"
+          } >>"$GITHUB_OUTPUT"
+          echo "state=$state running=$RUNNING head=$HEAD_SHA ci=$published"
+
+      - name: Say so
+        env:
+          STATE: ${{ steps.decide.outputs.state }}
+          AGE: ${{ steps.decide.outputs.age_minutes }}
+          PUBLISHED: ${{ steps.decide.outputs.published }}
+          CODE: ${{ steps.probe.outputs.code }}
+          RUNNING: ${{ steps.probe.outputs.running }}
+          HEAD_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Two titles, so a server that is down and a server that is merely behind dedupe apart
+          # and neither hides the other.
+          DRIFT_TITLE="Shannon is running an old build"
+          DOWN_TITLE="Shannon is not answering"
+
+          open_issue() {   # title, body
+            existing=$(gh issue list --state open --label deployment \
+                         --search "in:title \"$1\"" --json number,title \
+                         --jq "[.[] | select(.title == \"$1\")] | .[0].number // empty")
+            if [ -n "$existing" ]; then
+              # A comment rather than a second issue, so the history of one outage is in one place.
+              gh issue comment "$existing" --body "$2"
+              echo "commented on #$existing"
+            else
+              gh issue create --title "$1" --label deployment --body "$2"
+            fi
+          }
+
+          close_issue() {  # title, body
+            for n in $(gh issue list --state open --label deployment \
+                         --search "in:title \"$1\"" --json number,title \
+                         --jq "[.[] | select(.title == \"$1\")] | .[].number"); do
+              gh issue close "$n" --comment "$2"
+              echo "closed #$n"
+            done
+          }
+
+          # Nothing below names the host or the URL. This repository is public and so is every
+          # issue in it; the person reading this knows which box it is.
+          short_head="${HEAD_SHA:0:12}"
+          short_running="${RUNNING:0:12}"
+
+          case "$STATE" in
+            ok)
+              close_issue "$DRIFT_TITLE" "The server is now running \`$short_head\`. Closed automatically."
+              close_issue "$DOWN_TITLE"  "\`/health\` is answering 200 again, on \`$short_head\`. Closed automatically."
+              ;;
+
+            drift)
+              if [ "$PUBLISHED" = "success" ]; then
+                body=$(cat <<EOF
+          \`/health\` reports \`$short_running\`. The head of \`main\` is [\`$short_head\`](https://github.com/$REPO/commit/$HEAD_SHA), merged $AGE minutes ago, and CI has published an image for it.
+
+          Everything merged since is live nowhere. On the server:
+
+          \`\`\`
+          /opt/shannon/scripts/deploy.sh
+          \`\`\`
+
+          [What is in between](https://github.com/$REPO/compare/$RUNNING...$HEAD_SHA)
+
+          This issue closes itself on the next run once \`/health\` reports \`$short_head\`.
+          EOF
+          )
+              else
+                body=$(cat <<EOF
+          \`/health\` reports \`$short_running\` and the head of \`main\` is [\`$short_head\`](https://github.com/$REPO/commit/$HEAD_SHA), but CI for that commit is \`$PUBLISHED\`, so **no image was ever published for it**.
+
+          This is not a deploy that was forgotten. There is nothing to deploy. Fix CI first; deploying will refuse until there is an image, which is the point.
+          EOF
+          )
+              fi
+              open_issue "$DRIFT_TITLE" "$body"
+              exit 1
+              ;;
+
+            unhealthy)
+              open_issue "$DOWN_TITLE" "$(cat <<EOF
+          \`/health\` answers **503** on \`$short_running\`. The process is listening and something behind it is not working: the database is unreachable, the worker has stopped, or the Discord gateway has dropped. Deliveries are being accepted and nothing is acting on them.
+
+          \`\`\`
+          docker compose -f compose.prod.yaml ps
+          docker compose -f compose.prod.yaml logs --tail=200 app
+          \`\`\`
+          EOF
+          )"
+              exit 1
+              ;;
+
+            down)
+              open_issue "$DOWN_TITLE" "$(cat <<EOF
+          \`/health\` did not answer. curl returned \`$CODE\`, where \`000\` means no response at all.
+
+          Either the host is down, Caddy is not running, the certificate failed to renew, or DNS has moved. The webhook endpoint is on the same hostname, so GitHub deliveries are failing too, and GitHub does not redeliver them.
+          EOF
+          )"
+              exit 1
+              ;;
+          esac
