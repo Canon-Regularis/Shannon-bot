@@ -53,6 +53,10 @@ def labelled(action: str, name: str) -> dict:
     The payload helper builds only the inner issue, so the top-level `label` is added here. That
     is the whole of what separates these two actions from every other: one delivery, one label,
     named where nothing else names it.
+
+    A test about the claim wants a name the opening block never showed, because a name it did
+    show is suppressed on purpose and the line would be missing for that reason instead of the
+    one under test. `bug` is the helper's default and is exactly the wrong choice.
     """
     payload = payloads.issue_event(action, labels=[{"name": name}])
     payload["label"] = {"name": name, "color": "d73a4a"}
@@ -90,6 +94,49 @@ async def test_a_label_coming_off_says_so(registered: Repository, db_engine: Asy
     assert lines(threads) == ["🏷️ Tag `wontfix` removed."]
 
 
+async def test_a_label_the_opening_block_already_showed_says_nothing(
+    registered: Repository, db_engine: AsyncEngine
+) -> None:
+    """`bug` is on the issue when it is opened, so the block that went up a moment ago lists it.
+
+    GitHub sends the `labeled` delivery for it beside the `opened` one rather than folding the
+    two together, which is why anything ever said it at all. Issue #81.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await with_a_thread(client, container)
+        await post(client, "issues", labelled("labeled", "bug"), delivery="tag-1")
+        await container.worker.run_once()
+
+    assert lines(threads) == []
+
+
+async def test_a_label_that_came_off_and_went_back_on_is_said_both_times(
+    registered: Repository, db_engine: AsyncEngine
+) -> None:
+    """Taking `bug` off is news even though the block showed it, and once a reader has been told
+    it is gone, putting it back is news again.
+
+    What keeps those apart is that the set follows the LINES rather than the labels: a line
+    saying a tag came off takes the name out of it.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await with_a_thread(client, container)
+        await post(client, "issues", labelled("unlabeled", "bug"), delivery="tag-1")
+        await container.worker.run_once()
+        await post(client, "issues", labelled("labeled", "bug"), delivery="tag-2")
+        await container.worker.run_once()
+
+    assert lines(threads) == ["🏷️ Tag `bug` removed.", "🏷️ Tag `bug` added."]
+
+
 async def test_the_same_delivery_handled_twice_says_it_once(
     registered: Repository,
     db_sessionmaker: async_sessionmaker,
@@ -118,12 +165,12 @@ async def test_the_same_delivery_handled_twice_says_it_once(
         announce=announcer,
     )
     await handle("opened", payloads.issue_event("opened"), 900_001)
-    payload = labelled("labeled", "bug")
+    payload = labelled("labeled", "needs design")
 
     await handle("labeled", payload, 900_002)
     await handle("labeled", payload, 900_002)
 
-    assert lines(threads) == ["🏷️ Tag `bug` added."]
+    assert lines(threads) == ["🏷️ Tag `needs design` added."]
     held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
     assert held == 1, "the claim that makes it say it once was not taken"
 
@@ -146,7 +193,7 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
         announce=announcer,
     )
     await handle("opened", payloads.issue_event("opened"), 900_001)
-    payload = labelled("labeled", "bug")
+    payload = labelled("labeled", "needs design")
 
     with pytest.raises(DiscordGatewayError):
         await handle("labeled", payload, 900_002)
@@ -154,7 +201,7 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
 
     await handle("labeled", payload, 900_002)
 
-    assert lines(threads) == ["🏷️ Tag `bug` added."], "the claim was never given back"
+    assert lines(threads) == ["🏷️ Tag `needs design` added."], "the claim was never given back"
 
 
 async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
@@ -179,7 +226,7 @@ async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
     await handle("opened", payloads.issue_event("opened"), 900_001)
 
     with caplog.at_level(logging.ERROR), pytest.raises(DiscordGatewayError):
-        await handle("labeled", labelled("labeled", "bug"), 900_002)
+        await handle("labeled", labelled("labeled", "needs design"), 900_002)
 
     assert "mirrored_notes" in caplog.text, f"it went quiet about it: {caplog.text}"
 
@@ -204,7 +251,9 @@ class _FailsToGiveItBack:
 
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
         self._sessionmaker = sessionmaker
-        self._left = 1
+        # Two: the announcer reads what the block already showed before it claims anything, and
+        # the read has to work or the line is never reached at all.
+        self._left = 2
 
     def __call__(self):
         if self._left:
@@ -216,8 +265,10 @@ class _FailsToGiveItBack:
 async def test_an_event_that_moves_no_label_says_nothing(
     registered: Repository, db_engine: AsyncEngine
 ) -> None:
-    """An item opened with four labels is one delivery carrying four names and no move. Only the
-    two actions GitHub sends one label with have anything to announce."""
+    """An `edited` delivery carries the whole label list and names no move, so there is nothing
+    to announce from it. Only `labeled` and `unlabeled` say which one went on or came off, and
+    GitHub sends one of those per label rather than folding them into the delivery that opened
+    the item."""
     threads = FakeThreadGateway()
     container = build_stack(db_engine, threads=threads)
     client = build_http_client(container)

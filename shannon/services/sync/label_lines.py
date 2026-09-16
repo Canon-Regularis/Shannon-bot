@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from shannon.db.stores.thread_pointers import ThreadPointerStore
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import LabelMove
 from shannon.github.webhooks.labels import parse_label_move
 from shannon.services.sync.announcements import Arrival, ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
+
+logger = logging.getLogger(__name__)
 
 Renderer = Callable[[LabelMove], str]
 
@@ -40,6 +45,7 @@ class LabelLine:
         render: Renderer,
         shut_again: KeepsThreadsShut,
     ) -> None:
+        self._sessionmaker = sessionmaker
         self._line = ClaimedLine(sessionmaker, threads, shut_again)
         self._render = render
 
@@ -61,9 +67,40 @@ class LabelLine:
         if move is None:
             return
 
+        if move.added and await self._already_shown(arrival.tracked_item_id, move.name):
+            # An item opened with labels already on it is not one delivery: GitHub fires `opened`
+            # and a `labeled` for each of them together. The block that went up a moment ago
+            # listed every one, so saying they were added is telling a reader what they are
+            # looking at. Issue #81.
+            #
+            # Read AFTER the sync, which is where the handler calls this and is what makes the
+            # answer the same either way round. If the `labeled` delivery is the one that opened
+            # the thread, its own posted block recorded the name and this read sees it; if
+            # `opened` got there first, it sees the set that block wrote.
+            logger.info(
+                "the block already showed %r on tracked item %s, so nothing is said about it",
+                move.name,
+                arrival.tracked_item_id,
+            )
+            return
+
         await self._line.say_once(
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"label:{arrival.arrived}",
             content=self._render(move),
         )
+        # Only once the line has actually landed. A refused post hands its claim back, and the
+        # retry has to be able to say the same thing.
+        async with self._sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).note_a_label_was_said(
+                arrival.tracked_item_id,
+                thread_id=arrival.thread_id,
+                name=move.name,
+                on_it=move.added,
+            )
+
+    async def _already_shown(self, tracked_item_id: int, name: str) -> bool:
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_id(tracked_item_id)
+        return item is not None and name in (item.shown_labels or ())
