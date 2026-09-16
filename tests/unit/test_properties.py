@@ -143,6 +143,10 @@ class TestRendering:
         assignees=st.lists(actors, max_size=5).map(tuple),
         labels=st.lists(labels, max_size=5).map(tuple),
         updated_at=st.one_of(st.none(), aware),
+        # Named rather than left to inference. `st.builds` fills only the arguments that have no
+        # default, and this one has, so leaving it out meant every generated block carried an
+        # empty description and the invariants below never saw one.
+        body=st.text(max_size=3000),
     )
 
     @given(metadata, st.sampled_from(list(Status)), st.sampled_from(list(Priority)))
@@ -164,6 +168,10 @@ class TestRendering:
             for field in ("Issue Name", "Type", "State", "Status", "Priority", "Last Updated"):
                 assert f"**{field}:**" in rendered
 
+        # The description is the one part of the block that is several lines, so it is the one
+        # part a trim can leave half of. A label with nothing under it reads as a broken bot.
+        assert not rendered.rstrip("…\n").endswith("**Description:**")
+
     @given(
         st.builds(
             PullRequestSnapshot,
@@ -175,6 +183,7 @@ class TestRendering:
             state=st.sampled_from(["open", "closed"]),
             merged=st.booleans(),
             reviewers=st.lists(actors, max_size=5).map(tuple),
+            body=st.text(max_size=3000),
         ),
         st.sampled_from(list(Status)),
     )

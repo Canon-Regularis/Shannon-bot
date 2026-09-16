@@ -19,9 +19,11 @@ import pytest
 
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
+    DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
     MESSAGE_LIMIT,
     as_plain_text,
+    as_prose,
     code_span,
     fit,
     quote,
@@ -182,3 +184,111 @@ class TestTheOtherTwoThingsThisModuleDecides:
         make all of them wrong in the direction that matters."""
         for text in ("plain", "**bold**", "a_b_c", "`code`", "<@1234>", "@everyone"):
             assert len(as_plain_text(text)) >= len(text)
+
+
+class TestTheDescriptionLimit:
+    """Pinned against the number rather than against the comment limit it happens to equal.
+
+    The two are different things and either may move. Asserting one against the other is how a
+    change to the comment preview silently becomes a change to the description as well.
+    """
+
+    def test_it_is_the_number_it_is(self) -> None:
+        assert DESCRIPTION_PREVIEW_LIMIT == 700
+
+    def test_a_description_at_its_worst_still_leaves_room_for_the_block_around_it(self) -> None:
+        """Escaping can double the length, every line gains two characters for the quote, and the
+        block it goes under has ten fields of its own. A limit that fits on its own and not in a
+        block would be a description that silently disappears from a busy item.
+        """
+        worst = quote(as_prose("*" * DESCRIPTION_PREVIEW_LIMIT), limit=DESCRIPTION_PREVIEW_LIMIT)
+
+        assert len(worst) < MESSAGE_LIMIT
+
+    def test_a_description_is_cut_at_its_own_limit_and_not_the_comment_one(self) -> None:
+        quoted = quote("a" * 900, limit=DESCRIPTION_PREVIEW_LIMIT)
+
+        assert len(quoted.removeprefix("> ").removesuffix("…")) == DESCRIPTION_PREVIEW_LIMIT
+
+    def test_a_comment_still_gets_the_comment_limit_without_being_asked(self) -> None:
+        """The limit is a keyword with a default, so every existing caller keeps what it had."""
+        assert len(quote("a" * 900).removeprefix("> ").removesuffix("…")) == COMMENT_PREVIEW_LIMIT
+
+
+class TestFlatteningMarkdownToProse:
+    """What makes a description readable, which is the escaping having nothing left to escape.
+
+    Every rule is checked with two occurrences. With one, a rule that forgot `re.MULTILINE` still
+    matches at the start of the string and the test passes while every later line goes untouched.
+    """
+
+    def test_headings_lose_their_hashes(self) -> None:
+        assert as_prose("## Summary\ntext\n### Detail") == "Summary\ntext\nDetail"
+
+    def test_a_line_leading_issue_reference_keeps_its_hash(self) -> None:
+        """The rule needs the space GitHub needs for a heading. Without it this reads `#3` as a
+        heading, strips the hash, and the reference is gone with no way to tell it was ever there.
+        """
+        assert as_prose("#3 is fixed by this\n#4 as well") == "#3 is fixed by this\n#4 as well"
+
+    def test_bullets_become_a_mark_discord_will_not_escape_back(self) -> None:
+        """`-`, `*` and `+` are all markdown to Discord, so writing one of those here means the
+        escaper puts the backslash straight back on and nothing has been gained."""
+        flattened = as_prose("- one\n* two\n+ three")
+
+        assert flattened == "• one\n• two\n• three"
+        assert "\\" not in as_plain_text(flattened), "the escaper put the markers back"
+
+    def test_an_indented_bullet_is_flattened_too(self) -> None:
+        assert as_prose("  - one\n\t- two") == "• one\n• two"
+
+    def test_a_blank_line_before_a_bullet_survives(self) -> None:
+        r"""The rule matches spaces and tabs and not `\s`, which reaches back over the newline.
+        That is the bug in Discord's own escaper that makes one bullet come out escaped and the
+        next not, with a stray backslash left on the line above.
+        """
+        assert as_prose("intro\n\n- one\n- two") == "intro\n\n• one\n• two"
+
+    def test_quote_markers_are_dropped_because_it_is_all_going_into_a_quote(self) -> None:
+        assert as_prose("> said this\n>> and this") == "said this\nand this"
+
+    def test_html_comments_go(self) -> None:
+        """A pull request template is mostly these, and they are invisible on GitHub. Left in,
+        the preview of a templated repository is the instructions rather than the description.
+        """
+        assert as_prose("<!-- tell us why -->real text<!-- and how -->") == "real text"
+
+    def test_a_comment_spanning_lines_goes_too(self) -> None:
+        assert as_prose("<!--\nmulti\nline\n-->kept") == "kept"
+
+    def test_an_unterminated_comment_is_left_alone(self) -> None:
+        """A greedy match would eat the rest of the description instead."""
+        assert as_prose("<!-- never closed\nand the rest") == "<!-- never closed\nand the rest"
+
+    def test_windows_line_endings_are_folded(self) -> None:
+        """GitHub's web form submits CRLF, and every rule here is anchored to a line. It also
+        costs a blank line two characters against the preview limit rather than one.
+        """
+        assert as_prose("## One\r\n\r\n\r\n\r\n- two") == "One\n\n• two"
+
+    def test_a_run_of_blank_lines_collapses(self) -> None:
+        assert as_prose("one\n\n\n\n\ntwo") == "one\n\ntwo"
+
+    @pytest.mark.parametrize("body", ["", "   ", "\n\n\n", "## ", "<!-- only a comment -->"])
+    def test_a_body_that_says_nothing_flattens_to_nothing(self, body: str) -> None:
+        """What the block reads to decide there is no description to show. A body of markers is
+        not empty and has nothing in it, which is why the block asks about the rendered text.
+        """
+        assert as_prose(body) == ""
+
+    def test_it_never_makes_text_unsafe(self) -> None:
+        """It runs before the escaping and never instead of it, and removing a comment joins
+        whatever sat either side. So the thing worth proving is that the escaping still catches
+        everything once this has had its turn.
+        """
+        hostile = "# <@1234567890>\n- @every<!-- -->one\n* **SHIPPED**\n<!-- -->`` <!-- -->`x"
+
+        escaped = as_plain_text(as_prose(hostile))
+
+        for live in ("<@1234567890>", "@everyone", "**SHIPPED", "```"):
+            assert live not in escaped, f"{live!r} survived"

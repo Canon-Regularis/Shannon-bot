@@ -10,8 +10,11 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from shannon.discord_bot.safe_text import (
+    DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
+    MESSAGE_LIMIT,
     as_plain_text,
+    as_prose,
     code_span,
     defuse_mentions,
     fit,
@@ -319,7 +322,31 @@ def _metadata(
         f"**Tags:** {_tags(snapshot.label_names)}",
         f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
     ]
-    return fit("\n".join(lines))
+    return _with_the_description(fit("\n".join(lines)), snapshot.body)
+
+
+def _with_the_description(block: str, body: str) -> str:
+    """The description under the block, where there is one and where the whole of it fits.
+
+    Last, because it is the one part of the block that is prose rather than a field, and because
+    everything above it is what a reader scanning a channel is looking for.
+
+    Asked about the rendered text and never about the body, which is the same trap `_title`
+    fell into: a body of nothing but whitespace is truthy, and so is one of nothing but markdown
+    markers, and either would put a `**Description:**` label over an empty quote and read as the
+    bot having broken.
+
+    Whole or not at all, and that is not caution. `fit` drops lines from the end, so on a block
+    with room for the label and not for the quote under it, the label is what survives and the
+    description is what goes: a message ending `**Description:**` and a truncation marker. The
+    fields are the point of the block and this is the nicety, so the nicety is what gives way.
+    """
+    described = quote(as_prose(body), limit=DESCRIPTION_PREVIEW_LIMIT)
+    if not described:
+        return block
+
+    whole = f"{block}\n**Description:**\n{described}"
+    return whole if len(whole) <= MESSAGE_LIMIT else block
 
 
 def _note(

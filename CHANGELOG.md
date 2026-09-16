@@ -4798,3 +4798,18 @@ to set the project number will find it.
   measured, from anybody who can comment on the repository. Sub-issues needed no code at all: a
   sub-issue is an ordinary issue with its own thread and its own comments, which there is now a
   test saying out loud.
+
+## What the item is actually for
+
+- The block now ends with the description the item was opened with, and says nothing at all when
+  it was opened without one. Closes #75.
+- The markdown is flattened before the escaping rather than after, because the escaping is what
+  made a description unreadable: Discord puts a backslash in front of a line-leading hash and a
+  line-leading dash, so an ordinary description arrived as a wall of them with a stray one on a
+  line of its own. Headings lose their hashes, list markers become a bullet Discord will not
+  escape back, and a pull request template's HTML comments go, which otherwise filled the preview
+  with instructions to the author instead of anything the author wrote.
+- Two things found by running it rather than reading it. A line-leading `#3` lost its issue
+  reference until the heading rule was made to require the space GitHub requires. And the section
+  goes in whole or not at all, because the trim drops lines from the end and a block with room for
+  the label and not for the text under it ended the message on a label and an ellipsis.

@@ -113,3 +113,41 @@ class TestAnItem:
 
         assert found is not None
         assert found.html_url == "https://github.com/acme/widget/pull/7"
+
+
+class TestADescription:
+    """The one field GitHub sends as a null rather than as an empty string.
+
+    An item opened with the description box left alone arrives as `"body": null`, which is the
+    ordinary case rather than a malformed payload, and a None reaching the renderer would be a
+    `**Description:**` label over the word None.
+    """
+
+    @pytest.mark.parametrize("body", [None, 7, [], {}, True], ids=lambda v: type(v).__name__)
+    def test_anything_that_is_not_text_reads_as_no_description(self, body: object) -> None:
+        found = mapping.issue({"id": 5, "number": 7, "body": body}, REPO)
+
+        assert found is not None
+        assert found.body == ""
+
+    def test_a_missing_key_reads_as_no_description(self) -> None:
+        found = mapping.issue({"id": 5, "number": 7}, REPO)
+
+        assert found is not None
+        assert found.body == ""
+
+    def test_text_is_carried_through_exactly_as_written(self) -> None:
+        """Untouched here on purpose. What it looks like in Discord is decided where a reader is
+        decided about, and cutting or tidying it here would leave nothing else able to."""
+        written = "## Summary\n\n- one\n- two\n"
+
+        found = mapping.issue({"id": 5, "number": 7, "body": written}, REPO)
+
+        assert found is not None
+        assert found.body == written
+
+    def test_a_pull_request_carries_one_the_same_way(self) -> None:
+        found = mapping.pull_request({"id": 5, "number": 7, "body": "why this exists"}, REPO)
+
+        assert found is not None
+        assert found.body == "why this exists"

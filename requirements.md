@@ -147,10 +147,12 @@ item carries no priority label until somebody gives it one, and that state has t
 ## Discord Output Format
 
 For every synced PR / issue, the bot must generate a Discord message (in the relevant thread) with
-the fields below. Two differences from the list as first written: a `State:` line carries GitHub's
-own open, closed or merged, which the status field does not, and the `Reviewers:` line is omitted
-for issues, because GitHub issues have no reviewers and a row that always reads `None` is noise
-rather than information.
+the fields below. Three differences from the list as first written: a `State:` line carries
+GitHub's own open, closed or merged, which the status field does not; the `Reviewers:` line is
+omitted for issues, because GitHub issues have no reviewers and a row that always reads `None` is
+noise rather than information; and a `Description:` section is added at the end, because the list
+said what an item was called and who was on it and nothing about what it was for. The description
+is left out entirely when the item was opened without one.
 
 ```text
 PR / issue Name:
@@ -163,6 +165,7 @@ Status:
 Priority:
 Tags:
 Last Updated:
+Description:
 ```
 
 For every synced ticket, the bost must generate a Discord message (in the relevant thread) with:
