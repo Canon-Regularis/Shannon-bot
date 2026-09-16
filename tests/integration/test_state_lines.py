@@ -23,6 +23,7 @@ from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -33,7 +34,11 @@ pytestmark = pytest.mark.integration
 
 CLOSED = {"state": "closed", "closed_at": "2026-08-11T12:00:00Z"}
 MERGED = {"state": "closed", "merged": True, "merged_at": "2026-08-10T13:00:00Z"}
-SHUT = "### 🔒 Closed\n-# This thread is locked. Reopen the item on GitHub to reopen it here."
+SHUT = (
+    "### 🔒 Closed\n-# This thread is locked and archived. "
+    "Reopen the item on GitHub to reopen it here."
+)
+MERGED_SHUT = "### 🟣 Merged\n-# This thread is locked and archived."
 REOPENED = "### 🔓 Reopened"
 
 
@@ -46,7 +51,12 @@ def issue_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGateway):
     return build_item_handler(
         build_item_sync(sessionmaker, threads, IssuePolicy()),
         parse_issue_event,
-        announce=StateLine(sessionmaker, threads, render=format_state_change),
+        announce=StateLine(
+            sessionmaker,
+            threads,
+            render=format_state_change,
+            shut_again=KeepsThreadsShut(sessionmaker, threads),
+        ),
     )
 
 
@@ -54,7 +64,12 @@ def pull_request_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGa
     return build_item_handler(
         build_item_sync(sessionmaker, threads, PullRequestPolicy()),
         parse_pull_request_event,
-        announce=StateLine(sessionmaker, threads, render=format_state_change),
+        announce=StateLine(
+            sessionmaker,
+            threads,
+            render=format_state_change,
+            shut_again=KeepsThreadsShut(sessionmaker, threads),
+        ),
     )
 
 
@@ -81,11 +96,11 @@ class _RefusesToGiveTheThreadBack(FakeThreadGateway):
     first Discord call a reopen makes.
     """
 
-    async def set_locked(self, *, thread_id: int, locked: bool) -> None:
-        if not locked:
-            self.lock_calls.append((thread_id, locked))
-            raise DiscordPermissionError("Discord will not let the bot unlock the thread")
-        await super().set_locked(thread_id=thread_id, locked=locked)
+    async def set_shut(self, *, thread_id: int, shut: bool) -> None:
+        if not shut:
+            self.shut_calls.append((thread_id, shut))
+            raise DiscordPermissionError("Discord will not let the bot reopen the thread")
+        await super().set_shut(thread_id=thread_id, shut=shut)
 
 
 class TestWhatEachMoveSays:
@@ -99,7 +114,12 @@ class TestWhatEachMoveSays:
         await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
 
         assert markers(threads) == [SHUT]
-        assert threads.threads[threads.created[0].thread_id].locked is True
+        thread = threads.threads[threads.created[0].thread_id]
+        assert thread.locked is True
+        # The header is posted after the sync shut the thread, and posting reopens an archived
+        # one. Without putting it back, every closed item ends up announced as closed in a thread
+        # that is sitting open in the channel.
+        assert thread.archived is True, "the header it posted left the thread open"
 
     async def test_reopening_an_issue_says_the_thread_is_back(
         self, registered: Repository, db_sessionmaker: async_sessionmaker
@@ -118,12 +138,11 @@ class TestWhatEachMoveSays:
         assert markers(threads)[-1] == f"{REOPENED}\n-# This thread is open again."
         assert threads.threads[threads.created[0].thread_id].locked is False
 
-    async def test_a_closed_pull_request_claims_no_lock(
+    async def test_a_pull_request_closed_without_merging_is_shut_too(
         self, registered: Repository, db_sessionmaker: async_sessionmaker
     ) -> None:
-        """Pull requests close without their thread being shut, which
-        `test_a_closed_thread_is_left_unlocked` pins on the sync side. A line claiming otherwise
-        would tell people they cannot reply where they can.
+        """An abandoned pull request is exactly the thread worth getting out of the way, and it
+        is the one that can genuinely be reopened on GitHub, so it is told how.
         """
         threads = FakeThreadGateway()
         handle = pull_request_handler(db_sessionmaker, threads)
@@ -131,8 +150,8 @@ class TestWhatEachMoveSays:
         await handle("opened", payloads.pull_request_event("opened"), 900_001)
         await handle("closed", payloads.pull_request_event("closed", **CLOSED), 900_002)
 
-        assert markers(threads) == ["### 🔒 Closed"]
-        assert threads.locks == [], "the pull request path started locking threads"
+        assert markers(threads) == [SHUT]
+        assert threads.threads[threads.created[0].thread_id].archived is True
 
     async def test_a_merged_pull_request_is_told_apart_from_an_abandoned_one(
         self, registered: Repository, db_sessionmaker: async_sessionmaker
@@ -146,7 +165,30 @@ class TestWhatEachMoveSays:
         await handle("opened", payloads.pull_request_event("opened"), 900_001)
         await handle("closed", payloads.pull_request_event("closed", **MERGED), 900_002)
 
-        assert markers(threads) == ["### 🟣 Merged"]
+        assert markers(threads) == [MERGED_SHUT]
+        assert threads.threads[threads.created[0].thread_id].archived is True
+
+    async def test_a_thread_discord_would_not_shut_says_which_permission_is_missing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        """The whole point of carrying the refusal instead of raising on it.
+
+        This delivery used to be dropped: a missing permission is permanent, so the worker gave
+        up on the first attempt and the header never posted. What a reader saw was a thread that
+        went quiet, with the reason in a log on a server they cannot get at. Now the item still
+        says it closed and the thread says why it is still open.
+        """
+        threads = FakeThreadGateway()
+        threads.refuses_every_shut = True
+        handle = issue_handler(db_sessionmaker, threads)
+
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        assert markers(threads) == [
+            "### 🔒 Closed\n-# This thread could not be closed: the bot needs Manage Threads."
+        ]
+        assert threads.threads[threads.created[0].thread_id].archived is False
 
     async def test_an_action_that_moves_no_state_says_nothing(
         self, registered: Repository, db_sessionmaker: async_sessionmaker

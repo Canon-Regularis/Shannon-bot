@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
-from shannon.discord_bot.errors import DiscordPermissionError
+from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import Status
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.policies import IssuePolicy
@@ -19,24 +19,45 @@ pytestmark = pytest.mark.integration
 CLOSED = {"state": "closed", "closed_at": "2026-08-11T12:00:00Z"}
 
 
-async def test_a_lock_the_payload_asked_for_still_fails_the_delivery(
+async def test_a_shut_no_permission_will_ever_grant_does_not_fail_the_delivery(
     registered: Repository,
     issue_service: ItemSyncService,
     threads: FakeThreadGateway,
     issue_event,
 ) -> None:
-    """The other side of stepping over a refusal nobody can wait out.
+    """This used to raise, and raising was the wrong answer for a reason worth writing down.
 
-    A pull request's lock is asked for by the row, and the row can be left saying the thread is
-    not shut, so granting the permission later is enough on its own and the delivery has nothing
-    left to do. An issue's is asked for by the payload, and that delivery is answering something
-    somebody just did. Stepping over it would leave the issue reading Closed in the block with an
-    open thread underneath and nothing recorded anywhere, so it fails and is recorded as failed.
+    A missing permission is permanent, so the delivery was dropped on its first attempt. That
+    took the whole delivery with it, not just the shut: the metadata block was written but the
+    closing header never posted, so the thread said nothing at all rather than saying the wrong
+    thing. The refusal is carried back to the announcement instead, which is the one place
+    anybody will read it. The row still says the thread is open, so the next delivery tries
+    again and granting the permission later is enough on its own.
     """
-    await issue_service.sync(issue_event("opened"))
-    threads.refuses_every_lock = True
+    result = await issue_service.sync(issue_event("opened"))
+    assert result is not None
+    threads.refuses_every_shut = True
 
-    with pytest.raises(DiscordPermissionError):
+    closed = await issue_service.sync(issue_event("closed", **CLOSED))
+
+    assert closed.synced, "a permission nobody has granted lost the whole delivery"
+    assert closed.shut_refused is True
+    assert threads.threads[result.thread_id].locked is False
+    assert "**State:** Closed" in threads.metadata_of(result.thread_id)
+
+
+async def test_a_bad_moment_still_fails_the_delivery(
+    registered: Repository,
+    issue_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    issue_event,
+) -> None:
+    """The half that did not change. A refusal that is worth waiting out has to fail, because
+    failing is what gets the delivery another go."""
+    await issue_service.sync(issue_event("opened"))
+    threads.fail_next_shut = True
+
+    with pytest.raises(DiscordGatewayError):
         await issue_service.sync(issue_event("closed", **CLOSED))
 
 
@@ -58,7 +79,7 @@ async def test_a_refused_unlock_does_not_take_the_rest_of_the_delivery_with_it(
     """
     await issue_service.sync(issue_event("opened"))
     await issue_service.sync(issue_event("closed", **CLOSED))
-    threads.refuses_every_lock = True
+    threads.refuses_every_shut = True
 
     with caplog.at_level(logging.WARNING):
         await issue_service.sync(
@@ -100,7 +121,7 @@ async def test_closing_locks_the_thread(
     assert result is not None
     await issue_service.sync(issue_event("closed", **CLOSED))
 
-    assert threads.locks == [(result.thread_id, True)]
+    assert threads.shuts == [(result.thread_id, True)]
     assert threads.threads[result.thread_id].locked is True
 
 
@@ -134,7 +155,7 @@ async def test_reopening_unlocks_the_thread_and_resets_the_status(
 
     await issue_service.sync(issue_event("reopened", state="open", closed_at=None))
 
-    assert threads.locks == [(result.thread_id, True), (result.thread_id, False)]
+    assert threads.shuts == [(result.thread_id, True), (result.thread_id, False)]
     assert threads.threads[result.thread_id].locked is False
 
     db_session.expunge_all()
@@ -194,8 +215,8 @@ async def test_closing_twice_locks_once(
     await issue_service.sync(issue_event("closed", **CLOSED))
     await issue_service.sync(issue_event("closed", **CLOSED))
 
-    assert len(threads.locks) == 1, "it edited the thread twice for one close"
-    assert threads.lock_calls == [(threads.created[0].thread_id, True)] * 2
+    assert len(threads.shuts) == 1, "it edited the thread twice for one close"
+    assert threads.shut_calls == [(threads.created[0].thread_id, True)] * 2
 
 
 async def test_a_locked_thread_still_accepts_metadata_updates(
@@ -215,18 +236,27 @@ async def test_a_locked_thread_still_accepts_metadata_updates(
     assert threads.threads[result.thread_id].locked is True
 
 
-async def test_locking_never_archives(
+async def test_shutting_archives_as_well_as_locking(
     registered: Repository,
     issue_service: ItemSyncService,
     issue_event,
     threads: FakeThreadGateway,
 ) -> None:
-    """Archiving would hide the thread and make every later edit fail."""
+    """Issues #76 and #77. Locked keeps people from replying; archived is what takes the thread
+    out of the channel, which is the half anybody actually sees.
+
+    This file used to assert the opposite, because archiving hides a thread and Discord refuses
+    every edit to an archived one, and a closed issue still gets label and comment events. That
+    is still true. What answers it is that every write reopens the thread first and the delivery
+    shuts it again afterwards.
+    """
     result = await issue_service.sync(issue_event("opened"))
     assert result is not None
     await issue_service.sync(issue_event("closed", **CLOSED))
 
-    assert threads.threads[result.thread_id].archived is False
+    thread = threads.threads[result.thread_id]
+    assert thread.archived is True
+    assert thread.locked is True, "archived without the lock reopens on the first reply"
 
 
 async def test_an_issue_that_opens_already_closed_is_locked(

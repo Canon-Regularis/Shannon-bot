@@ -28,7 +28,7 @@ from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonErro
 from shannon.domain.models import Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
-from shannon.services.sync.items import LocksAndKnowsServers, SyncsItems
+from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class ItemWorkflow:
         self,
         sessionmaker: async_sessionmaker,
         github: LabelsItems,
-        threads: LocksAndKnowsServers,
+        threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -436,7 +436,7 @@ class ItemWorkflow:
         the card is recorded as moved with its thread left open and no poll looks at it again.
         """
         try:
-            await self._threads.set_locked(thread_id=thread_id, locked=locked)
+            await self._threads.set_shut(thread_id=thread_id, shut=locked)
         except ThreadNotFoundError as error:
             logger.info("thread %s is gone, so there was nothing to lock: %s", thread_id, error)
             return _Lock(locked=False, refused=True, thread_missing=True)
@@ -665,7 +665,7 @@ class _Found:
 def build_item_workflow(
     sessionmaker: async_sessionmaker,
     github: GitHubClient,
-    threads: LocksAndKnowsServers,
+    threads: ShutsAndKnowsServers,
     *,
     pr_sync: SyncsItems,
     issue_sync: SyncsItems,
