@@ -25,15 +25,36 @@ class ThreadTarget:
     """Which item is being written to, and where its thread is if it has one yet."""
 
     tracked_item_id: int
+    # Where a NEW thread belongs, off the mapping as it stands now.
     channel_id: int
     thread_id: int | None
     message_id: int | None
+    # Where the thread it already has actually is, off the row. None where the row does not
+    # remember, which is every thread claimed before that column existed.
+    #
+    # These two are different questions and the whole of issue #78 is that nothing asked the
+    # second one. `/set_channel` moves where new threads go and leaves the old ones where they
+    # were, so an item registered into the wrong channel kept being written to there for ever.
+    thread_channel_id: int | None = None
+
+    @property
+    def is_stranded(self) -> bool:
+        """Whether the thread it has is somewhere the mapping no longer names.
+
+        Unknown is not stranded. A row that remembers no channel is a candidate for somebody who
+        can ask Discord, and this is not that: guessing here would abandon a working thread on no
+        evidence, and every row written before the column existed would qualify.
+        """
+        return self.thread_channel_id is not None and self.thread_channel_id != self.channel_id
 
 
 @dataclass(frozen=True, slots=True)
 class ThreadWrite:
     handle: ThreadHandle
     created: bool
+    # The thread this write moved the item off, for a caller that has something to say in it.
+    # None on every ordinary write, which is all of them unless relocation was asked for.
+    displaced: int | None = None
 
 
 class ItemThreads:
@@ -45,14 +66,48 @@ class ItemThreads:
     deleted out from under an item, and a thread that opens but cannot be written to.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker, threads: OpensThreads) -> None:
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        threads: OpensThreads,
+        *,
+        relocates: bool = False,
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
+        # Whether a thread in a channel the mapping no longer names is replaced by one in the
+        # channel it does. Built with it rather than told per call, the same way the refresh path
+        # is built without a notifier: a binding that cannot relocate cannot be talked into it by
+        # a later edit, and the delivery path must not.
+        #
+        # Not on the delivery path because a relocation is four to seven Discord calls, one of
+        # them a thread creation, inside something the worker deadlines, cancels and retries
+        # sixteen times. It also leaves a thread behind that somebody has to be told about, and
+        # the queue has nobody to tell.
+        self._relocates = relocates
 
     async def write(self, target: ThreadTarget, *, name: str, content: str) -> ThreadWrite:
         """Put `content` in the item's thread, opening or rebuilding one where needed."""
         if target.thread_id is None:
             return ThreadWrite(await self._open(target, name=name, content=content), created=True)
+
+        if self._relocates and target.is_stranded:
+            # Discord cannot move a thread between channels, so the item gets a new one and the
+            # old is left behind for the caller to sign-post and shut. The swap below is one
+            # guarded UPDATE from the old id to the new, so nothing here can leave the row
+            # pointing at nothing: it either moves whole or does not move.
+            logger.info(
+                "thread %s for tracked item %s is in channel %s and belongs in %s, replacing it",
+                target.thread_id,
+                target.tracked_item_id,
+                target.thread_channel_id,
+                target.channel_id,
+            )
+            handle = await self._open(target, name=name, content=content)
+            # Unconditional, and it has to be. After a successful swap the id that comes back is
+            # never the old one, and after a lost race it is the winner's, so the old thread is
+            # displaced either way and is worth saying so about either way.
+            return ThreadWrite(handle, created=True, displaced=target.thread_id)
 
         try:
             handle = await self._threads.update(
