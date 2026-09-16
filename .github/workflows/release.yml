@@ -69,6 +69,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # What /health reports back. github.sha is ambient in a called workflow too, so
+          # neither this workflow nor the one calling it needs an input for it.
+          build-args: SHANNON_BUILD=${{ github.sha }}
           # arm64 goes through QEMU and is slow, so it is only worth paying for on a real
           # release. Pushes to main stay amd64 and fast.
           platforms: >-

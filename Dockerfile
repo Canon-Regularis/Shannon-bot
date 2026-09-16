@@ -56,4 +56,12 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
+# The commit this image was built from, which `/health` reports so the running build can be
+# named without an SSH session. Two things about where it sits. An ARG does not cross a FROM, so
+# one declared beside the builder would be invisible here. And it changes on every push, so
+# anything below it in the file would be rebuilt every time; last is the only place it costs
+# nothing. Unset, a locally built image says `unknown` rather than claiming a commit.
+ARG SHANNON_BUILD=unknown
+ENV SHANNON_BUILD=${SHANNON_BUILD}
+
 CMD ["python", "-m", "shannon.main"]
