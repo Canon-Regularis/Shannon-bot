@@ -66,6 +66,7 @@ class TestWhatItWiresUp:
             "link",
             "link_team",
             "pr",
+            "refresh",
             "register",
             "set_backlog",
             "set_channel",

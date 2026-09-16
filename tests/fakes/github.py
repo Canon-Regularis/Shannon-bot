@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, TypeVar
 
 from shannon.domain.models import (
     IssueSnapshot,
@@ -12,6 +12,9 @@ from shannon.domain.models import (
     RepositorySnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
+
+# The same shape the real client uses, so one helper answers for both stores.
+_Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
 
 
 class FakeGitHubClient:
@@ -49,6 +52,10 @@ class FakeGitHubClient:
         self.before_read: tuple[asyncio.Event, asyncio.Event] | None = None
         self.pull_request_calls: list[tuple[str, int]] = []
         self.issue_calls: list[tuple[str, int]] = []
+        # Which lists were asked for, so a test can say a refresh narrowed to issues never went
+        # near the pulls endpoint. Counting threads afterwards cannot show that: a repository
+        # whose pull requests are all mirrored already looks the same either way.
+        self.list_calls: list[tuple[str, str]] = []
         # Labels the fake has been told to write, keyed the same way the snapshots are, so a
         # read after a write sees what the write did.
         self.labels: dict[tuple[str, int], list[str]] = {
@@ -116,6 +123,34 @@ class FakeGitHubClient:
             raise GitHubNotFoundError(
                 f"GitHub has nothing at /repos/{owner}/{name}/issues/{number}"
             ) from None
+
+    async def list_open_pull_requests(
+        self, repository: RepositorySnapshot
+    ) -> Sequence[PullRequestSnapshot]:
+        return self._open("pulls", self.pull_requests, repository)
+
+    async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]:
+        return self._open("issues", self.issues, repository)
+
+    def _open(
+        self, kind: str, store: Mapping[tuple[str, int], _Item], repository: RepositorySnapshot
+    ) -> list[_Item]:
+        """The open half of whatever this fake was stocked with, for the named repository.
+
+        Filtered on `closed` rather than returning everything, so a test can put a closed item in
+        the store and say out loud that a refresh does not reach for it. Sorted by number, because
+        the real client sorts by what moved last and a test asserting on the order of what was
+        mirrored needs an order it can predict.
+        """
+        self.list_calls.append((kind, repository.full_name))
+        if self.error is not None:
+            raise self.error
+        wanted = repository.full_name.lower()
+        return [
+            snapshot
+            for (full_name, _), snapshot in sorted(store.items())
+            if full_name == wanted and not snapshot.closed
+        ]
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         key = (f"{owner}/{name}".lower(), number)

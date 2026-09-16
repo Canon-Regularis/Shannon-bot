@@ -4894,3 +4894,30 @@ to set the project number will find it.
   alone, or the next `synchronize` webhook undoes `/set_done`. Answering only the first two also
   meant the sync started unlocking threads during a command that had said it would handle the lock
   itself, which failed the command outright on a refusal it was built to survive.
+
+## The backlog nothing ever mirrored
+
+- `/refresh` opens a thread for every open pull request and issue that has none, and leaves the
+  ones that do completely alone. Anything open before the repository was registered, or through a
+  gap in delivery, had no thread and never would: the bot learns about an item from a webhook and
+  nothing revisits one. Closes #74.
+- **It pings nobody, and that is the half that needed designing.** The notifier fires on first
+  sight of every item, so a backlog of sixty would have been well over a hundred messages carrying
+  a hundred and fifty live mentions, teams included. Worse, the claim on `item_assignments` makes
+  every run after the first quiet, so it would have tested clean and only happened once, in
+  production. The refresh is given its own sync services built with no notifier rather than told
+  not to ping: there is nothing to fire, so no later edit can make one fire. The ping is deferred
+  rather than cancelled, and the rows are still written, so the next ordinary webhook for an item
+  tells its reviewer then, spread out instead of all at once.
+- Two list calls rather than one, and the one that looks free is the trap. GitHub serves pull
+  requests from the issues endpoint too, but a pull request row there is the issue shape: no
+  requested reviewers, no requested teams. Reading them from it would have opened a thread on
+  every pull request saying nobody had been asked to review. Reading both endpoints properly costs
+  three GitHub calls for a whole run, against fifty for the same twenty-five items one at a time.
+- Twenty-five per run, and the reply says how many are left. The number is about the reply
+  arriving rather than the work: a command has fifteen minutes after it defers, and the failure
+  when that runs out is the worst one available, because the threads all exist and the answer
+  cannot be delivered, which reads from outside as nothing having happened.
+- An item with a row and no thread counts as untracked. The row is committed before the Discord
+  call that gives it a thread, so a refused create leaves an item recorded and invisible; reading
+  the row alone would have called that finished and left it that way for good.

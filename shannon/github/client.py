@@ -3,9 +3,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from urllib.parse import quote
 
 import httpx
@@ -34,6 +34,26 @@ MAX_PAGES = 50
 # rather than room to work in.
 MAX_WRITE_REDIRECTS = 3
 
+# GitHub's maximum, and the right end of the range to be at. A backlog is read whole, so round
+# trips are the thing to spend the fewest of; there is no partial answer worth asking for.
+LIST_PAGE_SIZE = 100
+
+# Constrained rather than bound, so reading the pulls endpoint gives back pull requests and the
+# issues endpoint gives back issues. One paging helper serves both and neither caller has to say
+# which of the two it got.
+_Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
+
+
+def _an_issue(payload: Any, repository: RepositorySnapshot) -> IssueSnapshot | None:
+    """An issue row, or None for the pull requests GitHub mixes into the issues endpoint.
+
+    Named rather than written inline, because the paging helper takes one parser and the pulls
+    side passes `mapping.pull_request` straight in.
+    """
+    if mapping.is_pull_request(payload):
+        return None
+    return mapping.issue(payload, repository)
+
 
 class LooksUpRepository(Protocol):
     """Resolving a repository by owner and name.
@@ -46,6 +66,26 @@ class LooksUpRepository(Protocol):
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
 
 
+class ListsOpenItems(LooksUpRepository, Protocol):
+    """Every open pull request or issue on a repository, which is all `/refresh` needs.
+
+    Its own protocol for the reason `LooksUpRepository` is: mirroring a backlog should not need a
+    handle that can write a label. `get_repository` comes with it because a list may only be asked
+    for against a repository the caller has already resolved, and that is the call that resolves
+    one.
+
+    The repository is passed in rather than an owner and a name. It makes that rule unforgeable,
+    it means the current name is used rather than a stale one, and `list_open_issues` cannot work
+    without it: GitHub's issue rows carry no repository object at all.
+    """
+
+    async def list_open_pull_requests(
+        self, repository: RepositorySnapshot
+    ) -> Sequence[PullRequestSnapshot]: ...
+
+    async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]: ...
+
+
 class LooksUpUsers(Protocol):
     """Asking who holds a GitHub login, which is all `/link` needs of GitHub.
 
@@ -56,7 +96,7 @@ class LooksUpUsers(Protocol):
     async def user_id(self, login: str) -> int | None: ...
 
 
-class GitHubClient(LooksUpRepository, LooksUpUsers, Protocol):
+class GitHubClient(ListsOpenItems, LooksUpUsers, Protocol):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module
@@ -70,6 +110,12 @@ class GitHubClient(LooksUpRepository, LooksUpUsers, Protocol):
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
+
+    async def list_open_pull_requests(
+        self, repository: RepositorySnapshot
+    ) -> Sequence[PullRequestSnapshot]: ...
+
+    async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]: ...
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
@@ -180,6 +226,54 @@ class HttpGitHubClient:
                 f"GitHub returned an unusable issue for {owner}/{name}#{number}"
             )
         return snapshot
+
+    async def list_open_pull_requests(
+        self, repository: RepositorySnapshot
+    ) -> Sequence[PullRequestSnapshot]:
+        """Every open pull request, whole.
+
+        The pulls endpoint rather than the issues one, which also answers with pull requests. A
+        pull request row there is the issue shape: no requested reviewers, no requested teams and
+        no repository on the base. Mirroring from those would open a thread saying nobody had been
+        asked to review, on every pull request, and the only way back would be a second call per
+        item, which is the cost this whole method exists to avoid.
+        """
+        return await self._open_items(
+            f"/repos/{repository.owner}/{repository.name}/pulls", repository, mapping.pull_request
+        )
+
+    async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]:
+        """Every open issue, with the pull requests GitHub mixes in dropped."""
+        return await self._open_items(
+            f"/repos/{repository.owner}/{repository.name}/issues", repository, _an_issue
+        )
+
+    async def _open_items(
+        self,
+        path: str,
+        repository: RepositorySnapshot,
+        parse: Callable[[Any, RepositorySnapshot], _Item | None],
+    ) -> list[_Item]:
+        """Read a list endpoint whole, once each.
+
+        Sorted by what moved most recently, because a run that reaches a cap should spend it on
+        the items somebody is actually working on, and because that leaves the quietest ones in
+        the tail that `MAX_PAGES` cuts off.
+
+        Deduplicated here rather than by the caller. GitHub's own documentation says a list that
+        is edited while it is being paged can hand the same row back on two pages, and the caller
+        reads what is already mirrored once at the start, so a repeat would open two threads for
+        one item and be counted twice on the way out.
+        """
+        found: dict[int, _Item] = {}
+        async for body in self.get_pages(
+            path, state="open", per_page=LIST_PAGE_SIZE, sort="updated", direction="desc"
+        ):
+            for row in body if isinstance(body, list) else []:
+                item = parse(row, repository)
+                if item is not None and item.github_object_id not in found:
+                    found[item.github_object_id] = item
+        return list(found.values())
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Put a label on an item.
