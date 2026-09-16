@@ -10,8 +10,8 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 ## What it does
 
 - **Threads.** One per item, opened on the first event and edited in place after. The metadata
-  block carries name, type, state, link, author, assignees, reviewers, status, priority, tags and
-  last updated.
+  block carries name, type, state, link, author, assignees, reviewers, status, priority, tags,
+  last updated, and the description the item was opened with where there is one.
 - **Comments and reviews.** Quoted into the item's thread with a link back. Edits and deletions
   are not mirrored, so a thread records what was said at the time.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
