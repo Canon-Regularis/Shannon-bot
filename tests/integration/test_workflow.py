@@ -127,7 +127,7 @@ class TestSettingAStatus:
 
         assert github.label_calls, "it did not get as far as writing a label"
         assert threads.metadata_of(thread_id) == before, "Discord was told about a refused write"
-        assert threads.locks == []
+        assert threads.shuts == []
         assert (await stored(db_session)).status is Status.NOT_REVIEWED
 
     async def test_moving_a_pull_request_out_of_done_gives_its_thread_back(
@@ -151,11 +151,11 @@ class TestSettingAStatus:
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
         """Giving a thread back is worth a call to Discord; saying nothing changed is not."""
-        before = list(threads.locks)
+        before = list(threads.shuts)
 
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
-        assert threads.locks == before
+        assert threads.shuts == before
 
     async def test_a_failed_write_leaves_the_stored_status_alone(
         self,
@@ -529,7 +529,7 @@ class TestWhatAReviewFound:
         had made it.
         """
         await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         refused = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is False
 
@@ -583,7 +583,7 @@ class TestWhatAReviewFound:
 
             # What the command finishing the item does, now that its own write has landed.
             await holder.commit()
-            await threads.set_locked(thread_id=thread_id, locked=True)
+            await threads.set_shut(thread_id=thread_id, shut=True)
             release.set()
             await catching_up
 
@@ -607,7 +607,7 @@ class TestWhatAReviewFound:
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is True
 
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         refused = await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         assert threads.threads[thread_id].locked is True, "nothing overlapped, this proves nothing"
 
@@ -629,7 +629,7 @@ class TestWhatAReviewFound:
         way apart for somebody deciding what to do next.
         """
         await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
 
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
@@ -707,7 +707,7 @@ class TestWhatAReviewFound:
         threads.threads.pop(thread_id)
 
         sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
-        threads.fail_next_lock = True
+        threads.fail_next_shut = True
         with pytest.raises(DiscordGatewayError):
             await sync.sync(pr_event("edited", title="Rebuilt after somebody deleted the thread"))
 
@@ -771,7 +771,7 @@ class TestWhatAReviewFound:
         threads.threads.pop(thread_id)
 
         sync = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
-        threads.refuses_every_lock = True
+        threads.refuses_every_shut = True
 
         with caplog.at_level(logging.WARNING):
             result = await sync.sync(pr_event("edited", title="Rebuilt"))
@@ -947,14 +947,14 @@ class TestHoldingTheItemWhileItSetsTheLock:
         lock = ItemLock(db_sessionmaker)
         reached = asyncio.Event()
         answer: dict[str, bool] = {}
-        setting_it = threads.set_locked
+        setting_it = threads.set_shut
 
         async def waits_inside(**kwargs):
             reached.set()
             await asyncio.sleep(0.5)
             return await setting_it(**kwargs)
 
-        threads.set_locked = waits_inside
+        threads.set_shut = waits_inside
 
         async def anybody_else() -> None:
             # Started from the test rather than from inside the command, so it asks for the item
@@ -1024,13 +1024,13 @@ class TestHoldingTheItemWhileItSetsTheLock:
             moved = await TrackedItemStore(session).get_by_id(row_id)
             moved.status = Status.IN_REVIEW
 
-        asked = len(threads.lock_calls)
+        asked = len(threads.shut_calls)
         release.set()
         await blocker
         with pytest.raises(ItemMovedError) as refusal:
             await repeat
 
-        assert len(threads.lock_calls) == asked, "it touched a lock on a status that had moved"
+        assert len(threads.shut_calls) == asked, "it touched a lock on a status that had moved"
         assert threads.threads[thread_id].locked is False
         # Both callers have to be able to tell this from the ordinary repeat that had nothing to
         # do. A person is told where the item actually is, and the board poller counts the card
