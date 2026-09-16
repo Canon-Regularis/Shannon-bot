@@ -106,6 +106,33 @@ class ThreadPointerStore:
             .execution_options(synchronize_session=False)
         )
 
+    async def remember_channel(
+        self, tracked_item_id: int, *, thread_id: int, channel_id: int
+    ) -> None:
+        """Record where a thread turned out to be, having asked Discord.
+
+        For the rows claimed before this column existed, which remember no channel at all. The
+        answer costs a Discord call, so it is written down the moment it is known and a later run
+        asks nothing.
+
+        What may be written here is what Discord said, never what the mapping says. The mapping
+        answers where NEW threads go; this column answers where this one IS, and the two differ
+        the moment anybody runs `/set_channel`. Writing the mapping into it would make every
+        stranded thread look settled and leave it stranded for good.
+
+        Guarded on the pointer like everything else here, so an answer about a thread the item has
+        since been moved off does not describe the one it is on now.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.id == tracked_item_id,
+                TrackedItem.discord_thread_id == thread_id,
+            )
+            .values(discord_channel_id=channel_id)
+            .execution_options(synchronize_session=False)
+        )
+
     async def claim_thread(
         self,
         tracked_item_id: int,
