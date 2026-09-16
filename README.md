@@ -23,12 +23,11 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
   statuses told apart from ordinary labels. Closing, merging or reopening posts a header saying
   what became of the thread, and a finished item's thread is shut: locked and archived out of the
-  channel, and opened again if the item is. Both exist because a Discord edit is silent: it posts
-  no message,
-  notifies nobody, and does not bump the thread, so a change that only moves the block looks from
-  the channel like nothing happening.
-- **Manual sync.** `/pr` and `/issue` pull an item from the REST API, for whatever the webhooks
-  missed.
+  channel, and opened again if the item is. Both exist because a Discord edit is silent: it posts no
+  message, notifies nobody, and does not bump the thread, so a change that only moves the block
+  looks from the channel like nothing happening.
+- **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
+  missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
   mark per item stops an old delivery undoing a newer one.
 
@@ -213,7 +212,7 @@ at the door.
 | `SHANNON_DATABASE_URL` | `postgresql+asyncpg://shannon:shannon@localhost:5433/shannon` | The default is the compose database |
 | `SHANNON_GITHUB_WEBHOOK_SECRET` | empty | HMAC secret. Empty answers 500 to every delivery rather than waving them through |
 | `SHANNON_DISCORD_TOKEN` | empty | Bot token. Empty runs without the gateway |
-| `SHANNON_GITHUB_TOKEN` | empty | REST token. Needs **write** access to issues: `/register`, `/pr` and `/issue` only read, but every `/set_*` command and every board move puts a label on the item |
+| `SHANNON_GITHUB_TOKEN` | empty | REST token. Needs **write** access to issues: `/register`, `/pr`, `/issue` and `/refresh` only read, but every `/set_*` command and every board move puts a label on the item |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
@@ -257,6 +256,7 @@ Retention bounds it and the payload goes with the row.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
+| `/refresh [only]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
