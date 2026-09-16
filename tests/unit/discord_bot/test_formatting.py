@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from shannon.discord_bot.formatting import format_pull_request
+from shannon.discord_bot.formatting import (
+    format_pull_request,
+    format_thread_moved,
+    format_thread_moving,
+)
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT, as_plain_text
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
@@ -349,3 +353,40 @@ class TestMarkupAfterAMarkdownLink:
         rendered = format_pull_request(titled, status=Status.NOT_REVIEWED)
 
         assert SNAPSHOT.html_url in rendered
+
+
+class TestSayingWhereAnItemWent:
+    """The line left in a thread the item has been moved off. Issue #78.
+
+    Discord cannot move a thread between channels, so the old one is the only place somebody
+    looking for the item will look, and it is the only place this can be said.
+    """
+
+    def test_it_names_the_replacement_thread(self) -> None:
+        """A thread rather than the channel it is in, because the thread is where somebody
+        reading this wants to be taken. `<#id>` renders either."""
+        assert format_thread_moved(4242) == (
+            "-# This item is now mirrored in <#4242>. Nothing more will be posted in this thread."
+        )
+
+    def test_a_card_with_no_replacement_yet_names_the_channel(self) -> None:
+        """A board card has no GitHub endpoint to rebuild it from, so its pointer is let go of and
+        the poller opens the new thread on its next pass. Until then the channel is all there is
+        to name, and it is enough to stop somebody waiting in a thread nothing will arrive in."""
+        assert format_thread_moving(77) == (
+            "-# This item will be mirrored in <#77> from now on. Nothing more will be posted here."
+        )
+
+    @pytest.mark.parametrize("line", [format_thread_moved(1), format_thread_moving(1)])
+    def test_neither_claims_the_thread_is_locked(self, line: str) -> None:
+        """Both are written before the lock is attempted, because posting reopens an archived
+        thread and shutting first would be undone by the line itself. At that moment nobody knows
+        whether the lock will land, and a server without Manage Threads would be told it cannot
+        reply somewhere it can.
+        """
+        assert "locked" not in line
+
+    @pytest.mark.parametrize("line", [format_thread_moved(1), format_thread_moving(1)])
+    def test_both_are_subtext(self, line: str) -> None:
+        """Quieter than the headers beside them: this is a signpost, not news."""
+        assert line.startswith("-# ")
