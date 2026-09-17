@@ -65,6 +65,27 @@ def pull_request_event(action: str = "opened", **pr_overrides: Any) -> dict[str,
     }
 
 
+# The two ends of a push. Distinct strings rather than realistic hashes, so a test asserting on
+# which compare was asked for reads as the pair it named.
+BEFORE_PUSH = "1" * 40
+AFTER_PUSH = "2" * 40
+
+
+def push_event(
+    *, before: str = BEFORE_PUSH, after: str = AFTER_PUSH, pusher: str = "octocat", **overrides: Any
+) -> dict[str, Any]:
+    """A `pull_request.synchronize` body: somebody pushed to the branch of an open pull request.
+
+    The two SHAs sit at the top level beside the action, which is the whole of what GitHub says
+    about a push here. What actually landed takes a call to find out.
+    """
+    payload = pull_request_event("synchronize", **overrides)
+    payload["before"] = before
+    payload["after"] = after
+    payload["sender"] = user(pusher, 583231)
+    return payload
+
+
 def issue(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": ISSUE_ID,

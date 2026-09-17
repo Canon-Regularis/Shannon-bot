@@ -5118,3 +5118,48 @@ to set the project number will find it.
   descriptions beside them these can genuinely fail, because discord.py shortens a description to
   fit before the test sees it and passes a choice through whole. Red on nothing today; a
   twenty-sixth entry or a copied line with an unchanged value turns them red.
+
+## Commits in the thread
+
+- **A push to an open pull request now says what landed on it.** One message per commit: the
+  GitHub account that wrote it, the subject line, the rest of the message capped at 250
+  characters, and the additions, deletions and files changed. Ten per push, with a footnote
+  counting anything left over. Closes #67.
+- **`synchronize` is an action this bot acts on.** It was dropped at three layers before: the
+  endpoint refused to queue it, the action list did not hold it, and the parser answered None for
+  anything unlisted. The dead guard in `PullRequestPolicy.locked` that answered None for an open
+  item at DONE, written against a `synchronize` that never arrived, is live code now.
+- **This is the largest single increase in queue volume the project has taken.** Every push to
+  every open pull request writes a `webhook_events` row carrying the whole payload. GitHub sends
+  one per push rather than one per commit, and the pruner clears them after seven days, so it is
+  bounded rather than growing. The README paragraph saying pushes stay out of the queue was true
+  and is not any more.
+- **Merges and other people's commits are skipped, before anything is spent on them.** A pull
+  request kept up to date with main would otherwise post everybody's work behind one merge. The
+  filter runs on the compare's own rows, so a merge costs exactly one call and announces nothing.
+  A commit with no GitHub account at all is kept and named `Unknown`: read strictly, "not
+  authored by the pusher" drops those too, and anybody whose git address is not on their profile
+  would lose every commit with no way of guessing why.
+- **A force push says so once instead of announcing the commits.** Every commit on a rewritten
+  branch has a new hash and would read as work nobody had just done. `behind` counts as one as
+  well as `diverged`, which is the case that is easy to leave out and the one that matters most:
+  `reset --hard HEAD~3 && push --force` leaves nothing ahead and GitHub reports zero commits, so
+  without it the thread says nothing at all about three commits being thrown away.
+- **Nothing here pings anybody.** Not by filtering, but because none of the three renderers will
+  accept a mentions map: `_person` is the only thing that builds a `<@id>` and it needs a mapping
+  to look one up in, so a renderer holding none cannot ping however it is wired. A commit message
+  carrying `<@1234>` is defused like every other piece of GitHub-authored text.
+- **Keyed on the commit's hash rather than on the delivery.** The other two announcers key on the
+  delivery because a label move is a fact about one. A commit is a fact about a hash, and one
+  delivery carries up to ten. Keyed on the delivery, a run that posts three of five and then
+  fails would find the key claimed on its retry and post nothing, losing two commits for good
+  with the delivery recorded as handled.
+- **The numbers cost a call each and there was no way round it.** Checked against the live API:
+  the commit rows inside a `/compare` carry no `stats` block, and a commit has no `changed_files`
+  either, so the file count is the length of the list GitHub sends, which stops at 300. The
+  compare's own totals cover the whole range against the merge base, and attributing those to one
+  commit is wrong in every multi-commit push and right by accident in a single one.
+- **The git name is never rendered.** `commit.author.name` is free text out of `git config`, so
+  anybody who can push could put a colleague's name against their own commit; `author.login` is
+  resolved by GitHub from the address. Verified against this repository's own history, where the
+  two are different strings.
