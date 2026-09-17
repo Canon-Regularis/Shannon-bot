@@ -313,6 +313,43 @@ class UserLink(TimestampMixin, Base):
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class MutedMember(TimestampMixin, Base):
+    """One member of one server who asked this bot not to notify them.
+
+    The row IS the fact. There is no column saying yes or no, because there is no third state to
+    record: somebody has asked to be left alone or they have not, and a member who never runs
+    `/mentions` wants exactly what every member got before this existed. So no backfill, and an
+    absent row reads as pinged. `mirrored_notes` is the same shape for the same reason.
+
+    Not a column on `user_links`, and that is the constraint that decided it rather than a
+    preference. `UserLinkStore.link` clears both halves of that row and inserts a fresh one,
+    because either half may be held by a different row and both are unique within a guild. So
+    re-running `/link` writes a new row with defaults, and the changed-hands warning in
+    `resolve_many` tells people to do exactly that. A preference kept there would be silently
+    forgotten by the one action the bot asks for by name.
+
+    Keyed on the Discord account rather than on a link, so the order of `/link` and `/mentions`
+    does not matter and somebody who has never linked still has a preference on record for when
+    they do.
+
+    Muted, not quiet, and the difference is worth saying because `quiet_metadata` lives two files
+    away and means the opposite thing: that one takes the mention OUT and leaves a plain name,
+    which is what a backlog mirror and a replacement thread want. This one keeps the mention, so
+    the thread still records who is on the item, and takes away only the notification.
+    """
+
+    __tablename__ = "muted_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "discord_guild_id", "discord_user_id", name="uq_muted_members_guild_discord"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class TeamLink(TimestampMixin, Base):
     """Maps a GitHub team to a Discord role within one guild.
 
