@@ -346,8 +346,11 @@ class TestAskingATeamAgain:
     GitHub drops a team the moment any member submits a review, and sends no `pull_request`
     event saying so. Nothing here deletes the row, so the next ask of that team arrives with
     the list exactly as it was, `replace` leaves the row alone with its ping still stamped, and
-    nobody is told. There is no escape from it either: `synchronize` is not handled, so a round
-    of review, fixes and re-request produces no delivery that would have deleted the row.
+    nobody is told.
+
+    A push is now the one thing that can escape it by accident: since issue #67 `synchronize` is
+    handled, and reconciling the list against it would delete the row. That is luck rather than a
+    mechanism, and this class is about the round where nobody pushes.
 
     What separates the second ask from the first is the team GitHub names at the top level of a
     `review_requested` event, which it only sends for a party that was not already requested.

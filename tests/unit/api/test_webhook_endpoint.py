@@ -39,7 +39,7 @@ async def test_unsupported_event_is_ignored_without_error(
 async def test_unsupported_action_on_supported_event_is_ignored(
     client: AsyncClient, handler: RecordingHandler
 ) -> None:
-    response = await post(client, "pull_request", {"action": "synchronize"})
+    response = await post(client, "pull_request", {"action": "ready_for_review"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"

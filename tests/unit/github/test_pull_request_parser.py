@@ -50,7 +50,9 @@ def test_a_real_github_payload_parses() -> None:
     assert snapshot.updated_at.year == 2026
 
 
-@pytest.mark.parametrize("action", ["synchronize", "ready_for_review", "milestoned", "", "opened "])
+@pytest.mark.parametrize(
+    "action", ["ready_for_review", "milestoned", "converted_to_draft", "", "opened "]
+)
 def test_unsupported_actions_are_ignored(action: str) -> None:
     assert parse_pull_request_event(action, payloads.pull_request_event("opened")) is None
 

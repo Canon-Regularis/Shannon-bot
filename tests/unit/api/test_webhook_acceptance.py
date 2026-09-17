@@ -64,7 +64,7 @@ async def test_an_unsupported_action_is_never_queued(queue: InMemoryDeliveryQueu
     """Nothing to protect against a repeat of something that would be dropped anyway."""
     async with build_client(RecordingHandler(), queue=queue) as client:
         response = await post(
-            client, "pull_request", {"action": "synchronize"}, delivery="delivery-a"
+            client, "pull_request", {"action": "ready_for_review"}, delivery="delivery-a"
         )
 
     assert response.json()["status"] == "ignored"
