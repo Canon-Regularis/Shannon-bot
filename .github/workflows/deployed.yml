@@ -25,6 +25,12 @@ on:
 permissions:
   contents: read
   issues: write
+  # For the one `gh run list` below. A permissions block sets every scope it does not name to
+  # none, so without this the call is refused, and it sits in a command substitution under
+  # `set -e` ahead of the step writing its outputs: the step dies, "Say so" never runs, and the
+  # drift issue is not opened at all. The monitor's one job, silently not done, in the exact
+  # state it exists for.
+  actions: read
 
 concurrency:
   group: deployed
@@ -42,8 +48,13 @@ jobs:
       # endpoint behind it is unauthenticated by design. It keeps the address of the box out of
       # public logs and public issue bodies, which is worth the one setup step.
       HEALTH_URL: ${{ secrets.SHANNON_HEALTH_URL }}
-      # Below this, drift is just CI still running. A push that has not finished building is not
-      # something to open an issue about.
+      # Below this there is no image to deploy yet, so there is nothing anybody could have done
+      # and nothing worth saying. It stopped being a failure-suppressor when drift stopped
+      # failing; what it suppresses now is an ISSUE opening and closing on every merge, which is
+      # how a title that should mean something turns into noise.
+      #
+      # Not lower: a re-run or a queued runner puts a genuinely slow CI near thirty minutes. Not
+      # past sixty: the cron is hourly, so a wider window starts skipping whole runs.
       GRACE_MINUTES: "45"
 
     steps:
@@ -111,10 +122,22 @@ jobs:
 
           # A red CI publishes no image, so drift nobody can fix reads differently from drift
           # somebody forgot. Worth the one API call to say which.
+          #
+          # Falls back rather than failing, because this is the only call here that can be
+          # refused, and an issue that depends on an API call is an issue nobody gets on the day
+          # the token loses a scope. The permission above and this fallback are both wanted:
+          # either alone leaves a way for the one thing this workflow does to stop quietly.
+          #
+          # Status as well as conclusion. A run still going answers with an EMPTY conclusion
+          # rather than null, and jq's `//` falls through on null and false but not on "". So
+          # `// "none"` handed back nothing at all, and the body below told somebody to go and
+          # fix a CI run that was green and still building.
           published=unknown
           if [ "$state" = "drift" ]; then
-            published=$(gh run list --workflow=ci.yml --commit "$HEAD_SHA" \
-                          --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+            asked='.[0] | if . == null then "none"
+                          elif .conclusion == "" then "still running"
+                          else .conclusion end'
+            published=$(gh run list --workflow=ci.yml --commit "$HEAD_SHA" --limit 1 --json conclusion,status --jq "$asked" || echo unknown)
           fi
 
           {
@@ -192,14 +215,17 @@ jobs:
           )
               else
                 body=$(cat <<EOF
-          \`/health\` reports \`$short_running\` and the head of \`main\` is [\`$short_head\`](https://github.com/$REPO/commit/$HEAD_SHA), but CI for that commit is \`$PUBLISHED\`, so **no image was ever published for it**.
+          \`/health\` reports \`$short_running\` and the head of \`main\` is [\`$short_head\`](https://github.com/$REPO/commit/$HEAD_SHA), but CI for that commit is \`$PUBLISHED\`, so **there is no image to deploy yet**.
 
-          This is not a deploy that was forgotten. There is nothing to deploy. Fix CI first; deploying will refuse until there is an image, which is the point.
+          This is not a deploy that was forgotten. If CI is still running this closes itself once it finishes and the deploy is run. If it failed, fix CI first: deploying refuses until there is an image, which is the point.
           EOF
           )
               fi
               open_issue "$DRIFT_TITLE" "$body"
-              exit 1
+              # Green on purpose. A box behind main is a deploy nobody has run yet, and the issue
+              # above is what says so. Red is kept for the two states where the bot is not
+              # serving, so a red run here means one thing rather than two.
+              exit 0
               ;;
 
             unhealthy)

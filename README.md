@@ -189,32 +189,64 @@ docker compose -f compose.prod.yaml up -d
 
 Point the GitHub webhook at `https://<hostname>/webhooks/github`.
 
-Upgrades are `pull` then `up -d`, in that order and both of them. Nothing on the box watches for a
-new image and the compose file sets no `pull_policy`, so `up -d` on its own reuses whatever is
-already there, reports success and changes nothing. That has cost real time: a merged change was
-read as a bug in the bot for an afternoon. `curl https://<hostname>/health` gives back the commit
-that is actually running, which is the quick way to tell a broken change from an undeployed one.
+Upgrades go through `scripts/deploy.sh`, from a laptop, one command and one ssh password:
+
+```bash
+ssh root@<host> /opt/shannon/scripts/deploy.sh              # head of main
+ssh root@<host> /opt/shannon/scripts/deploy.sh <commit>     # a named commit
+ssh root@<host> /opt/shannon/scripts/deploy.sh --rollback   # the previous build
+```
+
+It pins the image to `sha-<commit>` rather than following a moving tag, so what is running is a
+fact rather than whatever `edge` pointed at that afternoon, and it refuses outright if CI never
+published an image for the commit you asked for. `scripts/README.md` is the whole story.
+
+**It does not decide when to run; a person does.** A pull loop restarts a live bot on a green
+merge with nobody watching, and a merge on a Friday evening is exactly when nobody is. The cost of
+that choice is that the box sits behind `main` until somebody deploys, which is what the hourly
+`Deployed` workflow opens an issue about. That issue is the reminder; it is not a failure.
+
+`curl https://<hostname>/health` gives back the commit that is actually running, which is the
+quick way to tell a broken change from an undeployed one. That has cost real time: a merged change
+was read as a bug in the bot for an afternoon.
 
 Only one copy may run at a time: two would both hold the Discord gateway and both lease from the
-queue. `SHANNON_IMAGE_TAG` defaults to `edge`, which moves on every green push to main. The
-Postgres credentials are read once, when the volume is created.
+queue. The Postgres credentials are read once, when the volume is created.
 
-### Doing that without typing it
+A deploy announces itself in Discord through a webhook and rolls the image back if the new
+container never reports healthy. It cannot roll the database back, which `scripts/README.md` is
+blunt about: the migration has been applied and `alembic downgrade` is not run.
 
-`deploy/` is a systemd timer that does the two commands above for you, and nothing else. It asks
-ghcr.io every five minutes whether the tag it follows names a different image from the one the
-app container is running, and on the days the answer is no it downloads nothing and writes
-nothing. The server pulls; nothing pushes to it, and no credential for this machine exists in
-GitHub. `deploy/README.md` is the whole story; the short version is
-`bash install.sh` on the box and then a choice in `.env`:
+### One bot, several servers
 
-- `SHANNON_IMAGE_TAG=stable` deploys when you push a `v*` tag, and does nothing on a merge to
-  main. Recommended, and the reason the release workflow publishes a `stable` tag at all.
-- `SHANNON_IMAGE_TAG=edge` deploys every green merge, within five minutes, with nobody watching.
+One instance serves as many Discord servers as it is invited to. Commands register globally for
+that reason, and every table that holds a decision a server made is keyed by guild: which
+repository it mirrors, which channel each kind of item threads into, who is linked to whom, who
+asked not to be pinged. A webhook resolves to a server through the repository it came from, never
+through a configured guild id.
 
-A deploy announces itself in Discord through a webhook, rolls the image back if the new container
-never reports healthy, and stops deploying after a failure rather than retrying a bad image all
-night. It cannot roll the database back, which `deploy/README.md` is blunt about.
+What is shared, and what that costs:
+
+- **One `SHANNON_GITHUB_TOKEN`** has to see every repository, with write access to issues in each,
+  because every `/set_*` puts a label on the item. GitHub's 5,000 an hour is per token, so it is
+  now shared across all of them.
+- **One `SHANNON_GITHUB_WEBHOOK_SECRET`.** Every repository's webhook is configured with the same
+  one; there is no per-repository secret to verify against.
+- **One set of role names.** `SHANNON_ROLE_*` are read once at startup and apply everywhere, so a
+  server that calls its managers something else grants nothing to anybody but guild
+  administrators. This is the one that surprises people.
+- **One board, or none.** `SHANNON_GITHUB_PROJECT_NUMBER` names a single project, and nothing
+  elects which server's board it belongs to. With more than one server registered the board mirror
+  stops itself and `/health` reports `poller: false` until the number goes back to zero and the
+  process restarts. Leave it at `0` unless exactly one server is registered.
+
+Adding one: invite the bot with the `bot` and `applications.commands` scopes and the permissions
+above, point that repository's webhook at the same URL with the same secret, then `/register` and
+`/set_channel` in the new server. A global command takes up to an hour to appear the first time,
+which looks exactly like a broken deploy and is not.
+
+The two limits that do not move: one repository per server, and one server per repository. There
+is no supported way to unregister either.
 
 ## Configuration
 

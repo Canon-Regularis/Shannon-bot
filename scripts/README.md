@@ -65,8 +65,15 @@ by design. It keeps the address of the box out of public logs and public issue b
 worth one setup step. The `deployment` label the issues carry is created by the workflow itself,
 so there is nothing else to do.
 
-Check that Actions failure email is on (Settings → Notifications). A scheduled run that finds
-drift exits non-zero on purpose, so the issue is not the only signal.
+Red in that workflow means the bot is not serving: `/health` did not answer, or answered 503.
+Green means it answered 200 and healthy. Whether it is running the head of `main` is said in the
+issue, not in the colour.
+
+Drift used to be red as well. It stopped being, because this deploy runs when a person decides and
+the box is normally behind `main` until they do, so red said two different things and neither
+could be acted on without reading which. **The issue is now the only signal for drift**, so watch
+the repository or the `deployment` label; an unwatched issue is no signal at all. Actions failure
+email (Settings → Notifications) still covers the two states that stayed red.
 
 ## Deploying
 
@@ -113,6 +120,9 @@ column and the data in it. The old code then runs against a newer schema, which 
 additive migration and is not fine for one that removed or renamed something the old code reads.
 The script says this in as many words when it rolls back, because it is the moment somebody needs
 to read it.
+
+**It cannot watch a second box.** The workflow probes one `SHANNON_HEALTH_URL`, so a second
+deployment is not monitored by it and its drift is nobody's alert.
 
 **It cannot roll back to nothing.** A first install, or a deploy attempted while the bot was
 already down, has no known-good commit to return to. It stops, leaves the stack as it is so the

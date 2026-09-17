@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,14 +30,25 @@ class RepositoryStore:
         """
         return await self._session.get(Repository, repository_id)
 
-    async def only_one(self) -> Repository | None:
-        """The registered repository, whichever it is.
+    async def registered(self, *, at_most: int = 2) -> Sequence[Repository]:
+        """The registered repositories, oldest first, up to `at_most` of them.
 
-        One per guild is a unique constraint rather than a convention, and this process serves
-        one guild, so asking without a key is asking the only question there is. Ordered so that
-        a deployment which somehow holds two answers the same way twice rather than alternating.
+        Replaces `only_one`, which answered "the registered repository, whichever it is" on the
+        reasoning that this process serves one guild so asking without a key was asking the only
+        question there is. That sentence stopped being true: this bot is invited to a server
+        rather than built into one, and its commands register globally so that a second server
+        works. Every table that matters is keyed per guild and every other read here takes a key.
+
+        Bounded rather than counted, because the only caller's question is whether there is more
+        than one, and a count or an unbounded read would grow with the number of servers on a
+        query that runs on every poll.
+
+        Ordered, which is the half of the old reasoning that survived: a deployment answering
+        with one of several answers the same way twice rather than alternating.
         """
-        return await self._session.scalar(select(Repository).order_by(Repository.id))
+        return (
+            await self._session.scalars(select(Repository).order_by(Repository.id).limit(at_most))
+        ).all()
 
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:
         return await self._session.scalar(

@@ -8,6 +8,7 @@ until Discord starts refusing, which is why most of what is pinned here is what 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -30,7 +31,7 @@ from shannon.services.workflow import (
 )
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
-from tests.support.db import map_channel
+from tests.support.db import map_channel, register_repository
 
 pytestmark = pytest.mark.integration
 
@@ -182,6 +183,68 @@ class TestReadingABoard:
         await poller_for(board).run_once()
 
         assert board.reads == [("Canon-Regularis", PROJECT)]
+
+
+class TestABoardAndMoreThanOneServer:
+    """This bot is invited to a server rather than built into one, so several may register.
+
+    A board is not: it is addressed by an owner taken from one repository's name, and nothing
+    elects which. Polling whichever registered first mirrored one server's board into one
+    server's channels and said nothing anywhere about the others, which reads from every other
+    server as a feature that does not work at all.
+    """
+
+    async def test_one_server_is_still_polled(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The other half of the guard. Without this the comparison could be widened to refuse
+        everything and the test below would still pass."""
+        poller = poller_for(FakeBoard(card()))
+
+        assert await poller.run_once() == 1
+        assert poller.stopping is False
+
+    async def test_a_second_server_stops_the_board_mirror(
+        self, board_channel: None, poller_for, db_session: AsyncSession
+    ) -> None:
+        """Stopped, not merely quiet for one pass. Returning zero would leave it trying again
+        every minute for the life of the process with nothing anywhere saying why, and `/health`
+        would go on reporting `poller: true` while it mirrored nothing."""
+        await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+        poller = poller_for(FakeBoard(card()))
+
+        assert await poller.run_once() == 0
+        assert poller.stopping is True
+
+    async def test_it_reads_no_board_at_all(
+        self, board_channel: None, poller_for, db_session: AsyncSession
+    ) -> None:
+        """Rather than reading one and discarding it. The owner it would ask for is one of two
+        answers and there is no reason to prefer either."""
+        await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+        board = FakeBoard(card())
+
+        await poller_for(board).run_once()
+
+        assert board.reads == []
+
+    async def test_it_says_which_setting_to_change(
+        self, board_channel: None, poller_for, db_session: AsyncSession, caplog
+    ) -> None:
+        """Going quiet is the failure this guard replaces, so the one line it does write has to
+        name the way out."""
+        await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+
+        with caplog.at_level(logging.ERROR):
+            await poller_for(FakeBoard(card())).run_once()
+
+        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
 
 
 class TestNotDoingWorkTwice:

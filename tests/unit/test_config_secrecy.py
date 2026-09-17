@@ -215,3 +215,35 @@ class TestReadingSettingsOnce:
             assert get_settings() is get_settings()
         finally:
             get_settings.cache_clear()
+
+
+def test_every_value_compose_demands_is_in_the_example() -> None:
+    """A value `compose.prod.yaml` names with `:?` stops the whole stack, not one feature.
+
+    The test above this one polices `Settings` fields, and these are not `Settings` fields:
+    `ACME_EMAIL` has no prefix at all and `SHANNON_HOSTNAME` is read by Caddy rather than by the
+    application, so both were missing from the example for as long as it has existed and nothing
+    said so. `scripts/deploy.sh` has meanwhile been reading `SHANNON_HOSTNAME` out of the same
+    file and refusing to deploy without it, so the live path depended on a key the file that
+    tells you what to write never offered.
+
+    Read off the compose file rather than listed here, because a list is the thing that goes
+    stale the next time somebody adds a `:?`.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).parents[2]
+    demanded = set(re.findall(r"\$\{([A-Z_]+):\?", (root / "compose.prod.yaml").read_text("utf-8")))
+    assert demanded, "no hard-required values found; the pattern stopped matching"
+
+    offered = {
+        line.partition("=")[0].strip()
+        for line in (root / ".env.example").read_text(encoding="utf-8").splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    }
+
+    assert not demanded - offered, (
+        f"compose refuses to start without {sorted(demanded - offered)}, and .env.example does "
+        "not say so, so a .env copied from it cannot bring the stack up"
+    )

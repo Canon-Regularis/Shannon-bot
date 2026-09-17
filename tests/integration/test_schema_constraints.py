@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem, WebhookEvent
+from shannon.db.stores.muted_members import MutedMemberStore
+from shannon.db.stores.team_links import TeamLinkStore
+from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 
 pytestmark = pytest.mark.integration
@@ -187,3 +191,82 @@ def test_every_table_is_truncated_between_tests() -> None:
     assert set(TABLES) == set(Base.metadata.tables), (
         "the truncation list and the schema have drifted apart"
     )
+
+
+class TestLettingGoOfARepository:
+    """What the database takes with a repository, and what it deliberately keeps.
+
+    Nothing deletes one yet. These pin the cascades anyway, because the command that will is only
+    safe if they hold: it does one DELETE and trusts the schema for the rest, and a cascade that
+    quietly stopped cascading would leave rows pointing at a repository that is gone.
+
+    This tests the DATABASE rather than the session, which is what makes it worth writing. The
+    relationships carry `passive_deletes=True`, so SQLAlchemy does not load the children and
+    delete them itself; it leaves them to PostgreSQL. Without that flag the same assertions would
+    pass with no `ondelete` anywhere and prove nothing at all.
+    """
+
+    async def test_deleting_a_repository_takes_its_items_with_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        repository = make_repository()
+        db_session.add(repository)
+        await db_session.commit()
+        db_session.add(
+            ChannelMapping(
+                repository_id=repository.id,
+                object_type=ObjectType.PR,
+                discord_channel_id=99,
+            )
+        )
+        item = make_tracked_item(repository.id)
+        db_session.add(item)
+        await db_session.commit()
+        db_session.add(
+            ItemAssignment(
+                tracked_item_id=item.id,
+                github_username="octocat",
+                role_type=ActorRole.AUTHOR,
+            )
+        )
+        await db_session.commit()
+
+        await db_session.delete(repository)
+        await db_session.commit()
+
+        assert await db_session.scalar(select(func.count()).select_from(ChannelMapping)) == 0
+        assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 0
+        assert await db_session.scalar(select(func.count()).select_from(ItemAssignment)) == 0
+
+    async def test_it_leaves_what_the_guild_decided_about_itself_alone(
+        self, db_session: AsyncSession
+    ) -> None:
+        """These are facts about the server, not about which repository it happens to mirror.
+        None carries a foreign key here, so surviving is what the schema already does; this is
+        what stops somebody adding a delete for them later.
+
+        `muted_members` is the one that would be worst to get wrong. A row there is somebody
+        saying they do not want this bot to ring them, so deleting it on a re-register would
+        quietly start notifying a person who had asked to be left alone, and nothing anywhere
+        would say so. An account link coming back is an inconvenience; that is a consent record.
+        """
+        repository = make_repository()
+        db_session.add(repository)
+        await db_session.commit()
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="octocat", github_user_id=1, discord_user_id=555
+        )
+        await TeamLinkStore(db_session).link(guild_id=1, github_team="backend", discord_role_id=777)
+        await MutedMemberStore(db_session).mute(guild_id=1, discord_user_id=555)
+        await db_session.commit()
+
+        await db_session.delete(repository)
+        await db_session.commit()
+
+        assert await UserLinkStore(db_session).resolve_many(guild_id=1, people={"octocat": 1}) == {
+            "octocat": 555
+        }
+        assert await TeamLinkStore(db_session).resolve_many(
+            guild_id=1, people={"backend": None}
+        ) == {"backend": 777}
+        assert await MutedMemberStore(db_session).is_muted(guild_id=1, discord_user_id=555) is True
