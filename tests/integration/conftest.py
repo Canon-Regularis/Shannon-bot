@@ -45,6 +45,7 @@ TABLES = (
     "channel_mappings",
     "user_links",
     "team_links",
+    "muted_members",
     "webhook_events",
     "repositories",
 )
