@@ -19,11 +19,14 @@ import pytest
 
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
+    COMMIT_MESSAGE_LIMIT,
+    COMMIT_TITLE_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
     MESSAGE_LIMIT,
     as_plain_text,
     as_prose,
+    clipped,
     code_span,
     fit,
     quote,
@@ -47,6 +50,56 @@ def test_the_preview_limit_leaves_room_for_a_block_around_it() -> None:
     """A comment is a pointer to the discussion, not a copy, and it is quoted inside a block
     carrying a header and a link. Escaping only ever makes the body longer."""
     assert 0 < COMMENT_PREVIEW_LIMIT < MESSAGE_LIMIT
+
+
+def test_the_commit_message_limit_is_the_number_that_was_asked_for() -> None:
+    """Written out rather than compared against anything, because there is nothing to compare it
+    to: it is a product decision and the issue that asked for commit lines named it."""
+    assert COMMIT_MESSAGE_LIMIT == 250
+
+
+def test_a_commit_title_is_cut_shorter_than_the_message_under_it() -> None:
+    """Not a taste. `fit` drops whole lines, so a subject longer than what follows it would take
+    the statistics line down with it and the thread would show half a title and no numbers."""
+    assert 0 < COMMIT_TITLE_LIMIT < COMMIT_MESSAGE_LIMIT
+    assert COMMIT_TITLE_LIMIT == 120
+
+
+class TestClippingGitHubText:
+    """The cut `quote` was doing inline, now shared with the commit lines.
+
+    It is the ORDER that is being pinned here. Cut first, escape second: the other way round
+    looks identical on ordinary text and leaves a stray backslash the moment the cut lands on
+    one, un-escaping whatever came after it.
+    """
+
+    def test_text_exactly_at_the_limit_is_left_whole(self) -> None:
+        assert clipped("a" * 40, limit=40) == "a" * 40
+
+    def test_one_character_over_is_cut(self) -> None:
+        assert clipped("a" * 41, limit=40) == "a" * 40 + "…"
+
+    def test_nothing_but_whitespace_clips_to_nothing(self) -> None:
+        """Answered as empty rather than as a blank line, because callers read it as a section to
+        leave out."""
+        assert clipped("   \n  \n ", limit=40) == ""
+
+    def test_the_cut_falls_on_the_raw_text_rather_than_the_escaped_text(self) -> None:
+        """Forty underscores escape to eighty characters. Cutting the escaped text would keep
+        twenty of them and a trailing backslash; cutting the raw text keeps all forty, escaped."""
+        assert clipped("_" * 40, limit=40) == "\\_" * 40
+
+    def test_a_cut_never_leaves_a_backslash_with_nothing_to_protect(self) -> None:
+        """The failure this ordering exists to prevent. The character at the limit is one that
+        gets escaped, so a cut after escaping would sit between the backslash and the asterisk."""
+        clipped_text = clipped("a" * 39 + "*rest", limit=40)
+
+        assert not clipped_text.removesuffix("…").endswith("\\")
+
+    def test_a_mention_inside_clipped_text_reaches_nobody(self) -> None:
+        """Whatever this renders goes into a thread with no allow-list beside it, so a commit
+        message carrying a literal mention would ring whoever that id belongs to."""
+        assert "<@123456>" not in clipped("ping <@123456> please", limit=100)
 
 
 class TestFittingAMessage:
