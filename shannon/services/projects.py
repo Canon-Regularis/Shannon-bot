@@ -93,6 +93,16 @@ class ProjectPoller:
         """Whether a board was configured at all. Zero means none."""
         return self._project_number > 0
 
+    @property
+    def stopping(self) -> bool:
+        """Whether this has been asked to stop, by a shutdown or by itself.
+
+        Public because stopping is no longer only something done to this from outside: the guard
+        below takes that decision on its own, so whether it did is a question worth being able to
+        ask rather than a flag the loop alone reads.
+        """
+        return self._stopping
+
     def stop(self) -> None:
         self._stopping = True
         self._stopped.set()
@@ -490,8 +500,38 @@ class ProjectPoller:
 
     async def _registered(self) -> _Board | None:
         async with self._sessionmaker() as session:
-            repository = await RepositoryStore(session).only_one()
-            return _Board.of(repository) if repository is not None else None
+            found = await RepositoryStore(session).registered(at_most=2)
+
+        if len(found) > 1:
+            # A board is addressed by an owner taken from one repository's name, and nothing here
+            # elects which one. Polling whichever registered first would mirror one server's
+            # board into one server's channels and say nothing anywhere about the others, which
+            # reads from every other server as a feature that simply does not work.
+            #
+            # Stopping rather than warning, because a warning here is one nobody reads: this runs
+            # once a minute for as long as the process lives. Ending the task puts it where
+            # something already watches. `report_exit` says so once, and `/health` answers
+            # `poller: false` from then on, which is a standing machine-readable flag rather than
+            # a line in a log.
+            #
+            # Nothing else stops with it. The poller is the one task this process is useful
+            # without, and it is deliberately wired without `halt`, so refusing to serve webhooks,
+            # threads, comments and every command in every server to protect a feature that is
+            # off would be the wrong blast radius by an enormous margin. `healthy` does not count
+            # the poller, so the deploy monitor stays green as well.
+            #
+            # It does not start again by itself once a server unregisters. A guard that quietly
+            # resumes is a guard nobody ever finds out about.
+            logger.error(
+                "%s servers are registered and a board is configured, and nothing elects which "
+                "board to read, so the board mirror is stopping. Set "
+                "SHANNON_GITHUB_PROJECT_NUMBER to 0, or give that server a deployment of its own.",
+                len(found),
+            )
+            self.stop()
+            return None
+
+        return _Board.of(found[0]) if found else None
 
     async def _mirrored(self, repository_id: int) -> dict[int, tuple[datetime | None, int | None]]:
         async with self._sessionmaker() as session:
