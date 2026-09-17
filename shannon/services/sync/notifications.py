@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.threads import PostsToThread
+from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.enums import ActorRole
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,20 @@ class ResolvesMentions(Protocol):
 Mentions = Callable[[AsyncSession], ResolvesMentions]
 
 
+class FindsMutedMembers(Protocol):
+    """Which of a set of Discord accounts this bot is still allowed to notify.
+
+    Injected for the same reason `ResolvesMentions` is, and with the opposite default: off unless
+    the wiring turns it on. That is the same polarity the thread gateway's own allow-list uses, so
+    one sentence covers the whole feature rather than two that have to be held in mind together.
+    """
+
+    async def may_be_pinged(self, *, guild_id: int, ids: Iterable[int]) -> tuple[int, ...]: ...
+
+
+Muted = Callable[[AsyncSession], FindsMutedMembers]
+
+
 class ActorNotifier:
     """Pings the people in one role once each.
 
@@ -53,6 +67,7 @@ class ActorNotifier:
         role: ActorRole,
         render: Renderer,
         mentions: Mentions = UserLinkStore,
+        muted: Muted | None = None,
         the_block_pings_them: bool = True,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -60,6 +75,15 @@ class ActorNotifier:
         self._role = role
         self._render = render
         self._mentions = mentions
+        # Which of the people about to be named may actually be notified, or None for a notifier
+        # whose ids are not people at all.
+        #
+        # The team notifier is the one that must stay None, and that override is free rather than
+        # load-bearing, unlike the one below it. A team's map holds ROLE ids, and a Discord
+        # snowflake is unique across entity types, so no role id could ever be sitting in
+        # `muted_members`: filtering them would answer correctly for ever, by accident. It is off
+        # so that nobody has to work out that it would have been fine.
+        self._muted = muted
         # Whether the metadata block reaches these people on its own. True for anybody rendered
         # through `_person`, which emits a live mention for a linked login; the block is a real
         # message the first time it is posted, so it notifies them.
@@ -81,7 +105,9 @@ class ActorNotifier:
 
         `the_block_pinged` says the block went out as a new message carrying live mentions,
         which means it has already reached everybody it names. See the guard below for why this
-        still claims rather than simply not running.
+        still claims rather than simply not running. It stays right for somebody who has turned
+        their pings off: the block named them and did not ring them, and a line beside it would
+        do exactly the same, so skipping it costs them nothing the block did not already show.
         """
         # Deliberately not shielded. Shielding this looks like it protects the claim, and does
         # the opposite: the await raises at once while the claim carries on and commits, so
@@ -89,7 +115,7 @@ class ActorNotifier:
         # nobody for ever. Unshielded, a cancellation here aborts the transaction before it
         # commits and nothing was claimed, which is the outcome worth having. Once this returns
         # there is no await before the guard, so nothing can land in between.
-        claimed, mentions = await self._claim(tracked_item_id, guild_id)
+        claimed, mentions, notify = await self._claim(tracked_item_id, guild_id)
         if not claimed:
             return ()
         logins = tuple(sorted(claimed))
@@ -113,7 +139,12 @@ class ActorNotifier:
             return ()
 
         try:
-            await self._threads.post(thread_id=thread_id, content=self._render(logins, mentions))
+            # Posted even where nobody on it may be notified. The line is the only visible
+            # record that somebody was put on an item after its thread already existed, and a
+            # muted person asked not to be rung rather than to be left out of the thread.
+            await self._threads.post(
+                thread_id=thread_id, content=self._render(logins, mentions), notify=notify
+            )
         except BaseException:
             # Nothing was said, so the ping is owed again; late beats twice or never.
             #
@@ -132,7 +163,7 @@ class ActorNotifier:
 
     async def _claim(
         self, tracked_item_id: int, guild_id: int
-    ) -> tuple[Mapping[str, int | None], Mapping[str, int]]:
+    ) -> tuple[Mapping[str, int | None], Mapping[str, int], Notify]:
         """Take the pings nobody has sent yet, and work out how to address them.
 
         The claim answers with the account beside each name, because this is the one mention
@@ -144,11 +175,20 @@ class ActorNotifier:
                 tracked_item_id, self._role
             )
             if not claimed:
-                return {}, {}
+                return {}, {}, None
             mentions = await self._mentions(session).resolve_many(guild_id=guild_id, people=claimed)
+            # None where nothing was injected, which leaves the client's own rule in force. That
+            # is the right answer for a notifier whose content holds no account mentions at all.
+            notify = (
+                None
+                if self._muted is None
+                else await self._muted(session).may_be_pinged(
+                    guild_id=guild_id, ids=mentions.values()
+                )
+            )
         # The account beside each name goes back to the caller as well, because the hand-back
         # below has to find these rows again after a gap long enough for a rename to land in.
-        return claimed, mentions
+        return claimed, mentions, notify
 
     async def _release(self, tracked_item_id: int, claimed: Mapping[str, int | None]) -> None:
         async with self._sessionmaker() as session, session.begin():

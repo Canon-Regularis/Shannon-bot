@@ -368,10 +368,10 @@ class _RefusingToPost(FakeThreadGateway):
         super().__init__()
         self.refusing = True
 
-    async def post(self, *, thread_id: int, content: str) -> int | None:
+    async def post(self, **kwargs) -> int | None:
         if self.refusing:
             raise DiscordGatewayError("Discord refused to post to the thread")
-        return await super().post(thread_id=thread_id, content=content)
+        return await super().post(**kwargs)
 
 
 class TestTwoDeliveriesGitHubStampedWithTheSameSecond:
@@ -745,11 +745,11 @@ class _HangingOnPost(FakeThreadGateway):
         self.hanging = True
         self.posting = asyncio.Event()
 
-    async def post(self, *, thread_id: int, content: str) -> int | None:
+    async def post(self, **kwargs) -> int | None:
         self.posting.set()
         if self.hanging:
             await asyncio.sleep(60)
-        return await super().post(thread_id=thread_id, content=content)
+        return await super().post(**kwargs)
 
 
 async def _cancelled_in_the_ping(service: ItemSyncService, threads: _HangingOnPost, snapshot):
