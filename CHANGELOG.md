@@ -5163,3 +5163,73 @@ to set the project number will find it.
   anybody who can push could put a colleague's name against their own commit; `author.login` is
   resolved by GitHub from the address. Verified against this repository's own history, where the
   two are different strings.
+
+## Private repositories, through a GitHub App
+
+- **Private repositories can be registered.** Closes #98. What was actually stopping them is worth
+  saying, because nothing in the codebase refused one on purpose: there is no visibility check
+  anywhere, and `repositories` had nowhere to record one. GitHub answers `404` for a repository the
+  caller cannot see, `_raise_for_status` checks 404 before the 401/403 branch, and the reply table
+  rendered that as "GitHub could not find that repository." An access problem was reported as a
+  missing object, so people went and checked the spelling of a link that was correct.
+- **The fix is not a bigger token.** There was one process-wide `SHANNON_GITHUB_TOKEN`, frozen into
+  one HTTP client's default headers, and the README already conceded it "has to see every
+  repository". `/register` is open to Admin and Project Manager, and a guild Administrator bypasses
+  the role check outright. Widen that token to private repositories and any administrator of any
+  server this bot has been invited to can mirror any private code it can read into a channel they
+  control. With public repositories that leaked nothing that was not already public.
+- **So the token is gone and there is a GitHub App.** A token is minted per installation and can
+  only see what that account granted. Installing requires admin on the repository or the
+  organisation, which makes the installation the proof of control that a Discord role is not.
+- **`/unregister` exists, and a Discord role cannot authorise it.** Registering had been one way
+  since it was written, which was survivable while the worst case was a public repository in the
+  wrong channel. The caller is sent a one-time link, authorises the App, and GitHub says who they
+  are; only `admin` on the repository unbinds it. `/link` cannot serve here and it is worth saying
+  why, because it looks like it should: it records a login after checking only that the login
+  exists, so any administrator can claim to be the repository owner and pass.
+- **The user access token is used once and never written down.** It answers `GET /user` and is
+  discarded. One lasts eight hours and carries a six-month refresh token, so keeping either would
+  mean holding a credential to somebody's whole GitHub account to answer a question already
+  answered.
+- **The state is consumed by one statement.** `UPDATE ... WHERE consumed_at IS NULL AND expires_at
+  > now() RETURNING ...`, so two clicks on one link race in Postgres and exactly one wins. Reading
+  the row and then updating it leaves a window where both clicks see it unspent. Expired, already
+  used and never issued all answer the same thing, because telling them apart confirms to somebody
+  guessing states that a particular one was real.
+- **The expiry is stamped by the database, not the process.** It is expired against `now()`, so a
+  row stamped here would be compared against a different clock and a link would live slightly
+  longer or shorter than it claims. `issue` takes a lifetime and the interval is added in SQL.
+- **Both webhook secrets are accepted while a deployment moves across.** Without it the change is a
+  flag day. **Delete the per-repository webhook the moment the App is installed:** until then
+  GitHub sends everything twice under different delivery ids, the queue dedupes on that id so it
+  cannot see them, and `mirrored_notes` covers comments and reviews but nothing covers the commit,
+  label and state lines. Every commit line posts twice.
+- **One credential survives, renamed to say what it is.** GitHub publishes no App permission of any
+  kind for a **user-owned** Projects v2 board; the Projects permission exists at organisation level
+  only, and `HttpProjectBoards` reads `/users/{owner}/projectsV2/...` because a personal account is
+  what this runs against. So the board keeps `SHANNON_GITHUB_PROJECT_TOKEN`, read by that one
+  reader and nothing else. A leak of it exposes a board rather than source, and it is unset in
+  every deployment leaving the project number at zero.
+- **The token is attached per request rather than baked into the client.** An `httpx.Auth` hook was
+  the obvious way and is the wrong one: it would recover the account by parsing a path this code
+  had just built, and `/users/{login}` for the `/link` lookup and `/users/{owner}/projectsV2/...`
+  for the board both begin `/users/` and mean different things. `owner` is threaded to the four
+  transport helpers instead. Only `get_json` and `get_pages` changed shape, and their one caller
+  already had the owner in hand.
+- **An unset App behaves exactly as an unset token did.** No `Authorization` header at all rather
+  than an empty bearer, which GitHub answers 401 to. Public endpoints answer, private ones report
+  as missing, and the container says once and loudly that no App is configured.
+- **`cryptography` rather than a JWT library.** This only ever signs and never verifies, so the
+  whole value of a JWT library goes unused and it pulls `cryptography` in regardless.
+- **Three tables and a column.** `github_installations` maps an account to its installation and is
+  a cache with GitHub behind it, so a missed webhook costs a lookup rather than a broken mirror.
+  `identity_verifications` and `verified_identities` are the two halves of the round trip.
+  `repositories.private` is nullable and reads as "nobody said" rather than as public: nothing can
+  invent the answer for a row written before the column existed, and it fills itself in on the next
+  delivery rather than needing a backfill that would have to guess.
+- **`ReadsJson` was missing from the conformance table all along**, and `get_json` and `get_pages`
+  grew a parameter in three places at once. That is exactly the drift that file exists to catch.
+- The README now says where private repository content actually ends up: the delivery payload, the
+  tracked item's title and labels, the assignees' logins, the Discord thread name, and the log.
+  Along with the two gaps in pruning, which are that a stuck delivery is never pruned at any age
+  and that pruning only runs while the worker does.
