@@ -32,6 +32,18 @@ MAX_COMMANDS = 100
 MAX_PARAMETERS = 25
 MAX_DESCRIPTION = 100
 
+# The choice ceilings, none of which discord.py checks on the way past. `Choice.__init__` stores
+# whatever it is handed: no length on the name, none on the value, no count on the list, and no
+# check that two entries do not carry the same value.
+#
+# Worth having where the rules beside it are, because these can actually fail. A parameter
+# description is run through `_shorten` before Discord ever sees it, so the assertion on that one
+# above is about intent rather than about the sync; a choice is passed through whole, so one that
+# is too long reaches the registration intact and the process ends without connecting.
+MAX_CHOICES = 25
+MAX_CHOICE_NAME = 100
+MAX_CHOICE_VALUE = 100
+
 
 def commands():
     """The commands the container really installs.
@@ -62,6 +74,13 @@ def test_every_description_fits_and_is_not_empty() -> None:
 
 
 def test_every_parameter_is_one_discord_will_take() -> None:
+    """The description half of this cannot fail, and that is worth writing down rather than
+    leaving to be rediscovered. discord.py runs every parameter description through `_shorten`
+    while the decorator is applied, so it is already within the limit before this reads it, and an
+    undescribed parameter arrives here as a single ellipsis. The assertion states the intent; the
+    name and count assertions beside it are the ones that can go red. Choices are checked below,
+    where nothing shortens anything first.
+    """
     for command in commands():
         assert len(command.parameters) <= MAX_PARAMETERS, f"/{command.name} has too many options"
         for parameter in command.parameters:
@@ -82,3 +101,36 @@ def test_no_two_commands_share_a_name() -> None:
 
 def test_there_are_not_more_commands_than_discord_will_register() -> None:
     assert len(commands()) <= MAX_COMMANDS
+
+
+def test_every_choice_is_one_discord_will_take() -> None:
+    for command in commands():
+        for parameter in command.parameters:
+            offered = parameter.choices
+            assert len(offered) <= MAX_CHOICES, (
+                f"/{command.name} {parameter.display_name} offers {len(offered)} choices"
+            )
+            for choice in offered:
+                name = len(choice.name)
+                assert 1 <= name <= MAX_CHOICE_NAME, (
+                    f"/{command.name} {parameter.display_name} choice name is {name} chars"
+                )
+                # Every choice here is a string one, where the limit is Discord's hundred
+                # characters. An integer choice would be bounded by its range instead.
+                value = len(str(choice.value))
+                assert 1 <= value <= MAX_CHOICE_VALUE, (
+                    f"/{command.name} {parameter.display_name} choice value is {value} chars"
+                )
+
+
+def test_no_two_choices_on_one_option_share_a_value() -> None:
+    """Discord refuses a duplicate at sync time, and it is the mistake a copied line makes: the
+    name gets changed and the value does not. The picker then offers two entries that do the same
+    thing, and the application never registers at all, so nothing in Discord works rather than one
+    command being odd."""
+    for command in commands():
+        for parameter in command.parameters:
+            values = [choice.value for choice in parameter.choices]
+            assert len(values) == len(set(values)), (
+                f"/{command.name} {parameter.display_name} offers one value twice: {values}"
+            )
