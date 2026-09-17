@@ -6,6 +6,8 @@ from dataclasses import replace
 from typing import Any, TypeVar
 
 from shannon.domain.models import (
+    CommitRange,
+    CommitStats,
     IssueSnapshot,
     Label,
     PullRequestSnapshot,
@@ -35,7 +37,21 @@ class FakeGitHubClient:
         pull_requests: dict[tuple[str, int], PullRequestSnapshot] | None = None,
         issues: dict[tuple[str, int], IssueSnapshot] | None = None,
         users: dict[str, int] | None = None,
+        compares: dict[tuple[str, str], CommitRange | None] | None = None,
+        commits: dict[str, CommitStats | None] | None = None,
     ) -> None:
+        # What a push did, keyed by the pair of SHAs asked about, and how much each commit
+        # changed, keyed by its own. A key holding None is how a test says GitHub has collected
+        # it: a missing key is a test that forgot to stock the fake, and the two want telling
+        # apart. Stocked with nothing, both answer None, which is the quiet path.
+        self.compares = compares or {}
+        self.commits = commits or {}
+        self.compare_calls: list[tuple[str, str, str]] = []
+        # Which commits had their numbers read. The filter that drops merges and other people's
+        # work runs before these calls, and counting the lines in a thread cannot show that: a
+        # push that announces nothing looks identical whether it skipped the reads or made ten
+        # of them and threw the answers away.
+        self.stats_calls: list[tuple[str, str]] = []
         # Every login exists unless a test says otherwise, because almost no test is about a
         # login that does not. `{}` is how a test says the account is not there, and a mapping
         # rather than a set because what `/link` needs is the account's id, not a yes.
@@ -123,6 +139,20 @@ class FakeGitHubClient:
             raise GitHubNotFoundError(
                 f"GitHub has nothing at /repos/{owner}/{name}/issues/{number}"
             ) from None
+
+    async def compare_commits(
+        self, owner: str, name: str, base: str, head: str
+    ) -> CommitRange | None:
+        self.compare_calls.append((f"{owner}/{name}".lower(), base, head))
+        if self.error is not None:
+            raise self.error
+        return self.compares.get((base, head))
+
+    async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None:
+        self.stats_calls.append((f"{owner}/{name}".lower(), sha))
+        if self.error is not None:
+            raise self.error
+        return self.commits.get(sha)
 
     async def list_open_pull_requests(
         self, repository: RepositorySnapshot

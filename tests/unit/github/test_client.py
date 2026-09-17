@@ -816,3 +816,130 @@ class TestARepositoryThatMoved:
         )
 
         assert (await client.get_repository("acme", "old-name")).full_name == "acme/new-name"
+
+
+class TestComparingTwoCommits:
+    """Reading what a push did to a branch.
+
+    Every test here goes through the transport rather than round a stub, because the thing worth
+    pinning is the request: the path shape, what is escaped into it, and which answers are turned
+    into None instead of thrown.
+    """
+
+    def compare(self, **overrides: object) -> dict[str, object]:
+        body = {
+            "status": "ahead",
+            "total_commits": 1,
+            "commits": [
+                {
+                    "sha": "a" * 40,
+                    "commit": {"message": "Add the endpoint"},
+                    "author": {"login": "octocat", "id": 1},
+                    "parents": [{"sha": "b" * 40}],
+                }
+            ],
+        }
+        body.update(overrides)
+        return body
+
+    async def test_a_compare_reads_as_a_range(self) -> None:
+        async with client_with(responds(200, self.compare())) as client:
+            found = await client.compare_commits(payloads.OWNER, payloads.REPO, "b" * 40, "a" * 40)
+
+        assert found is not None
+        assert found.status == "ahead"
+        assert [commit.sha for commit in found.commits] == ["a" * 40]
+
+    async def test_it_asks_the_compare_endpoint_with_both_ends_in_the_path(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps(self.compare()))
+
+        async with client_with(handler) as client:
+            await client.compare_commits(payloads.OWNER, payloads.REPO, "old", "new")
+
+        assert seen == [f"/repos/{payloads.OWNER}/{payloads.REPO}/compare/old...new"]
+
+    async def test_a_ref_with_a_slash_in_it_stays_one_path_segment(self) -> None:
+        """The two ends arrive off a webhook payload, and this is the one place a value nobody
+        validated decides which endpoint gets called. A branch name is a legal ref here, and
+        `feat/x` unescaped reads as two more segments and asks GitHub something else entirely."""
+        seen: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps(self.compare()))
+
+        async with client_with(handler) as client:
+            await client.compare_commits(payloads.OWNER, payloads.REPO, "feat/x", "main")
+
+        assert b"/compare/feat%2Fx...main" in seen[0]
+
+    async def test_a_compare_github_has_nothing_for_is_not_an_error(self) -> None:
+        """A branch deleted between the push and this call never comes back. Raising would put
+        the delivery through sixteen retries over two hours to be told the same thing, holding up
+        everything behind it."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            found = await client.compare_commits(payloads.OWNER, payloads.REPO, "gone", "also")
+
+        assert found is None
+
+    async def test_a_body_with_no_status_is_nothing_rather_than_a_guess(self) -> None:
+        async with client_with(responds(200, {"total_commits": 4})) as client:
+            found = await client.compare_commits(payloads.OWNER, payloads.REPO, "b", "a")
+
+        assert found is None
+
+    async def test_github_being_down_still_raises(self) -> None:
+        """The other half of the 404 rule. A push is worth retrying; only a thing that is
+        permanently gone is worth giving up on."""
+        async with client_with(responds(500)) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.compare_commits(payloads.OWNER, payloads.REPO, "b", "a")
+
+
+class TestReadingOneCommitsNumbers:
+    def commit(self, **overrides: object) -> dict[str, object]:
+        body = {"stats": {"additions": 42, "deletions": 7, "total": 49}, "files": [{}, {}, {}]}
+        body.update(overrides)
+        return body
+
+    async def test_the_numbers_come_back(self) -> None:
+        async with client_with(responds(200, self.commit())) as client:
+            found = await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
+
+        assert found is not None
+        assert (found.additions, found.deletions, found.changed_files) == (42, 7, 3)
+
+    async def test_it_asks_the_commit_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps(self.commit()))
+
+        async with client_with(handler) as client:
+            await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
+
+        assert seen == [f"/repos/{payloads.OWNER}/{payloads.REPO}/commits/{'a' * 40}"]
+
+    async def test_a_commit_that_has_been_collected_is_not_an_error(self) -> None:
+        """A rebase during the push leaves SHAs the compare listed and the read cannot find. The
+        caller carries on with the commits it can read rather than losing all of them."""
+        async with client_with(responds(404, {"message": "No commit found"})) as client:
+            found = await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
+
+        assert found is None
+
+    async def test_a_commit_with_no_stats_block_is_nothing(self) -> None:
+        async with client_with(responds(200, {"files": [{}]})) as client:
+            found = await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
+
+        assert found is None
+
+    async def test_github_being_down_still_raises(self) -> None:
+        async with client_with(responds(503)) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
