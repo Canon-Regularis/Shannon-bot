@@ -31,6 +31,12 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   and archived out of the channel, and opened again if the item is. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
+- **Commits.** A push to an open pull request posts a message per commit: who wrote it, its
+  subject, its message capped at 250 characters, and the additions, deletions and files changed.
+  Ten per push, newest first, with a footnote counting anything left over. Merge commits and
+  commits somebody else wrote are skipped, so pulling main in says nothing. A force push says it
+  was force-pushed instead, once, because every commit on a rewritten branch has a new hash and
+  would otherwise read as work nobody had just done. None of it pings anybody.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
   missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly, or
   one kind of item if you pick one. It never revisits an item that already has a thread.
@@ -41,8 +47,9 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 
 1. `POST /webhooks/github` checks the signature against the raw body and decodes it. Nothing here
    touches Discord.
-2. Events and actions the bot does not act on are answered `ignored` without a row, so pushes and
-   stars stay out of the queue.
+2. Events and actions the bot does not act on are answered `ignored` without a row, so stars and
+   forks stay out of the queue. Pushes to an open pull request are acted on and do get a row,
+   which is the largest single share of what the queue holds.
 3. The delivery is claimed by its `X-GitHub-Delivery` id and written to `webhook_events` with its
    payload. A repeat answers `duplicate`, anything new answers `accepted`.
 4. The worker leases a batch with `SELECT ... FOR UPDATE SKIP LOCKED`, oldest first, one at a time
@@ -419,7 +426,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Four things the bot is known to get wrong. All are narrow, and all are written down here rather
+Five things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -457,6 +464,13 @@ somebody freed and a stranger took does not inherit the previous holder's mentio
 of a comment body carries no id at all, so that check cannot run and the name alone decides. It
 follows the rule the link table already states for a payload with no id: no evidence is not
 evidence, and refusing on it would take away mentions that work.
+
+**The same commit announced in two threads.** A commit is announced where it lands, and merging
+a branch that carries your own earlier work lands it again somewhere else. Suppressing it needs a
+call per commit asking whether the default branch already has it, which triples what a push costs
+in order to hide something that is true. A rebase is a separate case and is handled: every commit
+on a rewritten branch has a new hash, so the thread says the branch was force-pushed rather than
+announcing them all again.
 
 ## License
 

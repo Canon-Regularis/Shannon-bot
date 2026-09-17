@@ -44,6 +44,7 @@ from shannon.github.client import (
     HttpGitHubClient,
     ListsOpenItems,
     LooksUpUsers,
+    ReadsCommits,
 )
 from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.events import EventHandler
@@ -113,6 +114,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (LooksUpUsers, HttpGitHubClient),
     (ListsOpenItems, FakeGitHubClient),
     (ListsOpenItems, HttpGitHubClient),
+    (ReadsCommits, FakeGitHubClient),
+    (ReadsCommits, HttpGitHubClient),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),

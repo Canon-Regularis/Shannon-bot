@@ -277,7 +277,7 @@ async def test_the_webhook_handler_ignores_an_out_of_scope_action(
 ) -> None:
     handler = build_item_handler(sync_service, parse_pull_request_event)
 
-    outcome = await handler("synchronize", payloads.pull_request_event("synchronize"))
+    outcome = await handler("ready_for_review", payloads.pull_request_event("ready_for_review"))
 
     assert outcome == "ignored"
 

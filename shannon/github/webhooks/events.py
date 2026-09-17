@@ -22,6 +22,17 @@ PULL_REQUEST_ACTIONS = frozenset(
         "unlabeled",
         "assigned",
         "unassigned",
+        # A push to the branch. Listed last because it is the only one of these that is not about
+        # the item's own fields: everything above changes what the metadata block says, and this
+        # one changes nothing there at all. It is here so the thread can say what landed on the
+        # pull request, which is issue #67.
+        #
+        # This is the largest single increase in queue volume the project has taken. Every push
+        # to every open pull request now writes a row carrying the whole payload, where before it
+        # was matched and dropped at the endpoint. GitHub sends one of these per push rather than
+        # per commit, and the pruner clears them after seven days, so it is bounded rather than
+        # growing, but it is a real change in what the queue holds.
+        "synchronize",
     }
 )
 

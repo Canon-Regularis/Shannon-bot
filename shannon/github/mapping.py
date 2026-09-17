@@ -8,6 +8,9 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
+    CommitRange,
+    CommitRef,
+    CommitStats,
     IssueSnapshot,
     Label,
     PullRequestSnapshot,
@@ -289,3 +292,80 @@ def _note_fields(payload: Payload, *, created: str) -> dict[str, Any]:
         "author": actor(payload.get("user")),
         "created_at": parse_timestamp(payload.get(created)),
     }
+
+
+def commit_ref(payload: Any) -> CommitRef | None:
+    """One row of a compare, or None for a row that cannot be used.
+
+    A row with no SHA is not a commit anybody can go and read, and nothing downstream could claim
+    it, so it is dropped rather than rendered as a gap.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    sha = payload.get("sha")
+    if not isinstance(sha, str) or not sha:
+        return None
+
+    inner = payload.get("commit")
+    message = inner.get("message") if isinstance(inner, Mapping) else None
+    parents = payload.get("parents")
+    return CommitRef(
+        sha=sha,
+        message=message if isinstance(message, str) else "",
+        # `author` and not `commit.author`. The first is the GitHub account, resolved from the
+        # email address; the second is whatever the committer typed into their git config.
+        author=actor(payload.get("author")),
+        merge=isinstance(parents, list) and len(parents) > 1,
+    )
+
+
+def commit_range(payload: Any) -> CommitRange | None:
+    """A compare between two commits, or None for a body that says nothing usable.
+
+    One unusable row does not lose the rest: the range is what the caller asked about, and
+    dropping every other commit because GitHub sent one odd entry would say less than it knows.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        return None
+
+    rows = payload.get("commits")
+    rows = rows if isinstance(rows, list) else []
+    parsed = (commit_ref(row) for row in rows)
+    commits = tuple(found for found in parsed if found is not None)
+    total = payload.get("total_commits")
+    return CommitRange(
+        status=status,
+        commits=commits,
+        # Falls back to what was listed rather than to zero. A missing count with commits beside
+        # it would otherwise report every one of them as left out.
+        total=total if isinstance(total, int) else len(commits),
+    )
+
+
+def commit_stats(payload: Any) -> CommitStats | None:
+    """How much one commit changed, or None for a body without the numbers.
+
+    The file count is the length of the list, because GitHub sends no count on a commit. That
+    list stops at three hundred entries, so a very wide commit understates its files while its
+    additions and deletions stay exact.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    stats = payload.get("stats")
+    if not isinstance(stats, Mapping):
+        return None
+
+    additions = stats.get("additions")
+    deletions = stats.get("deletions")
+    if not isinstance(additions, int) or not isinstance(deletions, int):
+        return None
+
+    files = payload.get("files")
+    return CommitStats(
+        additions=additions,
+        deletions=deletions,
+        changed_files=len(files) if isinstance(files, list) else 0,
+    )

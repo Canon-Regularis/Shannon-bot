@@ -591,8 +591,14 @@ class TestReRequestingAReviewAfterOneWasGiven:
     """The single moment the reviewer ping exists for, and it used to say nothing at all.
 
     GitHub drops a reviewer from `requested_reviewers` the moment they submit, and sends no
-    `pull_request` event saying so. Nothing else in the sequence tells us either: the author's
-    push arrives as `synchronize`, which is deliberately not handled.
+    `pull_request` event saying so.
+
+    Since issue #67 the author's push does arrive, as `synchronize`, and reconciling the list
+    against it deletes the row, so on a sequence where somebody pushes between the review and the
+    re-request the ping would come back anyway. What this class pins is the sequence where nobody
+    does: a reviewer approving with a note, and the author asking again after replying to it. The
+    reviewer GitHub names at the top of the `review_requested` event is what closes that one, and
+    it is what makes the ping work whether or not a push happened to intervene.
     """
 
     async def test_the_reviewer_is_pinged_again(

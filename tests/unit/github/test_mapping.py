@@ -151,3 +151,181 @@ class TestADescription:
 
         assert found is not None
         assert found.body == "why this exists"
+
+
+# What GitHub actually sends for one row of a compare, trimmed to the fields anything reads. The
+# two author blocks are both real and they disagree, which is the point: `commit.author.name` is
+# whatever the pusher typed into their git config and nothing here may render it.
+def commit_row(**overrides: object) -> dict[str, object]:
+    row = {
+        "sha": "a" * 40,
+        "commit": {"message": "Add the endpoint\n\nAnswers the check.", "author": {"name": "Ada"}},
+        "author": {"login": "octocat", "id": 583231},
+        "parents": [{"sha": "b" * 40}],
+    }
+    row.update(overrides)
+    return row
+
+
+class TestOneCommitOffACompare:
+    def test_the_account_is_read_and_the_git_name_is_not(self) -> None:
+        """A security test wearing a parser's clothes. `commit.author.name` is free text from
+        `git config user.name`, so anybody who can push could put a colleague's name against their
+        own work. `author.login` is resolved by GitHub from the address and cannot be typed."""
+        found = mapping.commit_ref(commit_row())
+
+        assert found is not None
+        assert found.author is not None
+        assert found.author.login == "octocat"
+
+    def test_a_commit_with_no_github_account_has_no_author(self) -> None:
+        """GitHub sends null whenever the committing email is registered to nobody. It happens on
+        ordinary work, so it has to read as an unknown person rather than as a broken row."""
+        found = mapping.commit_ref(commit_row(author=None))
+
+        assert found is not None
+        assert found.author is None
+
+    def test_a_commit_with_two_parents_is_a_merge(self) -> None:
+        found = mapping.commit_ref(commit_row(parents=[{"sha": "b"}, {"sha": "c"}]))
+
+        assert found is not None
+        assert found.merge is True
+
+    def test_a_commit_with_one_is_not(self) -> None:
+        found = mapping.commit_ref(commit_row())
+
+        assert found is not None
+        assert found.merge is False
+
+    def test_a_first_commit_with_no_parents_at_all_is_not_a_merge(self) -> None:
+        found = mapping.commit_ref(commit_row(parents=[]))
+
+        assert found is not None
+        assert found.merge is False
+
+    @pytest.mark.parametrize("sha", UNUSABLE_NAMES)
+    def test_a_row_without_a_sha_is_no_commit(self, sha: object) -> None:
+        """Nothing downstream could claim it: the note key is the SHA, so a row without one cannot
+        be marked as said and would be posted again on every retry."""
+        assert mapping.commit_ref(commit_row(sha=sha)) is None
+
+    def test_a_row_with_no_message_still_reads(self) -> None:
+        """An empty subject is a commit somebody can still be told about, and the SHA is the part
+        that had to be there."""
+        found = mapping.commit_ref(commit_row(commit={"message": None}))
+
+        assert found is not None
+        assert found.message == ""
+
+    def test_a_body_that_is_not_an_object_reads_as_nothing(self) -> None:
+        assert mapping.commit_ref("a" * 40) is None
+
+
+class TestARangeOfCommits:
+    def test_a_compare_body_reads_as_a_range(self) -> None:
+        found = mapping.commit_range(
+            {"status": "ahead", "total_commits": 2, "commits": [commit_row(), commit_row(sha="c")]}
+        )
+
+        assert found is not None
+        assert found.status == "ahead"
+        assert found.total == 2
+        assert [commit.sha for commit in found.commits] == ["a" * 40, "c"]
+
+    def test_a_commit_row_missing_a_sha_is_dropped_from_the_range(self) -> None:
+        """One odd row does not lose the rest. The range is what the caller asked about, and
+        refusing all of it because GitHub sent one entry nothing can use says less than it knows.
+        """
+        found = mapping.commit_range(
+            {"status": "ahead", "total_commits": 2, "commits": [commit_row(sha=None), commit_row()]}
+        )
+
+        assert found is not None
+        assert [commit.sha for commit in found.commits] == ["a" * 40]
+        assert found.total == 2, "the count is what GitHub said, not a tally of what survived"
+
+    def test_a_rollback_reads_as_behind_with_nothing_ahead(self) -> None:
+        """The shape a `reset --hard && push --force` leaves, checked against the live API. It is
+        the case that says nothing at all unless `behind` is treated as a rewrite."""
+        found = mapping.commit_range({"status": "behind", "total_commits": 0, "commits": []})
+
+        assert found is not None
+        assert found.status == "behind"
+        assert found.commits == ()
+
+    @pytest.mark.parametrize("status", UNUSABLE_NAMES)
+    def test_a_compare_with_no_status_is_no_range(self, status: object) -> None:
+        """The status is the whole decision: announce, say it was force-pushed, or stay quiet.
+        Guessing one would pick a branch of that on no evidence."""
+        assert mapping.commit_range({"status": status, "commits": [], "total_commits": 0}) is None
+
+    def test_a_missing_count_falls_back_to_what_was_listed(self) -> None:
+        """Not to zero. The count is subtracted from to work out how many went unannounced, and a
+        zero there reports every commit in the push as left out."""
+        found = mapping.commit_range({"status": "ahead", "commits": [commit_row()]})
+
+        assert found is not None
+        assert found.total == 1
+
+    @pytest.mark.parametrize("rows", [None, "commits", {}, 7])
+    def test_a_commits_field_that_is_not_a_list_reads_as_no_commits(self, rows: object) -> None:
+        found = mapping.commit_range({"status": "ahead", "total_commits": 4, "commits": rows})
+
+        assert found is not None
+        assert found.commits == ()
+
+    def test_a_compare_body_that_is_not_an_object_reads_as_nothing(self) -> None:
+        assert mapping.commit_range(["ahead"]) is None
+
+
+class TestWhatOneCommitChanged:
+    def test_the_numbers_are_read_off_the_stats_block(self) -> None:
+        found = mapping.commit_stats({"stats": {"additions": 42, "deletions": 7}, "files": []})
+
+        assert found is not None
+        assert (found.additions, found.deletions) == (42, 7)
+
+    def test_the_file_count_is_the_length_of_the_list_github_sent(self) -> None:
+        """There is no `changed_files` on a commit, checked against the live API. The list stops
+        at three hundred entries, so a very wide commit understates its files while its additions
+        and deletions stay exact."""
+        found = mapping.commit_stats(
+            {"stats": {"additions": 1, "deletions": 0}, "files": [{}, {}, {}]}
+        )
+
+        assert found is not None
+        assert found.changed_files == 3
+
+    def test_no_files_block_counts_as_none_changed(self) -> None:
+        found = mapping.commit_stats({"stats": {"additions": 1, "deletions": 0}})
+
+        assert found is not None
+        assert found.changed_files == 0
+
+    def test_a_zero_is_a_number_and_not_a_missing_one(self) -> None:
+        """A deletion-only commit has zero additions, which is the value every sloppy falsy check
+        turns into nothing."""
+        found = mapping.commit_stats({"stats": {"additions": 0, "deletions": 3}, "files": [{}]})
+
+        assert found is not None
+        assert found.additions == 0
+
+    @pytest.mark.parametrize("value", ["", "4", None, [], {}, 4.5])
+    def test_a_count_that_is_not_a_number_is_no_statistics(self, value: object) -> None:
+        """Both ways round. Rendering `+None` or `+4.5` in a thread is worse than saying nothing,
+        and the caller already has a path for a commit it cannot read."""
+        assert mapping.commit_stats({"stats": {"additions": value, "deletions": 1}}) is None
+        assert mapping.commit_stats({"stats": {"additions": 1, "deletions": value}}) is None
+
+    def test_a_commit_with_no_stats_block_is_no_statistics(self) -> None:
+        assert mapping.commit_stats({"files": [{}]}) is None
+
+    @pytest.mark.parametrize("stats", [[], [1, 2], "42", 7])
+    def test_a_stats_field_that_is_not_an_object_is_no_statistics(self, stats: object) -> None:
+        """Separate from the missing case, because the two fail differently. A missing block falls
+        through to the number check; a list walks straight into `.get` and raises."""
+        assert mapping.commit_stats({"stats": stats}) is None
+
+    def test_a_stats_body_that_is_not_an_object_reads_as_nothing(self) -> None:
+        assert mapping.commit_stats(None) is None

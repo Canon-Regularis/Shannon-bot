@@ -23,6 +23,39 @@ COMMENT_PREVIEW_LIMIT = 700
 # conversation, and this is the standing answer to what the item is for.
 DESCRIPTION_PREVIEW_LIMIT = 700
 
+# What a commit says about itself under its subject line, which is a pointer to the commit rather
+# than a copy of it. Its own name for the reason the two above give, and the number is the one the
+# issue that asked for commit lines named.
+COMMIT_MESSAGE_LIMIT = 250
+
+# And its subject line. GitHub enforces no length on one, so without this a single commit written
+# by somebody careless is the whole message.
+#
+# `fit` cannot rescue that, and it is why this limit is here rather than left to it: `fit` drops
+# WHOLE LINES from the end, so a subject longer than the message limit would take the statistics
+# line underneath it down with it, and what reached the thread would be half a title and nothing
+# else. Wider than anything git's own tooling encourages, so no ordinary subject is ever cut.
+COMMIT_TITLE_LIMIT = 120
+
+
+def clipped(body: str, *, limit: int) -> str:
+    """GitHub-authored text, cut to length and made safe, with nothing wrapped round it.
+
+    Lifted out of `quote` below rather than written twice, because the order is the whole of it:
+    the RAW text is cut and only then escaped, so a cut can never land between a backslash and the
+    character it was protecting. Cutting the escaped text instead looks identical, leaves a stray
+    backslash in the thread, and un-escapes whatever followed it.
+
+    Empty for text that is nothing but whitespace, which callers read as a section to leave out
+    rather than one to render blank.
+    """
+    text = (body or "").strip()
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return as_plain_text(text)
+
 
 def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:
     """A comment body, made safe to drop into a Discord message.
@@ -31,12 +64,10 @@ def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:
     all still resolve inside a quote. So the text is neutralised first, which also means the
     preview can be cut anywhere without leaving a `**` open and bolding everything after it.
     """
-    text = (body or "").strip()
+    text = clipped(body, limit=limit)
     if not text:
         return ""
-    if len(text) > limit:
-        text = text[:limit].rstrip() + "…"
-    return "\n".join(f"> {line}" if line else ">" for line in as_plain_text(text).splitlines())
+    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
 
 
 # GitHub's web form submits CRLF, and every rule below is anchored to a line. Folded first so

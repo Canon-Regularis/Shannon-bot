@@ -10,11 +10,14 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from shannon.discord_bot.safe_text import (
+    COMMIT_MESSAGE_LIMIT,
+    COMMIT_TITLE_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
     MESSAGE_LIMIT,
     as_plain_text,
     as_prose,
+    clipped,
     code_span,
     defuse_mentions,
     fit,
@@ -24,6 +27,8 @@ from shannon.domain.enums import Priority, StateChange, Status
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
+    Commit,
+    CommitStats,
     IssueSnapshot,
     LabelMove,
     PullRequestSnapshot,
@@ -482,3 +487,88 @@ def _timestamp(value: datetime | None) -> str:
     # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a
     # naive datetime as local time, which would shift every rendered time by the host's offset.
     return f"<t:{int(as_utc(value).timestamp())}:f>"
+
+
+_COMMIT_MARK = "📝"
+_FORCE_PUSH_MARK = "🔁"
+
+
+def format_commit(commit: Commit) -> str:
+    """One commit that landed on a pull request, as its own message in the thread.
+
+    **No mentions argument, and that is the requirement rather than an oversight.** `_person` is
+    the only thing in this module that builds a `<@id>`, and it needs a mapping to look an account
+    up in, so a renderer holding nothing to look one up in cannot ping anybody however it is
+    called. A push of ten commits would otherwise be ten notifications about work whoever cares is
+    already watching, which is what issue #67 asked not to happen.
+
+    The name is the GitHub account and never `commit.author.name`. That field is free text out of
+    `git config user.name`, so anybody who can push could put a colleague's name against their own
+    commit; the account is resolved by GitHub from the address and cannot be typed.
+
+    Three lines at most, in the order somebody scanning a thread reads them: who and what, then
+    why, then how much. The body is left out rather than rendered blank when the commit has none,
+    which is most of them.
+    """
+    said = f"{_COMMIT_MARK} **{_committer(commit.author)}** has committed {_subject(commit)}"
+    body = quote(commit.description, limit=COMMIT_MESSAGE_LIMIT)
+    return fit("\n".join(line for line in (said, body, _changes(commit.stats)) if line))
+
+
+def format_force_push(pusher: Actor | None) -> str:
+    """Said once when a branch was rewritten, instead of the commits it now holds.
+
+    The commits after a rewrite have new SHAs and would all be announced as new work, which is
+    both wrong and noisy: a rebase of five commits says five things nobody did just now. Naming
+    what happened is the honest version of that, and it also covers the rollback, where GitHub
+    reports nothing ahead at all and silence would be the alternative.
+    """
+    return (
+        f"{_FORCE_PUSH_MARK} **{_committer(pusher)}** force-pushed this branch, so the commits it "
+        "replaced are not announced."
+    )
+
+
+def format_commits_left(count: int) -> str:
+    """The tail of a push that was not announced line by line.
+
+    Small text, because it is a footnote about what is missing rather than a thing that happened.
+    Deliberately not saying whether the cap or a skip left them out: both mean the same thing to
+    whoever is reading, which is that GitHub has the rest.
+    """
+    were = "commit in this push was" if count == 1 else "commits in this push were"
+    return f"-# {count} earlier {were} not announced."
+
+
+def _committer(actor: Actor | None) -> str:
+    """The account that wrote a commit, or the word for not knowing.
+
+    GitHub answers with no account whenever the committing address is registered to nobody, which
+    happens on ordinary work rather than only on anything suspect. Escaped like every other field
+    GitHub authored: no login it issues today holds a markdown character, and this module escapes
+    everything else it did not write, so the exception would be the thing to explain.
+    """
+    return as_plain_text(actor.login) if actor is not None else UNKNOWN
+
+
+def _subject(commit: Commit) -> str:
+    """The commit's first line, or its short SHA when it has no message at all.
+
+    `git commit --allow-empty-message` is legal and the mapping layer lets one through, because
+    the SHA is the part that had to be there. Without the fallback the line would end on the word
+    "committed" and read as the bot having broken rather than as a commit nobody described.
+    """
+    return clipped(commit.title, limit=COMMIT_TITLE_LIMIT) or code_span(commit.sha[:7])
+
+
+def _changes(stats: CommitStats) -> str:
+    """How much the commit changed, in the shape `git` itself uses.
+
+    Small text, under the thing it is about. One file is one file: a count that reads "1 files"
+    is the sort of detail that makes everything above it look unmaintained.
+    """
+    files = "file" if stats.changed_files == 1 else "files"
+    return (
+        f"-# With changes: +{stats.additions}, -{stats.deletions}, "
+        f"{stats.changed_files} {files} changed"
+    )

@@ -10,7 +10,13 @@ from urllib.parse import quote
 
 import httpx
 
-from shannon.domain.models import IssueSnapshot, PullRequestSnapshot, RepositorySnapshot
+from shannon.domain.models import (
+    CommitRange,
+    CommitStats,
+    IssueSnapshot,
+    PullRequestSnapshot,
+    RepositorySnapshot,
+)
 from shannon.github import mapping
 from shannon.github.errors import (
     GitHubAuthError,
@@ -96,7 +102,26 @@ class LooksUpUsers(Protocol):
     async def user_id(self, login: str) -> int | None: ...
 
 
-class GitHubClient(ListsOpenItems, LooksUpUsers, Protocol):
+class ReadsCommits(Protocol):
+    """What a push did to a branch, which is all the commit announcer needs of GitHub.
+
+    Its own protocol for the same reason as the two above. This one runs on every push to every
+    open pull request, which makes it the busiest reader in the project, and a handle that could
+    also write a label is a handle that could write one by accident on the noisiest path there is.
+
+    Both answer None rather than raising when GitHub has nothing. A SHA that has been collected
+    never comes back, so a retry would spend sixteen attempts over two hours to say the same
+    thing, and the caller can carry on with the commits it can read.
+    """
+
+    async def compare_commits(
+        self, owner: str, name: str, base: str, head: str
+    ) -> CommitRange | None: ...
+
+    async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None: ...
+
+
+class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module
@@ -110,6 +135,12 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, Protocol):
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
+
+    async def compare_commits(
+        self, owner: str, name: str, base: str, head: str
+    ) -> CommitRange | None: ...
+
+    async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None: ...
 
     async def list_open_pull_requests(
         self, repository: RepositorySnapshot
@@ -190,6 +221,43 @@ class HttpGitHubClient:
             return None
         found = payload.get("id")
         return found if isinstance(found, int) else None
+
+    async def compare_commits(
+        self, owner: str, name: str, base: str, head: str
+    ) -> CommitRange | None:
+        """What happened between two commits, from the older one's point of view.
+
+        The SHAs are quoted. They arrive off a webhook payload, and a path segment is the one
+        place where a value nobody validated decides which endpoint gets called.
+
+        Only the first page is read, so a push of more than 250 commits has its list cut while
+        `total_commits` stays right. That is what the count is for: the announcer subtracts what
+        it said from GitHub's own total, so the overflow is reported rather than lost.
+
+        Gone means gone. A branch deleted between the push and this call, or a base rewritten out
+        of existence, never comes back, and a retry only delays the deliveries behind it.
+        """
+        path = f"/repos/{owner}/{name}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
+        try:
+            payload = await self._get(path)
+        except GitHubNotFoundError:
+            logger.info("GitHub has no compare for %s/%s %s...%s", owner, name, base, head)
+            return None
+        return mapping.commit_range(payload)
+
+    async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None:
+        """How much one commit changed.
+
+        A call each, because the commit rows inside a compare carry no `stats` block. The
+        alternative is the compare's own totals, which cover the whole range against the merge
+        base and would be attributed to whichever commit happened to be rendered.
+        """
+        try:
+            payload = await self._get(f"/repos/{owner}/{name}/commits/{quote(sha, safe='')}")
+        except GitHubNotFoundError:
+            logger.info("GitHub has no commit %s on %s/%s", sha, owner, name)
+            return None
+        return mapping.commit_stats(payload)
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}")

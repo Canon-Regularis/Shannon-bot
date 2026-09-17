@@ -23,6 +23,9 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
     format_comment,
+    format_commit,
+    format_commits_left,
+    format_force_push,
     format_label_change,
     format_review,
     format_reviewer_ping,
@@ -51,6 +54,7 @@ from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
+from shannon.services.sync.commit_lines import CommitLine
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -311,9 +315,25 @@ def _event_router(
     # One of each for both kinds of item, because a label moves the same way on either and so
     # does a close. Given to the item handlers rather than to the sync service: the sync runs for
     # commands and the board as well, and neither of those has a delivery to announce.
+    #
+    # The commit line is last because it is the only one of the three that reads GitHub, which
+    # makes it the only one that can take a delivery down for a reason outside this process. The
+    # two above have already said their piece by the time it starts.
+    #
+    # It goes to the issue handler as well, and does nothing there: an issue has no `synchronize`
+    # action, which is the first thing it checks.
     announce = _every(
         LabelLine(sessionmaker, threads, render=format_label_change, shut_again=shut_again),
         StateLine(sessionmaker, threads, render=format_state_change, shut_again=shut_again),
+        CommitLine(
+            sessionmaker,
+            threads,
+            github,
+            render=format_commit,
+            rewritten=format_force_push,
+            left=format_commits_left,
+            shut_again=shut_again,
+        ),
     )
     router.register(
         "pull_request", build_item_handler(pr_sync, parse_pull_request_event, announce=announce)
