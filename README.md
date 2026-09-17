@@ -235,11 +235,21 @@ through a configured guild id.
 
 What is shared, and what that costs:
 
-- **One `SHANNON_GITHUB_TOKEN`** has to see every repository, with write access to issues in each,
-  because every `/set_*` puts a label on the item. GitHub's 5,000 an hour is per token, so it is
-  now shared across all of them.
-- **One `SHANNON_GITHUB_WEBHOOK_SECRET`.** Every repository's webhook is configured with the same
-  one; there is no per-repository secret to verify against.
+- **Nothing shared reaches a repository any more.** Every GitHub call carries a token minted for
+  the installation covering that repository's owner, so it can only see what that account granted.
+  This is what makes private repositories safe to register: before it, one token saw everything,
+  and `/register` is open to anybody holding the Admin role in any server this bot was invited to.
+- **One GitHub App, and therefore one private key.** It is the credential to protect, because it
+  mints tokens for every installation. Losing it is worse than losing the token it replaced.
+- **One `SHANNON_GITHUB_PROJECT_TOKEN`, if the board is used at all.** GitHub publishes no App
+  permission for a user-owned Projects v2 board, so that one feature keeps a credential of its
+  own. It is narrow on purpose: a leak exposes a board rather than source, and it is unset in
+  every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero.
+- **One webhook secret per source.** The App has its own, and the endpoint also accepts
+  `SHANNON_GITHUB_WEBHOOK_SECRET` so a repository configured the old way keeps working while a
+  deployment moves across. Delete the per-repository webhook once the App is installed: until you
+  do, GitHub sends everything twice under different delivery ids, the queue's own duplicate check
+  cannot see it, and every commit line is posted twice.
 - **One set of role names.** `SHANNON_ROLE_*` are read once at startup and apply everywhere, so a
   server that calls its managers something else grants nothing to anybody but guild
   administrators. This is the one that surprises people.
@@ -253,8 +263,11 @@ above, point that repository's webhook at the same URL with the same secret, the
 `/set_channel` in the new server. A global command takes up to an hour to appear the first time,
 which looks exactly like a broken deploy and is not.
 
-The two limits that do not move: one repository per server, and one server per repository. There
-is no supported way to unregister either.
+The two limits that do not move: one repository per server, and one server per repository.
+`/unregister` undoes a binding, but only for somebody who has proved to GitHub that they hold
+admin on the repository - a Discord role cannot decide that, and `/link` is a claim rather than
+proof. It throws away every mirror record with it, so the threads already in the channel are
+orphaned and registering again opens new ones.
 
 ## Configuration
 
@@ -267,7 +280,14 @@ at the door.
 | `SHANNON_DATABASE_URL` | `postgresql+asyncpg://shannon:shannon@localhost:5433/shannon` | The default is the compose database |
 | `SHANNON_GITHUB_WEBHOOK_SECRET` | empty | HMAC secret. Empty answers 500 to every delivery rather than waving them through |
 | `SHANNON_DISCORD_TOKEN` | empty | Bot token. Empty runs without the gateway |
-| `SHANNON_GITHUB_TOKEN` | empty | REST token. Needs **write** access to issues: `/register`, `/pr`, `/issue` and `/refresh` only read, but every `/set_*` command and every board move puts a label on the item |
+| `SHANNON_GITHUB_APP_CLIENT_ID` | empty | The App's client id. Used as the JWT issuer and as the OAuth `client_id`, so one value serves both |
+| `SHANNON_GITHUB_APP_PRIVATE_KEY` | empty | The `.pem` GitHub issued, newlines written as `
+`. Signs the JWT that is traded for an installation token |
+| `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/unregister`. Empty makes `/unregister` refuse rather than hand out a broken link |
+| `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
+| `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App |
+| `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
+| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with user Projects: Read-only. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
@@ -300,14 +320,31 @@ One rule spans fields: `worker_lease_seconds` must cover `worker_batch_size *
 worker_delivery_timeout_seconds`, or construction fails. A lease expiring mid-batch would let a
 second worker take deliveries this one is still on.
 
-`webhook_events.payload` holds private repository content: titles, comment bodies, author names.
-Retention bounds it and the payload goes with the row.
+### Where private repository content ends up
+
+Registering a private repository copies parts of it into places GitHub does not control. Worth
+knowing before you point this at one, and worth knowing when somebody asks what a backup contains.
+
+| Where | What |
+| --- | --- |
+| `webhook_events.payload` | The whole delivery body: titles, descriptions, comment and review text, author names. Pruned seven days after a delivery finishes |
+| `tracked_items` | `title`, `github_url`, `shown_labels` and `project_column`, kept for as long as the repository is registered |
+| `item_assignments` | GitHub logins of authors, assignees and reviewers |
+| The Discord channel | Everything a thread shows. A thread's NAME is the item's title, and it is visible to anybody who can see the channel |
+| The log | Repository full name and item number on every delivery retry, and item titles at INFO from the project board poller |
+
+Two gaps in the pruning, said rather than left to be discovered: a delivery stuck `PENDING` or
+`PROCESSING` is never pruned at any age, and pruning only runs while the worker is running, so a
+deployment whose worker has died keeps everything.
+
+Nothing here is encrypted at rest beyond whatever the database and disk already do.
 
 ## Commands
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/register <github_repo_link>` | Admin, Project Manager | Binds a repository to this server and points PR threads at the current channel. One repository per server, and no way to undo it |
+| `/register <github_repo_link>` | Admin, Project Manager | Binds a repository to this server and points PR threads at the current channel. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
+| `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
@@ -383,18 +420,22 @@ rather than abandoning the rest.
 | `user_links` | GitHub login to Discord account, per server |
 | `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
+| `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and can always be asked, so a missing row costs one request |
+| `identity_verifications` | Outstanding one-time links from `/unregister`. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once |
+| `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
 
 Enums are `VARCHAR`, not native PostgreSQL types, so adding a status needs no `ALTER TYPE`. Worth
 knowing that they are unconstrained in the database: the mapping asks for a `CHECK` and SQLAlchemy
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0017`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0020`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
-Nothing prunes except `webhook_events`. `mirrored_notes` grows by one row per comment and review
-and has no cleanup path.
+`webhook_events` and `identity_verifications` are pruned. `mirrored_notes` grows by one row per
+comment and review and has no cleanup path, and `github_installations` holds one row per account
+for as long as the App is installed on it.
 
 ## HTTP surface
 

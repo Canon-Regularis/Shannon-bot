@@ -47,6 +47,9 @@ TABLES = (
     "team_links",
     "muted_members",
     "webhook_events",
+    "identity_verifications",
+    "verified_identities",
+    "github_installations",
     "repositories",
 )
 

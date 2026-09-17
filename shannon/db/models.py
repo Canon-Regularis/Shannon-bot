@@ -44,6 +44,15 @@ class Repository(TimestampMixin, Base):
     repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
     repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Nullable, and read as "no evidence" rather than as public. Nothing can invent the answer for
+    # a row written before the column existed, and false would be a claim rather than a gap. It is
+    # rewritten from the repository object on every sync, so it corrects itself on the first
+    # delivery instead of needing a backfill that would have to guess.
+    #
+    # Worth recording at all because it is the one question an operator has about a deployment -
+    # is there private code in this database - and because a repository flipping public to private
+    # is a fact worth noticing rather than a GitHub call away every time somebody asks.
+    private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
     # need every child row loaded into the session first.
@@ -373,3 +382,113 @@ class TeamLink(TimestampMixin, Base):
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     github_team: Mapped[str] = mapped_column(String(255), nullable=False)
     discord_role_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class GitHubInstallation(TimestampMixin, Base):
+    """Which App installation covers one GitHub account.
+
+    A GitHub App holds no standing credential. It signs a short-lived JWT with its private key and
+    trades that for a token scoped to one installation, and an installation is on an ACCOUNT rather
+    than on a repository: install it on `octocat` and it covers whichever of that account's
+    repositories were granted. So this is keyed on the account, and the route from a Discord server
+    to a token is guild, then repository, then owner, then here.
+
+    Deliberately not keyed on the guild as well. That would make one account's installation belong
+    to one server, which is wrong the moment two servers mirror two repositories under the same
+    owner, and the current schema handles that case perfectly well.
+
+    A fast path rather than the source of truth. GitHub is authoritative, every App delivery
+    carries the installation id in its payload, and the resolver falls back to asking GitHub
+    directly, so a row that is missing or stale costs one request rather than a broken mirror.
+
+    `account_id` is nullable for the reason `user_links.github_user_id` is: a row written from a
+    payload that carried no account block has no evidence of the id, and inventing one would be
+    worse than admitting it is not known. A login is not an identity - GitHub frees one the moment
+    it is renamed and lets anybody take it - so the id is what a rename is noticed by.
+    """
+
+    __tablename__ = "github_installations"
+    __table_args__ = (
+        UniqueConstraint("installation_id", name="uq_github_installations_installation_id"),
+        UniqueConstraint("account_login", name="uq_github_installations_account_login"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Stored lowercased, because GitHub echoes back whatever case a payload was written with and
+    # a lookup that respected case would miss its own row half the time.
+    account_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    account_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # GitHub suspends an installation rather than deleting it when somebody pauses the App. The
+    # token mint fails while it is suspended, so the state is worth holding: it is the difference
+    # between "this bot was never installed here" and "somebody turned it off on purpose".
+    suspended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+
+class IdentityVerification(TimestampMixin, Base):
+    """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
+
+    `/unregister` destroys a binding and everything mirrored under it, so it may not be run on the
+    strength of a Discord role alone. `/link` cannot help: it checks only that a login EXISTS, so
+    any guild administrator can claim to be anybody, and a check built on it would be theatre.
+
+    The callback that GitHub redirects to is unauthenticated - it is a browser arriving with a
+    code - so this row is the whole of what connects it to the person who ran the command. That
+    makes `state` a CSRF token and a session identifier at once, which is the ordinary OAuth
+    pattern and the right one here.
+
+    Single use, and consumed by an UPDATE that filters on `consumed_at IS NULL` so two clicks on
+    the same link race in the database rather than in Python. Short lived, because an unused one
+    is a standing invitation to unbind somebody's repository if it ever leaks.
+    """
+
+    __tablename__ = "identity_verifications"
+    __table_args__ = (
+        UniqueConstraint("state", name="uq_identity_verifications_state"),
+        # The pruner looks for the slice past the expiry without reading the rest.
+        Index("ix_identity_verifications_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state: Mapped[str] = mapped_column(String(64), nullable=False)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VerifiedIdentity(TimestampMixin, Base):
+    """Who a Discord account proved they are on GitHub, and when they proved it.
+
+    The result of the round trip above. Kept rather than re-proved on every command because the
+    proof costs a browser visit, and asking somebody to do that twice inside a minute to answer
+    one question is how a safety check gets worked around instead of used.
+
+    Kept only briefly, though, and the freshness rule lives with the service rather than here: a
+    proof that somebody held an account an hour ago says little about now, and this is the row
+    that permits an irreversible command.
+
+    Its own table rather than columns on `user_links`, for exactly the reason `muted_members` is
+    its own table: `UserLinkStore.link` deletes and rewrites that row, so anything kept there is
+    silently destroyed by the one command the bot tells people to run. It is also a different kind
+    of fact. A link is a claim somebody made about themselves; this is something GitHub vouched
+    for.
+    """
+
+    __tablename__ = "verified_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "discord_guild_id",
+            "discord_user_id",
+            name="uq_verified_identities_guild_discord",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    github_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Not nullable here, unlike the installation above. This row only ever comes from `GET /user`
+    # answering about the account that just authorised, which always carries an id.
+    github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

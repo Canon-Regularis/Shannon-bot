@@ -57,6 +57,8 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
     assert tables == {
         "alembic_version",
         "channel_mappings",
+        "github_installations",
+        "identity_verifications",
         "item_assignments",
         "mirrored_notes",
         "muted_members",
@@ -64,6 +66,7 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
         "team_links",
         "tracked_items",
         "user_links",
+        "verified_identities",
         "webhook_events",
     }
 
