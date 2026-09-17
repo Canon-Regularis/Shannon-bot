@@ -9,6 +9,10 @@ license = { file = "LICENSE" }
 dependencies = [
     "alembic>=1.19.1",
     "asyncpg>=0.31.0",
+    # Signing the GitHub App's JWT, and nothing else. A JWT library would be the conventional
+    # pick, but this only ever SIGNS and never verifies, so the whole of what one buys - safe
+    # verification of somebody else's token - goes unused, and it pulls this in regardless.
+    "cryptography>=43.0.0",
     "discord-py>=2.7.1",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
