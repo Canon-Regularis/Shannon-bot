@@ -65,6 +65,7 @@ class TestWhatItWiresUp:
             "issue",
             "link",
             "link_team",
+            "mentions",
             "pr",
             "refresh",
             "register",

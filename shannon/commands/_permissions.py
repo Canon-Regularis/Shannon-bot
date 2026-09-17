@@ -31,3 +31,14 @@ SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
 # because nothing GitHub sends says who dragged the card. `SHANNON_BOARD_MAY_SET_STATUS` decides
 # whether it may, and it is off unless somebody turns it on.
 WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
+
+# The commands that take no gate at all, by name. One of them, and `/mentions` is the answer to
+# the note above about a later command for a tier that is not a manager's: the answer turned out
+# to be no tier. Every other command here decides something about the server, and that one decides
+# whether your own name notifies you.
+#
+# Written down rather than left to the command, because this file is what somebody reads to find
+# out who may do what, and a command absent from it reads as one nobody remembered rather than as
+# one nobody gates. A test holds this against what the factories actually take, so adding a second
+# is a deliberate edit and dropping a gate by accident is red.
+UNGATED = frozenset({"mentions"})
