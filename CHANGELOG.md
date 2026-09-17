@@ -5036,3 +5036,55 @@ to set the project number will find it.
   row is cleared and rewritten on every `/link`, and the warning about a login changing hands tells
   people to run `/link` again, so a preference kept there would be wiped by the one action the bot
   asks for by name.
+
+## One way to deploy, and a monitor that means one thing
+
+- The hourly `Deployed` workflow had never once succeeded. It was merged without the repository
+  secret it reads, so all fifteen runs failed at the first step with `SHANNON_HEALTH_URL` empty.
+  Nothing in the repository could fix that; the secret was added by hand and the rest of this
+  entry is what was wrong underneath it.
+- **Drift is no longer a failure.** This deploy runs when a person decides, so the box is normally
+  behind `main` until they do, and a red run said two things at once: the bot is not serving, or
+  somebody has not deployed yet. Neither could be acted on without reading which. Red now means
+  `/health` did not answer or answered 503. Whether the head of `main` is live is said in the
+  issue, which the workflow already opened and nobody could see for the failure beside it.
+- **The drift path could not open that issue at all.** It asks GitHub whether CI published an
+  image for the commit, to tell drift somebody forgot from drift nobody can fix. That call needs
+  `actions: read`, a `permissions:` block sets every scope it does not name to none, and it sits
+  in a command substitution under `set -e` ahead of the step writing its outputs. On a private
+  repository the step would die there and the issue would never be written. It is granted now, and
+  the call falls back rather than failing: an issue that depends on an API call is an issue nobody
+  gets on the day a token loses a scope.
+- **A running build was reported as a broken one.** `gh run list --json conclusion` answers with
+  an empty string for a run still going, and jq's `//` falls through on null and false but not on
+  `""`, so the fallback never fired and the issue said "CI for that commit is ``" and sent the
+  reader to go and fix a build that was green and still building. Still running is now its own
+  case and says so.
+- **The pull timer is gone.** Two deployment mechanisms landed on `main` fifteen seconds apart and
+  contradicted each other in as many words: one said the box pulls and nothing pushes to it, the
+  other that it cannot deploy without a person and that this is the design rather than an
+  omission. Both rewrote `SHANNON_IMAGE_TAG` in the same `.env` by different routes and kept
+  different rollback files, so a rollback by one was invisible to the other. `scripts/deploy.sh`
+  is the one that stays. **Removing the directory does not stop a timer already installed**: its
+  units live outside `/opt/shannon` and a checkout cannot reach them, so a box set up with it has
+  to be uninstalled by hand.
+- **`.env.example` could not start the stack.** `compose.prod.yaml` names `SHANNON_HOSTNAME` and
+  `ACME_EMAIL` with `:?`, so a `.env` copied from the example refused to come up at all. Neither
+  is a `Settings` field — one is read by Caddy and the other has no prefix — so the test that
+  polices this file did not police them, and `scripts/deploy.sh` had meanwhile been reading
+  `SHANNON_HOSTNAME` out of the same file and refusing to deploy without it. A test now reads the
+  `:?` names out of the compose file and holds the example to them.
+- **One instance now serves several Discord servers.** Nothing in the schema stood in the way:
+  every table holding a decision a server made is already keyed by guild, commands register
+  globally so a second server works, and a webhook resolves through the repository it came from.
+  One thing did. `RepositoryStore.only_one` answered "the registered repository, whichever it is"
+  on the reasoning that this process serves one guild, and its single caller is the board poller.
+  With two servers registered that read mirrored one board into one server's channels and said
+  nothing anywhere about the other, which reads from that other server as a feature that does not
+  work. The method is gone; the poller now refuses and stops itself rather than picking.
+- Stopping rather than warning, because a warning once a minute for the life of the process is one
+  nobody reads, and `/health` would have gone on reporting `poller: true` while it mirrored
+  nothing. It ends the task instead: one line as it exits, `poller: false` from then on, and no
+  restart when a server unregisters, because a guard that quietly resumes is one nobody finds out
+  about. Nothing else stops with it — the poller is the one task this process is useful without,
+  and `healthy` does not count it, so no webhook, thread, comment or command is affected.
