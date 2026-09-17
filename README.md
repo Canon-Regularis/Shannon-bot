@@ -32,7 +32,8 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
-  missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly.
+  missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly, or
+  one kind of item if you pick one. It never revisits an item that already has a thread.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
   mark per item stops an old delivery undoing a newer one.
 
@@ -303,7 +304,7 @@ Retention bounds it and the payload goes with the row.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/refresh [only]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
+| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |

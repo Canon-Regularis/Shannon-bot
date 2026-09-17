@@ -5088,3 +5088,33 @@ to set the project number will find it.
   restart when a server unregisters, because a guard that quietly resumes is one nobody finds out
   about. Nothing else stops with it — the poller is the one task this process is useful without,
   and `healthy` does not count it, so no webhook, thread, comment or command is affected.
+
+## An option that was always there
+
+- `/refresh` offers `all` in the picker now, beside `pull requests` and `issues`. It is not a new
+  behaviour: leaving the argument out has always meant both kinds, and `RefreshScope.EVERYTHING`
+  has existed since the command shipped. Nothing in Discord said so, and a capability only the
+  source mentions is one nobody has. Closes #92.
+- **`only` became `scope`.** The name was honest with two entries and a contradiction at the
+  third, because `only: all` says the opposite of what it does. Renaming an option Discord has
+  already registered is safe here for one reason worth writing down, which is that the option is
+  optional: a stale registration sends `only`, discord.py looks for `scope`, does not find it and
+  takes the default, which is all of them. Required, the same line raises
+  `CommandSignatureMismatch` and the interaction dies with a generic error instead. So there is a
+  test asserting the option is still optional, because that is the property holding the rename up.
+- `all` means all kinds, not all items. Anything that already has a thread is still left alone.
+  The only place in Discord that distinction can be drawn is the option's description, so it says
+  "kinds of item" rather than anything shorter.
+- **The picker was the whole feature and nothing pinned it.** The test helper built its own choice
+  with the value as the name, so no test here had ever touched the real list: a scope Discord
+  could never offer would have passed, and a third entry could have been added and then not
+  offered at all. Worse, deleting the decorator that binds the list to the option raises nothing,
+  because the validation only complains about leftover keys, so the constant stays correct while
+  the picker quietly becomes a free-text box. The helper now takes its choice off the built
+  command, and the displayed names and their order are asserted separately, because the displayed
+  name is the whole of what changed.
+- The choice rules are checked where the other Discord rules are. `Choice` validates nothing: no
+  length on the name, none on the value, no count, no duplicate check. Unlike the parameter
+  descriptions beside them these can genuinely fail, because discord.py shortens a description to
+  fit before the test sees it and passes a choice through whole. Red on nothing today; a
+  twenty-sixth entry or a copied line with an unchanged value turns them red.
