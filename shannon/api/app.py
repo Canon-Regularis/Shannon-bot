@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from shannon.api.dependencies import EventIntake
-from shannon.api.routes import health, webhooks
+from shannon.api.routes import health, oauth, webhooks
 from shannon.config import Settings, get_settings
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.delivery.queue import DeliveryInbox
@@ -32,6 +32,10 @@ def create_app(
     # Set by the lifespan once the worker exists. Without it /health can only report that the
     # port is open, which is what it says.
     app.state.liveness = None
+    # Set by the lifespan once the container exists, the same way `liveness` is. The OAuth route
+    # is entered from outside rather than called, so it reads what it needs off app state.
+    app.state.verification = None
     app.include_router(webhooks.router)
     app.include_router(health.router)
+    app.include_router(oauth.router)
     return app

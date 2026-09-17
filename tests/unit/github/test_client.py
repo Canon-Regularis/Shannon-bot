@@ -20,7 +20,9 @@ from shannon.github.errors import (
 from tests.support import github_payloads as payloads
 
 
-def client_with(handler: Callable[[httpx.Request], httpx.Response]) -> HttpGitHubClient:
+def client_with(
+    handler: Callable[[httpx.Request], httpx.Response], *, tokens: object | None = None
+) -> HttpGitHubClient:
     """A client wired to a handler, otherwise built the way the real one is.
 
     `follow_redirects` is the way the real one is built, and leaving it off here made a whole
@@ -29,9 +31,10 @@ def client_with(handler: Callable[[httpx.Request], httpx.Response]) -> HttpGitHu
     """
     transport = httpx.MockTransport(handler)
     return HttpGitHubClient(
+        tokens=tokens,
         http_client=httpx.AsyncClient(
             transport=transport, base_url="https://api.github.com", follow_redirects=True
-        )
+        ),
     )
 
 
@@ -214,7 +217,7 @@ async def test_a_json_body_that_is_not_an_object_raises_unavailable() -> None:
 
 async def test_the_client_it_builds_itself_is_the_one_it_closes() -> None:
     """Every other test here injects a client, which this deliberately does not own."""
-    client = HttpGitHubClient(token="t")
+    client = HttpGitHubClient()
 
     await client.aclose()
 
@@ -476,11 +479,111 @@ class TestFetchingAnyJson:
                 await client.get_json("/fields")
 
 
-def test_token_is_sent_as_a_bearer_header() -> None:
-    from shannon.github.client import _headers
+class FakeTokens:
+    """A token per account, which is what an installation supplies."""
 
-    assert _headers("abc123")["Authorization"] == "Bearer abc123"
-    assert "Authorization" not in _headers("")
+    def __init__(self, **owners: str) -> None:
+        self.owners = owners
+        self.asked: list[str] = []
+
+    async def token_for(self, owner: str) -> str:
+        self.asked.append(owner)
+        return self.owners.get(owner, "")
+
+
+class TestWhichCredentialACallCarries:
+    """The change issue #98 turns on. There is no longer one token: each call carries one minted
+    for the account it is about, so a server can only ever read what it was granted."""
+
+    def test_the_static_headers_carry_no_credential(self) -> None:
+        """`Authorization` used to be baked in here, because there was one token for everything.
+        Leaving it would mean one credential on every request again."""
+        from shannon.github.client import _headers
+
+        assert "Authorization" not in _headers()
+
+    async def test_a_read_is_authorised_as_the_account_it_is_about(self) -> None:
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+        async with client_with(handler, tokens=FakeTokens(acme="ghs_acme")) as client:
+            await client.get_repository("acme", "widget")
+
+        assert seen == ["Bearer ghs_acme"]
+
+    async def test_two_accounts_are_authorised_differently(self) -> None:
+        """One token for both would be the shared credential this replaced."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+        tokens = FakeTokens(acme="ghs_acme", other="ghs_other")
+        async with client_with(handler, tokens=tokens) as client:
+            await client.get_repository("acme", "widget")
+            await client.get_repository("other", "thing")
+
+        assert seen == ["Bearer ghs_acme", "Bearer ghs_other"]
+
+    async def test_a_write_carries_one_too(self) -> None:
+        """Labels are the only thing this bot writes to GitHub, and a write with no credential is
+        a write that silently does nothing on a private repository."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler, tokens=FakeTokens(acme="ghs_acme")) as client:
+            await client.add_label("acme", "widget", 7, "bug")
+
+        assert seen == ["Bearer ghs_acme"]
+
+    async def test_an_account_with_no_installation_sends_no_header_at_all(self) -> None:
+        """No header rather than an empty bearer. `Bearer ` is a malformed credential and GitHub
+        answers 401 to it; no header is an anonymous request that public endpoints answer, which
+        is what a deployment with no App configured wants."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+        async with client_with(handler, tokens=FakeTokens()) as client:
+            await client.get_repository("stranger", "widget")
+
+        assert seen == [None]
+
+    async def test_a_client_with_no_token_source_asks_for_none(self) -> None:
+        """Exactly what an empty `SHANNON_GITHUB_TOKEN` used to produce, which is why a
+        deployment that has not set the App up still answers about public repositories."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+        async with client_with(handler) as client:
+            await client.get_repository("acme", "widget")
+
+        assert seen == [None]
+
+    async def test_the_user_lookup_is_anonymous(self) -> None:
+        """`/link` asks about a login rather than about a repository, so there is no account to
+        authorise as. The endpoint is public, which is why it works at all."""
+        tokens = FakeTokens(acme="ghs_acme")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"id": 7}))
+
+        async with client_with(handler, tokens=tokens) as client:
+            await client.user_id("octocat")
+
+        assert tokens.asked == [], "it tried to mint a token for a public endpoint"
 
 
 class TestHowLongToWait:
@@ -789,7 +892,7 @@ class TestARepositoryThatMoved:
 
     def test_the_client_this_builds_follows_redirects(self) -> None:
         """Pinned separately because every other test here injects its own client."""
-        client = HttpGitHubClient(token="t")
+        client = HttpGitHubClient()
 
         assert client._client.follow_redirects is True
 
@@ -943,3 +1046,76 @@ class TestReadingOneCommitsNumbers:
         async with client_with(responds(503)) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.commit_stats(payloads.OWNER, payloads.REPO, "a" * 40)
+
+
+class TestWhatOneAccountMayDoToARepository:
+    """Read by `/unregister`, and the only question asked of GitHub anywhere on that path.
+
+    The login handed in must be one GitHub itself vouched for a moment ago rather than one out of
+    `user_links`, which records a claim somebody made about themselves.
+    """
+
+    def answering(self, permission: object):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"permission": permission}))
+
+        return handler
+
+    @pytest.mark.parametrize("permission", ["admin", "write", "read", "none"])
+    async def test_it_answers_what_github_said(self, permission: str) -> None:
+        async with client_with(self.answering(permission)) as client:
+            assert await client.permission_for("acme", "widget", "octocat") == permission
+
+    async def test_it_asks_the_collaborator_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({"permission": "admin"}))
+
+        async with client_with(handler) as client:
+            await client.permission_for("acme", "widget", "octocat")
+
+        assert seen == ["/repos/acme/widget/collaborators/octocat/permission"]
+
+    async def test_every_part_of_the_path_is_escaped(self) -> None:
+        """All three arrive from outside: two off a stored repository name and one from whatever
+        GitHub answered at `/user`."""
+        seen: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps({"permission": "admin"}))
+
+        async with client_with(handler) as client:
+            await client.permission_for("acme", "widget/..", "octo/cat")
+
+        assert b"/repos/acme/widget%2F../collaborators/octo%2Fcat/permission" in seen[0]
+
+    async def test_somebody_who_is_not_a_collaborator_at_all_has_nothing(self) -> None:
+        """GitHub answers 404 for an account it has never heard of and for one with no
+        relationship to the repository, and both mean the same thing here."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+        async with client_with(handler) as client:
+            assert await client.permission_for("acme", "widget", "stranger") == "none"
+
+    @pytest.mark.parametrize("permission", [None, 7, [], {}])
+    async def test_a_body_that_does_not_say_reads_as_nothing(self, permission: object) -> None:
+        """Nothing rather than a guess. This answer decides whether a binding is destroyed, so the
+        only safe reading of an unusable one is the one that refuses."""
+        async with client_with(self.answering(permission)) as client:
+            assert await client.permission_for("acme", "widget", "octocat") == "none"
+
+    async def test_github_being_down_still_raises(self) -> None:
+        """Unlike the 404. An outage is not an answer about somebody's permissions, and treating
+        it as one would refuse a legitimate admin with a message blaming them."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.permission_for("acme", "widget", "octocat")

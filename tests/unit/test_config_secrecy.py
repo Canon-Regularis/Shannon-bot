@@ -12,19 +12,36 @@ from shannon.config import Settings, get_settings
 # trip push protection and secret scanners, and the masking under test does not care what the
 # value looks like.
 BOT_TOKEN = "placeholder-discord-bot-token"
-API_TOKEN = "placeholder-github-api-token"
 WEBHOOK_SECRET = "placeholder-webhook-secret"
 DATABASE_URL = "postgresql+asyncpg://shannon:not-a-real-password@localhost:5433/shannon"
+# The App's credentials, which replaced the single API token. The private key is the one that
+# matters most: it mints installation tokens for every account this bot is installed on, so a
+# leak of it is worse than a leak of the token it replaced.
+APP_KEY = "placeholder-github-app-private-key"
+APP_SECRET = "placeholder-github-app-client-secret"
+APP_WEBHOOK_SECRET = "placeholder-github-app-webhook-secret"
+PROJECT_TOKEN = "placeholder-github-project-token"
 
-LEAKS = (BOT_TOKEN, API_TOKEN, WEBHOOK_SECRET, "not-a-real-password")
+LEAKS = (
+    BOT_TOKEN,
+    WEBHOOK_SECRET,
+    APP_KEY,
+    APP_SECRET,
+    APP_WEBHOOK_SECRET,
+    PROJECT_TOKEN,
+    "not-a-real-password",
+)
 
 
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
         discord_token=BOT_TOKEN,
-        github_token=API_TOKEN,
         github_webhook_secret=WEBHOOK_SECRET,
+        github_app_private_key=APP_KEY,
+        github_app_client_secret=APP_SECRET,
+        github_app_webhook_secret=APP_WEBHOOK_SECRET,
+        github_project_token=PROJECT_TOKEN,
         database_url=DATABASE_URL,
     )
 
@@ -70,8 +87,11 @@ def test_an_unhandled_error_carrying_the_settings_hides_credentials(
 
 def test_the_values_are_still_readable_when_asked_for(settings: Settings) -> None:
     assert settings.discord_token.get_secret_value() == BOT_TOKEN
-    assert settings.github_token.get_secret_value() == API_TOKEN
     assert settings.github_webhook_secret.get_secret_value() == WEBHOOK_SECRET
+    assert settings.github_app_private_key.get_secret_value() == APP_KEY
+    assert settings.github_app_client_secret.get_secret_value() == APP_SECRET
+    assert settings.github_app_webhook_secret.get_secret_value() == APP_WEBHOOK_SECRET
+    assert settings.github_project_token.get_secret_value() == PROJECT_TOKEN
     assert settings.database_url.get_secret_value() == DATABASE_URL
 
 
@@ -80,8 +100,11 @@ def test_an_unset_secret_reads_as_empty() -> None:
     bare = Settings()
 
     assert bare.discord_token.get_secret_value() == ""
-    assert bare.github_token.get_secret_value() == ""
     assert bare.github_webhook_secret.get_secret_value() == ""
+    assert bare.github_app_private_key.get_secret_value() == ""
+    assert bare.github_app_client_secret.get_secret_value() == ""
+    assert bare.github_app_webhook_secret.get_secret_value() == ""
+    assert bare.github_project_token.get_secret_value() == ""
     # SecretStr defines __len__, so an empty one is falsy. Worth pinning down, because the
     # startup path and the webhook route both branch on a credential being absent.
     assert not bare.discord_token

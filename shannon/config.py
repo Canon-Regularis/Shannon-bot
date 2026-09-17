@@ -21,8 +21,28 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://shannon:shannon@localhost:5433/shannon"
     )
     discord_token: SecretStr = SecretStr("")
-    github_token: SecretStr = SecretStr("")
     github_webhook_secret: SecretStr = SecretStr("")
+
+    # The GitHub App, which replaced the single personal access token this used to hold. That
+    # token had to see every repository, and `/register` is open to anybody holding the Admin role
+    # in any server this bot was invited to, so widening it to private repositories would have let
+    # any of them mirror any private code it could read. An installation token sees one account.
+    #
+    # The client id is the JWT issuer and the OAuth client id at once: GitHub accepts it for both
+    # and recommends it for the first, so a deployment configures one identifier instead of two
+    # that have to agree.
+    github_app_client_id: str = ""
+    github_app_private_key: SecretStr = SecretStr("")
+    github_app_client_secret: SecretStr = SecretStr("")
+    github_app_webhook_secret: SecretStr = SecretStr("")
+
+    # The one credential the App cannot replace. GitHub publishes no App permission of any kind
+    # for a USER-owned Projects v2 board - the Projects permission exists at organisation level
+    # only - and `HttpProjectBoards` reads `/users/{owner}/projectsV2/...` because a personal
+    # account is what this runs against. So the board keeps a token of its own, read by that one
+    # reader and nothing else. Narrow on purpose: a leak exposes a board rather than source, and
+    # it stays unset in every deployment that leaves the project number at zero.
+    github_project_token: SecretStr = SecretStr("")
 
     role_admin: str = "Admin"
     role_project_manager: str = "Project Manager"
@@ -41,6 +61,12 @@ class Settings(BaseSettings):
     build: str = "unknown"
 
     github_api_url: str = "https://api.github.com"
+    # Where `authorize` and `access_token` live, which is `github.com` rather than the API host.
+    # Its own setting beside the one above so GitHub Enterprise can move both.
+    github_oauth_url: str = "https://github.com"
+    # The origin the OAuth `redirect_uri` is built from. Empty makes `/unregister` refuse rather
+    # than hand somebody a link that goes nowhere.
+    public_base_url: str = ""
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
     # A GitHub project board to mirror, by the number in its URL. Zero means none, which is the
@@ -92,6 +118,21 @@ class Settings(BaseSettings):
     @classmethod
     def _upper(cls, value: str) -> str:
         return value.upper()
+
+    @field_validator("github_app_private_key")
+    @classmethod
+    def _unescape_newlines(cls, value: SecretStr) -> SecretStr:
+        r"""Turn the two-character `\n` of an environment variable into real newlines.
+
+        A PEM is multi-line and `.env` is not, so the key is written on one line with its breaks
+        escaped. Without this the key parses as nothing, every repository reports as one this bot
+        cannot see, and the message says nothing whatever about a key.
+
+        Harmless where the value already has real newlines, since there is then nothing to
+        replace, so a deployment that mounts the file instead still works.
+        """
+        raw = value.get_secret_value()
+        return SecretStr(raw.replace("\\n", "\n")) if "\\n" in raw else value
 
     @model_validator(mode="after")
     def _lease_covers_a_whole_batch(self) -> Settings:

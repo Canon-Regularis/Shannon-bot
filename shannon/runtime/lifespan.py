@@ -261,6 +261,9 @@ def build_lifespan(
         probes = build_probe_engine(container.engine)
         liveness = ProcessLiveness(probes)
         app.state.liveness = liveness
+        # The OAuth callback reads this rather than being handed it, because it is entered from
+        # outside this process rather than called by anything inside it.
+        app.state.verification = container.verification
 
         running = await _start(bot, container, settings, liveness, halt)
         try:

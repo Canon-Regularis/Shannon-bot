@@ -61,6 +61,23 @@ def _an_issue(payload: Any, repository: RepositorySnapshot) -> IssueSnapshot | N
     return mapping.issue(payload, repository)
 
 
+class SuppliesTokens(Protocol):
+    """A bearer token for calls about one GitHub account, or the empty string for none.
+
+    Declared here rather than beside the thing that implements it, because this is the module that
+    depends on the shape. The implementation lives in `github/installations.py` and reaches the
+    database; a client that imported it would drag the whole storage layer in behind an HTTP
+    wrapper, and nothing in here should know that installations are stored at all.
+
+    Empty rather than an exception, and a good deal rests on that. It is exactly the state this
+    client already modelled for an unset token: no `Authorization` header at all, public endpoints
+    answer, private ones report as missing. So a deployment with no App configured behaves as one
+    with no token used to, rather than failing on the first command anybody runs.
+    """
+
+    async def token_for(self, owner: str) -> str: ...
+
+
 class LooksUpRepository(Protocol):
     """Resolving a repository by owner and name.
 
@@ -148,6 +165,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
 
     async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]: ...
 
+    async def permission_for(self, owner: str, name: str, login: str) -> str: ...
+
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
@@ -156,25 +175,33 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
     # module that checks every field it touches. Declared here because the wiring hands this
     # same object to the board reader, and a stand-in that satisfied the protocol without them
     # would build a container that fails on the first poll rather than at the seam.
-    async def get_json(self, path: str, **params: Any) -> Any: ...
+    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any: ...
 
-    def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]: ...
+    def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]: ...
 
 
 class HttpGitHubClient:
     def __init__(
         self,
         *,
-        token: str = "",
+        tokens: SuppliesTokens | None = None,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 10.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
+        # A supplier rather than a token, because there is no longer one token. Each call carries
+        # a credential minted for the account it is about, so the header cannot be baked into the
+        # client the way it was: it is decided per request, from the owner the caller already had
+        # in its hand.
+        #
+        # None means no App is configured, and every request then goes out unauthenticated. That
+        # is deliberately the same behaviour an empty `SHANNON_GITHUB_TOKEN` used to produce.
+        self._tokens = tokens
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
-            headers=_headers(token),
+            headers=_headers(),
             # Renaming a repository or its owner turns every lookup of the old name into a 301,
             # as does moving an issue between repositories. httpx does not follow redirects
             # unless told to, and an unfollowed one surfaces as "GitHub could not be reached".
@@ -193,7 +220,7 @@ class HttpGitHubClient:
         await self.aclose()
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}")
+        payload = await self._get(f"/repos/{owner}/{name}", owner)
         snapshot = mapping.repository(payload)
         if snapshot is None:
             raise GitHubUnavailableError(
@@ -239,7 +266,7 @@ class HttpGitHubClient:
         """
         path = f"/repos/{owner}/{name}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
         try:
-            payload = await self._get(path)
+            payload = await self._get(path, owner)
         except GitHubNotFoundError:
             logger.info("GitHub has no compare for %s/%s %s...%s", owner, name, base, head)
             return None
@@ -253,14 +280,14 @@ class HttpGitHubClient:
         base and would be attributed to whichever commit happened to be rendered.
         """
         try:
-            payload = await self._get(f"/repos/{owner}/{name}/commits/{quote(sha, safe='')}")
+            payload = await self._get(f"/repos/{owner}/{name}/commits/{quote(sha, safe='')}", owner)
         except GitHubNotFoundError:
             logger.info("GitHub has no commit %s on %s/%s", sha, owner, name)
             return None
         return mapping.commit_stats(payload)
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}")
+        payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}", owner)
 
         # The PR response embeds its own repository under base.repo, which saves a second call.
         base = payload.get("base") if isinstance(payload, dict) else None
@@ -276,7 +303,7 @@ class HttpGitHubClient:
         return snapshot
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}/issues/{number}")
+        payload = await self._get(f"/repos/{owner}/{name}/issues/{number}", owner)
 
         # GitHub serves pull requests from this endpoint as well, so a number that turns out to
         # be a pull request is reported as no such issue rather than tracked as one.
@@ -335,13 +362,44 @@ class HttpGitHubClient:
         """
         found: dict[int, _Item] = {}
         async for body in self.get_pages(
-            path, state="open", per_page=LIST_PAGE_SIZE, sort="updated", direction="desc"
+            path,
+            owner=repository.owner,
+            state="open",
+            per_page=LIST_PAGE_SIZE,
+            sort="updated",
+            direction="desc",
         ):
             for row in body if isinstance(body, list) else []:
                 item = parse(row, repository)
                 if item is not None and item.github_object_id not in found:
                     found[item.github_object_id] = item
         return list(found.values())
+
+    async def permission_for(self, owner: str, name: str, login: str) -> str:
+        """What one GitHub account may do to one repository: admin, write, read or none.
+
+        Read for `/unregister`, and the login handed in must be one GitHub itself vouched for a
+        moment ago rather than one out of `user_links`: that table records a claim somebody made
+        about themselves, so a check built on it proves nothing at all.
+
+        GitHub maps `maintain` onto `write` and `triage` onto `read` before answering, so the four
+        values here are the whole ladder.
+
+        A 404 is "not a collaborator" rather than an error. GitHub answers it for an account it
+        has never heard of and for one with no relationship to the repository, and both mean the
+        same thing to the caller: this person may not do that.
+        """
+        path = (
+            f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+            f"/collaborators/{quote(login, safe='')}/permission"
+        )
+        try:
+            payload = await self._get(path, owner)
+        except GitHubNotFoundError:
+            return "none"
+
+        permission = payload.get("permission")
+        return permission if isinstance(permission, str) else "none"
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Put a label on an item.
@@ -351,7 +409,10 @@ class HttpGitHubClient:
         server start using the workflow without setting five labels up by hand first.
         """
         await self._send(
-            "POST", f"/repos/{owner}/{name}/issues/{number}/labels", json={"labels": [label]}
+            "POST",
+            f"/repos/{owner}/{name}/issues/{number}/labels",
+            owner,
+            json={"labels": [label]},
         )
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:
@@ -363,9 +424,9 @@ class HttpGitHubClient:
         """
         path = f"/repos/{owner}/{name}/issues/{number}/labels/{quote(label, safe='')}"
         with contextlib.suppress(GitHubNotFoundError):
-            await self._send("DELETE", path)
+            await self._send("DELETE", path, owner)
 
-    async def _send(self, method: str, path: str, **kwargs: Any) -> None:
+    async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
         """A write, whose answer is only ever whether it worked.
 
         Redirects are followed here rather than by the transport, because httpx follows one the
@@ -381,13 +442,16 @@ class HttpGitHubClient:
         until an item webhook arrives, and no `repository` event is registered at all.
         """
         try:
-            response = await self._client.request(method, path, follow_redirects=False, **kwargs)
+            headers = await self._authorization(owner)
+            response = await self._client.request(
+                method, path, follow_redirects=False, headers=headers, **kwargs
+            )
             for _ in range(MAX_WRITE_REDIRECTS):
                 if not response.is_redirect:
                     break
                 path = _redirect_target(response, path)
                 response = await self._client.request(
-                    method, path, follow_redirects=False, **kwargs
+                    method, path, follow_redirects=False, headers=headers, **kwargs
                 )
         except httpx.HTTPError as exc:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
@@ -397,7 +461,7 @@ class HttpGitHubClient:
         # for a chain that never resolves it is still the right one.
         _raise_for_status(response, path)
 
-    async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
+    async def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]:
         """Every page of a list endpoint, following GitHub's own Link header.
 
         The project endpoints paginate by cursor rather than by page number: there is no `page`
@@ -413,7 +477,9 @@ class HttpGitHubClient:
             if url is None:
                 return
             try:
-                response = await self._client.get(url, params=params or None)
+                response = await self._client.get(
+                    url, params=params or None, headers=await self._authorization(owner)
+                )
             except httpx.HTTPError as exc:
                 raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
@@ -440,7 +506,7 @@ class HttpGitHubClient:
         if url is not None:
             logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
 
-    async def get_json(self, path: str, **params: Any) -> Any:
+    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any:
         """Whatever GitHub answers at a path, list or object alike.
 
         The typed readers above each know what they asked for and refuse anything else. The
@@ -448,7 +514,9 @@ class HttpGitHubClient:
         it touches, so this hands the body over as it came and leaves the judging to them.
         """
         try:
-            response = await self._client.get(path, params=params or None)
+            response = await self._client.get(
+                path, params=params or None, headers=await self._authorization(owner)
+            )
         except httpx.HTTPError as exc:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
@@ -459,9 +527,24 @@ class HttpGitHubClient:
         except ValueError as exc:
             raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
-    async def _get(self, path: str) -> dict[str, Any]:
+    async def _authorization(self, owner: str) -> dict[str, str]:
+        """The credential for calls about one account, or nothing at all.
+
+        Nothing rather than an empty bearer: a header reading `Bearer ` is a malformed credential
+        and GitHub answers 401 to it, where no header at all is an anonymous request that public
+        endpoints answer. The second is what a deployment with no App configured wants.
+
+        An empty owner means a call that is not about a repository - the user lookup behind
+        `/link` is the only one - and those endpoints are public.
+        """
+        if self._tokens is None or not owner:
+            return {}
+        token = await self._tokens.token_for(owner)
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    async def _get(self, path: str, owner: str = "") -> dict[str, Any]:
         try:
-            response = await self._client.get(path)
+            response = await self._client.get(path, headers=await self._authorization(owner))
         except httpx.HTTPError as exc:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
@@ -477,15 +560,18 @@ class HttpGitHubClient:
         return payload
 
 
-def _headers(token: str) -> dict[str, str]:
-    headers = {
+def _headers() -> dict[str, str]:
+    """The headers every request carries whoever it is about.
+
+    `Authorization` is deliberately not among them any more. It used to be, because there was one
+    token for everything; now it depends on which account the request concerns, so it is built per
+    request by `_authorization` below.
+    """
+    return {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": API_VERSION,
         "User-Agent": "shannon-bot",
     }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
 
 
 def _redirect_target(response: httpx.Response, path: str) -> str:

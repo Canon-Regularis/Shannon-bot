@@ -79,9 +79,9 @@ class ReadsJson(Protocol):
     something that answers with JSON rather than on everything that talks to GitHub.
     """
 
-    async def get_json(self, path: str, **params: Any) -> Any: ...
+    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any: ...
 
-    def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]: ...
+    def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]: ...
 
 
 class HttpProjectBoards:
@@ -104,7 +104,7 @@ class HttpProjectBoards:
 
         items: list[BoardItem] = []
         async for body in self._client.get_pages(
-            f"/users/{owner}/projectsV2/{project_number}/items", **params
+            f"/users/{owner}/projectsV2/{project_number}/items", owner=owner, **params
         ):
             rows = body if isinstance(body, list) else []
             items.extend(
@@ -127,7 +127,9 @@ class HttpProjectBoards:
         if key in self._fields:
             return self._fields[key]
 
-        body = await self._client.get_json(f"/users/{owner}/projectsV2/{project_number}/fields")
+        body = await self._client.get_json(
+            f"/users/{owner}/projectsV2/{project_number}/fields", owner=owner
+        )
         rows = body if isinstance(body, list) else []
         by_name = {
             row.get("name"): field_id

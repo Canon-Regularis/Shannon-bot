@@ -162,7 +162,12 @@ class TestWhatAPushSays:
 
         assert said(threads) == []
         assert github.compare_calls == [], "it went to GitHub about a delivery that was not a push"
-        assert caplog.records == [], "an ordinary delivery complained about not being a push"
+        from_the_announcer = [
+            record
+            for record in caplog.records
+            if record.name == "shannon.services.sync.commit_lines"
+        ]
+        assert from_the_announcer == [], "an ordinary delivery complained about not being a push"
 
 
 class TestWhatIsLeftOut:

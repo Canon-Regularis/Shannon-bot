@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from shannon.config import Settings
@@ -16,10 +18,12 @@ class DisposableEngine:
         self.disposed = True
 
 
-def container_with(engine: DisposableEngine, github: FakeGitHubClient):
+def container_with(
+    engine: DisposableEngine, github: FakeGitHubClient, settings: Settings | None = None
+):
     return build_container(
         threads=FakeThreadGateway(),
-        settings=Settings(github_webhook_secret="x"),
+        settings=settings or Settings(github_webhook_secret="x"),
         engine=engine,
         github=github,
     )
@@ -78,10 +82,87 @@ class TestWhatItWiresUp:
             "set_med_priority",
             "set_not_reviewed",
             "set_ready_for_merge",
+            "unregister",
         ]
 
     async def test_the_router_handles_every_event_the_webhook_accepts(self) -> None:
         container = container_with(DisposableEngine(), FakeGitHubClient())
 
-        for event in ("pull_request", "issues", "issue_comment", "pull_request_review"):
+        for event in (
+            "pull_request",
+            "issues",
+            "issue_comment",
+            "pull_request_review",
+            # Not about an item. These keep the account-to-installation map current, and a
+            # deployment that dropped them would go on minting tokens against installations that
+            # had been removed.
+            "installation",
+            "installation_repositories",
+        ):
             assert container.event_router.handles(event), f"{event} would be dropped on arrival"
+
+
+class TestTheOneCredentialTheAppCannotReplace:
+    """GitHub publishes no App permission for a USER-owned Projects v2 board.
+
+    The Projects permission exists at organisation level only, and `HttpProjectBoards` reads
+    `/users/{owner}/projectsV2/...` because a personal account is what this runs against. So that
+    one feature keeps a token of its own, and everything else goes through an installation.
+    """
+
+    async def test_the_board_reads_with_its_own_token_when_one_is_set(self) -> None:
+        from shannon.container import _OneToken
+
+        supplier = _OneToken("ghp_board")
+
+        assert await supplier.token_for("acme") == "ghp_board"
+        assert await supplier.token_for("anybody-else") == "ghp_board"
+
+    async def test_a_deployment_with_no_board_token_builds_without_one(self) -> None:
+        """Which is every deployment leaving the project number at zero, so the narrow credential
+        stays unset rather than being one more thing everybody has to create."""
+        container = container_with(
+            DisposableEngine(), FakeGitHubClient(), Settings(github_webhook_secret="s")
+        )
+
+        assert container.poller is not None
+
+    async def test_setting_one_still_builds(self) -> None:
+        """The board then reads through a client of its own rather than the shared one. Asserted
+        as construction rather than by reaching inside the poller, because what matters is that
+        the branch exists and is taken; which object the reader holds is its own business."""
+        container = container_with(
+            DisposableEngine(),
+            FakeGitHubClient(),
+            Settings(github_webhook_secret="s", github_project_token="ghp_board"),
+        )
+
+        assert container.poller is not None
+
+
+class TestSayingWhenNoAppIsConfigured:
+    """The failure an unconfigured App causes is silent and looks like something else: every
+    request goes out anonymous, and every private repository then reports as one that does not
+    exist. So it is said once, at wiring time, where somebody can act on it."""
+
+    async def test_a_deployment_with_no_app_is_told_so(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.ERROR):
+            container_with(DisposableEngine(), FakeGitHubClient())
+
+        assert "no GitHub App is configured" in caplog.text
+
+    async def test_a_deployment_with_one_is_not(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.ERROR):
+            container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(
+                    github_webhook_secret="s",
+                    github_app_client_id="Iv23liAbC",
+                    github_app_private_key="-----BEGIN PRIVATE KEY-----",
+                ),
+            )
+
+        assert "no GitHub App is configured" not in caplog.text

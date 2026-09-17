@@ -83,6 +83,14 @@ class FakeGitHubClient:
         # Bodies for the untyped endpoints, keyed by path, and what was asked of them.
         self.bodies: dict[str, Any] = {}
         self.json_calls: list[tuple[str, dict[str, Any]]] = []
+        # Which account each untyped read was authorised as. Separate from the calls above so the
+        # existing assertions on paths and parameters do not have to change shape, and worth
+        # recording at all because an empty owner is an anonymous request: on a private
+        # repository that is the difference between reading it and being told it does not exist.
+        self.json_owners: list[str] = []
+        # What each login may do, for `/unregister`. Anything not named here is an admin.
+        self.permissions: dict[str, str] = {}
+        self.permission_calls: list[tuple[str, str]] = []
         self.error: Exception | None = None
         # Raised by the label writes alone, leaving the reads working. `error` fails every
         # call including the read that comes first, which is no use for showing what a
@@ -214,7 +222,19 @@ class FakeGitHubClient:
         self.labels[key] = list(names)
         self._restate(key)
 
-    async def get_json(self, path: str, **params: Any) -> Any:
+    async def permission_for(self, owner: str, name: str, login: str) -> str:
+        """What one account may do to one repository, out of a dictionary.
+
+        Answers `admin` unless a test says otherwise, because almost no test here is about
+        somebody who is not one, and `none` is what GitHub answers for an account with no
+        relationship to the repository.
+        """
+        self.permission_calls.append((f"{owner}/{name}".lower(), login))
+        if self.error is not None:
+            raise self.error
+        return self.permissions.get(login.lower(), "admin")
+
+    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any:
         """Whatever this fake was told to answer with at a path, or an empty list.
 
         Here because the protocol declares it, which is the point of the conformance table: the
@@ -222,12 +242,14 @@ class FakeGitHubClient:
         builds a container that dies on the first poll rather than failing at the seam.
         """
         self.json_calls.append((path, params))
+        self.json_owners.append(owner)
         if self.error is not None:
             raise self.error
         return self.bodies.get(path, [])
 
-    async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
+    async def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]:
         self.json_calls.append((path, params))
+        self.json_owners.append(owner)
         if self.error is not None:
             raise self.error
         yield self.bodies.get(path, [])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import httpx
 from discord import app_commands
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -13,6 +14,7 @@ from shannon.commands.refresh import build_refresh_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
+from shannon.commands.unregister import build_unregister_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
@@ -38,8 +40,10 @@ from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import ItemNote
 from shannon.github.client import GitHubClient, HttpGitHubClient
+from shannon.github.installations import InstallationDirectory, InstallationTokens
 from shannon.github.projects import HttpProjectBoards
 from shannon.github.webhooks.comments import parse_comment_event
+from shannon.github.webhooks.installations import build_installation_handler
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
@@ -74,6 +78,8 @@ from shannon.services.sync.refresh import RepositoryRefresh
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
+from shannon.services.unregistration import RepositoryUnregistrationService
+from shannon.services.verification import GitHubIdentityVerification
 from shannon.services.workflow import ItemWorkflow, build_item_workflow
 
 logger = logging.getLogger(__name__)
@@ -99,6 +105,10 @@ class Container:
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
     commands: tuple[app_commands.Command, ...]
+    # Held so the OAuth callback route can reach it. The route is the one place in this project
+    # that is entered from outside rather than called, so it reads its collaborator off app state
+    # rather than being handed one.
+    verification: GitHubIdentityVerification | None = None
 
     async def forget_channel(self, channel_id: int) -> None:
         """Let go of every thread that was in a channel Discord says has gone.
@@ -206,6 +216,25 @@ class _EveryAnnouncer:
     async def say(self, arrival: Arrival) -> None:
         for announcer in self.announcers:
             await announcer.say(arrival)
+
+
+@dataclass(frozen=True, slots=True)
+class _OneToken:
+    """The same token for every account, which is what a plain personal access token is.
+
+    Exists for one caller. The project board cannot be read through an installation at all -
+    GitHub has no App permission for a user-owned Projects v2 board - so that reader keeps a token
+    of its own, and this is the shape the client expects a credential to arrive in.
+
+    Deliberately not offered to anything else. Every repository call goes through an installation,
+    and a second way to hand the client a fixed token is a second way to end up back where this
+    project started, with one credential that can see everything.
+    """
+
+    token: str
+
+    async def token_for(self, owner: str) -> str:
+        return self.token
 
 
 def _every(*announcers: AnnouncesInThread) -> AnnouncesInThread:
@@ -340,6 +369,11 @@ def _event_router(
     )
     router.register("issues", build_item_handler(issue_sync, parse_issue_event, announce=announce))
     router.register("issue_comment", build_note_handler(comments, parse_comment_event))
+    # Not about an item at all. These say what this bot is ABLE to see, and they are what keeps
+    # the account-to-installation map current without anybody typing an id anywhere.
+    installations = build_installation_handler(sessionmaker)
+    router.register("installation", installations)
+    router.register("installation_repositories", installations)
     router.register(
         "pull_request_review",
         build_note_handler(
@@ -418,6 +452,8 @@ def _commands(
     issue_sync: ItemSyncService,
     refresh: RepositoryRefresh,
     relocation: ThreadRelocation,
+    installations: InstallationTokens,
+    verification: GitHubIdentityVerification,
 ) -> tuple[app_commands.Command, ...]:
     """Every slash command the bot installs.
 
@@ -425,7 +461,12 @@ def _commands(
     built once at wiring time rather than assembled on demand.
     """
     return (
-        build_register_command(RepositoryRegistrationService(sessionmaker, github), gate),
+        build_register_command(
+            RepositoryRegistrationService(sessionmaker, github, installations), gate
+        ),
+        build_unregister_command(
+            RepositoryUnregistrationService(sessionmaker, github), verification, gate
+        ),
         build_set_channel_command(
             ChannelMappingService(sessionmaker, channel_fallbacks()), relocation, gate
         ),
@@ -456,10 +497,40 @@ def build_container(
     settings = settings or get_settings()
     engine = engine or build_engine(settings.database_url.get_secret_value())
     sessionmaker = build_sessionmaker(engine)
+
+    # The App's own HTTP client, separate from the one the API client uses. It signs with a JWT
+    # rather than an installation token, so sharing default headers with the client that has none
+    # would be a trap waiting for somebody.
+    app_http = httpx.AsyncClient(
+        base_url=settings.github_api_url, timeout=settings.github_timeout_seconds
+    )
+    tokens = InstallationTokens(
+        client_id=settings.github_app_client_id,
+        private_key_pem=settings.github_app_private_key.get_secret_value(),
+        http=app_http,
+        directory=InstallationDirectory(sessionmaker),
+    )
+    if not settings.github_app_client_id or not settings.github_app_private_key.get_secret_value():
+        # Said once and loudly, because the failure it causes is silent and looks like something
+        # else: every request goes out unauthenticated, and every private repository then reports
+        # as one that does not exist.
+        logger.error(
+            "no GitHub App is configured, so this bot can only read public repositories. "
+            "Set SHANNON_GITHUB_APP_CLIENT_ID and SHANNON_GITHUB_APP_PRIVATE_KEY."
+        )
+
     github = github or HttpGitHubClient(
-        token=settings.github_token.get_secret_value(),
+        tokens=tokens,
         base_url=settings.github_api_url,
         timeout=settings.github_timeout_seconds,
+    )
+    verification = GitHubIdentityVerification(
+        sessionmaker,
+        client_id=settings.github_app_client_id,
+        client_secret=settings.github_app_client_secret.get_secret_value(),
+        oauth_url=settings.github_oauth_url,
+        public_base_url=settings.public_base_url,
+        http=app_http,
     )
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
@@ -478,7 +549,19 @@ def build_container(
         worker=DeliveryWorker(queue, event_router, WorkerSettings.from_settings(settings)),
         poller=ProjectPoller(
             sessionmaker,
-            HttpProjectBoards(github),
+            # Its own client with its own token. GitHub publishes no App permission for a
+            # user-owned Projects v2 board, so this one feature cannot go through the installation
+            # and keeps a narrow credential instead. Left unset, the board reads nothing, which is
+            # what every deployment with the project number at zero already does.
+            HttpProjectBoards(
+                github
+                if not settings.github_project_token.get_secret_value()
+                else HttpGitHubClient(
+                    tokens=_OneToken(settings.github_project_token.get_secret_value()),
+                    base_url=settings.github_api_url,
+                    timeout=settings.github_timeout_seconds,
+                )
+            ),
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
             project_number=settings.github_project_number,
@@ -488,6 +571,7 @@ def build_container(
         event_router=event_router,
         pr_sync=pr_sync,
         issue_sync=issue_sync,
+        verification=verification,
         commands=_commands(
             sessionmaker,
             github,
@@ -497,5 +581,7 @@ def build_container(
             issue_sync,
             _refresh(sessionmaker, github, threads),
             _relocation(sessionmaker, github, threads),
+            tokens,
+            verification,
         ),
     )

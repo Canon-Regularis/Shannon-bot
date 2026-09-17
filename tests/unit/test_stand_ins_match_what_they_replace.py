@@ -23,8 +23,9 @@ from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
+from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
 from shannon.commands.workflow import MovesItems
-from shannon.container import Container
+from shannon.container import Container, _OneToken
 from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -45,8 +46,14 @@ from shannon.github.client import (
     ListsOpenItems,
     LooksUpUsers,
     ReadsCommits,
+    SuppliesTokens,
 )
-from shannon.github.projects import HttpProjectBoards
+from shannon.github.installations import (
+    InstallationDirectory,
+    InstallationTokens,
+    ResolvesInstallations,
+)
+from shannon.github.projects import HttpProjectBoards, ReadsJson
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
@@ -62,7 +69,7 @@ from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.projects import ReadsBoards
-from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.items import (
     ItemSyncService,
@@ -87,6 +94,11 @@ from shannon.services.sync.policies import (
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
+from shannon.services.unregistration import (
+    ReadsPermissions,
+    RepositoryUnregistrationService,
+)
+from shannon.services.verification import GitHubIdentityVerification
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.handlers import RecordingHandler
@@ -116,6 +128,18 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ListsOpenItems, HttpGitHubClient),
     (ReadsCommits, FakeGitHubClient),
     (ReadsCommits, HttpGitHubClient),
+    # `ReadsJson` was missing from this table all along, and `get_json` and `get_pages` have just
+    # grown a parameter in three places at once. This is exactly the drift the file exists for.
+    (ReadsJson, FakeGitHubClient),
+    (ReadsJson, HttpGitHubClient),
+    (SuppliesTokens, InstallationTokens),
+    (SuppliesTokens, _OneToken),
+    (ResolvesInstallations, InstallationDirectory),
+    (ReadsPermissions, FakeGitHubClient),
+    (ReadsPermissions, HttpGitHubClient),
+    (FindsInstallations, InstallationTokens),
+    (VerifiesIdentity, GitHubIdentityVerification),
+    (UnregistersRepositories, RepositoryUnregistrationService),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),

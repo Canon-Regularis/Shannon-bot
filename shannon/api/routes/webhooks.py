@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -14,7 +15,7 @@ from shannon.api.dependencies import (
     SettingsDep,
 )
 from shannon.github.webhooks.events import WebhookOutcome
-from shannon.github.webhooks.signature import SignatureResult, verify
+from shannon.github.webhooks.signature import SignatureResult, verify_any
 from shannon.services.delivery.queue import DeliveryInbox
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,12 @@ async def receive_github_webhook(
 
     body = await _read_within_limit(request)
     _require_valid_signature(
-        body, settings.github_webhook_secret.get_secret_value(), x_hub_signature_256
+        body,
+        (
+            settings.github_app_webhook_secret.get_secret_value(),
+            settings.github_webhook_secret.get_secret_value(),
+        ),
+        x_hub_signature_256,
     )
     payload = _decode(body)
     action = payload.get("action")
@@ -145,18 +151,31 @@ _SIGNATURE_FAILURES = {
 }
 
 
-def _require_valid_signature(body: bytes, secret: str, header_value: str | None) -> None:
+def _require_valid_signature(body: bytes, secrets: Sequence[str], header_value: str | None) -> None:
+    """Accept a delivery signed with any secret this deployment knows.
+
+    Two rather than one, for the window in which a repository webhook configured by hand and the
+    GitHub App's own webhook are both live. Without it the changeover is a flag day: delete the
+    old webhook a moment early and deliveries are refused, a moment late and they arrive twice.
+
+    That second case is the one to get out of quickly, and nothing here can detect it: GitHub
+    gives the two copies different delivery ids, so the queue's own duplicate check cannot see
+    them and every commit line is posted twice. Delete the repository webhook as soon as the App
+    is installed.
+    """
+    result = verify_any(body, secrets, header_value)
+    if result is SignatureResult.VALID:
+        return
     # Fail closed. An unconfigured secret would otherwise let anyone post events.
-    if not secret:
-        logger.error("SHANNON_GITHUB_WEBHOOK_SECRET is not set, rejecting delivery")
+    if not any(secrets):
+        logger.error(
+            "neither SHANNON_GITHUB_APP_WEBHOOK_SECRET nor SHANNON_GITHUB_WEBHOOK_SECRET is "
+            "set, rejecting delivery"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Webhook secret is not configured",
         )
-
-    result = verify(body, secret, header_value)
-    if result is SignatureResult.VALID:
-        return
 
     logger.warning("rejecting webhook delivery: %s", result)
     raise HTTPException(
