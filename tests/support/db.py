@@ -14,13 +14,21 @@ async def register_repository(
     channel_id: int = 99,
     github_repo_id: int = payloads.REPO_ID,
     repo_name: str = f"{payloads.OWNER}/{payloads.REPO}",
+    private: bool | None = False,
 ) -> Repository:
-    """The state /register leaves behind, without going through GitHub."""
+    """The state /register leaves behind, without going through GitHub.
+
+    `private` matches what the payload helpers say, so a sync driven by one of them learns nothing
+    new about the repository and leaves the row alone. Registration records the visibility, and
+    every delivery afterwards keeps it current, so a fixture that left it unknown would have every
+    test's first sync writing the row for a reason that has nothing to do with the test.
+    """
     repository = Repository(
         github_repo_id=github_repo_id,
         repo_name=repo_name,
         repo_url=f"https://github.com/{repo_name}",
         discord_guild_id=guild_id,
+        private=private,
     )
     session.add(repository)
     await session.commit()

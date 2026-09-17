@@ -74,6 +74,10 @@ class RepositorySnapshot:
     owner: str
     name: str
     html_url: str
+    # Three states rather than two, and None is the useful one: it means GitHub did not say. A
+    # webhook payload always carries the flag, but a body that has been trimmed or comes from a
+    # cache may not, and reading a missing field as public would state something nobody checked.
+    private: bool | None = None
 
     @property
     def full_name(self) -> str:

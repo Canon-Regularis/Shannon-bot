@@ -56,27 +56,63 @@ class RepositoryStore:
         )
 
     async def add(
-        self, *, github_repo_id: int, repo_name: str, repo_url: str, discord_guild_id: int
+        self,
+        *,
+        github_repo_id: int,
+        repo_name: str,
+        repo_url: str,
+        discord_guild_id: int,
+        private: bool | None = None,
     ) -> Repository:
         repository = Repository(
             github_repo_id=github_repo_id,
             repo_name=repo_name,
             repo_url=repo_url,
             discord_guild_id=discord_guild_id,
+            private=private,
         )
         self._session.add(repository)
         await self._session.flush()
         return repository
 
-    async def follow_rename(self, repository: Repository, *, repo_name: str, repo_url: str) -> bool:
-        """Take the name and URL GitHub is using now, reporting whether they moved.
+    async def follow_rename(
+        self,
+        repository: Repository,
+        *,
+        repo_name: str,
+        repo_url: str,
+        private: bool | None = None,
+    ) -> bool:
+        """Take the name, URL and visibility GitHub is using now, reporting whether the NAME moved.
 
         Webhooks find a repository by its numeric id, which survives a rename, but `/pr` and
         `/issue` compare the link against the stored name. Without this, renaming a repository
         on GitHub leaves the mirror working and both commands answering that the link is for
         the wrong repository, with nothing the server admin can do about it.
+
+        Visibility rides along rather than having a path of its own, because it arrives on the
+        same object and there is nowhere else every delivery already passes through. It is what
+        makes the column self-healing: a row written before the column existed, or before this
+        bot could see the repository at all, fills in on the next delivery rather than needing a
+        backfill that would have to guess.
+
+        It deliberately does not affect the answer. The caller logs a rename and re-renders links
+        on a True, and a repository quietly flipped to private has not been renamed. Only written
+        when GitHub actually said, so a payload without the field leaves what is known alone.
         """
-        if repository.repo_name == repo_name and repository.repo_url == repo_url:
+        moved = repository.repo_name != repo_name or repository.repo_url != repo_url
+        revealed = private is not None and repository.private != private
+        if revealed:
+            logger.info("%s is now %s", repository.repo_name, "private" if private else "public")
+            repository.private = private
+
+        if not moved:
+            # Only where something actually changed. A delivery saying nothing new must leave the
+            # row completely alone, or `updated_at` moves on every unrelated event and stops
+            # meaning anything. Flushed where the visibility did change, so that write does not
+            # sit in the session waiting for whatever happens to commit next.
+            if revealed:
+                await self._session.flush()
             return False
 
         logger.info("%s is now %s, following the rename", repository.repo_name, repo_name)

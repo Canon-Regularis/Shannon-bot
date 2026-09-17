@@ -329,3 +329,56 @@ class TestWhatOneCommitChanged:
 
     def test_a_stats_body_that_is_not_an_object_reads_as_nothing(self) -> None:
         assert mapping.commit_stats(None) is None
+
+
+class TestWhetherARepositoryIsPrivate:
+    """Three states rather than two, and the third is the one that matters.
+
+    GitHub sends the flag on every repository object it puts in a webhook payload, but the column
+    behind this is nullable and reads a missing value as "nobody said" rather than as public.
+    Collapsing the two would state something nobody checked, about the one question an operator
+    asks of a deployment holding a backup.
+    """
+
+    def test_a_private_repository_reads_as_private(self) -> None:
+        found = mapping.repository(
+            {"id": 1, "name": "widget", "owner": {"login": "acme"}, "private": True}
+        )
+
+        assert found is not None
+        assert found.private is True
+
+    def test_a_public_one_reads_as_public(self) -> None:
+        found = mapping.repository(
+            {"id": 1, "name": "widget", "owner": {"login": "acme"}, "private": False}
+        )
+
+        assert found is not None
+        assert found.private is False
+
+    def test_a_body_that_does_not_say_reads_as_nobody_said(self) -> None:
+        found = mapping.repository({"id": 1, "name": "widget", "owner": {"login": "acme"}})
+
+        assert found is not None
+        assert found.private is None
+
+    @pytest.mark.parametrize("value", ["", "true", "false", 0, 1, None, [], {}])
+    def test_anything_that_is_not_a_flag_reads_as_nobody_said(self, value: object) -> None:
+        """Checked for the type rather than coerced. `bool(...)` would read `"false"` as private
+        and a missing field as public, which are both worse than admitting to not knowing."""
+        found = mapping.repository(
+            {"id": 1, "name": "widget", "owner": {"login": "acme"}, "private": value}
+        )
+
+        assert found is not None
+        assert found.private is None
+
+    def test_visibility_does_not_decide_whether_the_repository_is_usable(self) -> None:
+        """The flag is recorded, never a gate. A repository whose visibility cannot be read is
+        still a repository, and refusing one here would be inventing a requirement."""
+        assert (
+            mapping.repository(
+                {"id": 1, "name": "widget", "owner": {"login": "acme"}, "private": "nonsense"}
+            )
+            is not None
+        )

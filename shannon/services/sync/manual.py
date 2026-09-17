@@ -109,7 +109,10 @@ class ManualSync:
             stored = await repositories.get_by_guild(guild_id)
             if stored is not None:
                 await repositories.follow_rename(
-                    stored, repo_name=named.full_name, repo_url=named.html_url
+                    stored,
+                    repo_name=named.full_name,
+                    repo_url=named.html_url,
+                    private=named.private,
                 )
         return named.full_name
 

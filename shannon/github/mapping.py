@@ -119,7 +119,17 @@ def repository(payload: Any) -> RepositorySnapshot | None:
     if not isinstance(html_url, str) or not html_url:
         html_url = f"https://github.com/{owner}/{name}"
 
-    return RepositorySnapshot(github_repo_id=repo_id, owner=owner, name=name, html_url=html_url)
+    # Checked for the type rather than coerced. `bool(payload.get("private"))` would read a
+    # missing field, a null and the string "false" all as public, and the whole point of the
+    # column behind this is that "nobody said" is a different answer from "no".
+    private = payload.get("private")
+    return RepositorySnapshot(
+        github_repo_id=repo_id,
+        owner=owner,
+        name=name,
+        html_url=html_url,
+        private=private if isinstance(private, bool) else None,
+    )
 
 
 def _owner_login(payload: Payload) -> str | None:

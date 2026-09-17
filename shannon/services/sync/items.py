@@ -711,6 +711,7 @@ class ItemSyncService:
                 placement.repository,
                 repo_name=snapshot.repository.full_name,
                 repo_url=snapshot.repository.html_url,
+                private=snapshot.repository.private,
             )
 
         roles = self._policy.assignments(snapshot)
