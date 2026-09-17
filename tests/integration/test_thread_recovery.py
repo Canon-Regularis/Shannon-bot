@@ -275,8 +275,8 @@ class _EmptyOnFirstCreate(FakeThreadGateway):
         super().__init__()
         self.opened: list[int] = []
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
-        handle = await super().create(channel_id=channel_id, name=name, content=content)
+    async def create(self, **kwargs) -> ThreadHandle:
+        handle = await super().create(**kwargs)
         if not self.opened:
             self.opened.append(handle.thread_id)
             thread = self.threads[handle.thread_id]
@@ -879,7 +879,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
 class _RefusesThePost(FakeThreadGateway):
     """Discord having the ordinary bad moment the whole retry mechanism exists for."""
 
-    async def post(self, *, thread_id: int, content: str) -> int | None:
+    async def post(self, **kwargs) -> int | None:
         raise DiscordGatewayError("Discord refused the post")
 
 
@@ -1069,14 +1069,14 @@ class _ClearsTheSlotWhileCreating(FakeThreadGateway):
     def arm(self, tracked_item_id: int, dead_thread_id: int) -> None:
         self._item, self._dead = tracked_item_id, dead_thread_id
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+    async def create(self, **kwargs) -> ThreadHandle:
         if self._item is not None:
             async with self._sessionmaker() as session, session.begin():
                 await ThreadPointerStore(session).forget_thread(
                     self._item, dead_thread_id=self._dead
                 )
             self._item = None
-        return await super().create(channel_id=channel_id, name=name, content=content)
+        return await super().create(**kwargs)
 
 
 class _DeletesTheItemWhileCreating(FakeThreadGateway):
@@ -1086,8 +1086,8 @@ class _DeletesTheItemWhileCreating(FakeThreadGateway):
         super().__init__()
         self._sessionmaker = sessionmaker
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
-        handle = await super().create(channel_id=channel_id, name=name, content=content)
+    async def create(self, **kwargs) -> ThreadHandle:
+        handle = await super().create(**kwargs)
         async with self._sessionmaker() as session, session.begin():
             await session.execute(delete(TrackedItem))
         return handle

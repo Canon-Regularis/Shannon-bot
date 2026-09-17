@@ -11,12 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.channel_mappings import ChannelMappingStore
+from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
-from shannon.discord_bot.threads import KnowsItsServers, OpensThreads, ShutsThread
+from shannon.discord_bot.threads import KnowsItsServers, Notify, OpensThreads, ShutsThread
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import Actor, TrackedSnapshot
@@ -122,7 +123,13 @@ class ThreadBinding(Protocol):
     """Keeping one item pointed at one thread, whatever Discord does in between."""
 
     async def write(
-        self, target: ThreadTarget, *, name: str, content: str, replacement: str | None = None
+        self,
+        target: ThreadTarget,
+        *,
+        name: str,
+        content: str,
+        replacement: str | None = None,
+        notify: Notify = None,
     ) -> ThreadWrite:
         """`replacement` is what a thread opened to REPLACE one gets instead of `content`.
 
@@ -132,6 +139,10 @@ class ThreadBinding(Protocol):
         and a thread opened because the old one was deleted or is in the wrong channel must not.
         Nothing about the item changed in that last case, and telling everybody on it that
         somebody tidied a channel is the ping this whole path exists to stop sending.
+
+        `notify` is which of the people the block names may actually be notified, which is a
+        separate question from whether they are named: somebody who ran `/mentions off` is still
+        in the block, as a mention, and is left off this list.
         """
         ...
 
@@ -279,6 +290,7 @@ class ItemSyncService:
             name=state.thread_name,
             content=state.metadata,
             replacement=state.quiet_metadata,
+            notify=state.notify,
         )
         handle = written.handle
 
@@ -779,6 +791,19 @@ class ItemSyncService:
             if superseded
             else snapshot
         )
+        # Who, of the people this block is about to name, has not asked to be left alone. Sent
+        # with the write rather than folded into the rendering, because the two answer different
+        # questions: the block still shows a muted person as a mention, so the thread records who
+        # is on the item, and Discord is told separately not to ring them.
+        #
+        # Always a tuple and never None. A path built without mentions resolves nobody, so this
+        # comes back empty, and an empty allow-list tells Discord to notify nobody where None
+        # would leave the client's own rule in force. That is what makes a backlog mirror silent
+        # twice over, off one switch, rather than by the rendering alone.
+        notify = await MutedMemberStore(session).may_be_pinged(
+            guild_id=placement.repository.discord_guild_id, ids=mentions.values()
+        )
+
         metadata = self._policy.render(
             shown, status=item.status, priority=item.priority, mentions=mentions
         )
@@ -808,6 +833,7 @@ class ItemSyncService:
             thread_locked=item.discord_thread_locked,
             thread_channel_id=item.discord_channel_id,
             labels=tuple(shown.label_names),
+            notify=notify,
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -1004,6 +1030,9 @@ class _SyncState:
     labels: tuple[str, ...]
     # The same block with nobody mentioned, for a thread that replaces one. See `ThreadBinding`.
     quiet_metadata: str
+    # Which of the people the block names this bot may notify. Empty where it names nobody, which
+    # is never the same answer as having no opinion. See `Notify`.
+    notify: tuple[int, ...]
 
     @property
     def target(self) -> ThreadTarget:

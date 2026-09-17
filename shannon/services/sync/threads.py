@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
-from shannon.discord_bot.threads import OpensThreads, ThreadHandle
+from shannon.discord_bot.threads import Notify, OpensThreads, ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,13 @@ class ItemThreads:
         self._relocates = relocates
 
     async def write(
-        self, target: ThreadTarget, *, name: str, content: str, replacement: str | None = None
+        self,
+        target: ThreadTarget,
+        *,
+        name: str,
+        content: str,
+        replacement: str | None = None,
+        notify: Notify = None,
     ) -> ThreadWrite:
         """Put `content` in the item's thread, opening or rebuilding one where needed.
 
@@ -96,10 +102,19 @@ class ItemThreads:
         notifies everybody it mentions; the two branches below open one because somebody deleted
         the old thread or moved the channel out from under it. Neither is anything happening to
         the item, and neither is worth telling everybody on it about.
+
+        `notify` is who those mentions are allowed to reach, and it goes with every branch here
+        including the replacement, whose block names nobody. An allow-list permits and does not
+        force, so there it applies to nothing. Narrowing it to nobody on that branch would give
+        one outcome two owners, and a later edit could undo the one that matters while the tests
+        went on passing on the other, which is the argument the wiring already makes about this
+        exact write.
         """
         instead = content if replacement is None else replacement
         if target.thread_id is None:
-            return ThreadWrite(await self._open(target, name=name, content=content), created=True)
+            return ThreadWrite(
+                await self._open(target, name=name, content=content, notify=notify), created=True
+            )
 
         if self._relocates and target.is_stranded:
             # Discord cannot move a thread between channels, so the item gets a new one and the
@@ -113,7 +128,7 @@ class ItemThreads:
                 target.thread_channel_id,
                 target.channel_id,
             )
-            handle = await self._open(target, name=name, content=instead)
+            handle = await self._open(target, name=name, content=instead, notify=notify)
             # Unconditional, and it has to be. After a successful swap the id that comes back is
             # never the old one, and after a lost race it is the winner's, so the old thread is
             # displaced either way and is worth saying so about either way.
@@ -125,6 +140,7 @@ class ItemThreads:
                 message_id=target.message_id,
                 name=name,
                 content=content,
+                notify=notify,
             )
         except ThreadNotFoundError:
             # Somebody deleted the thread. Its id is worthless now, and holding on to it would
@@ -135,12 +151,16 @@ class ItemThreads:
                 target.thread_id,
                 target.tracked_item_id,
             )
-            return ThreadWrite(await self._open(target, name=name, content=instead), created=True)
+            return ThreadWrite(
+                await self._open(target, name=name, content=instead, notify=notify), created=True
+            )
 
         await self._remember(target.tracked_item_id, handle)
         return ThreadWrite(handle, created=False)
 
-    async def _open(self, target: ThreadTarget, *, name: str, content: str) -> ThreadHandle:
+    async def _open(
+        self, target: ThreadTarget, *, name: str, content: str, notify: Notify = None
+    ) -> ThreadHandle:
         """Open a thread and attach it, out of reach of the caller's cancellation.
 
         The worker deadlines every delivery and shutdown cancels outright, and either can land
@@ -152,7 +172,9 @@ class ItemThreads:
         asyncio report the failure in its own words, and the shutdown log is all anybody gets.
         The wait is bounded so a gateway that has stopped answering cannot hold the process open.
         """
-        claiming = asyncio.ensure_future(self._create_and_claim(target, name=name, content=content))
+        claiming = asyncio.ensure_future(
+            self._create_and_claim(target, name=name, content=content, notify=notify)
+        )
         try:
             await asyncio.wait({claiming})
             return claiming.result()
@@ -173,11 +195,11 @@ class ItemThreads:
             raise
 
     async def _create_and_claim(
-        self, target: ThreadTarget, *, name: str, content: str
+        self, target: ThreadTarget, *, name: str, content: str, notify: Notify = None
     ) -> ThreadHandle:
         try:
             handle = await self._threads.create(
-                channel_id=target.channel_id, name=name, content=content
+                channel_id=target.channel_id, name=name, content=content, notify=notify
             )
         except ThreadStartedEmptyError as error:
             # The thread is real even though its first message never landed. Recording it here
