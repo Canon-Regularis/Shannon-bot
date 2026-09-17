@@ -320,3 +320,21 @@ def _deleted(thread_id: int) -> discord.RawThreadDeleteEvent:
     return discord.RawThreadDeleteEvent(
         {"id": thread_id, "type": 11, "guild_id": 1, "parent_id": 2}
     )
+
+
+async def test_a_per_message_allow_list_still_cannot_reach_everyone(bot: ShannonBot) -> None:
+    """The client's own rule is the only thing stopping it.
+
+    Every message carrying a `/mentions` allow-list sends an `AllowedMentions` built for that one
+    message, and discord.py merges it over this. Built alone, such an object leaves `everyone` at
+    a sentinel that is truthy, so its payload permits @everyone; the merge is what strips it. So
+    deleting the keyword from `ShannonBot.__init__` does not fail anything obvious. It opens
+    every mirrored GitHub comment to @everyone, which is what this asserts instead.
+    """
+    one_message = discord.AllowedMentions(users=[discord.Object(id=555)])
+
+    merged = bot.allowed_mentions.merge(one_message).to_dict()
+
+    assert "everyone" not in merged["parse"]
+    assert "roles" in merged["parse"], "a review asked of a team stopped reaching its role"
+    assert merged["users"] == [555]

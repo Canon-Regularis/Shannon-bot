@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -18,12 +18,48 @@ from shannon.discord_bot.errors import (
 
 logger = logging.getLogger(__name__)
 
+# Who one message is allowed to notify, as Discord account ids.
+#
+# None means the caller has no opinion, and the client's own `AllowedMentions` applies untouched.
+# An empty sequence means nobody may be notified. Those are different answers and both are falsy,
+# so everything here asks `is None` and never `if notify`. Getting that one character wrong turns
+# "notify nobody" into "notify everybody named", silently, which is this whole feature inverted.
+Notify = Sequence[int] | None
+
 # Discord's own ceilings.
 THREAD_NAME_LIMIT = 100
 
 # Threads can only be opened in these. Any other channel type has to be refused where somebody
 # is still watching, because by the time the sync path reaches it there is nobody to tell.
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
+
+
+def _may_notify(notify: Notify) -> dict[str, discord.AllowedMentions]:
+    """The `allowed_mentions` keyword for one write, or no keyword at all.
+
+    Nothing rather than a permissive object, because discord.py merges a per-call value over the
+    client's and there is no value meaning "leave it alone": `users=True` reads as a decision to
+    notify everybody named, and would override a client default that had since changed.
+
+    Only `users` is set, so `everyone=False` and `roles=True` keep coming from the client. That is
+    load-bearing rather than tidy. Un-merged, this object's `everyone` is discord.py's `default`
+    sentinel, which is truthy, so its payload carries `parse: ['everyone', 'roles']`; it is the
+    merge against the client's own that strips `everyone` back out. A client built without an
+    `allowed_mentions` of its own would have every message written here permit `@everyone`.
+
+    The ids are wrapped rather than passed as numbers. `AllowedMentions.to_dict` reads `.id` off
+    each entry, so a bare int raises `AttributeError` from inside discord.py's payload builder
+    before any request is made. That is not an `HTTPException`, so it walks past the translation
+    below and out of this module raw, and the worker then retries it for two hours: the same shape
+    of failure `_require_a_connection` exists to prevent.
+    """
+    if notify is None:
+        return {}
+    return {
+        "allowed_mentions": discord.AllowedMentions(
+            users=[discord.Object(id=user_id) for user_id in notify]
+        )
+    }
 
 
 def why_threads_will_not_open(channel: object) -> str | None:
@@ -124,10 +160,18 @@ class OpensThreads(Protocol):
     Only the code that keeps an item pointed at exactly one thread has any business here.
     """
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle: ...
+    async def create(
+        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+    ) -> ThreadHandle: ...
 
     async def update(
-        self, *, thread_id: int, message_id: int | None, name: str, content: str
+        self,
+        *,
+        thread_id: int,
+        message_id: int | None,
+        name: str,
+        content: str,
+        notify: Notify = None,
     ) -> ThreadHandle: ...
 
     async def delete(self, *, thread_id: int) -> None: ...
@@ -136,7 +180,7 @@ class OpensThreads(Protocol):
 class PostsToThread(Protocol):
     """Adding a message to a thread that already exists."""
 
-    async def post(self, *, thread_id: int, content: str) -> int | None: ...
+    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None: ...
 
 
 class ShutsThread(Protocol):
@@ -220,14 +264,19 @@ class DiscordThreadGateway:
     def __init__(self, client: discord.Client) -> None:
         self._client = client
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+    async def create(
+        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+    ) -> ThreadHandle:
         channel = await self._channel(channel_id)
         name = truncate_thread_name(name)
 
         if isinstance(channel, discord.ForumChannel):
             with _translated("create a thread"):
                 created = await channel.create_thread(
-                    name=name, content=content, auto_archive_duration=ARCHIVE_AFTER_MINUTES
+                    name=name,
+                    content=content,
+                    auto_archive_duration=ARCHIVE_AFTER_MINUTES,
+                    **_may_notify(notify),
                 )
             return ThreadHandle(thread_id=created.thread.id, message_id=created.message.id)
 
@@ -244,7 +293,11 @@ class DiscordThreadGateway:
             # reported with the failure and recorded before anyone tries again.
             try:
                 with _translated("post the first message"):
-                    message = await thread.send(content)
+                    # On the send rather than on the create above, which is where a reader will
+                    # look for it: `TextChannel.create_thread` takes neither the content nor an
+                    # allow-list, because it opens an empty thread and the first message is a
+                    # separate call. A forum channel does both at once.
+                    message = await thread.send(content, **_may_notify(notify))
             except DiscordGatewayError as error:
                 raise ThreadStartedEmptyError(str(error), thread_id=thread.id) from error
             return ThreadHandle(thread_id=thread.id, message_id=message.id)
@@ -254,7 +307,13 @@ class DiscordThreadGateway:
         )
 
     async def update(
-        self, *, thread_id: int, message_id: int | None, name: str, content: str
+        self,
+        *,
+        thread_id: int,
+        message_id: int | None,
+        name: str,
+        content: str,
+        notify: Notify = None,
     ) -> ThreadHandle:
         thread = await self._thread(thread_id)
         name = truncate_thread_name(name)
@@ -264,15 +323,15 @@ class DiscordThreadGateway:
             # Renames are rate limited hard, so only spend one when the title actually moved.
             if thread.name != name:
                 await thread.edit(name=name)
-            resolved_message_id = await self._edit_or_post(thread, message_id, content)
+            resolved_message_id = await self._edit_or_post(thread, message_id, content, notify)
 
         return ThreadHandle(thread_id=thread.id, message_id=resolved_message_id)
 
-    async def post(self, *, thread_id: int, content: str) -> int | None:
+    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None:
         thread = await self._thread(thread_id)
         with _translated("post to the thread"):
             await self._wake(thread)
-            message = await thread.send(content)
+            message = await thread.send(content, **_may_notify(notify))
         return message.id
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
@@ -357,7 +416,7 @@ class DiscordThreadGateway:
             await thread.edit(archived=False)
 
     async def _edit_or_post(
-        self, thread: discord.Thread, message_id: int | None, content: str
+        self, thread: discord.Thread, message_id: int | None, content: str, notify: Notify = None
     ) -> int:
         if message_id is not None:
             try:
@@ -366,10 +425,16 @@ class DiscordThreadGateway:
                 # Someone deleted the metadata message. Post a fresh one and adopt its ID.
                 logger.info("metadata message %s is gone, posting a replacement", message_id)
             else:
-                await message.edit(content=content)
+                # An edit notifies nobody whatever it says, so the allow-list changes nothing
+                # here. Carried anyway so this method has one rule rather than two, and so the
+                # day Discord changes its mind about edits there is nothing to go back and add.
+                await message.edit(content=content, **_may_notify(notify))
                 return message.id
 
-        replacement = await thread.send(content)
+        # This one is a new message and does notify, which is the whole reason `update` takes an
+        # allow-list at all. A block nobody can edit any more is reposted, and reposting it is
+        # indistinguishable from opening the thread as far as everybody it names is concerned.
+        replacement = await thread.send(content, **_may_notify(notify))
         return replacement.id
 
     def _require_a_connection(self) -> None:

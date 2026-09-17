@@ -4989,3 +4989,50 @@ to set the project number will find it.
 - One case accepted wrong: a label removed while the bot was down, then put back, stays silent.
   It costs one line repeating a field of the block, in a scenario that had already lost a line,
   and it corrects itself at the next announced removal.
+
+## Turning your own pings off
+
+- `/mentions off` stops this bot notifying you in a server and leaves you named on everything you
+  are on. Anybody may run it, for themselves; `/mentions` with no argument says which way round
+  you are. Closes #80.
+- **Named, not removed.** A muted member is still `<@id>` in the metadata block, in the line
+  asking them for a review, and in a comment that tags them. Discord renders that as the mention
+  it always was, with their nickname, still clickable; the message simply carries a list of who it
+  is allowed to notify and they are not on it. Rendering them as plain text would have been a
+  tenth of the work and would have taken them out of the thread, which is not what anybody asked
+  for.
+- The line asking for a review is still posted for somebody who cannot be notified by it. Since
+  the block stopped being reposted it is the only visible sign in a thread that somebody was added
+  after it was opened, and they asked not to be rung rather than to be left out.
+- **Three facts about discord.py that the code is shaped around.** A per-message allow-list will
+  not take bare integers: `AllowedMentions.to_dict` reads `.id` off every entry, so an int raises
+  inside the payload builder before any request, as an `AttributeError` that walks past the
+  gateway's translation and gets retried for two hours. The object is only safe because the client
+  sets a default of its own, since alone its `everyone` is a truthy sentinel and its payload
+  permits `@everyone`; the merge is what strips that, and a test now says so. And saying nothing
+  is not the same as saying nobody: both are falsy, so every check is `is None`, because reading
+  one as the other turns "notify nobody" into "notify everybody named".
+- The default is to say nothing, which leaves everybody notified. Deliberately the permissive way
+  round: a ping that silently never arrives is the failure this project has been burned by twice
+  and has no symptom at all, where a ping that should not have gone out arrives at somebody who
+  will say so. That default is only defensible because an autouse fixture fails any test whose
+  message names an account and says nothing about who it may notify, so a producer that forgets is
+  caught. The two ship together and neither is worth much alone.
+- `/refresh` gained something for free. It renders people in plain text, so its allow-list comes
+  out empty rather than absent, and "Nobody was pinged." now rests on two facts read off one
+  switch instead of on the rendering alone.
+- **One thing this cannot do, and the reply says so.** A review asked of a GitHub team is a ping of
+  the whole Discord role, and Discord offers no way to leave one person out of one. Role ids never
+  go near the account allow-list, because putting them there would be a claim the bot cannot
+  honour.
+- **The first command here with no role behind it.** Every other one decides something about the
+  server; this decides whether your own name notifies you, and gating it would mean asking a
+  project manager to turn off your own pings. `_permissions.UNGATED` names it and a test reads the
+  gate off every command factory, so a second ungated command is a deliberate edit and a gate
+  dropped from another by accident is red. That case has no user-facing symptom otherwise: the
+  command still builds, still registers and still works, for everybody.
+- `muted_members`, migration `0017`. The row is the whole of the fact, so no column saying yes or
+  no and no backfill. Not a column on `user_links`, which is where it would otherwise belong: that
+  row is cleared and rewritten on every `/link`, and the warning about a login changing hands tells
+  people to run `/link` again, so a preference kept there would be wiped by the one action the bot
+  asks for by name.

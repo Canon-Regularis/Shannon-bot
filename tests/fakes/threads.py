@@ -8,7 +8,7 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
-from shannon.discord_bot.threads import ThreadHandle, truncate_thread_name
+from shannon.discord_bot.threads import Notify, ThreadHandle, truncate_thread_name
 
 
 @dataclass
@@ -33,6 +33,14 @@ class FakeThreadGateway:
         self.threads: dict[int, FakeThread] = {}
         self.created: list[FakeThread] = []
         self.posts: list[tuple[int, str]] = []
+        # What each write said it was allowed to notify, beside what it wrote. Kept apart from
+        # `posts` above, which around fifty tests read as (thread, content) and which is not worth
+        # churning for this.
+        #
+        # None and () are different answers and the distinction is the point: None is a caller
+        # with no opinion, leaving the client's own rule in force, and () is a caller saying
+        # nobody. A test that asserts on one and means the other proves nothing.
+        self.allowed: list[tuple[str, int, str, Notify]] = []
         # Every rewrite of an existing thread, whether or not anything about it changed. A rename
         # only records a new name, so it cannot show a thread being written twice with the same
         # content, which is what a card mirrored twice looks like.
@@ -83,7 +91,9 @@ class FakeThreadGateway:
         self._next_id += 1
         return self._next_id
 
-    async def create(self, *, channel_id: int, name: str, content: str) -> ThreadHandle:
+    async def create(
+        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+    ) -> ThreadHandle:
         if self.fail_next_create:
             self.fail_next_create = False
             raise DiscordGatewayError("Discord refused to create a thread")
@@ -99,6 +109,7 @@ class FakeThreadGateway:
         )
         self.threads[thread_id] = thread
         self.created.append(thread)
+        self.allowed.append(("create", thread_id, content, notify))
         if self.fail_next_first_message:
             self.fail_next_first_message = False
             raise ThreadStartedEmptyError(
@@ -107,7 +118,13 @@ class FakeThreadGateway:
         return ThreadHandle(thread_id=thread_id, message_id=message_id)
 
     async def update(
-        self, *, thread_id: int, message_id: int | None, name: str, content: str
+        self,
+        *,
+        thread_id: int,
+        message_id: int | None,
+        name: str,
+        content: str,
+        notify: Notify = None,
     ) -> ThreadHandle:
         if self.refuses_every_update:
             raise DiscordPermissionError("Discord will not let the bot write in that channel")
@@ -117,6 +134,7 @@ class FakeThreadGateway:
 
         thread = self._wake(thread_id)
         self.updates.append(thread_id)
+        self.allowed.append(("update", thread_id, content, notify))
 
         wanted = truncate_thread_name(name)
         if thread.name != wanted:
@@ -167,11 +185,12 @@ class FakeThreadGateway:
         thread = self.threads.get(thread_id)
         return None if thread is None else thread.channel_id
 
-    async def post(self, *, thread_id: int, content: str) -> int | None:
+    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None:
         thread = self._wake(thread_id)
         message_id = self._allocate()
         thread.messages[message_id] = content
         self.posts.append((thread_id, content))
+        self.allowed.append(("post", thread_id, content, notify))
         return message_id
 
     async def delete(self, *, thread_id: int) -> None:

@@ -22,14 +22,15 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   The claim is taken before the message goes out and handed back if it fails. When a thread is
   first opened the metadata block carries those mentions and is a real message, so it is the
   ping; the separate line is kept for people added later, when editing the block would reach
-  nobody.
+  nobody. Anybody who has run `/mentions off` is still named in all of it, as a mention Discord
+  renders and does not ring.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
   statuses told apart from ordinary labels. A tag the opening block already listed says nothing:
-  GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening posts a header saying
-  what became of the thread, and a finished item's thread is shut: locked and archived out of the
-  channel, and opened again if the item is. Both exist because a Discord edit is silent: it posts no
-  message, notifies nobody, and does not bump the thread, so a change that only moves the block
-  looks from the channel like nothing happening.
+  GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening
+  posts a header saying what became of the thread, and a finished item's thread is shut: locked
+  and archived out of the channel, and opened again if the item is. Both exist because a Discord
+  edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
+  that only moves the block looks from the channel like nothing happening.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
   missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
@@ -273,6 +274,7 @@ Retention bounds it and the payload goes with the row.
 | `/refresh [only]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
+| `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
 
@@ -280,6 +282,12 @@ Guild only, replies always ephemeral. Role names are configured strings, matched
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
+
+`/mentions` is the one command with no role behind it. Every other one decides something about
+the server; that one decides whether your own name notifies you, and asking a project manager to
+turn off your own pings is a request nobody makes twice. It reaches everything this bot writes
+except a role: `@org/team` pings the whole Discord role and Discord gives nobody a way to leave
+one person out of one.
 
 Linking is a project manager's job, both halves of it. Claiming your own account used to be
 ungated, on the reasoning that it is yours to claim, and nothing checked that it was: GitHub is
@@ -333,6 +341,7 @@ rather than abandoning the rest.
 | `mirrored_notes` | Comments and reviews already posted, claimed before posting so a retry cannot repeat one |
 | `webhook_events` | The queue: payload, status, attempts, backoff, lease, last error |
 | `user_links` | GitHub login to Discord account, per server |
+| `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 
 Enums are `VARCHAR`, not native PostgreSQL types, so adding a status needs no `ALTER TYPE`. Worth
@@ -340,7 +349,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0016`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0017`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

@@ -7,9 +7,15 @@ what somebody without one is told.
 
 from __future__ import annotations
 
-import pytest
+import importlib
+import inspect
+import pkgutil
 
-from shannon.commands._permissions import REGISTER_ROLES, SYNC_ROLES
+import pytest
+from discord import app_commands
+
+import shannon.commands
+from shannon.commands._permissions import REGISTER_ROLES, SYNC_ROLES, UNGATED
 from shannon.config import Settings
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
@@ -99,3 +105,51 @@ def test_denial_message_with_every_tier_blanked_names_nothing() -> None:
     )
 
     assert gate.denial("register", REGISTER_ROLES) == "You are not allowed to use /register."
+
+
+def every_command_factory() -> dict[str, object]:
+    """Every `build_*_command` in the commands package, by the name Discord will show.
+
+    Walked rather than listed, because a list is the thing that drifts. A factory building
+    several commands answers for each of them.
+    """
+    found: dict[str, object] = {}
+    for module in pkgutil.iter_modules(shannon.commands.__path__):
+        imported = importlib.import_module(f"shannon.commands.{module.name}")
+        for name, value in vars(imported).items():
+            if not (name.startswith("build_") and name.endswith(("_command", "_commands"))):
+                continue
+            if not callable(value) or inspect.isclass(value):
+                continue
+            found[name] = value
+    return found
+
+
+def commands_from(factory: object) -> list[str]:
+    """The Discord names a factory produces, taking whatever stubs its arguments need."""
+    parameters = inspect.signature(factory).parameters
+    built = factory(*(object() for _ in parameters))
+    made = built if isinstance(built, tuple) else (built,)
+    return [command.name for command in made if isinstance(command, app_commands.Command)]
+
+
+def test_the_commands_that_take_no_gate_are_the_ones_named() -> None:
+    """Every command factory takes a permission gate except the ones written down.
+
+    A gate dropped from a factory by accident has no symptom anybody would notice: the command
+    still builds, still registers with Discord and still works. It just works for everybody.
+    Nothing else in the suite looks at whether a gate is there, only at what it answers, so a
+    factory that stopped asking for one would go on passing.
+
+    Read off the signatures rather than off a second list, so the two cannot drift. Adding a
+    command anybody may run means editing `_permissions.UNGATED`, which is a sentence somebody
+    has to mean.
+    """
+    ungated = {
+        name
+        for factory in every_command_factory().values()
+        if "gate" not in inspect.signature(factory).parameters
+        for name in commands_from(factory)
+    }
+
+    assert ungated == set(UNGATED)

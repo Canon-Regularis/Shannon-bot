@@ -59,6 +59,7 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
         "channel_mappings",
         "item_assignments",
         "mirrored_notes",
+        "muted_members",
         "repositories",
         "team_links",
         "tracked_items",

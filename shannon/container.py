@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
+from shannon.commands.mentions import build_mentions_command
 from shannon.commands.refresh import build_refresh_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
@@ -15,6 +16,7 @@ from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
+from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
@@ -43,6 +45,7 @@ from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.linking import TeamLinkingService, UserLinkingService
+from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
@@ -220,7 +223,12 @@ def _sync_services(
             PullRequestPolicy(),
             _both(
                 ActorNotifier(
-                    sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
+                    sessionmaker,
+                    threads,
+                    role=ActorRole.REVIEWER,
+                    render=format_reviewer_ping,
+                    # So the line names somebody who ran `/mentions off` without ringing them.
+                    muted=MutedMemberStore,
                 ),
                 ActorNotifier(
                     sessionmaker,
@@ -233,6 +241,11 @@ def _sync_services(
                     # its behalf, and silencing this beside the others would stop a team ever
                     # being told a review was asked of it.
                     the_block_pings_them=False,
+                    # And no `muted=`, because this one's ids are roles rather than accounts. A
+                    # member cannot opt out of a role ping at all: Discord rings everybody who
+                    # holds it. Filtering them would have been harmless rather than wrong, since
+                    # a snowflake is unique across entity types so no role id could be sitting in
+                    # `muted_members`, and it is left off so nobody has to work that out.
                 ),
             ),
         ),
@@ -241,7 +254,11 @@ def _sync_services(
             threads,
             IssuePolicy(),
             ActorNotifier(
-                sessionmaker, threads, role=ActorRole.ASSIGNEE, render=format_assignee_ping
+                sessionmaker,
+                threads,
+                role=ActorRole.ASSIGNEE,
+                render=format_assignee_ping,
+                muted=MutedMemberStore,
             ),
         ),
     )
@@ -397,6 +414,9 @@ def _commands(
         build_refresh_command(refresh, gate),
         build_link_command(UserLinkingService(sessionmaker, github), gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
+        # The only one here with no gate, which is visible at a glance and is the point. See
+        # `_permissions.UNGATED`.
+        build_mentions_command(MentionPreferences(sessionmaker)),
         *build_workflow_commands(workflow, gate),
     )
 

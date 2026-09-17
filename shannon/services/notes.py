@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
+from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
@@ -63,6 +64,10 @@ class _NoteTarget:
     thread_id: int
     mentions: Mapping[str, int]
     roles: Mapping[str, int]
+    # Which of the accounts in `mentions` this bot may actually notify. People only: a role
+    # mention reaches everybody holding the role and Discord offers no way to leave one person
+    # out of one, so `roles` never comes near this.
+    notify: tuple[int, ...]
     # Carried rather than read again at the point of the refusal, because it is already in hand:
     # the same repository row that answers where the thread is answers which server it is in.
     guild_id: int
@@ -176,11 +181,18 @@ class ItemNoteMirror:
                 guild_id=repository.discord_guild_id,
                 people=dict.fromkeys(named.teams, None),
             )
+            # Built from the same map the renderer swaps names in, so the allow-list and the
+            # content agree by construction rather than by argument. That map covers both halves
+            # of a note: the author in the header line and every `@login` inside the quoted body.
+            notify = await MutedMemberStore(session).may_be_pinged(
+                guild_id=repository.discord_guild_id, ids=mentions.values()
+            )
             return _NoteTarget(
                 tracked_item_id=item.id,
                 thread_id=item.discord_thread_id,
                 mentions=mentions,
                 roles=roles,
+                notify=notify,
                 guild_id=repository.discord_guild_id,
             )
 
@@ -202,6 +214,7 @@ class ItemNoteMirror:
             await self._threads.post(
                 thread_id=target.thread_id,
                 content=self._render(snapshot, target.mentions, target.roles),
+                notify=target.notify,
             )
         except ThreadNotFoundError as error:
             # Only the item's own sync knows how to open a replacement, because only it has the

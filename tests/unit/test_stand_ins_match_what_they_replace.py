@@ -19,11 +19,13 @@ from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
+from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.workflow import MovesItems
 from shannon.container import Container
+from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.client import ShannonBot
@@ -56,6 +58,7 @@ from shannon.services.delivery.queue import (
 )
 from shannon.services.delivery.worker import DeliveryWorker
 from shannon.services.linking import TeamLinkingService, UserLinkingService
+from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.projects import ReadsBoards
 from shannon.services.registration import RepositoryRegistrationService
@@ -69,7 +72,11 @@ from shannon.services.sync.items import (
 )
 from shannon.services.sync.label_lines import LabelLine
 from shannon.services.sync.manual import ManualSync
-from shannon.services.sync.notifications import ActorNotifier, ResolvesMentions
+from shannon.services.sync.notifications import (
+    ActorNotifier,
+    FindsMutedMembers,
+    ResolvesMentions,
+)
 from shannon.services.sync.policies import (
     IssuePolicy,
     PullRequestPolicy,
@@ -124,6 +131,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
     (ResolvesMentions, TeamLinkStore),
+    (FindsMutedMembers, MutedMemberStore),
+    (RemembersWhoWantsPinging, MentionPreferences),
     (RegistersRepositories, RepositoryRegistrationService),
     (MapsChannels, ChannelMappingService),
     (SyncsByLink, ManualSync),
