@@ -63,6 +63,13 @@ class ShannonBot(discord.Client):
         # zero-width space inside the brackets of `<@&123>` as well as `<@123>`, so the only live
         # mentions in any message this bot sends are the ones it built. `everyone` stays off,
         # because nothing this bot builds is ever addressed to everyone.
+        #
+        # This is also load-bearing for the per-message allow-lists that `/mentions` writes.
+        # discord.py merges those over this one, and an `AllowedMentions` built for a single
+        # message leaves `everyone` at a sentinel that is truthy, so its payload permits
+        # @everyone on its own. It is the merge against this that takes it back out. Deleting
+        # the keyword below would not fail: it would quietly let @everyone through every message
+        # that carries an allow-list, which is most of them.
         super().__init__(
             intents=build_intents(),
             allowed_mentions=discord.AllowedMentions(

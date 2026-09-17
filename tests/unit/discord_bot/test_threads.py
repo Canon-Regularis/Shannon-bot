@@ -16,6 +16,7 @@ from shannon.discord_bot.threads import (
     ARCHIVE_AFTER_MINUTES,
     THREAD_NAME_LIMIT,
     DiscordThreadGateway,
+    _may_notify,
     truncate_thread_name,
     why_threads_will_not_open,
 )
@@ -724,3 +725,102 @@ class TestBeforeTheGatewayIsConnected:
 
 def gateway_for(client: MagicMock) -> DiscordThreadGateway:
     return DiscordThreadGateway(client)
+
+
+class TestWhoAMessageMayNotify:
+    """The allow-list one message carries, which is how a member turns their own pings off
+    without disappearing from the thread. Issue #80.
+
+    Every claim here is about discord.py rather than about this project, which is why they are
+    asserted against the payload it would actually send rather than against our own call. A fake
+    gateway records whatever it is handed and would agree with any of these being wrong.
+    """
+
+    def test_saying_nothing_leaves_the_clients_own_rule_alone(self) -> None:
+        assert _may_notify(None) == {}
+
+    def test_an_empty_allow_list_is_not_the_same_as_saying_nothing(self) -> None:
+        """The two are both falsy and mean opposite things: one is a caller with no opinion and
+        one is a caller saying nobody. A gateway asking `if notify` reads the second as the first
+        and notifies everybody the message names, which is this whole feature inverted."""
+        allowed = _may_notify(())["allowed_mentions"]
+
+        assert allowed.users == []
+
+    def test_the_ids_are_wrapped_so_discord_py_can_read_them(self) -> None:
+        """`AllowedMentions.to_dict` reads `.id` off every entry, so a bare int raises
+        AttributeError inside discord.py's payload builder before any request is made. That is
+        not an HTTPException, so it would walk past the gateway's translation and be retried for
+        two hours. Nothing but a live Discord or this assertion catches it.
+        """
+        assert _may_notify([555, 444])["allowed_mentions"].to_dict()["users"] == [555, 444]
+
+    def test_a_role_ping_still_reaches_the_role(self) -> None:
+        """A member cannot opt out of a role ping and this must not pretend otherwise: naming
+        only `users` leaves `roles` to the client, which allows them."""
+        merged = _CLIENT_RULE.merge(_may_notify([555])["allowed_mentions"])
+
+        assert "roles" in merged.to_dict()["parse"]
+
+    def test_nothing_can_reach_everyone_through_an_allow_list(self) -> None:
+        """On its own this object's `everyone` is discord.py's `default` sentinel, which is
+        truthy, so its payload carries `everyone` in `parse`. Only the merge against the client's
+        own rule takes it back out, which couples the two: a client built without an
+        `allowed_mentions` would have every message written here permit `@everyone`.
+        """
+        alone = _may_notify([555])["allowed_mentions"].to_dict()["parse"]
+        merged = _CLIENT_RULE.merge(_may_notify([555])["allowed_mentions"]).to_dict()["parse"]
+
+        assert "everyone" in alone, "discord.py stopped defaulting this on; the merge below is why"
+        assert "everyone" not in merged
+
+
+# What `ShannonBot` gives its client, restated here because these tests are about what the merge
+# does and the merge has two sides. `test_client.py` is what holds the real one to this.
+_CLIENT_RULE = discord.AllowedMentions(everyone=False, roles=True, users=True, replied_user=False)
+
+
+async def test_a_thread_opened_in_a_forum_carries_the_allow_list() -> None:
+    created, first = thread(), message(700)
+    channel = forum_channel(created, first)
+    gateway = DiscordThreadGateway(client_with(channel))
+
+    await gateway.create(channel_id=10, name="#7 Title", content="<@1>", notify=[1])
+
+    allowed = channel.create_thread.await_args.kwargs["allowed_mentions"]
+    assert allowed.to_dict()["users"] == [1]
+
+
+async def test_a_thread_opened_in_a_text_channel_carries_it_on_the_first_message() -> None:
+    """Not on the create: a text channel opens an empty thread and the first message is its own
+    call, so an allow-list on the create would go nowhere."""
+    created = thread()
+    channel = text_channel(created)
+    gateway = DiscordThreadGateway(client_with(channel))
+
+    await gateway.create(channel_id=10, name="#7 Title", content="<@1>", notify=[1])
+
+    assert "allowed_mentions" not in channel.create_thread.await_args.kwargs
+    assert created.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == [1]
+
+
+async def test_a_post_carries_the_allow_list() -> None:
+    existing = thread()
+    gateway = DiscordThreadGateway(client_with(existing))
+
+    await gateway.post(thread_id=500, content="<@1>", notify=())
+
+    assert existing.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == []
+
+
+async def test_a_replacement_for_a_deleted_metadata_message_carries_it() -> None:
+    """The reason `update` takes an allow-list at all. An edit notifies nobody, but a block
+    somebody deleted is REPOSTED, and a repost is indistinguishable from opening the thread as
+    far as everybody it names is concerned."""
+    existing = thread()
+    existing.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    gateway = DiscordThreadGateway(client_with(existing))
+
+    await gateway.update(thread_id=500, message_id=600, name="#7 T", content="<@1>", notify=())
+
+    assert existing.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == []
