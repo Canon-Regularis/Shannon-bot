@@ -4954,3 +4954,38 @@ to set the project number will find it.
   command gets would be worse here than elsewhere: creating threads is what Discord rate-limits
   hardest and discord.py sleeps through a 429 rather than raising, so the one thing that would
   spend the budget gives no warning before it does.
+
+## One message when a thread opens
+
+- Opening an item with somebody on it and two labels put three messages in the thread where one
+  was wanted: the block, a line pinging the person the block already mentions, and a line for each
+  label the block already lists. Closes #81.
+- **The block was a ping and nothing treated it as one.** It carries live mentions, and the first
+  time it goes up it is a real message rather than an edit, so it notifies everybody it names. The
+  separate line is kept for anybody added later, because every block after the first is an edit
+  and an edit notifies nobody.
+- The notifier still runs and still claims. It throws the claim away instead of posting it, and
+  that is the whole of the fix rather than waste: `notified_at` is stamped inside the claim, so
+  simply skipping the notifier would leave the rows owed and the `labeled` delivery arriving in
+  the same second would post the very line this avoids. The bug would have moved one delivery
+  later and passed every test that sends `opened` on its own.
+- Reviewer teams are exempt. The block names a team in plain text and never looks one up, so it
+  reaches nobody on their behalf, and a blanket rule would have stopped every team ever being told
+  a review was asked of it.
+- `tracked_items.shown_labels` records what a POSTED block put in front of a reader, and a tag
+  line says nothing about a name that is already in it. Only a posted one: `/set_done` re-renders
+  the block seconds before its own `labeled` delivery arrives, and that block is an edit, so the
+  status line still posts. It has to, because the command's reply is ephemeral and an edit is
+  invisible from the channel, which makes that line the only thing anybody else ever sees.
+  Migration `0016`, one nullable column, no backfill.
+- A thread opened to REPLACE one gets the block with the people named in plain text. A rebuild
+  after somebody deleted the thread and a move after `/set_channel` are both posts, and neither is
+  anything happening to the item.
+- **`/refresh` was pinging, and replied "Nobody was pinged."** It is built with no notifier, which
+  is what made it read as silent, and the mention in a block it posted is not something that
+  wiring went near: a run over twenty-five items notified every linked person on all of them. Its
+  sync services are now built with mentions off as well. `/set_channel` had the same hole without
+  the sentence, and needs nothing: every thread it opens replaces one.
+- One case accepted wrong: a label removed while the bot was down, then put back, stays silent.
+  It costs one line repeating a field of the block, in a scenario that had already lost a line,
+  and it corrects itself at the next announced removal.

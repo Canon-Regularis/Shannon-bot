@@ -19,9 +19,13 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   Anybody unlinked is still named in plain text. At most ten per comment are mentioned, because
   without a limit one comment could ping every linked member of the server.
 - **Pings.** Reviewers and assignees are told once each, as mentions where the account is linked.
-  The claim is taken before the message goes out and handed back if it fails.
+  The claim is taken before the message goes out and handed back if it fails. When a thread is
+  first opened the metadata block carries those mentions and is a real message, so it is the
+  ping; the separate line is kept for people added later, when editing the block would reach
+  nobody.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
-  statuses told apart from ordinary labels. Closing, merging or reopening posts a header saying
+  statuses told apart from ordinary labels. A tag the opening block already listed says nothing:
+  GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening posts a header saying
   what became of the thread, and a finished item's thread is shut: locked and archived out of the
   channel, and opened again if the item is. Both exist because a Discord edit is silent: it posts no
   message, notifies nobody, and does not bump the thread, so a change that only moves the block
@@ -336,7 +340,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0015`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0016`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

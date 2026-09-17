@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.container import _relocation
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.channel_mappings import ChannelMappingStore
+from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.domain.models import (
@@ -567,7 +568,17 @@ class TestTheWiring:
         threads: FakeThreadGateway,
     ) -> None:
         """Both halves live in the wiring and neither is visible from the service, so nothing
-        else in this file would notice if a later edit dropped one."""
+        else in this file would notice if a later edit dropped one.
+
+        Not pinging covers the block it posts as well as any line. A moved thread is the same
+        item in a different place, and the block that opens one is a real message, so leaving
+        the mentions in it would tell everybody on the item that something happened when the
+        only thing that happened is somebody fixing a channel mapping.
+        """
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
+        )
+        await db_session.commit()
         snapshot = a_pull_request(reviewers=(Actor("monalisa"),))
         await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
         await remap(db_session, registered, ObjectType.PR, channel_id=NEW)
@@ -579,6 +590,8 @@ class TestTheWiring:
 
         assert outcome.moved == 1, "the wiring did not relocate"
         assert len(threads.posts) == posted + 1, "the wiring pinged somebody"
+        moved_to = threads.created[-1].thread_id
+        assert "<@" not in threads.metadata_of(moved_to), "the block it posted pinged somebody"
 
 
 class TestABoardCard:

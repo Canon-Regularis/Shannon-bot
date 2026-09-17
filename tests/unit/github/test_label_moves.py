@@ -36,8 +36,9 @@ def test_a_label_coming_off_is_read_as_removed() -> None:
 
 def test_the_two_actions_that_name_a_label_are_the_only_ones_read() -> None:
     """Every other action carries the whole label list and nothing about what changed, so there
-    is no move in it to announce. `opened` on an item created with four labels is the case: it
-    is one delivery, four labels, and nothing moved."""
+    is no move in it to announce. `opened` on an item created with four labels is the case: the
+    delivery lists all four and names none of them as having moved. GitHub sends the moves
+    separately, as four more deliveries arriving in the same second."""
     assert set(LABEL_ACTIONS) == {"labeled", "unlabeled"}
     for action in ("opened", "edited", "closed", "reopened", "assigned", "unassigned"):
         assert parse_label_move(action, a_delivery()) is None, action

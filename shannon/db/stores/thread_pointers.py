@@ -14,10 +14,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import Text, func, select, update
+from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import TrackedItem
+
+# An empty text array, for the coalesce below. A row that remembers nothing and a row that
+# remembers no labels answer the same way to "has the reader seen this name", which is no.
+_NOTHING = array((), type_=Text())
 
 
 class ThreadPointerStore:
@@ -40,12 +45,13 @@ class ThreadPointerStore:
                 TrackedItem.discord_thread_id == dead_thread_id,
             )
             # The lock goes with the pointer. Whatever this bot had made the dead thread, the
-            # replacement starts open.
+            # replacement starts open, and has shown its reader nothing until its own block lands.
             .values(
                 discord_thread_id=None,
                 discord_message_id=None,
                 discord_thread_locked=None,
                 discord_channel_id=None,
+                shown_labels=None,
             )
             .execution_options(synchronize_session=False)
         )
@@ -81,6 +87,7 @@ class ThreadPointerStore:
                     discord_message_id=None,
                     discord_thread_locked=None,
                     discord_channel_id=None,
+                    shown_labels=None,
                 )
                 .returning(TrackedItem.id)
                 .execution_options(synchronize_session=False)
@@ -133,6 +140,52 @@ class ThreadPointerStore:
             .execution_options(synchronize_session=False)
         )
 
+    async def note_what_the_block_showed(
+        self, tracked_item_id: int, *, thread_id: int, shown: Sequence[str]
+    ) -> None:
+        """Record the label names a block that was POSTED put in front of a reader.
+
+        Only a posted one. An edit is invisible from the channel, so a block rewritten by a
+        command has shown nobody anything, and recording it would silence the line that command's
+        own webhook produces, which is the only thing anybody else ever sees.
+
+        Guarded on the pointer, so a block posted into a thread the item has since moved off does
+        not describe the thread it is on now.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.id == tracked_item_id,
+                TrackedItem.discord_thread_id == thread_id,
+            )
+            .values(shown_labels=list(shown))
+            .execution_options(synchronize_session=False)
+        )
+
+    async def note_a_label_was_said(
+        self, tracked_item_id: int, *, thread_id: int, name: str, on_it: bool
+    ) -> None:
+        """Keep the shown set in step with a tag line that was actually posted.
+
+        One statement rather than a read and a write, so two labels moving at once cannot lose
+        each other: the remove runs whichever way the line went, and the append only when it went
+        on. That also makes a name idempotent, which matters because a delivery is at-least-once.
+
+        The remove is what lets a label come off and go back on and be announced both times. The
+        set is what a reader has been shown, and a line saying it came off is the reader being
+        shown that it is gone.
+        """
+        without = func.array_remove(func.coalesce(TrackedItem.shown_labels, _NOTHING), name)
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.id == tracked_item_id,
+                TrackedItem.discord_thread_id == thread_id,
+            )
+            .values(shown_labels=func.array_append(without, name) if on_it else without)
+            .execution_options(synchronize_session=False)
+        )
+
     async def claim_thread(
         self,
         tracked_item_id: int,
@@ -172,6 +225,9 @@ class ThreadPointerStore:
             # Discord to shut a thread it had already shut on every delivery, and the staleness
             # guard let every superseded delivery for a finished item straight through.
             moving["discord_thread_locked"] = None
+            # And it has shown its reader nothing. The block that will name its labels is posted
+            # a moment after this, and records them itself.
+            moving["shown_labels"] = None
 
         await self._session.execute(
             update(TrackedItem)

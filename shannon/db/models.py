@@ -15,7 +15,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shannon.db.base import Base, TimestampMixin, varchar_enum
@@ -117,6 +117,21 @@ class TrackedItem(TimestampMixin, Base):
     # routinely do. Null for a row written before this was kept, and for a write that came from
     # a command or the board rather than from a delivery.
     last_delivery_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The label names a reader of this thread has actually been shown, which is not the same
+    # question as which labels the item has. The block carries those and they are identical
+    # whether or not anybody has seen them; this is what has reached somebody.
+    #
+    # Written by a block that was POSTED, and maintained by a tag line that was said. An EDIT
+    # never touches it, and that is the whole of the design rather than an oversight: Discord
+    # says nothing about an edit, so a command that re-renders the block seconds before its own
+    # `labeled` webhook lands has shown the reader nothing, and the line that webhook produces is
+    # the only thing anybody but the person who ran the command ever sees.
+    #
+    # Cleared with the pointer, because a replacement thread has shown its reader nothing until
+    # its own block arrives. Null means no evidence rather than no labels: a row written before
+    # this existed announces every tag as it always did, and gains the gate from its next posted
+    # block.
+    shown_labels: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     # What this bot last made the lock on the thread it currently points at. Null means it has
     # not set one, which is what a thread just opened is. Cleared whenever the pointer moves,
     # because a replacement thread starts open however the one it replaced ended.

@@ -23,6 +23,36 @@ from tests.support import github_payloads as payloads
 
 pytestmark = pytest.mark.integration
 
+# Earlier than every payload below, so opening the thread is never the newest thing that happened
+# to the pull request.
+BEFORE = "2026-08-10T11:00:00Z"
+
+
+async def opened_with_nobody_asked(service: ItemSyncService, pr_event) -> None:
+    """The thread already open, and no review requested on it yet.
+
+    The block that opens a thread is a real message, so it reaches every reviewer it names and is
+    the ask for them. A test about the LINE has to start from here, or there is no line to look
+    at and it passes on the block instead.
+    """
+    await service.sync(pr_event("opened", requested_reviewers=[], updated_at=BEFORE))
+
+
+async def test_the_block_that_opens_a_thread_is_the_ask(
+    registered: Repository,
+    notifying_sync_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    pr_event,
+) -> None:
+    """It is sent rather than edited, and it names her, so she has been reached. A line beside it
+    asked the same person twice for one event, which is issue #81."""
+    result = await notifying_sync_service.sync(pr_event("opened"))
+
+    assert result is not None
+    assert result.notified == ()
+    assert threads.posts == []
+    assert "monalisa" in threads.metadata_of(result.thread_id)
+
 
 async def test_a_requested_reviewer_is_pinged_once(
     registered: Repository,
@@ -30,7 +60,11 @@ async def test_a_requested_reviewer_is_pinged_once(
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    result = await notifying_sync_service.sync(pr_event("opened"))
+    """Every block after the first is an edit, and an edit notifies nobody, so somebody asked
+    once the thread exists is reached by the line and by nothing else."""
+    await opened_with_nobody_asked(notifying_sync_service, pr_event)
+
+    result = await notifying_sync_service.sync(pr_event("review_requested"))
 
     assert result is not None
     assert result.notified == ("monalisa",)
@@ -44,7 +78,9 @@ async def test_a_second_webhook_does_not_ping_again(
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    await notifying_sync_service.sync(pr_event("opened"))
+    await opened_with_nobody_asked(notifying_sync_service, pr_event)
+    await notifying_sync_service.sync(pr_event("review_requested"))
+
     result = await notifying_sync_service.sync(pr_event("edited", title="Renamed"))
 
     assert result is not None
@@ -69,9 +105,9 @@ async def test_a_newly_added_reviewer_is_pinged_but_the_first_is_not(
 
     assert result is not None
     assert result.notified == ("hubot",)
-    assert len(threads.posts) == 2
-    assert "hubot" in threads.posts[1][1]
-    assert "monalisa" not in threads.posts[1][1]
+    assert len(threads.posts) == 1, "the first was reached by the block, not by a line"
+    assert "hubot" in threads.posts[0][1]
+    assert "monalisa" not in threads.posts[0][1]
 
 
 async def test_a_linked_reviewer_is_pinged_by_mention(
@@ -85,8 +121,9 @@ async def test_a_linked_reviewer_is_pinged_by_mention(
         guild_id=1, github_username="MonaLisa", github_user_id=200, discord_user_id=555
     )
     await db_session.commit()
+    await opened_with_nobody_asked(notifying_sync_service, pr_event)
 
-    await notifying_sync_service.sync(pr_event("opened"))
+    await notifying_sync_service.sync(pr_event("review_requested"))
 
     assert "<@555>" in threads.posts[0][1]
 
@@ -97,7 +134,9 @@ async def test_an_unlinked_reviewer_is_named_in_plain_text(
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    await notifying_sync_service.sync(pr_event("opened"))
+    await opened_with_nobody_asked(notifying_sync_service, pr_event)
+
+    await notifying_sync_service.sync(pr_event("review_requested"))
 
     assert "monalisa" in threads.posts[0][1]
     assert "<@" not in threads.posts[0][1]
@@ -141,13 +180,36 @@ async def test_notification_stamps_the_assignment_row(
     assert row.notified_at is not None
 
 
+async def test_the_claim_is_spent_by_a_block_that_reached_them(
+    registered: Repository,
+    notifying_sync_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    pr_event,
+) -> None:
+    """The crux of issue #81, and why the notifier still runs on a delivery it says nothing on.
+
+    `notified_at` is stamped inside the claim. Skip the notifier rather than claiming and
+    throwing the claim away, and the row is left owed, and the `labeled` delivery GitHub sends
+    in the same second claims it and posts the very line the block made unnecessary. The bug
+    moves one delivery later and every test that sends `opened` on its own still passes.
+    """
+    await notifying_sync_service.sync(pr_event("opened"))
+    assert threads.posts == [], "the block was not the only thing said"
+
+    result = await notifying_sync_service.sync(pr_event("labeled"))
+
+    assert result.notified == ()
+    assert threads.posts == [], "the ping moved one delivery later instead of going away"
+
+
 async def test_a_removed_and_re_requested_reviewer_is_pinged_again(
     registered: Repository,
     notifying_sync_service: ItemSyncService,
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    await notifying_sync_service.sync(pr_event("opened"))
+    await opened_with_nobody_asked(notifying_sync_service, pr_event)
+    await notifying_sync_service.sync(pr_event("review_requested"))
     # Three separate things somebody did, and GitHub moves the pull request's timestamp on each
     # of them. Sharing one stamp is a shape it does not send.
     await notifying_sync_service.sync(
@@ -165,6 +227,33 @@ async def test_a_removed_and_re_requested_reviewer_is_pinged_again(
     assert result is not None
     assert result.notified == ("monalisa",)
     assert len(threads.posts) == 2
+
+
+async def test_a_rebuilt_thread_says_what_is_still_owed(
+    registered: Repository,
+    sync_service: ItemSyncService,
+    notifying_sync_service: ItemSyncService,
+    threads: FakeThreadGateway,
+    db_session: AsyncSession,
+    pr_event,
+) -> None:
+    """Somebody deleted the thread, and the replacement's block names people in plain text.
+
+    So it reaches nobody, and a ping still owed has to come out as a line. Synced without the
+    notifier first, which is what leaves one owed; a refused post does the same thing.
+    """
+    await UserLinkStore(db_session).link(
+        guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=555
+    )
+    await db_session.commit()
+    result = await sync_service.sync(pr_event("opened"))
+    await threads.delete(thread_id=result.thread_id)
+
+    again = await notifying_sync_service.sync(pr_event("edited", title="Renamed"))
+
+    assert again.created is True, "nothing was rebuilt, so this proves nothing"
+    assert "<@555>" not in threads.metadata_of(again.thread_id), "the replacement block pinged"
+    assert again.notified == ("monalisa",), "the ping owed was thrown away with the old thread"
 
 
 async def test_a_pull_request_with_no_reviewers_pings_nobody(
@@ -190,8 +279,10 @@ class TestNobodyIsPingedTwice:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
+        await opened_with_nobody_asked(notifying_sync_service, pr_event)
+
         results = await asyncio.gather(
-            notifying_sync_service.sync(pr_event("opened")),
+            notifying_sync_service.sync(pr_event("review_requested")),
             notifying_sync_service.sync(pr_event("review_requested")),
         )
 
@@ -207,9 +298,10 @@ class TestNobodyIsPingedTwice:
         pr_event,
     ) -> None:
         """The worker retries from the top, and the ping already went out."""
-        await notifying_sync_service.sync(pr_event("opened"))
+        await opened_with_nobody_asked(notifying_sync_service, pr_event)
+        await notifying_sync_service.sync(pr_event("review_requested"))
 
-        again = await notifying_sync_service.sync(pr_event("opened"))
+        again = await notifying_sync_service.sync(pr_event("review_requested"))
 
         assert again.notified == ()
         assert sum("Review requested" in content for _, content in threads.posts) == 1
@@ -231,9 +323,12 @@ class TestNobodyIsPingedTwice:
                 db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
             ),
         )
+        # The gateway refuses lines, not thread creation, so the block still lands and the ask
+        # that follows it is the one thing that can be refused.
+        await opened_with_nobody_asked(service, pr_event)
 
         with pytest.raises(DiscordGatewayError):
-            await service.sync(pr_event("opened"))
+            await service.sync(pr_event("review_requested"))
 
         db_session.expire_all()
         row = await db_session.scalar(
@@ -256,11 +351,12 @@ class TestNobodyIsPingedTwice:
                 db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
             ),
         )
+        await opened_with_nobody_asked(service, pr_event)
         with pytest.raises(DiscordGatewayError):
-            await service.sync(pr_event("opened"))
+            await service.sync(pr_event("review_requested"))
 
         threads.refusing = False
-        result = await service.sync(pr_event("opened"))
+        result = await service.sync(pr_event("review_requested"))
 
         assert result.notified == ("monalisa",)
 
@@ -305,6 +401,7 @@ class TestTwoDeliveriesGitHubStampedWithTheSameSecond:
         db_session: AsyncSession,
         pr_event,
     ) -> None:
+        await opened_with_nobody_asked(notifying_sync_service, pr_event)
         await notifying_sync_service.sync(
             pr_event("review_requested", requested_reviewers=[payloads.user("monalisa", 200)])
         )
@@ -506,7 +603,8 @@ class TestReRequestingAReviewAfterOneWasGiven:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        await notifying_sync_service.sync(pr_event("opened"))
+        await opened_with_nobody_asked(notifying_sync_service, pr_event)
+        await notifying_sync_service.sync(pr_event("review_requested"))
         await ReviewRequestLedger(db_sessionmaker).fulfilled(
             parse_review_event("submitted", payloads.pull_request_review_event())
         )
@@ -601,8 +699,9 @@ class TestAPingInterruptedMidFlight:
     ) -> None:
         threads = _HangingOnPost()
         service = _notifying(db_sessionmaker, threads)
+        await opened_with_nobody_asked(service, pr_event)
 
-        await _cancelled_in_the_ping(service, threads, pr_event("opened"))
+        await _cancelled_in_the_ping(service, threads, pr_event("review_requested"))
 
         # The hand-back is shielded, so it commits on its own schedule rather than before the
         # cancellation comes back. That it happens is the point; that it is instant is not.
@@ -613,11 +712,12 @@ class TestAPingInterruptedMidFlight:
     ) -> None:
         threads = _HangingOnPost()
         service = _notifying(db_sessionmaker, threads)
-        await _cancelled_in_the_ping(service, threads, pr_event("opened"))
+        await opened_with_nobody_asked(service, pr_event)
+        await _cancelled_in_the_ping(service, threads, pr_event("review_requested"))
         assert await _owed_again(db_session), "the ping was claimed and never handed back"
 
         threads.hanging = False
-        result = await service.sync(pr_event("opened"))
+        result = await service.sync(pr_event("review_requested"))
 
         assert result.notified == ("monalisa",)
 
@@ -792,8 +892,10 @@ class TestAReviewerWhoseLoginSomebodyElseNowHolds:
             ),
         )
 
+        await opened_with_nobody_asked(service, pr_event)
+
         # The payload's `monalisa` is account 200, which is somebody else.
-        await service.sync(pr_event("opened"))
+        await service.sync(pr_event("review_requested"))
 
         assert threads.posts == [(threads.created[0].thread_id, "Review requested from monalisa.")]
         assert "<@555>" not in threads.metadata_of(threads.created[0].thread_id)
@@ -819,7 +921,9 @@ class TestAReviewerWhoseLoginSomebodyElseNowHolds:
             ),
         )
 
-        await service.sync(pr_event("opened"))
+        await opened_with_nobody_asked(service, pr_event)
+
+        await service.sync(pr_event("review_requested"))
 
         assert threads.posts == [(threads.created[0].thread_id, "Review requested from <@555>.")]
 

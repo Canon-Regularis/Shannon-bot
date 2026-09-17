@@ -27,12 +27,29 @@ pytestmark = pytest.mark.integration
 
 # The payload the first delivery was captured with. The review lands after it, and a person
 # clicking re-request lands after that.
+OPENED_AT = "2026-08-10T11:00:00Z"
 REQUESTED_AT = "2026-08-10T12:00:00Z"
 RE_REQUESTED_AT = "2026-08-12T09:00:00Z"
 
 
 def requests_a_review(**overrides):
     return payloads.pull_request_event("review_requested", **overrides)
+
+
+async def with_a_thread(client, container) -> None:
+    """The pull request opened with nobody asked for a review yet.
+
+    Every test here turns on the line that asks somebody, and that line only exists once the
+    thread does. The block that opens a thread is a real message, so it reaches everybody it
+    names, and a reviewer already on the pull request is asked by the block and by nothing else.
+    """
+    await post(
+        client,
+        "pull_request",
+        payloads.pull_request_event("opened", requested_reviewers=[], updated_at=OPENED_AT),
+        delivery="open-1",
+    )
+    await container.worker.run_once()
 
 
 def pings(threads: FakeThreadGateway) -> list[str]:
@@ -65,6 +82,8 @@ async def test_a_delivery_retried_after_the_review_neither_pings_nor_blocks_the_
     client = build_http_client(container)
 
     async with client:
+        await with_a_thread(client, container)
+
         # The request arrives and the ping cannot be posted, so the delivery backs off with the
         # reviewer still owed one. Any failure in the Discord half does this; the ping is only
         # the easiest to arrange.
@@ -119,6 +138,7 @@ async def test_the_ordinary_request_and_review_still_work(
     client = build_http_client(container)
 
     async with client:
+        await with_a_thread(client, container)
         await post(
             client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
         )
@@ -160,6 +180,7 @@ async def test_a_review_delivery_retried_after_a_re_request_does_not_close_it(
     review = parse_review_event("submitted", payloads.pull_request_review_event("submitted"))
 
     async with client:
+        await with_a_thread(client, container)
         await post(
             client, "pull_request", requests_a_review(updated_at=REQUESTED_AT), delivery="req-1"
         )

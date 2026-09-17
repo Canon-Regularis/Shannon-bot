@@ -94,19 +94,22 @@ async def test_the_author_and_assignees_are_recorded(
     ]
 
 
-async def test_the_assignee_is_pinged_in_the_new_thread(
+async def test_the_assignee_is_reached_by_the_block_and_nothing_else(
     client: AsyncClient, threads: FakeThreadGateway
 ) -> None:
+    """The block that opens a thread is a real message, so it notifies everyone it names. A
+    second line saying the same thing reached the same person twice, which is issue #81."""
     await deliver(client, "issues", payloads.issue_event("opened"))
 
-    assert len(threads.posts) == 1
-    assert "hubot" in threads.posts[0][1]
-    assert threads.posts[0][1].startswith("Assigned to")
+    assert threads.posts == []
+    assert "hubot" in threads.metadata_of(threads.created[0].thread_id)
 
 
 async def test_a_linked_assignee_is_pinged_by_mention(
     client: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
+    """A mention only notifies from a message Discord delivered. The opening block is sent, so
+    the `<@id>` in it is the ping; every later block is an edit and reaches nobody."""
     await UserLinkStore(db_session).link(
         guild_id=1, github_username="hubot", github_user_id=100, discord_user_id=4242
     )
@@ -114,7 +117,8 @@ async def test_a_linked_assignee_is_pinged_by_mention(
 
     await deliver(client, "issues", payloads.issue_event("opened"))
 
-    assert "<@4242>" in threads.posts[0][1]
+    assert "<@4242>" in threads.metadata_of(threads.created[0].thread_id)
+    assert threads.posts == []
 
 
 async def test_the_delivery_is_logged(client: AsyncClient, db_session: AsyncSession) -> None:

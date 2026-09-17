@@ -114,14 +114,26 @@ class Notifier(Protocol):
     """
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int
+        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
     ) -> tuple[str, ...]: ...
 
 
 class ThreadBinding(Protocol):
     """Keeping one item pointed at one thread, whatever Discord does in between."""
 
-    async def write(self, target: ThreadTarget, *, name: str, content: str) -> ThreadWrite: ...
+    async def write(
+        self, target: ThreadTarget, *, name: str, content: str, replacement: str | None = None
+    ) -> ThreadWrite:
+        """`replacement` is what a thread opened to REPLACE one gets instead of `content`.
+
+        Two renderings of the same item, differing only in whether the people on it are live
+        mentions. Which one a write needs is not known until the write is under way: an edit
+        notifies nobody so it may carry them, a thread opened for the first time is meant to,
+        and a thread opened because the old one was deleted or is in the wrong channel must not.
+        Nothing about the item changed in that last case, and telling everybody on it that
+        somebody tidied a channel is the ping this whole path exists to stop sending.
+        """
+        ...
 
 
 class ItemSyncService:
@@ -139,6 +151,8 @@ class ItemSyncService:
         policy: SyncPolicy,
         binding: ThreadBinding,
         notifier: Notifier | None = None,
+        *,
+        mentions: bool = True,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -146,6 +160,10 @@ class ItemSyncService:
         self._binding = binding
         self._policy = policy
         self._notifier = notifier
+        # Whether the block may carry live mentions at all. Off for the paths that open threads
+        # in bulk, so a backlog mirror names people in plain text and notifies nobody. Built with
+        # it rather than told per call, the same as the notifier: there is nothing to turn on.
+        self._mentions = mentions
 
     async def sync(
         self,
@@ -257,9 +275,18 @@ class ItemSyncService:
                 await self._note_the_lock(state.tracked_item_id, state.thread_id, locked=False)
 
         written = await self._binding.write(
-            state.target, name=state.thread_name, content=state.metadata
+            state.target,
+            name=state.thread_name,
+            content=state.metadata,
+            replacement=state.quiet_metadata,
         )
         handle = written.handle
+
+        if written.created:
+            # Only a posted block. An edit is invisible from the channel, so a block rewritten by
+            # a command has shown its reader nothing, and recording it would silence the line
+            # that command's own webhook produces.
+            await self._note_the_block(state.tracked_item_id, handle.thread_id, state.labels)
 
         notified: tuple[str, ...] = ()
         if self._notifier is not None:
@@ -267,6 +294,10 @@ class ItemSyncService:
                 tracked_item_id=state.tracked_item_id,
                 thread_id=handle.thread_id,
                 guild_id=state.guild_id,
+                # A block reaches the people it names when it is POSTED as a new message, which
+                # is a thread being opened for the first time. An edit notifies nobody, and a
+                # thread opened to replace one carries the plain block on purpose.
+                the_block_pinged=written.created and state.thread_id is None,
             )
 
         # Two reasons to shut it, kept apart because they are answered by different things.
@@ -458,6 +489,15 @@ class ItemSyncService:
             return True
         await self._note_the_lock(tracked_item_id, thread_id, locked=True)
         return False
+
+    async def _note_the_block(
+        self, tracked_item_id: int, thread_id: int, shown: tuple[str, ...]
+    ) -> None:
+        """Its own transaction, because the Discord call it records happens outside one."""
+        async with self._sessionmaker() as session, session.begin():
+            await ThreadPointerStore(session).note_what_the_block_showed(
+                tracked_item_id, thread_id=thread_id, shown=shown
+            )
 
     async def _note_the_lock(self, tracked_item_id: int, thread_id: int, *, locked: bool) -> None:
         """Its own transaction, because the Discord call it records happens outside one."""
@@ -702,9 +742,15 @@ class ItemSyncService:
             if role is not ActorRole.REVIEWER_TEAM
             for actor in actors
         }
-        mentions = await UserLinkStore(session).resolve_many(
-            guild_id=placement.repository.discord_guild_id, people=people
-        )
+        # Off wholesale for `/refresh`, which opens threads for a whole backlog at once. Every
+        # one of those is a first open, so every one of them would be a real message full of
+        # live mentions, and a run over twenty-five items would notify everybody on all of them
+        # about nothing that happened.
+        mentions: Mapping[str, int] = {}
+        if self._mentions:
+            mentions = await UserLinkStore(session).resolve_many(
+                guild_id=placement.repository.discord_guild_id, people=people
+            )
 
         # What the thread is told, and what its lock is set from. The same snapshot everywhere
         # else, and on the superseded branch above the row instead, for the fields the row holds.
@@ -733,14 +779,27 @@ class ItemSyncService:
             if superseded
             else snapshot
         )
+        metadata = self._policy.render(
+            shown, status=item.status, priority=item.priority, mentions=mentions
+        )
         return _SyncState(
             tracked_item_id=item.id,
             guild_id=placement.repository.discord_guild_id,
             channel_id=placement.channel_id,
             thread_id=item.discord_thread_id,
             message_id=item.discord_message_id,
-            metadata=self._policy.render(
-                shown, status=item.status, priority=item.priority, mentions=mentions
+            metadata=metadata,
+            # The same block with the people named in plain text, for a thread opened to replace
+            # one. Rendered rather than branched on up here because whether this write replaces
+            # anything is decided inside the binding, after a Discord call has already failed.
+            # Identical to the one above wherever there was nobody to mention, which is most
+            # items and every path built without mentions at all.
+            quiet_metadata=(
+                metadata
+                if not mentions
+                else self._policy.render(
+                    shown, status=item.status, priority=item.priority, mentions={}
+                )
             ),
             thread_name=self._policy.thread_name(shown),
             wants_shut=self._policy.shut(shown, status=item.status),
@@ -748,6 +807,7 @@ class ItemSyncService:
             shut_when_opened=item.status is Status.DONE,
             thread_locked=item.discord_thread_locked,
             thread_channel_id=item.discord_channel_id,
+            labels=tuple(shown.label_names),
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -810,6 +870,7 @@ def build_item_sync(
     notifier: Notifier | None = None,
     *,
     relocates: bool = False,
+    mentions: bool = True,
 ) -> ItemSyncService:
     """Assemble a sync service and the thread binding it drives.
 
@@ -826,6 +887,7 @@ def build_item_sync(
         policy,
         ItemThreads(sessionmaker, threads, relocates=relocates),
         notifier,
+        mentions=mentions,
     )
 
 
@@ -937,6 +999,11 @@ class _SyncState:
     # Where the row says that thread actually is, which is not where the mapping says new ones
     # go the moment anybody has run `/set_channel`.
     thread_channel_id: int | None
+    # The label names the block about to be written carries, recorded against the item when that
+    # block is POSTED. What a reader has been shown, which the item's own labels cannot answer.
+    labels: tuple[str, ...]
+    # The same block with nobody mentioned, for a thread that replaces one. See `ThreadBinding`.
+    quiet_metadata: str
 
     @property
     def target(self) -> ThreadTarget:

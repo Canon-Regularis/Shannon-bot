@@ -31,6 +31,10 @@ _CHOICES = [
 
 # Said only where something was mirrored. It is the one surprising thing about this command, and
 # it is what lets somebody run it against a real backlog without wondering who they just woke up.
+#
+# It covers the blocks as well as the lines. A block that is posted notifies everybody it
+# mentions, so the sync services behind this are built to write names in plain text; the sentence
+# was false for as long as they were not.
 _QUIET = "Nobody was pinged."
 
 

@@ -132,6 +132,8 @@ async def test_a_review_request_reaches_the_metadata(
 async def test_a_review_request_pings_only_the_new_reviewer(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:
+    """Somebody asked after the thread exists needs a line, because the rewritten block is an
+    edit and an edit notifies nobody. The reviewer who was there when it opened had the block."""
     payload = payloads.pull_request_event(
         "review_requested",
         requested_reviewers=[payloads.user("monalisa", 200), payloads.user("hubot", 100)],
@@ -139,9 +141,9 @@ async def test_a_review_request_pings_only_the_new_reviewer(
 
     await deliver(tracked, "pull_request", payload, delivery="d1")
 
-    assert len(threads.posts) == 2
-    assert "hubot" in threads.posts[1][1]
-    assert "monalisa" not in threads.posts[1][1]
+    assert len(threads.posts) == 1
+    assert "hubot" in threads.posts[0][1]
+    assert "monalisa" not in threads.posts[0][1]
 
 
 async def test_no_update_ever_opens_a_second_thread(
