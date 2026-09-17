@@ -1,0 +1,117 @@
+"""Following the App being installed, removed, paused or resumed.
+
+The only events this bot handles that are not about an item. Everything else changes what it has
+been told; these change what it is able to see at all, which is why they are worth acting on
+rather than answering `ignored`.
+
+What they maintain is the account-to-installation map, and that map is a cache with GitHub behind
+it. So a missed delivery costs a lookup rather than a broken mirror, and this handler can be
+simple: write down what the payload says, and stop.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from shannon.db.stores.installations import InstallationStore
+from shannon.github.webhooks.events import EventHandler, WebhookOutcome
+
+logger = logging.getLogger(__name__)
+
+# Somebody removed the App. `installation_repositories.removed` is deliberately NOT here: taking a
+# repository out of an installation leaves the installation itself standing, and forgetting it
+# would break every other repository under that account.
+GONE = "deleted"
+SUSPENDED = "suspend"
+
+
+@dataclass(frozen=True, slots=True)
+class InstallationEvent:
+    """What one installation delivery says, once the fields that matter are checked."""
+
+    installation_id: int
+    account_login: str
+    account_id: int | None
+
+
+def parse_installation_event(payload: Any) -> InstallationEvent | None:
+    """The installation out of any delivery that carries one, or None for one that does not.
+
+    Written against the `installation` block rather than against a particular event, because every
+    App delivery carries that block - an `issues` one as much as an `installation` one - and the
+    same reading serves all of them. That is what lets a directory that missed a webhook repair
+    itself from ordinary traffic.
+
+    The account is required and the id is not. GitHub always sends both today; the id is allowed to
+    be absent because a row that records a login with no id is still useful, and one that records a
+    made-up id is not.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    installation = payload.get("installation")
+    if not isinstance(installation, Mapping):
+        return None
+
+    installation_id = installation.get("id")
+    if not isinstance(installation_id, int):
+        return None
+
+    account = installation.get("account")
+    login = account.get("login") if isinstance(account, Mapping) else None
+    if not isinstance(login, str) or not login:
+        return None
+
+    account_id = account.get("id") if isinstance(account, Mapping) else None
+    return InstallationEvent(
+        installation_id=installation_id,
+        account_login=login,
+        account_id=account_id if isinstance(account_id, int) else None,
+    )
+
+
+def build_installation_handler(sessionmaker: async_sessionmaker) -> EventHandler:
+    """Keep the installation directory in step with what GitHub says about itself."""
+
+    async def handle(
+        action: str, payload: Mapping[str, Any], arrived: int | None = None
+    ) -> WebhookOutcome:
+        found = parse_installation_event(payload)
+        if found is None:
+            logger.warning("installation.%s arrived without a usable installation", action)
+            return WebhookOutcome.IGNORED
+
+        async with sessionmaker() as session, session.begin():
+            store = InstallationStore(session)
+            if action == GONE:
+                removed = await store.forget(found.installation_id)
+                logger.info(
+                    "the app was removed from %s%s",
+                    found.account_login,
+                    "" if removed else ", which it was not installed on here",
+                )
+                return WebhookOutcome.PROCESSED
+
+            # Written before the suspension is applied, so a suspend for an account this bot has
+            # never seen still leaves a row behind rather than doing nothing at all. That happens
+            # whenever the App was installed while this process was down.
+            await store.remember(
+                installation_id=found.installation_id,
+                account_login=found.account_login,
+                account_id=found.account_id,
+                suspended=action == SUSPENDED,
+            )
+
+        logger.info(
+            "the app is installed on %s as installation %s%s",
+            found.account_login,
+            found.installation_id,
+            " and is suspended" if action == SUSPENDED else "",
+        )
+        return WebhookOutcome.PROCESSED
+
+    return handle
