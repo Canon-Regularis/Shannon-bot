@@ -27,6 +27,29 @@ class DuplicateRegistrationError(ShannonError):
     """The guild already has a repository, or the repository is bound elsewhere."""
 
 
+class NotInstalledError(ShannonError):
+    """This bot cannot see a repository because the GitHub App is not installed on it.
+
+    Its own error rather than a `GitHubNotFoundError`, and that distinction is the whole of what
+    issue #98 was about. GitHub answers 404 both for a repository that does not exist and for one
+    the caller may not see, so a private repository used to be reported as missing: the reply said
+    it could not be found, and the person reading it went and checked the spelling of a link that
+    was perfectly correct.
+
+    The message carries what to do about it, because unlike the 404 it replaces there is
+    something to do.
+    """
+
+
+class NotProvenError(ShannonError):
+    """The caller has not shown that GitHub agrees they may do this.
+
+    Raised where a Discord role is not enough, which today is `/unregister` alone. Its own error
+    rather than a permission denial, because the two say different things: a denial means the
+    server has not given you the role, and this means GitHub has not given you the repository.
+    """
+
+
 class RepositoryMismatchError(ShannonError):
     """The link points at a repository other than the one registered here."""
 

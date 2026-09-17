@@ -11,6 +11,8 @@ from shannon.discord_bot.errors import (
 from shannon.domain.errors import (
     DuplicateRegistrationError,
     ItemNotReadyError,
+    NotInstalledError,
+    NotProvenError,
     NotRegisteredError,
     RepositoryMismatchError,
     ShannonError,
@@ -33,6 +35,13 @@ logger = logging.getLogger(__name__)
 # nothing escapes after the interaction has been deferred and leaves the caller with silence.
 _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (UnparseableLinkError, "That link did not work. {message}"),
+    # Above the 404 it replaces, because the first match wins and the row below would otherwise
+    # claim this one. That ordering is the fix for issue #98: GitHub answers 404 both for a
+    # repository that is not there and for one this bot may not see, so a private repository was
+    # reported as missing and the person went and checked a link that was perfectly correct. The
+    # service composes the sentence because only it knows which repository and which link to
+    # offer, so the template is the message and nothing else.
+    (NotInstalledError, "{message}"),
     # Not "at that link": the workflow commands take no link, and a 404 there means the
     # item has gone from GitHub since it was mirrored.
     (GitHubNotFoundError, "GitHub could not find that {noun}."),
@@ -67,6 +76,10 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
     (NotRegisteredError, "{message}"),
+    # Its own row rather than falling through to the catch-all, because the message names
+    # the account GitHub signed the person in as and what that account is missing. "Something
+    # went wrong here" would leave somebody who genuinely cannot do this with no idea why.
+    (NotProvenError, "{message}"),
     (RepositoryMismatchError, "{message}"),
     (DuplicateRegistrationError, "{message}"),
     (SyncFailedError, "{message}"),

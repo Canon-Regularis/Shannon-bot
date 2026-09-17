@@ -15,7 +15,7 @@ from shannon.discord_bot.errors import (
 )
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
-from shannon.domain.errors import NotRegisteredError
+from shannon.domain.errors import NotInstalledError, NotRegisteredError
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
@@ -178,3 +178,29 @@ class TestARepliesThatWouldNotFit:
         await reply(interaction, "Registered owner/repo.")
 
         assert interaction.reply == "Registered owner/repo."
+
+
+def test_a_repository_the_app_cannot_see_says_so_instead_of_saying_it_is_missing() -> None:
+    """Issue #98, at the seam where it was actually visible to anybody.
+
+    GitHub answers 404 both for a repository that does not exist and for one the caller may not
+    see, so a private repository used to be reported as "GitHub could not find that repository"
+    and the person went and checked a link that was perfectly correct. This row sits above the 404
+    row in the table, and the table is ordered most specific first.
+    """
+    said = reply_for(
+        NotInstalledError("This bot cannot see acme/secret. Install the GitHub App on it."),
+        noun="repository",
+    )
+
+    assert said == "This bot cannot see acme/secret. Install the GitHub App on it."
+
+
+def test_it_is_matched_before_the_404_that_used_to_claim_it() -> None:
+    """The ordering is the whole fix, and it is not visible from the row itself. Both errors reach
+    this table and the first match wins, so a row added below the 404 would never be reached."""
+    from shannon.commands._replies import _REPLIES
+
+    kinds = [kind for kind, _ in _REPLIES]
+
+    assert kinds.index(NotInstalledError) < kinds.index(GitHubNotFoundError)

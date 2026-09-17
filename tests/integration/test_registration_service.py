@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
+from shannon.db.stores.installations import InstallationStore
+from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.enums import ObjectType
-from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
+from shannon.domain.errors import (
+    DuplicateRegistrationError,
+    NotInstalledError,
+    UnparseableLinkError,
+)
 from shannon.domain.models import RepositorySnapshot
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.webhooks.pull_request import parse_pull_request_event
@@ -281,3 +288,135 @@ def _at_the_old_name(*, at: str):
     snapshot = parse_pull_request_event("edited", payload)
     assert snapshot is not None
     return snapshot
+
+
+class FakeInstallations:
+    """Stands in for the token minter, answering only what registration asks of it."""
+
+    def __init__(self, *, installation: int | None = 42, slug: str = "shannon-bot") -> None:
+        self.installation = installation
+        self.slug = slug
+        self.asked: list[tuple[str, str]] = []
+
+    async def installed_on(self, owner: str, name: str) -> int | None:
+        self.asked.append((owner, name))
+        return self.installation
+
+    async def app_slug(self) -> str:
+        return self.slug
+
+
+class TestARepositoryTheAppIsNotInstalledOn:
+    """Issue #98, and the reason the whole GitHub App exists here.
+
+    Before this, a private repository answered 404 from `GET /repos/...` and the reply said GitHub
+    could not find it. The person went and checked the spelling of a link that was correct, and
+    nothing anywhere mentioned that the bot simply had no access.
+    """
+
+    async def test_it_is_refused_before_github_is_asked_about_the_repository(
+        self, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        """The order is the fix rather than an optimisation. Read first and a private repository
+        reports as missing; ask first and the answer is both true and actionable."""
+        github = FakeGitHubClient()
+        service = RepositoryRegistrationService(
+            db_sessionmaker, github, FakeInstallations(installation=None)
+        )
+
+        with pytest.raises(NotInstalledError):
+            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+
+        assert github.repository_calls == [], "it went looking for a repository it cannot see"
+
+    async def test_the_reply_says_what_to_do_about_it(
+        self, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        service = RepositoryRegistrationService(
+            db_sessionmaker, FakeGitHubClient(), FakeInstallations(installation=None)
+        )
+
+        with pytest.raises(NotInstalledError) as refusal:
+            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+
+        assert "acme/secret" in refusal.value.message
+        assert "https://github.com/apps/shannon-bot/installations/new" in refusal.value.message
+
+    async def test_a_deployment_whose_slug_could_not_be_read_still_says_the_useful_part(
+        self, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        """The link makes the message nicer and is not the message. Failing the command because
+        GitHub would not say what the App is called would be the wrong trade."""
+        service = RepositoryRegistrationService(
+            db_sessionmaker, FakeGitHubClient(), FakeInstallations(installation=None, slug="")
+        )
+
+        with pytest.raises(NotInstalledError) as refusal:
+            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+
+        assert "Install the GitHub App" in refusal.value.message
+        assert "https://github.com/apps" not in refusal.value.message
+
+    async def test_nothing_is_written_down(
+        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+    ) -> None:
+        service = RepositoryRegistrationService(
+            db_sessionmaker, FakeGitHubClient(), FakeInstallations(installation=None)
+        )
+
+        with pytest.raises(NotInstalledError):
+            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+
+        assert await RepositoryStore(db_session).get_by_guild(1) is None
+
+
+class TestARepositoryTheAppCanSee:
+    async def test_registering_records_the_installation_on_the_way_past(
+        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+    ) -> None:
+        """`/register` is the one command that always knows the answer, so it is the cheapest
+        place to learn it. Every call about that owner afterwards resolves from the database."""
+        service = RepositoryRegistrationService(
+            db_sessionmaker,
+            FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT}),
+            FakeInstallations(installation=42),
+        )
+
+        await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+
+        found = await InstallationStore(db_session).for_owner("Canon-Regularis")
+        assert found is not None
+        assert found.installation_id == 42
+
+    async def test_a_private_repository_is_recorded_as_private(
+        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+    ) -> None:
+        """The whole point of the issue, end to end: it registers rather than reporting as
+        missing, and the row says what it is."""
+        service = RepositoryRegistrationService(
+            db_sessionmaker,
+            FakeGitHubClient(
+                repositories={"canon-regularis/shannon-bot": replace(SNAPSHOT, private=True)}
+            ),
+            FakeInstallations(installation=42),
+        )
+
+        await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+
+        stored = await RepositoryStore(db_session).get_by_guild(1)
+        assert stored is not None
+        assert stored.private is True
+
+    async def test_a_service_built_without_the_check_behaves_as_it_always_did(
+        self, db_sessionmaker: async_sessionmaker
+    ) -> None:
+        """The seam is optional so that everything written before the App existed goes on working,
+        including a deployment that has not set one up yet."""
+        service = RepositoryRegistrationService(
+            db_sessionmaker,
+            FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT}),
+        )
+
+        result = await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+
+        assert result.full_name == "Canon-Regularis/Shannon-bot"
