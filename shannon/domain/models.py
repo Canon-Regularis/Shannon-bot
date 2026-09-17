@@ -254,6 +254,91 @@ class ReviewSnapshot:
         return (self.state or "").lower()
 
 
+@dataclass(frozen=True, slots=True)
+class CommitRef:
+    """One commit as the compare endpoint describes it, which is everything but the numbers.
+
+    Carried apart from `Commit` because this is what decides whether a commit is announced at all,
+    and that decision is made before anything is spent reading it. A push that merges the default
+    branch in is filtered down to nothing off this alone, at the cost of the one call that listed
+    them.
+    """
+
+    sha: str
+    message: str
+    # The GitHub ACCOUNT, which GitHub resolves from the commit's email address and which is None
+    # when no account holds it.
+    #
+    # Deliberately not the name written into the commit itself. That is free text set by
+    # `git config user.name`, so anybody who can push to the branch could put a colleague's name
+    # against their own work, and a thread is exactly where that would be believed.
+    author: Actor | None
+    # More than one parent is a merge. A merge is announced by nothing: the commits it brings in
+    # are each judged on their own terms, and the merge itself says only that one branch caught up
+    # with another.
+    merge: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CommitStats:
+    """How much one commit changed."""
+
+    additions: int
+    deletions: int
+    # Counted off the list of files rather than read from a field, because GitHub sends no such
+    # field on a commit. It caps that list at three hundred entries, so a commit touching more
+    # understates its file count while its additions and deletions stay exact. The two halves of
+    # this are not equally trustworthy and only one of them can be wrong.
+    changed_files: int
+
+
+@dataclass(frozen=True, slots=True)
+class CommitRange:
+    """What one push did to a branch, as the compare endpoint answers it."""
+
+    # GitHub's own word: "ahead", "behind", "diverged" or "identical". Kept as the word rather
+    # than reduced to a flag, because two of the four mean the branch was rewritten and the
+    # caller is the one that says which two.
+    status: str
+    commits: tuple[CommitRef, ...]
+    # GitHub's count, which can exceed the list beside it: the compare endpoint stops listing at
+    # two hundred and fifty commits. Kept so that a line saying how many were not announced is
+    # right on a push that large, where counting the list would understate it.
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class Commit:
+    """One commit, as a line in a thread has to say it: who, what, and how much."""
+
+    sha: str
+    message: str
+    author: Actor | None
+    stats: CommitStats
+
+    @property
+    def note_key(self) -> str:
+        """Keyed on the commit, which is the opposite of the two lines beside it in the thread.
+
+        A label going on is a fact about one delivery, so the tag line keys on the delivery. A
+        commit is a fact about a SHA, and one delivery carries several of them. Keying a push on
+        its delivery would let a delivery that posted three commits and then failed turn the other
+        two away for good on the retry, with the delivery reported handled.
+        """
+        return f"commit:{self.sha}"
+
+    @property
+    def title(self) -> str:
+        """The subject line, which is git's own convention rather than anything invented here."""
+        return self.message.split("\n", 1)[0].strip()
+
+    @property
+    def description(self) -> str:
+        """Everything under the subject. Empty for a commit written as one line, which is most."""
+        _, _, rest = self.message.partition("\n")
+        return rest.strip()
+
+
 @runtime_checkable
 class ItemNote(Protocol):
     """Something posted into a tracked item's thread that is not its metadata.
