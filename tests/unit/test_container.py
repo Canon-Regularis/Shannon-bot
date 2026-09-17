@@ -161,7 +161,10 @@ class TestSayingWhenNoAppIsConfigured:
                 Settings(
                     github_webhook_secret="s",
                     github_app_client_id="Iv23liAbC",
-                    github_app_private_key="-----BEGIN PRIVATE KEY-----",
+                    # Any non-empty value will do: the container only asks whether a key is set.
+                    # A string shaped like a PEM header would be indistinguishable to a secret
+                    # scanner from one somebody had committed by accident.
+                    github_app_private_key="placeholder-github-app-private-key",
                 ),
             )
 
