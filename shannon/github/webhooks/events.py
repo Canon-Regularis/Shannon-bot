@@ -57,11 +57,25 @@ COMMENT_ACTIONS = frozenset({"created"})
 # the thread records what was said when it was said.
 REVIEW_ACTIONS = frozenset({"submitted"})
 
+# Somebody installing, uninstalling, pausing or resuming the App, and somebody adding or removing
+# repositories from an existing installation. Not about an item at all, which is what makes these
+# different from everything above: they are the only events that change what this bot is ABLE to
+# see rather than what it has been told.
+#
+# GitHub delivers them whether or not they are ticked in the App's settings, so listing them here
+# is about acting on them rather than about receiving them.
+INSTALLATION_ACTIONS = frozenset(
+    {"created", "deleted", "suspend", "unsuspend", "new_permissions_accepted"}
+)
+INSTALLATION_REPOSITORY_ACTIONS = frozenset({"added", "removed"})
+
 SUPPORTED_EVENTS: Mapping[str, frozenset[str]] = {
     "pull_request": PULL_REQUEST_ACTIONS,
     "issues": ISSUE_ACTIONS,
     "issue_comment": COMMENT_ACTIONS,
     "pull_request_review": REVIEW_ACTIONS,
+    "installation": INSTALLATION_ACTIONS,
+    "installation_repositories": INSTALLATION_REPOSITORY_ACTIONS,
 }
 
 
