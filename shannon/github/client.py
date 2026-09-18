@@ -169,6 +169,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
 
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
 
+    async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
+
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
@@ -432,7 +434,7 @@ class HttpGitHubClient:
         """
         await self._send(
             "POST",
-            f"/repos/{owner}/{name}/issues/{number}/labels",
+            f"{_repository(owner, name)}/issues/{number}/labels",
             owner,
             json={"labels": [label]},
         )
@@ -444,7 +446,7 @@ class HttpGitHubClient:
         happened since. A 404 here means the end state is the wanted one, and failing the
         command over it would leave the caller retrying towards where they already are.
         """
-        path = f"/repos/{owner}/{name}/issues/{number}/labels/{quote(label, safe='')}"
+        path = f"{_repository(owner, name)}/issues/{number}/labels/{quote(label, safe='')}"
         with contextlib.suppress(GitHubNotFoundError):
             await self._send("DELETE", path, owner)
 
@@ -518,6 +520,27 @@ class HttpGitHubClient:
         except GitHubNotFoundError:
             return False
         return True
+
+    async def list_labels(self, owner: str, name: str) -> Sequence[str]:
+        """Every label this repository has, by name.
+
+        Read so that a label set by hand can be checked against them first. GitHub creates a label
+        it has never seen rather than refusing, which is what lets the workflow commands work on a
+        repository nobody set up, and is exactly wrong for a typed name: one typo would add a label
+        to the repository for good, and nothing here can delete one.
+
+        Paged, because a repository with a real taxonomy has more than a page of them and a
+        half-read list would refuse a label that exists.
+        """
+        found: list[str] = []
+        async for body in self.get_pages(
+            f"{_repository(owner, name)}/labels", owner=owner, per_page=LIST_PAGE_SIZE
+        ):
+            for row in body if is_json_list(body) else []:
+                label = row.get("name") if is_json_object(row) else None
+                if isinstance(label, str) and label:
+                    found.append(label)
+        return found
 
     async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
         """A write, whose answer is only ever whether it worked.

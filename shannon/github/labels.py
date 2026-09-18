@@ -104,5 +104,47 @@ def priority_change(current: Iterable[str], wanted: Priority) -> LabelChange:
     return LabelChange(remove=stale, add="" if already else PRIORITY_LABELS[wanted])
 
 
+def reserved_as(name: str) -> Status | Priority | None:
+    """What this name already means to this bot, or None if it is an ordinary label.
+
+    Asked before a label is set by hand. Both halves of the workflow live as labels on the
+    repository, so a command that sets any label can reach them, and reaching them is what makes
+    the block contradict itself: nothing on the webhook path reads a status back onto the stored
+    column, so the item would show one status in its block and carry the label of another.
+
+    Priority is the sharper half and fails the opposite way round. `parse_priority` DOES feed the
+    stored column on every sync, so writing `critical` by hand changes an item's priority from a
+    command that never mentioned priority.
+
+    Built out of the two classifiers already in this module, so the reserved set is exactly what
+    the rest of it reads and cannot drift from it. That is wider than the eight names written
+    here: every spelling `parse_priority` accepts is reserved, because every one of them is read.
+    """
+    status = status_of([name])
+    if status is not None:
+        return status
+    priority = parse_priority([name])
+    return priority if priority is not Priority.UNSET else None
+
+
+def label_change(current: Iterable[str], name: str, *, adding: bool) -> LabelChange:
+    """Put one ordinary label on an item, or take it off.
+
+    Nothing comes off to make room, unlike the two changes above. A status and a priority are
+    each single-valued, which is the whole reason those two remove before they add; an ordinary
+    label is not, and an item may carry as many as somebody finds useful.
+
+    A label the item already holds is no change at all, compared case-folded because GitHub
+    matches a label name without regard to case. Left uncompared, adding `Bug` to an item holding
+    `bug` writes, re-attaches the label GitHub already had, and answers as though something
+    happened, which is the loop `priority_change` above describes.
+    """
+    wanted = name.strip().casefold()
+    on_it = any(held.strip().casefold() == wanted for held in current)
+    if adding:
+        return LabelChange(remove=(), add="" if on_it else name)
+    return LabelChange(remove=(name,) if on_it else (), add="")
+
+
 def _is_priority(name: str) -> bool:
     return parse_priority([name]) is not Priority.UNSET

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.commands.labels import build_label_command, build_unlabel_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
 from shannon.commands.mentions import build_mentions_command
@@ -585,6 +586,11 @@ def _commands(
         build_unassign_command(people, gate),
         build_request_review_command(people, gate),
         build_unrequest_review_command(people, gate),
+        # The workflow service twice over, behind two narrow protocols: one that may move a
+        # label and one that may only suggest a name. The picker is asked on every keystroke by
+        # somebody who has not run anything yet, so it holds the handle that cannot write.
+        build_label_command(workflow, gate, workflow),
+        build_unlabel_command(workflow, gate, workflow),
         *build_workflow_commands(workflow, gate),
     )
 

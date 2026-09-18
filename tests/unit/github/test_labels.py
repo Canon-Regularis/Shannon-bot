@@ -124,3 +124,85 @@ class TestPriority:
         change = labels.priority_change(["IN_REVIEW", "low"], Priority.HIGH)
 
         assert change.remove == ("low",)
+
+
+class TestWhatThisBotAlreadyOwns:
+    """Issue #104. A label somebody may not set by hand, and why each one is on the list.
+
+    The set is wider than the eight names written here, and that is the point: it is built out of
+    the two classifiers the rest of this module reads with, so it cannot drift from what they say.
+    """
+
+    @pytest.mark.parametrize("name", ["BACKLOG", "IN_REVIEW", "READY_FOR_MERGE", "DONE"])
+    def test_a_status_is_reserved(self, name: str) -> None:
+        assert labels.reserved_as(name) is labels.status_of([name])
+
+    @pytest.mark.parametrize("name", ["done", "Backlog", "in_review"])
+    def test_case_does_not_get_round_it(self, name: str) -> None:
+        """`status_of` casefolds, so a lowercase spelling is the same label to GitHub."""
+        assert isinstance(labels.reserved_as(name), Status)
+
+    @pytest.mark.parametrize(
+        "name", ["high", "urgent", "critical", "medium", "med", "moderate", "low", "minor"]
+    )
+    def test_every_word_the_priority_parser_reads_is_reserved(self, name: str) -> None:
+        """The sharp half. These are ordinary-looking triage words, and writing one would change
+        the item's stored priority from a command that never mentioned priority."""
+        assert isinstance(labels.reserved_as(name), Priority)
+
+    @pytest.mark.parametrize("name", ["p-high", "prio: low", "priority/med", "HIGH_PRIORITY"])
+    def test_the_prefixed_and_suffixed_forms_too(self, name: str) -> None:
+        assert isinstance(labels.reserved_as(name), Priority)
+
+    @pytest.mark.parametrize("name", ["good first issue", "bug", "documentation", "help wanted"])
+    def test_an_ordinary_label_is_not(self, name: str) -> None:
+        """The issue's own examples. If any of these were reserved the feature would be useless."""
+        assert labels.reserved_as(name) is None
+
+    def test_unset_is_not_a_reservation(self) -> None:
+        """`parse_priority` answers UNSET for everything it does not recognise, and UNSET is the
+        absence of a priority rather than one of them."""
+        assert labels.reserved_as("wontfix") is None
+
+
+class TestMovingAnOrdinaryLabel:
+    def test_putting_one_on(self) -> None:
+        change = labels.label_change(["bug"], "documentation", adding=True)
+
+        assert change.add == "documentation"
+        assert change.remove == ()
+
+    def test_nothing_comes_off_to_make_room(self) -> None:
+        """Unlike a status or a priority, which are single-valued. An item may carry as many
+        ordinary labels as somebody finds useful."""
+        change = labels.label_change(["bug", "HIGH", "IN_REVIEW"], "documentation", adding=True)
+
+        assert change.remove == ()
+
+    def test_one_the_item_already_has_is_no_change(self) -> None:
+        change = labels.label_change(["bug"], "bug", adding=True)
+
+        assert change.nothing_to_do is True
+
+    def test_case_does_not_make_a_second_label(self) -> None:
+        """GitHub matches a label name without regard to case, so writing `Bug` onto an item
+        holding `bug` re-attaches what was there and answers as though something happened."""
+        change = labels.label_change(["bug"], "Bug", adding=True)
+
+        assert change.nothing_to_do is True
+
+    def test_taking_one_off(self) -> None:
+        change = labels.label_change(["bug", "documentation"], "bug", adding=False)
+
+        assert change.remove == ("bug",)
+        assert change.add == ""
+
+    def test_taking_off_one_that_is_not_there(self) -> None:
+        change = labels.label_change(["documentation"], "bug", adding=False)
+
+        assert change.nothing_to_do is True
+
+    def test_taking_one_off_ignores_case_too(self) -> None:
+        change = labels.label_change(["Bug"], "bug", adding=False)
+
+        assert change.remove == ("bug",)

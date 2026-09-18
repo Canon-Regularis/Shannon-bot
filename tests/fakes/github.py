@@ -105,6 +105,11 @@ class FakeGitHubClient:
         # Who GitHub would refuse to assign. Anything not named here can be assigned, because that
         # is the ordinary case and a fake that refused by default would make every test say so.
         self.unassignable: set[str] = set()
+        # What labels the repository itself has, by `owner/name`. Empty by default and not
+        # stocked with anything plausible, so a test of the label command that forgot to say
+        # which labels exist fails loudly rather than passing on a guess.
+        self.repo_labels: dict[str, list[str]] = {}
+        self.label_list_calls: list[str] = []
         self.assignable_calls: list[tuple[str, str]] = []
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
@@ -199,6 +204,13 @@ class FakeGitHubClient:
             for (full_name, _), snapshot in sorted(store.items())
             if full_name == wanted and not snapshot.closed
         ]
+
+    async def list_labels(self, owner: str, name: str) -> Sequence[str]:
+        key = f"{owner}/{name}".lower()
+        self.label_list_calls.append(key)
+        if self.error is not None:
+            raise self.error
+        return list(self.repo_labels.get(key, []))
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         key = (f"{owner}/{name}".lower(), number)

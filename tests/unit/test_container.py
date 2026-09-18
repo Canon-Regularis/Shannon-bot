@@ -68,6 +68,7 @@ class TestWhatItWiresUp:
         assert sorted(command.name for command in container.commands) == [
             "assign",
             "issue",
+            "label",
             "link",
             "link_team",
             "mentions",
@@ -86,6 +87,7 @@ class TestWhatItWiresUp:
             "set_not_reviewed",
             "set_ready_for_merge",
             "unassign",
+            "unlabel",
             "unregister",
             "unrequest_review",
         ]

@@ -5468,3 +5468,44 @@ to set the project number will find it.
 - Deliberately not renamed: `unrequest_review` is an ugly word. It is GitHub's verb rather than a
   better one, and `/add_reviewer` and `/remove_reviewer` were the alternative.
 
+
+## Labels that are not a workflow move
+
+- **`/label` and `/unlabel` put an ordinary label on an item.** `good first issue`, `bug`,
+  `documentation`: the tags the eight `/set_*` commands were never for. Closes #104.
+- **Almost none of this was new.** `format_label_change` already had the branch that renders a
+  plain tag, `_apply` was already generic over a label change, and the `labeled` echo already
+  posts the line. The command writes to GitHub and says nothing in the thread, the same shape the
+  assignee commands take.
+- **What is new is saying no, in two directions, and both prevent a silent failure.**
+- **A name this bot owns is refused.** The five statuses and everything `parse_priority` reads,
+  each refusal naming the command that owns it. A status written this way would leave the block
+  showing one status while carrying the label of another, because nothing on the webhook path
+  reads a status back onto the stored column; the thread would announce a status that never moved.
+  Priority fails the other way and is worse for it, because `parse_priority` does feed the stored
+  column, so `critical` would change an item's priority from a command that never mentioned it.
+- **The reserved set is wider than the eight names written down**, and deliberately so: it is
+  built from the two classifiers the rest of the module reads with, so it cannot drift from them.
+  That means `urgent`, `minor`, `moderate` and every `p:`/`prio-` form are reserved as well.
+- **A name the repository does not have is refused too.** GitHub creates a label it has never seen
+  rather than refusing, which is what lets the workflow commands work on a repository nobody
+  prepared, and is exactly wrong for a name somebody typed: one slip would add a label to the
+  repository for good and nothing here can list or delete one.
+- **The repository's own spelling is what gets written.** GitHub matches a label name without
+  regard to case, so `/label BUG` on a repository holding `bug` would otherwise re-attach what was
+  already there while the block, comparing case-folded, saw nothing change, and the reply would
+  report something that did not happen.
+- **The first autocomplete in this project**, and it is a convenience rather than a guard:
+  discord.py documents that its choices are suggestions somebody may ignore and type past. So the
+  service checks independently. The list is cached a repository at a time, because a picker is
+  asked on every keystroke and Discord allows it about three seconds.
+- **A bug fixed on the way past.** `add_label` and `remove_label` interpolated the owner and
+  repository name into the path unescaped. They were the last two sites doing so, and
+  `_repository`'s own docstring already claimed in the past tense that the difference had been
+  closed. It had not.
+- Deliberately not fixed, and found while reading: `priority_change` removes every spelling
+  `parse_priority` accepts, so a repository using `critical` or `minor` as an ordinary triage
+  label loses it on the next `/set_*_priority`, with no line saying so. That predates this and
+  fixing it is a decision about whether the parser should be that permissive. The new refusal at
+  least surfaces the clash rather than leaving it silent.
+
