@@ -200,6 +200,7 @@ module = [
     "tests.unit.api.test_webhook_endpoint",
     "tests.unit.api.test_webhook_signature_gate",
     "tests.unit.commands.test_command_errors",
+    "tests.unit.commands.test_label_commands",
     "tests.unit.commands.test_link_team_command",
     "tests.unit.commands.test_mentions_command",
     "tests.unit.commands.test_permission_tables",
@@ -246,6 +247,7 @@ ignore = [
     # the typing work already schedules: give the commands a narrow protocol naming what they
     # actually read, which the fake then satisfies structurally and without a single cast.
     "tests/unit/commands/test_people_commands.py",
+    "tests/unit/commands/test_label_commands.py",
     "shannon/api/routes/webhooks.py",
     "shannon/commands/link.py",
     "shannon/commands/link_team.py",
