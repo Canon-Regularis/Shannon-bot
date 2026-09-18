@@ -421,18 +421,46 @@ class TrackedSnapshot(Protocol):
     and `priority`, which are what the two kinds of item disagree about.
     """
 
-    repository: RepositorySnapshot
-    github_object_id: int
-    number: int
-    title: str
-    html_url: str
-    author: Actor | None
-    assignees: tuple[Actor, ...]
-    updated_at: datetime | None
-    action: str | None
-    object_type: ObjectType
-    closed: bool
-    body: str
+    # Read-only, all of them, which is a statement about the implementations rather than a
+    # precaution. Every snapshot in this project is a frozen dataclass and nothing writes through
+    # this protocol. Declared as plain attributes they were writable, and a writable member is one
+    # a frozen class cannot offer, so strictly nothing satisfied this at all. Nothing noticed
+    # because nothing checked.
+    @property
+    def repository(self) -> RepositorySnapshot: ...
+
+    @property
+    def github_object_id(self) -> int: ...
+
+    @property
+    def number(self) -> int: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def html_url(self) -> str: ...
+
+    @property
+    def author(self) -> Actor | None: ...
+
+    @property
+    def assignees(self) -> tuple[Actor, ...]: ...
+
+    @property
+    def updated_at(self) -> datetime | None: ...
+
+    @property
+    def action(self) -> str | None: ...
+
+    @property
+    def object_type(self) -> ObjectType: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def body(self) -> str: ...
 
     @property
     def label_names(self) -> tuple[str, ...]: ...
