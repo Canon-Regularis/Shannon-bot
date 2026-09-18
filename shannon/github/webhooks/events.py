@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
+
+from shannon.domain.json import JsonObject
 
 # Anything not listed here arrives from GitHub the moment the webhook is configured, starting
 # with the ping it sends to prove the endpoint answers, and is matched and dropped rather
@@ -103,7 +105,7 @@ class EventHandler(Protocol):
     """Handles one GitHub event type. Implementations live in the services layer."""
 
     async def __call__(
-        self, action: str, payload: Mapping[str, Any], arrived: int | None = None
+        self, action: str, payload: JsonObject, arrived: int | None = None
     ) -> WebhookOutcome:
         """`arrived` is the number the queue gave this delivery, which is the order it reached
         this bot. Handlers that have no use for it ignore it; the item sync uses it to place two

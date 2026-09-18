@@ -19,12 +19,13 @@ arrives in a shape nobody expected leaves one card unread instead of ending the 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Protocol
 
 from shannon.domain.enums import ObjectType
+from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.github import mapping
 
 logger = logging.getLogger(__name__)
@@ -79,9 +80,11 @@ class ReadsJson(Protocol):
     something that answers with JSON rather than on everything that talks to GitHub.
     """
 
-    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any: ...
+    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
 
-    def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]: ...
+    def get_pages(
+        self, path: str, *, owner: str = "", **params: str | int
+    ) -> AsyncIterator[object]: ...
 
 
 class HttpProjectBoards:
@@ -98,7 +101,7 @@ class HttpProjectBoards:
         deleting it, so mirroring one would put back a thread for work already put away.
         """
         wanted = await self._field_ids(owner, project_number)
-        params: dict[str, Any] = {"per_page": PAGE_SIZE}
+        params: dict[str, str | int] = {"per_page": PAGE_SIZE}
         if wanted:
             params["fields"] = ",".join(str(field) for field in wanted)
 
@@ -106,7 +109,7 @@ class HttpProjectBoards:
         async for body in self._client.get_pages(
             f"/users/{owner}/projectsV2/{project_number}/items", owner=owner, **params
         ):
-            rows = body if isinstance(body, list) else []
+            rows = body if is_json_list(body) else []
             items.extend(
                 item for row in rows if (item := parse_item(row, project_number)) is not None
             )
@@ -130,11 +133,11 @@ class HttpProjectBoards:
         body = await self._client.get_json(
             f"/users/{owner}/projectsV2/{project_number}/fields", owner=owner
         )
-        rows = body if isinstance(body, list) else []
+        rows = body if is_json_list(body) else []
         by_name = {
             row.get("name"): field_id
             for row in rows
-            if isinstance(row, Mapping)
+            if is_json_object(row)
             and row.get("name") in (TITLE_FIELD, STATUS_FIELD)
             and isinstance(field_id := row.get("id"), int)
         }
@@ -151,14 +154,14 @@ class HttpProjectBoards:
         return found
 
 
-def parse_item(payload: Any, project_number: int) -> BoardItem | None:
+def parse_item(payload: object, project_number: int) -> BoardItem | None:
     """One card, or None for one this bot cannot make sense of.
 
     Every kind of card is read, not only drafts. A card wrapping an issue or a pull request is
     what "mirror project board movement" mostly means in practice, and the poller uses the
     content id to find the thread that issue already has rather than opening a second one.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     if payload.get("archived_at") is not None:
         return None
@@ -174,12 +177,13 @@ def parse_item(payload: Any, project_number: int) -> BoardItem | None:
     if not isinstance(item_id, int):
         return None
 
-    content = payload.get("content")
-    content = content if isinstance(content, Mapping) else {}
+    wrapped = payload.get("content")
+    content: JsonObject = wrapped if is_json_object(wrapped) else {}
 
-    fields = payload.get("fields")
-    fields = fields if isinstance(fields, list) else []
+    listed = payload.get("fields")
+    fields: list[object] = listed if is_json_list(listed) else []
 
+    content_id = content.get("id")
     title = _text(_field_value(fields, TITLE_FIELD)) or _text(content.get("title"))
     if not title:
         return None
@@ -196,18 +200,18 @@ def parse_item(payload: Any, project_number: int) -> BoardItem | None:
         updated_at=mapping.parse_timestamp(payload.get("updated_at")),
         # What the card wraps, by GitHub's id for it, which is the same id the tracked item was
         # stored under when its own webhook arrived. None for a draft, which wraps nothing.
-        content_id=content.get("id") if isinstance(content.get("id"), int) else None,
+        content_id=content_id if isinstance(content_id, int) else None,
     )
 
 
-def _field_value(fields: list[Any], name: str) -> Any:
+def _field_value(fields: list[object], name: str) -> object:
     for field in fields:
-        if isinstance(field, Mapping) and field.get("name") == name:
+        if is_json_object(field) and field.get("name") == name:
             return field.get("value")
     return None
 
 
-def _option_name(value: Any) -> Any:
+def _option_name(value: object) -> object:
     """A single-select field's chosen option.
 
     `value.name` is an object rather than a string here, unlike every other name in this API,
@@ -217,12 +221,12 @@ def _option_name(value: Any) -> Any:
     leaves a field value untyped, so the nesting is documented by one example, and refusing the
     flat form would turn a shape nobody promised against us into a board with no columns.
     """
-    if isinstance(value, Mapping):
+    if is_json_object(value):
         return value.get("name")
     return value if isinstance(value, str) else None
 
 
-def _text(value: Any) -> str | None:
+def _text(value: object) -> str | None:
     """The plain form of one of GitHub's `{raw, html}` pairs, or a bare string if it is one.
 
     Both, because the OpenAPI description leaves a field's value untyped, so the nesting is
@@ -231,14 +235,14 @@ def _text(value: Any) -> str | None:
     """
     if isinstance(value, str):
         return value.strip() or None
-    if isinstance(value, Mapping):
+    if is_json_object(value):
         raw = value.get("raw")
         if isinstance(raw, str):
             return raw.strip() or None
     return None
 
 
-def _owner_of(payload: Mapping[str, Any]) -> str:
+def _owner_of(payload: JsonObject) -> str:
     """The login out of the project's API url, which is the only place a card carries it."""
     url = payload.get("project_url")
     if isinstance(url, str) and "/users/" in url:

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.domain.models import ReviewSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import REVIEW_ACTIONS
@@ -11,7 +10,7 @@ from shannon.github.webhooks.events import REVIEW_ACTIONS
 logger = logging.getLogger(__name__)
 
 
-def parse_review_event(action: str, payload: Mapping[str, Any]) -> ReviewSnapshot | None:
+def parse_review_event(action: str, payload: JsonObject) -> ReviewSnapshot | None:
     """Turn a `pull_request_review` webhook body into a snapshot.
 
     The pull request is identified by number, matching how comments are looked up, so both
@@ -26,7 +25,7 @@ def parse_review_event(action: str, payload: Mapping[str, Any]) -> ReviewSnapsho
         return None
 
     item = payload.get("pull_request")
-    number = item.get("number") if isinstance(item, Mapping) else None
+    number = item.get("number") if is_json_object(item) else None
     if not isinstance(number, int):
         logger.warning("pull_request_review.%s arrived without a pull request number", action)
         return None

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.domain.models import LabelMove
 from shannon.domain.priority import parse_priority
 from shannon.github.labels import status_of
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 LABEL_ACTIONS = frozenset({"labeled", "unlabeled"})
 
 
-def parse_label_move(action: str, payload: Mapping[str, Any]) -> LabelMove | None:
+def parse_label_move(action: str, payload: JsonObject) -> LabelMove | None:
     """Which label this delivery put on or took off, or None where it says nothing about one.
 
     Read off the delivery rather than worked out by comparing label lists, because GitHub has
@@ -38,7 +37,7 @@ def parse_label_move(action: str, payload: Mapping[str, Any]) -> LabelMove | Non
         return None
 
     label = payload.get("label")
-    if not isinstance(label, Mapping):
+    if not is_json_object(label):
         logger.info("%s arrived without a label object, so nothing is said about it", action)
         return None
 
