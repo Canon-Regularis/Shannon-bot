@@ -5420,3 +5420,51 @@ to set the project number will find it.
   is caught. This has no second id to compare with, so it answers with the claim as it was made. A
   stale link asks the wrong person for a review; it cannot put somebody on an item who had no
   business being there, because GitHub still applies its own rules.
+
+
+## Assignees, and the vocabulary that makes room for them
+
+- **`/assign` now means assignee, and `/request_review` means reviewer.** A pull request keeps both
+  lists and one person can be on both, so the two needed separate commands. Closes #105.
+- **`/assign` used to work out which list from the kind of item.** A pull request meant a reviewer,
+  an issue meant an assignee, and it read well right up until somebody wanted to assign a pull
+  request, which it made unsayable. Issues #105 and #106 were a pair all along: one is reviewers,
+  which only a pull request has, and the other is assignees, which both have.
+- **An issue asked for a review is refused and told which command to use**, rather than being left
+  to GitHub, whose answer for that endpoint is a 404 nobody can act on.
+- **The mirror side needed nothing at all.** Pull request snapshots have always carried
+  `assignees`, `pull_request.assigned` has always been accepted, those rows have always been
+  stored under `ASSIGNEE`, and the block has always rendered the line, because it is unconditional
+  and only the reviewers line is behind a flag. The whole of this was the Discord vocabulary and
+  one notification gap.
+- **That gap: nothing has ever told somebody they were assigned to a pull request.** The reviewer
+  notifiers were on the pull request sync and the assignee one was on the issue sync alone. The
+  block names them, and every block after the first is an edit, which Discord does not notify. So
+  assigning somebody reached them nowhere.
+- **Switching that on without a migration would have been a mass notification.** The policy has
+  written an `ASSIGNEE` row for every pull request since it was written and nothing ever claimed
+  one, so every one of them has an empty `notified_at`, and that emptiness is the whole of what
+  `claim_notifications` asks about. The next delivery on each open pull request would have pinged
+  everybody assigned to it, about work they were given months ago.
+- **So migration `0021` stamps the rows that predate the notifier**, and only the ones on pull
+  requests. A null on an issue is a ping genuinely still owed, because that sync has carried the
+  notifier all along and clears the stamp whenever a post fails. The statement is lifted to a
+  module constant so the test runs the one the migration runs, rather than a copy kept in step by
+  hand: stamping one row too many silences somebody, and one too few is the storm.
+- **Its downgrade does nothing, deliberately.** Clearing the stamps cannot tell a row this
+  migration wrote from one the notifier has legitimately claimed since, so it would empty both and
+  re-create the exact problem the upgrade exists to prevent.
+- **The two-notifier seam became a list.** A pull request now tells three different people three
+  different things off three different tables, and `_Both` was pair-shaped. It is a tuple now, for
+  the same reason it existed at all: so a fourth needs no change to the sync service.
+- **A consequence found by the suite rather than by reasoning, and worth knowing.** Giving pull
+  request assignees a notifier means their rows now carry a `notified_at`, and that stamp is what
+  `_already_told_and_newer` reads: it refuses to let a payload that is not strictly newer delete a
+  row somebody has already been pinged from. So an assignee added and removed inside the same
+  second now stays on the item until the next event says otherwise, where before they went straight
+  off. That is the trade the rule was written to make, and issue assignees have made it all along;
+  this is pull requests catching up rather than anything new. It surfaced as a test that had never
+  needed a later timestamp and suddenly did.
+- Deliberately not renamed: `unrequest_review` is an ugly word. It is GitHub's verb rather than a
+  better one, and `/add_reviewer` and `/remove_reviewer` were the alternative.
+

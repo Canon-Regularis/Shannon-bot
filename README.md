@@ -375,8 +375,10 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
-| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Asks that person for a review on a pull request, or puts them on an issue, because an issue has no reviewers. They need a linked GitHub account. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
-| `/unassign <member>` | Developer, Project Manager | The same in reverse, withdrawing a review request or taking an assignee off |
+| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
+| `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
+| `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
+| `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
 | `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
@@ -455,7 +457,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0020`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0021`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
