@@ -137,7 +137,7 @@ class ItemWorkflow:
 
     async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done."""
-        found = await self._locate(thread_id)
+        found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._fetch(found)
         self._refuse_a_status_that_will_not_hold(found, snapshot, status)
@@ -170,7 +170,7 @@ class ItemWorkflow:
                 if moved_to is not status:
                     # Somebody moved the item while this waited, and their lock is the current
                     # one. Everything this branch acts on was read before the wait: the status
-                    # off `_locate`, the labels off a GitHub round trip after it. The branch
+                    # off `locate`, the labels off a GitHub round trip after it. The branch
                     # below never had this problem, because it re-reads under the row's own lock
                     # and decides from what that gave back.
                     #
@@ -274,7 +274,7 @@ class ItemWorkflow:
         merged pull request is never. Reproduced: label HIGH on GitHub, HIGH in the row, UNSET
         in the thread, and the command that exists to fix it reporting nothing to do.
         """
-        found = await self._locate(thread_id)
+        found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._fetch(found)
 
@@ -288,7 +288,7 @@ class ItemWorkflow:
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
         return WorkflowOutcome(found.full_name, found.number, changed=True)
 
-    def _refuse_a_kind_it_cannot_move(self, found: _Found) -> None:
+    def _refuse_a_kind_it_cannot_move(self, found: FoundItem) -> None:
         """Refuse a thread whose item this service has no way to write to.
 
         A project ticket is a draft card on a board. It has no repository page and no labels, so
@@ -303,7 +303,7 @@ class ItemWorkflow:
             )
 
     def _refuse_a_status_that_will_not_hold(
-        self, found: _Found, snapshot: TrackedSnapshot, status: Status
+        self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
     ) -> None:
         """Refuse, rather than write a status that something else is going to overwrite.
 
@@ -334,7 +334,7 @@ class ItemWorkflow:
                 f"{Status.DONE.value}. This one is {found.status.value}."
             )
 
-    async def _fetch(self, found: _Found) -> TrackedSnapshot:
+    async def _fetch(self, found: FoundItem) -> TrackedSnapshot:
         """Read the item from GitHub, and refuse anything that is not the repository we mean.
 
         Everything below this addresses GitHub by the stored `owner/name`, and a name is not an
@@ -359,7 +359,7 @@ class ItemWorkflow:
             )
         return snapshot
 
-    async def _apply(self, found: _Found, change: labels.LabelChange) -> None:
+    async def _apply(self, found: FoundItem, change: labels.LabelChange) -> None:
         """Put the labels right on GitHub.
 
         Removals first. The two states this can be interrupted in are an item with no status
@@ -372,7 +372,7 @@ class ItemWorkflow:
 
     async def _rerender(
         self,
-        found: _Found,
+        found: FoundItem,
         snapshot: TrackedSnapshot,
         change: labels.LabelChange,
         *,
@@ -497,7 +497,7 @@ class ItemWorkflow:
 
     async def _rebuild_and_lock(
         self,
-        found: _Found,
+        found: FoundItem,
         snapshot: TrackedSnapshot,
         change: labels.LabelChange,
         wants_lock: bool,
@@ -519,7 +519,7 @@ class ItemWorkflow:
         """
         rebuilt = await self._rerender(found, snapshot, change, settles_the_lock=False)
         # The one the command arrived on, where the render answered with nothing. It used to
-        # reach for a field `_Found` does not have, which nothing noticed because nothing here
+        # reach for a field `FoundItem` does not have, which nothing noticed because nothing here
         # is type checked and every route to it is closed by an invariant somewhere else: a
         # repository row is never deleted, a channel mapping is never deleted, and a ticket is
         # refused before this. All true, and none of them stated anywhere near this line.
@@ -583,25 +583,6 @@ class ItemWorkflow:
                 exc_info=True,
             )
 
-    async def _locate(self, thread_id: int) -> _Found:
-        """Which item this thread is, as plain values out of the session.
-
-        The repository is fetched rather than read off `item.repository`: that is a lazy
-        relationship, and an async session cannot load one on attribute access.
-        """
-        async with self._sessionmaker() as session:
-            item = await TrackedItemStore(session).get_by_thread(thread_id)
-            repository = (
-                await RepositoryStore(session).get_by_id(item.repository_id)
-                if item is not None
-                else None
-            )
-            if item is None or repository is None:
-                raise NotAnItemThreadError(
-                    "Run this inside the thread of a pull request or issue this bot is tracking."
-                )
-            return _Found.of(item, repository)
-
 
 def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> TrackedSnapshot:
     """The snapshot as it will be once the change lands, without asking GitHub again.
@@ -619,8 +600,32 @@ def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> Tracke
     return replace(snapshot, labels=tuple(kept))
 
 
+async def locate(sessionmaker: async_sessionmaker, thread_id: int) -> FoundItem:
+    """Which item a thread is, as plain values out of the session.
+
+    A function rather than a method, because it is the one question every command run INSIDE a
+    thread has to ask first and it belongs to no single service. The workflow commands ask it to
+    decide what to relabel; `/regenerate` asks it to decide what to redraw.
+
+    The repository is fetched rather than read off `item.repository`: that is a lazy
+    relationship, and an async session cannot load one on attribute access.
+    """
+    async with sessionmaker() as session:
+        item = await TrackedItemStore(session).get_by_thread(thread_id)
+        repository = (
+            await RepositoryStore(session).get_by_id(item.repository_id)
+            if item is not None
+            else None
+        )
+        if item is None or repository is None:
+            raise NotAnItemThreadError(
+                "Run this inside the thread of a pull request or issue this bot is tracking."
+            )
+        return FoundItem.of(item, repository)
+
+
 @dataclass(frozen=True, slots=True)
-class _Found:
+class FoundItem:
     """The item a thread belongs to, as plain values out of its session."""
 
     tracked_item_id: int
@@ -648,7 +653,7 @@ class _Found:
         return self.full_name.split("/", 1)[1]
 
     @classmethod
-    def of(cls, item: TrackedItem, repository: Repository) -> _Found:
+    def of(cls, item: TrackedItem, repository: Repository) -> FoundItem:
         return cls(
             tracked_item_id=item.id,
             object_type=item.github_object_type,

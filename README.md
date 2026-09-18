@@ -40,6 +40,12 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
   missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly, or
   one kind of item if you pick one. It never revisits an item that already has a thread.
+- **Redrawing one that has gone quiet.** `/regenerate`, run in an item's own thread, reads it from
+  GitHub again and rewrites the block. It is for the threads nothing else reaches: a closed pull
+  request gains labels and assignees afterwards and no delivery ever comes to say so, and somebody
+  who linked their GitHub account after `/refresh` opened a thread is named in plain text in it
+  until something redraws it. Nobody is pinged, which is the point: everybody on the item is named
+  as a real mention and Discord is told to ring none of them.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
   mark per item stops an old delivery undoing a newer one.
 
@@ -349,6 +355,7 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
+| `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |

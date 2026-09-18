@@ -11,6 +11,7 @@ from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
 from shannon.commands.mentions import build_mentions_command
 from shannon.commands.refresh import build_refresh_command
+from shannon.commands.regenerate import build_regenerate_command
 from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
@@ -75,12 +76,13 @@ from shannon.services.sync.policies import (
     channel_fallbacks,
 )
 from shannon.services.sync.refresh import RepositoryRefresh
+from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.unregistration import RepositoryUnregistrationService
 from shannon.services.verification import GitHubIdentityVerification
-from shannon.services.workflow import ItemWorkflow, build_item_workflow
+from shannon.services.workflow import ItemKind, ItemWorkflow, build_item_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +410,40 @@ def _refresh(
     )
 
 
+def _regenerate(
+    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+) -> ItemRegeneration:
+    """The redraw path's own sync services: no notifier, and no allow-list.
+
+    Mentions ON, deliberately, and that is the fix rather than a detail. A thread opened by
+    `/refresh` was rendered without them and nothing ever revisits it, so somebody who linked
+    afterwards stays plain text for ever. This is what puts them back.
+
+    Silent twice over, by construction rather than by rule. No notifier, so there is nothing to
+    fire. And `notifies=False`, so the block's live mentions reach Discord with an empty
+    allow-list and ring nobody even on the one path that POSTS the block rather than editing it,
+    which is a metadata message somebody deleted.
+
+    One invariant that guarantee leans on and does not own: `_may_notify` sets only `users`, so
+    `roles` stays whatever the client allows, which is everything. This is safe because the
+    metadata block never builds a role mention - teams are named plainly and never looked up in
+    the mention map. Anybody adding one to the block has to deal with this.
+    """
+    return ItemRegeneration(
+        sessionmaker,
+        {
+            ObjectType.PR: ItemKind(
+                fetch=github.get_pull_request,
+                sync=build_item_sync(sessionmaker, threads, PullRequestPolicy(), notifies=False),
+            ),
+            ObjectType.ISSUE: ItemKind(
+                fetch=github.get_issue,
+                sync=build_item_sync(sessionmaker, threads, IssuePolicy(), notifies=False),
+            ),
+        },
+    )
+
+
 def _relocation(
     sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
 ) -> ThreadRelocation:
@@ -451,6 +487,7 @@ def _commands(
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
     refresh: RepositoryRefresh,
+    regenerate: ItemRegeneration,
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
@@ -473,6 +510,7 @@ def _commands(
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
+        build_regenerate_command(regenerate, gate),
         build_link_command(UserLinkingService(sessionmaker, github), gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
         # The only one here with no gate, which is visible at a glance and is the point. See
@@ -580,6 +618,7 @@ def build_container(
             pr_sync,
             issue_sync,
             _refresh(sessionmaker, github, threads),
+            _regenerate(sessionmaker, github, threads),
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,

@@ -72,6 +72,7 @@ class TestWhatItWiresUp:
             "mentions",
             "pr",
             "refresh",
+            "regenerate",
             "register",
             "set_backlog",
             "set_channel",

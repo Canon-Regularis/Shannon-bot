@@ -26,7 +26,7 @@ from tests.fakes.threads import FakeThreadGateway
 # rely on that is worth failing on so somebody reads this comment.
 NAME = re.compile(r"^[-_a-z0-9]{1,32}$")
 
-# Discord's ceilings. The command one is per application and global, and this installs sixteen,
+# Discord's ceilings. The command one is per application and global, and this installs eighteen,
 # so it is here to catch a future stage adding a hundred rather than because it is close.
 MAX_COMMANDS = 100
 MAX_PARAMETERS = 25

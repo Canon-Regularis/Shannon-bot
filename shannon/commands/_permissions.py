@@ -11,10 +11,10 @@ from shannon.discord_bot.roles import CommandRole
 
 REGISTER_ROLES = frozenset({CommandRole.ADMIN, CommandRole.PROJECT_MANAGER})
 
-# Reviewers are deliberately absent: the permissions table grants /pr, /issue and /refresh to
-# developers
-# and project managers only. Somebody who holds one of those as well as Reviewer still passes,
-# because holding any listed role is what grants a command rather than holding only listed ones.
+# Reviewers are deliberately absent: the permissions table grants /pr, /issue, /refresh and
+# /regenerate to developers and project managers only. Somebody who holds one of those as well as
+# Reviewer still passes, because holding any listed role is what grants a command rather than
+# holding only listed ones.
 SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
 
 # The project manager's alone. Status is the record of a decision about somebody's work, and the
