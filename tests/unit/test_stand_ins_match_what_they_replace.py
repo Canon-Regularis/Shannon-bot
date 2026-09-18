@@ -20,6 +20,7 @@ from shannon.api.routes.health import Liveness
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.mentions import RemembersWhoWantsPinging
+from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
@@ -91,6 +92,7 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
+from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
@@ -140,6 +142,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (FindsInstallations, InstallationTokens),
     (VerifiesIdentity, GitHubIdentityVerification),
     (UnregistersRepositories, RepositoryUnregistrationService),
+    (RedrawsAnItem, ItemRegeneration),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),
