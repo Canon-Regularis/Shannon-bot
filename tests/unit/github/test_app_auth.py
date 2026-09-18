@@ -58,6 +58,20 @@ def broken_rsa_pem(*lines: str) -> str:
 
 PEM = pem_of(KEY)
 
+# Two ways a pasted key goes wrong, cut from a real one rather than written out here.
+#
+# Written out they would contain a literal PEM header, and a secret scanner cannot tell one of
+# those in a test fixture from a key somebody committed by accident. gitleaks scans the whole
+# history, so a marker added here fails the build on that commit for ever afterwards, and the
+# only ways out are rewriting published history or an ignore file. Cutting a real key apart says
+# exactly the same thing and leaves no marker in the source at all.
+#
+# They are better fixtures for it as well. These carry the headers `cryptography` actually emits
+# rather than the ones somebody remembered, and the truncation lands in the middle of the base64,
+# which is where a copy and paste really stops.
+HALF_A_KEY = PEM[: len(PEM) // 2]
+NO_KEY_AT_ALL = PEM.splitlines()[0] + "\n" + PEM.splitlines()[-1] + "\n"
+
 
 def parts(token: str) -> tuple[dict, dict, bytes]:
     """The three segments, decoded. Padding is put back because a JWT strips it."""
@@ -165,14 +179,7 @@ class TestAKeyThatWasSetAndIsWrong:
     """The opposite case, and it raises. Somebody put a value there, so somebody wants to hear
     that it does not work rather than watch every repository report as missing."""
 
-    @pytest.mark.parametrize(
-        "broken",
-        [
-            "not a key at all",
-            broken_rsa_pem("truncated"),
-            broken_rsa_pem(),
-        ],
-    )
+    @pytest.mark.parametrize("broken", ["not a key at all", HALF_A_KEY, NO_KEY_AT_ALL])
     def test_a_key_that_will_not_parse_says_which_setting_is_wrong(self, broken: str) -> None:
         with pytest.raises(GitHubAuthError, match="SHANNON_GITHUB_APP_PRIVATE_KEY"):
             signed(private_key_pem=broken)
