@@ -239,3 +239,56 @@ class TestALoginThatChangedHands:
         resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": None})
 
         assert resolved == {"alice": 42}
+
+
+class TestTheOtherDirection:
+    """Discord member to GitHub login, which is what a write to GitHub has to start from.
+
+    Issue #106. `resolve_many` answers the question an item asks, and it has the account id off
+    the payload to check the stored one against. This one has no second id, so it answers with the
+    claim as made, and the tests below are mostly about that being deliberate.
+    """
+
+    async def test_a_member_who_has_linked(self, db_session: AsyncSession) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="OctoCat", github_user_id=111, discord_user_id=42
+        )
+
+        found = await UserLinkStore(db_session).login_for(guild_id=1, discord_user_id=42)
+
+        assert found == "octocat", "the store lowercases on the way in and must answer that way"
+
+    async def test_a_member_who_has_not(self, db_session: AsyncSession) -> None:
+        assert await UserLinkStore(db_session).login_for(guild_id=1, discord_user_id=42) is None
+
+    async def test_a_member_linked_in_another_server(self, db_session: AsyncSession) -> None:
+        """Links are per guild, so one server's claim says nothing about another's."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+
+        assert await UserLinkStore(db_session).login_for(guild_id=2, discord_user_id=42) is None
+
+    async def test_it_follows_a_relink(self, db_session: AsyncSession) -> None:
+        """`/link` deletes and reinserts rather than updating, so this must read the live row."""
+        store = UserLinkStore(db_session)
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+        await store.link(
+            guild_id=1, github_username="monalisa", github_user_id=222, discord_user_id=42
+        )
+
+        assert await store.login_for(guild_id=1, discord_user_id=42) == "monalisa"
+
+    async def test_two_members_do_not_collide(self, db_session: AsyncSession) -> None:
+        store = UserLinkStore(db_session)
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+        await store.link(
+            guild_id=1, github_username="monalisa", github_user_id=222, discord_user_id=99
+        )
+
+        assert await store.login_for(guild_id=1, discord_user_id=42) == "octocat"
+        assert await store.login_for(guild_id=1, discord_user_id=99) == "monalisa"
