@@ -28,16 +28,20 @@ env:
 
 jobs:
   quality:
-    name: Lint and format
+    name: Lint, format and types
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
 
+      # Pinned to the floor rather than left to resolve. Both checkers are configured for 3.12,
+      # and a checker run on a newer interpreter quietly stops enforcing the version this project
+      # says it supports.
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          python-version: "3.12"
 
       - run: uv sync --extra dev --locked
 
@@ -47,6 +51,15 @@ jobs:
 
       - name: Formatting
         run: uv run ruff format --check --diff .
+
+      # Two checkers, because they disagree and each waves through what the other catches. Both
+      # carry a shrinking list of files that are not clean yet; anything outside that list has to
+      # stay clean, which is what stops the tree drifting back while the list is worked through.
+      - name: Types (mypy)
+        run: uv run mypy
+
+      - name: Types (pyright)
+        run: uv run pyright
 
   test:
     name: Tests (Python ${{ matrix.python }})
