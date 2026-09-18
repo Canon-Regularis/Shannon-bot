@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -28,6 +28,7 @@ from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonErro
 from shannon.domain.models import Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
+from shannon.services.labels import RepositoryLabels
 from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
 
@@ -105,10 +106,42 @@ class WorkflowOutcome:
     # board poller is the one caller with nobody to tell, so it is the one that has to know the
     # difference between a refusal worth another poll and one that will refuse every poll.
     lock_refusal_is_permanent: bool = False
+    # The label this moved, as the REPOSITORY spells it rather than as it was typed. Empty
+    # for the seven commands that do not move an arbitrary one. The reply says it back, and
+    # saying back what somebody typed would hide the one thing worth showing them: that
+    # `/label BUG` wrote `bug`, because that is the label the repository actually has.
+    label: str = ""
+
+
+# Which command owns a name that may not be set by hand, so a refusal says where to go instead.
+# Written out rather than derived from the enum: MEDIUM's command is `set_med_priority` and not
+# `set_medium_priority`, so a derived name would be wrong for exactly one of the eight and right
+# everywhere it was tested. A test holds this against the tables the commands are built from.
+_OWNED_BY: dict[Status | Priority, str] = {
+    Status.BACKLOG: "set_backlog",
+    Status.NOT_REVIEWED: "set_not_reviewed",
+    Status.IN_REVIEW: "set_in_review",
+    Status.READY_FOR_MERGE: "set_ready_for_merge",
+    Status.DONE: "set_done",
+    Priority.HIGH: "set_high_priority",
+    Priority.MEDIUM: "set_med_priority",
+    Priority.LOW: "set_low_priority",
+}
+
+# How many of a repository's labels a refusal lists before it stops. A taxonomy can be long and
+# the reply is one Discord message.
+_ENOUGH_TO_SHOW = 15
 
 
 class LabelsItems(Protocol):
-    """Putting a label on an item and taking one off, which is all this path asks of GitHub."""
+    """Putting a label on an item, taking one off, and asking which ones exist.
+
+    The third is only for the command that sets an arbitrary label: GitHub creates a name it has
+    never seen rather than refusing, so a typo has to be caught here or it becomes a label on the
+    repository for good.
+    """
+
+    async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
@@ -128,12 +161,14 @@ class ItemWorkflow:
         github: LabelsItems,
         threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
+        repository_labels: RepositoryLabels,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
         self._github = github
         self._threads = threads
         self._kinds = kinds
+        self._labels = repository_labels
 
     async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done."""
@@ -287,6 +322,101 @@ class ItemWorkflow:
 
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
         return WorkflowOutcome(found.full_name, found.number, changed=True)
+
+    async def set_label(self, *, thread_id: int, name: str, adding: bool) -> WorkflowOutcome:
+        """Put an ordinary label on an item, or take one off.
+
+        Modelled on `set_priority` rather than on `set_status`: no stored column moves, so there
+        is no row to write, nothing to put back when Discord fails, and no thread to lock.
+
+        The two refusals are the whole of this command. Everything else here already existed.
+        """
+        found = await locate(self._sessionmaker, thread_id)
+        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_name_this_bot_owns(name)
+
+        # Before the labels are listed, not after. Listing addresses GitHub by the stored
+        # `owner/name`, and if that name has been taken by somebody else the refusal would read a
+        # stranger's label taxonomy back to whoever ran the command.
+        snapshot = await self._fetch(found)
+        spelled = await self._spelling_the_repository_uses(found, name)
+
+        change = labels.label_change(snapshot.label_names, spelled, adding=adding)
+        if change.nothing_to_do:
+            return WorkflowOutcome(found.full_name, found.number, changed=False, label=spelled)
+
+        await self._apply(found, change)
+        await self._rerender(found, snapshot, change)
+
+        logger.info(
+            "%s#%s %s %r",
+            found.full_name,
+            found.number,
+            "was labelled" if adding else "lost the label",
+            spelled,
+        )
+        return WorkflowOutcome(found.full_name, found.number, changed=True, label=spelled)
+
+    async def labels_for_thread(self, thread_id: int) -> tuple[str, ...]:
+        """Every label the repository behind this thread has, for the picker.
+
+        Asked on every keystroke, which is why the list is cached a repository at a time. A thread
+        that is not a tracked item answers with nothing rather than raising: an autocomplete has
+        nowhere to put a refusal, and an empty picker in a channel that is not an item's thread is
+        the right amount of nothing to say.
+        """
+        try:
+            found = await locate(self._sessionmaker, thread_id)
+        except NotAnItemThreadError:
+            return ()
+        return await self._labels.names(found.owner, found.name)
+
+    def _refuse_a_name_this_bot_owns(self, name: str) -> None:
+        """Refuse a label that already means something here, and say which command owns it.
+
+        A status set this way would make the block contradict itself. Nothing on the webhook path
+        reads a status back onto the stored column, so the item would go on showing one status
+        while carrying the label of another, and the thread would post a line saying the status
+        had been set when it had not moved at all.
+
+        Priority fails the other way and is worse for it. `parse_priority` DOES feed the stored
+        column on every sync, so `critical` written here changes an item's priority from a command
+        that never mentioned priority.
+        """
+        reserved = labels.reserved_as(name)
+        if reserved is None:
+            return
+        instead = f"Use /{_OWNED_BY[reserved]} instead."
+        if isinstance(reserved, Status):
+            raise WorkflowRefusedError(f"{name!r} is a workflow status here. {instead}")
+        raise WorkflowRefusedError(
+            f"{name!r} already means {reserved.value} priority here. {instead}"
+        )
+
+    async def _spelling_the_repository_uses(self, found: FoundItem, name: str) -> str:
+        """The repository's own spelling of this label, refusing one it does not have.
+
+        Refused rather than written, because GitHub creates a label it has never seen instead of
+        refusing. That is what lets the workflow commands work on a repository nobody prepared,
+        and it is exactly wrong for a name somebody typed: one slip adds a label to the repository
+        for good, and nothing here can list or delete one afterwards.
+        """
+        spelled = await self._labels.spelled(found.owner, found.name, name)
+        if spelled is not None:
+            return spelled
+
+        known = sorted(await self._labels.names(found.owner, found.name))
+        if not known:
+            raise WorkflowRefusedError(
+                f"{found.full_name} has no labels at all yet, so there is none to set. Make one "
+                "on GitHub first."
+            )
+        shown = ", ".join(known[:_ENOUGH_TO_SHOW])
+        rest = len(known) - _ENOUGH_TO_SHOW
+        raise WorkflowRefusedError(
+            f"{found.full_name} has no label called {name!r}. It has: {shown}"
+            + (f", and {rest} more." if rest > 0 else ".")
+        )
 
     def _refuse_a_kind_it_cannot_move(self, found: FoundItem) -> None:
         """Refuse a thread whose item this service has no way to write to.
@@ -690,4 +820,5 @@ def build_item_workflow(
                 sync=issue_sync,
             ),
         },
+        RepositoryLabels(github),
     )
