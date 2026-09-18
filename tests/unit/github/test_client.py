@@ -1284,3 +1284,79 @@ class TestARefusalToldApartFromAnOutage:
         async with client_with(handler) as client:
             with pytest.raises(GitHubRefusedError):
                 await client.add_assignees("acme", "widget", 12, ["stranger"])
+
+
+class TestListingARepositoryLabels:
+    """Issue #104. Read so a typed label can be checked before it is written, because GitHub
+    creates a name it has never seen rather than refusing one."""
+
+    async def test_it_reads_the_names(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=json.dumps([{"name": "bug"}, {"name": "good first issue"}])
+            )
+
+        async with client_with(handler) as client:
+            assert await client.list_labels("acme", "widget") == ["bug", "good first issue"]
+
+    async def test_it_asks_the_repository_s_own_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path.decode())
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_labels("acme", "wid/get")
+
+        assert seen[0].startswith("/repos/acme/wid%2Fget/labels")
+
+    async def test_a_row_that_is_not_a_label_is_skipped(self) -> None:
+        """The body comes off the network. A row this cannot read is one label missing from the
+        picker, not a command that fails."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(["nope", {"name": ""}, {"colour": "red"}, {"name": "bug"}]),
+            )
+
+        async with client_with(handler) as client:
+            assert await client.list_labels("acme", "widget") == ["bug"]
+
+    async def test_a_body_that_is_not_a_list_at_all(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"message": "nope"}))
+
+        async with client_with(handler) as client:
+            assert await client.list_labels("acme", "widget") == []
+
+    async def test_a_repository_with_no_labels(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            assert await client.list_labels("acme", "widget") == []
+
+    async def test_every_page_is_read(self) -> None:
+        """A repository with a real taxonomy has more than one page of them, and a half-read list
+        would refuse a label that exists."""
+        asked: list[str] = []
+        following = {"Link": '<https://api.github.com/repos/acme/widget/labels?page=2>; rel="next"'}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(str(request.url))
+            if len(asked) == 1:
+                return httpx.Response(
+                    200,
+                    content=json.dumps([{"name": "bug"}]),
+                    # Followed rather than built, because the cursor is GitHub's own.
+                    headers=following,
+                )
+            return httpx.Response(200, content=json.dumps([{"name": "last"}]))
+
+        async with client_with(handler) as client:
+            found = await client.list_labels("acme", "widget")
+
+        assert len(asked) == 2
+        assert found == ["bug", "last"]
