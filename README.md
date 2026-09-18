@@ -85,6 +85,18 @@ uv run shannon
 Startup refuses to open the port until the database answers and has been migrated. Without a
 Discord token it still serves the endpoint and works the queue, and warns that it is doing so.
 
+The checks CI runs, which are worth running before pushing:
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+uv run mypy                          # strict on shannon, relaxed on tests
+uv run pyright                       # the engine behind Pylance, so the editor agrees
+uv run pytest -q --cov
+```
+
+Both type checkers carry a list of files that are not clean yet, in `pyproject.toml`. A file leaves
+that list when it is fixed and does not go back, and anything not on it has to stay clean.
+
 ## Connecting it to GitHub and Discord
 
 Neither side is configured by this repository, and the bot cannot do either for you.

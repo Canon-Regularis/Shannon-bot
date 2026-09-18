@@ -5331,3 +5331,56 @@ to set the project number will find it.
   thread goes on showing an approval that no longer counts, and taking somebody off a review says
   nothing in the thread either. Each needs a key and wording of its own, and a dismissal has to
   name who dismissed it rather than whose review it was, which is not the same person.
+
+
+## Two type checkers, and the first two thirds of the tree made clean for them
+
+- **mypy and pyright both gate CI now.** Pyright is the engine behind Pylance, so an error in the
+  editor is an error in the build and there is no second list to keep in your head. Mypy runs
+  beside it because the two genuinely disagree, and each waves through things the other catches.
+  Both are strict on `shannon` and relaxed on `tests`, and both are pinned to 3.12, the declared
+  floor, so anything that only works on a newer interpreter is caught here rather than by the
+  matrix.
+- **Two earlier entries in this file are now out of date and are left standing as history.** One
+  said there is no type checker in this project, which is what made a fake drifting narrower than
+  the real thing undetectable. The other said mypy reported about twenty things; on the tree as it
+  stood when this began it reported 168, and pyright at strict reported 806.
+- **Most of that 806 was one mistake repeated, not eight hundred.** Pyright's `reportUnknown*`
+  rules fire wherever a type is partly unresolved, and an unparameterised generic makes everything
+  downstream of it unresolved. Filling in `async_sessionmaker[AsyncSession]` at 343 sites took the
+  count from 806 to 446 without changing a line of behaviour, and the rest of the generics took it
+  to 358. Worth knowing before reading a strict-mode count as a defect count.
+- **The GitHub JSON boundary is the part that needed designing rather than filling in.** Every
+  parser took `payload: Any` and then checked each field with `isinstance` on the way past. The
+  runtime guards were already right; the type was what disabled checking, because `Any` reads a
+  field off a value nothing can see into, so a mistyped key name was invisible.
+- **So the boundary is one step wide now.** A body arrives as `object`, `is_json_object` narrows it
+  to a mapping with the key type the format guarantees, and everything after that is checked. It is
+  a `TypeGuard` rather than an `isinstance` at each site because `isinstance` cannot narrow to
+  better than `Mapping[Unknown, Unknown]`: the parameters are erased at runtime and there is
+  nothing left to test. That the keys are strings is a fact about JSON rather than an assumption
+  about the payload, which is what makes stating it the right trade.
+- **Not one `cast` was added, and the `Any` count went from 78 to single figures.** What survives
+  is where data genuinely arrives untyped: `json.loads` and `response.json()`. The two helpers that
+  are `**`-unpacked into snapshots became TypedDicts, because `dict[str, object]` will not unpack
+  into a typed constructor at all and `dict[str, Any]` unpacks into anything, which is the same as
+  not checking it.
+- **One `Any` was added deliberately, in `discord_bot/slash.py`.** `app_commands.Command` takes the
+  object a command is bound to, and discord.py bounds that to `Group | Cog`. Every command here is
+  a plain module-level function bound to neither, so there is nothing truthful to put in the slot:
+  `Group` claims a binding that does not exist and `object` does not satisfy the bound. Said once
+  in an alias rather than seventeen times across the command modules.
+- **The gate went on before the tree was clean, which is the point.** Both tools carry a list of
+  the files that still fail. A file leaves it when it is fixed and does not go back, and anything
+  not on the list is checked from the moment it is written. Waiting until everything passed would
+  have meant a long branch during which nothing was enforced at all.
+- **A pyright behaviour worth writing down, because it is not in the documentation.** An execution
+  environment honours per-rule overrides but silently ignores `typeCheckingMode`, so holding the
+  tests to standard while the source is strict means naming the eleven rules strict adds. That list
+  was derived by running the tree at both levels and taking the difference rather than read off a
+  page.
+- Still to do, and said rather than hidden: `discord_bot/threads.py`, the container, and the two
+  workflow modules are the bulk of what is left in the source, and the tests have had none of this
+  yet beyond the sessionmaker fill-in. The commands still take `discord.Interaction` rather than a
+  narrow protocol, which is what stops the fakes satisfying them without a cast.
+
