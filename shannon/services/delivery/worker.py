@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 from shannon.config import Settings
 from shannon.domain.enums import DeliveryStatus
 from shannon.domain.errors import PermanentError
+from shannon.domain.json import JsonObject
 from shannon.github.webhooks.events import WebhookOutcome
 from shannon.services.delivery.queue import Delivery, DeliveryQueue
 
@@ -29,7 +30,7 @@ class Dispatch(Protocol):
         self,
         event: str,
         action: str | None,
-        payload: Mapping[str, Any],
+        payload: JsonObject,
         arrived: int | None = None,
     ) -> WebhookOutcome: ...
 

@@ -77,7 +77,7 @@ def github() -> FakeGitHubClient:
 
 @pytest.fixture
 def manual(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     github: FakeGitHubClient,
     sync_service: ItemSyncService,
 ) -> ManualSync:
@@ -193,7 +193,10 @@ class TestWhenACollaboratorBreaksItsWord:
         return ManualSync(db_sessionmaker, github, sync, **(settings | overrides))
 
     async def test_a_parser_that_drops_the_number_is_refused_before_github(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
     ) -> None:
         manual = self._manual(
             db_sessionmaker,
@@ -208,7 +211,10 @@ class TestWhenACollaboratorBreaksItsWord:
         assert github.pull_request_calls == [], "GitHub was asked for an item with no number"
 
     async def test_nothing_to_sync_into_is_reported_as_a_missing_channel(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
     ) -> None:
         manual = self._manual(
             db_sessionmaker, github, _Syncs(SyncResult(outcome=SyncOutcome.NOT_TRACKED))
@@ -218,7 +224,10 @@ class TestWhenACollaboratorBreaksItsWord:
             await manual.sync_link(guild_id=1, link=LINK)
 
     async def test_a_sync_that_reports_no_thread_is_not_reported_as_success(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
     ) -> None:
         """`ManualSyncOutcome.thread_id` becomes a channel link in the reply, so None here is a
         message pointing at nothing."""
@@ -267,7 +276,7 @@ class TestARenamedRepository:
     async def test_a_link_under_the_new_name_is_accepted(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         sync_service: ItemSyncService,
         renamed: FakeGitHubClient,
         moved_link: str,
@@ -282,7 +291,7 @@ class TestARenamedRepository:
     async def test_the_stored_name_is_brought_up_to_date(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         sync_service: ItemSyncService,
         renamed: FakeGitHubClient,
@@ -309,7 +318,7 @@ class TestARenamedRepository:
     async def test_a_repository_unregistered_while_github_was_answering(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         renamed: FakeGitHubClient,
         moved_link: str,
@@ -345,7 +354,7 @@ class TestARenamedRepository:
     async def test_a_link_to_a_genuinely_different_repository_is_still_refused(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         sync_service: ItemSyncService,
     ) -> None:
         elsewhere = replace(REPO, github_repo_id=999999, owner="someone", name="else")
@@ -358,7 +367,7 @@ class TestARenamedRepository:
     async def test_a_link_to_nothing_at_all_is_still_refused(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         sync_service: ItemSyncService,
     ) -> None:
         service = build_pull_request_sync(db_sessionmaker, FakeGitHubClient(), sync_service)
@@ -384,7 +393,7 @@ class TestSyncingAnIssueByLink:
     @pytest.fixture
     def issues(
         self,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         issue_github: FakeGitHubClient,
         issue_service: ItemSyncService,
     ) -> ManualSync:
@@ -480,7 +489,7 @@ class TestTheNameTakenBySomebodyElse:
     async def test_the_link_is_refused_rather_than_mirrored(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         sync_service: ItemSyncService,
         somebody_elses: FakeGitHubClient,
         db_session: AsyncSession,
@@ -495,7 +504,7 @@ class TestTheNameTakenBySomebodyElse:
     async def test_the_repository_it_really_is_gets_named(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         sync_service: ItemSyncService,
         somebody_elses: FakeGitHubClient,
     ) -> None:

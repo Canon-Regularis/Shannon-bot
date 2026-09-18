@@ -35,7 +35,7 @@ async def stored(session: AsyncSession, login: str = "octocat"):
 
 class TestInstalling:
     async def test_installing_writes_the_account_down(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
 
@@ -47,7 +47,7 @@ class TestInstalling:
         assert (found.installation_id, found.account_id) == (42, 583231)
 
     async def test_it_is_not_suspended_to_begin_with(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
 
@@ -58,7 +58,7 @@ class TestInstalling:
         assert found.suspended is False
 
     async def test_accepting_new_permissions_keeps_it(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """An ordinary event when the App's permissions change. It carries the whole installation,
         so the simplest correct thing is to write it down again."""
@@ -71,7 +71,7 @@ class TestInstalling:
         assert await stored(db_session) is not None
 
     async def test_a_repository_added_to_an_installation_keeps_it(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
 
@@ -80,7 +80,7 @@ class TestInstalling:
         assert await stored(db_session) is not None
 
     async def test_a_repository_removed_does_not_forget_the_installation(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """The distinction that matters. Taking one repository out of an installation leaves the
         installation standing, and forgetting it would break every other repository under that
@@ -95,7 +95,7 @@ class TestInstalling:
 
 class TestRemoving:
     async def test_uninstalling_forgets_the_account(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
         await handle("created", delivery())
@@ -106,7 +106,7 @@ class TestRemoving:
         assert await stored(db_session) is None
 
     async def test_uninstalling_something_never_installed_here_is_not_an_error(
-        self, db_sessionmaker: async_sessionmaker, caplog: pytest.LogCaptureFixture
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], caplog: pytest.LogCaptureFixture
     ) -> None:
         """GitHub sends this to every subscriber. Answering anything but "handled" would put the
         delivery through sixteen retries to reach the same conclusion."""
@@ -121,7 +121,7 @@ class TestRemoving:
 
 class TestPausing:
     async def test_suspending_keeps_the_row_and_marks_it(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
         await handle("created", delivery())
@@ -133,7 +133,7 @@ class TestPausing:
         assert found.suspended is True
 
     async def test_resuming_clears_it(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
         await handle("created", delivery())
@@ -146,7 +146,7 @@ class TestPausing:
         assert found.suspended is False
 
     async def test_a_suspend_for_an_account_never_seen_still_leaves_a_row(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """Which happens whenever the App was installed while this process was down. Writing the
         row and then marking it means the state is right either way round."""
@@ -161,7 +161,7 @@ class TestPausing:
 
 class TestADeliveryThatSaysNothingUsable:
     async def test_a_payload_with_no_installation_is_ignored(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """Every delivery from a repository webhook configured by hand looks like this, and they
         are ordinary during the changeover."""
@@ -172,7 +172,7 @@ class TestADeliveryThatSaysNothingUsable:
         assert outcome is WebhookOutcome.IGNORED
 
     async def test_it_is_said_out_loud(
-        self, db_sessionmaker: async_sessionmaker, caplog: pytest.LogCaptureFixture
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], caplog: pytest.LogCaptureFixture
     ) -> None:
         handle = build_installation_handler(db_sessionmaker)
 

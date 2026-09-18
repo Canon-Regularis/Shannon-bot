@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.repositories import RepositoryStore
@@ -28,7 +28,7 @@ class ReviewRequestLedger:
     compared against, so a genuine re-request still reopens it and a straggler does not.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def fulfilled(self, snapshot: ReviewSnapshot) -> None:

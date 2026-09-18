@@ -12,7 +12,7 @@ import contextlib
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.services.sync.one_at_a_time import _ONE_ITEM_AT_A_TIME, ItemLock, _lock_key
 
@@ -23,7 +23,7 @@ ONE = 4_242
 ANOTHER = 9_999
 
 
-async def postgres_holds(sessionmaker: async_sessionmaker, item: int) -> bool:
+async def postgres_holds(sessionmaker: async_sessionmaker[AsyncSession], item: int) -> bool:
     """Whether Postgres says the lock on that item is held by anybody at all.
 
     Asked of the database rather than of this process, because taking the lock again from here
@@ -44,7 +44,7 @@ async def postgres_holds(sessionmaker: async_sessionmaker, item: int) -> bool:
     return bool(held)
 
 
-async def warm_the_pool(sessionmaker: async_sessionmaker) -> None:
+async def warm_the_pool(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     """Open the connections the test is about to need, before it starts timing anything.
 
     The tier hands back a pool with one connection in it, so one of two writers gathered below
@@ -86,7 +86,7 @@ class _Door:
 
 
 async def test_two_writers_of_one_item_do_not_overlap(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     await warm_the_pool(db_sessionmaker)
     lock = ItemLock(db_sessionmaker)
@@ -100,7 +100,7 @@ async def test_two_writers_of_one_item_do_not_overlap(
 
 
 async def test_two_different_items_do_not_wait_for_each_other(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """The other half of it, and the half a lock taken on nothing in particular would fail.
 
@@ -119,7 +119,7 @@ async def test_two_different_items_do_not_wait_for_each_other(
 
 
 async def test_taking_it_again_inside_is_let_straight_through(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """`/set_status` holds an item and re-renders it through the ordinary sync, which takes this
     for itself. Without letting the second one through, that is one caller waiting on itself for
@@ -142,7 +142,7 @@ async def test_taking_it_again_inside_is_let_straight_through(
 
 
 async def test_it_is_let_go_of_when_the_block_ends(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Nothing releases it by name, so this is the whole of the release: the transaction it was
     taken in ends, and the connection is rolled back before anything else is given it."""
@@ -155,7 +155,7 @@ async def test_it_is_let_go_of_when_the_block_ends(
 
 
 async def test_an_exception_inside_still_lets_it_go(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     lock = ItemLock(db_sessionmaker)
 
@@ -167,7 +167,7 @@ async def test_an_exception_inside_still_lets_it_go(
 
 
 async def test_the_note_of_holding_it_is_given_back_after_a_failure(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Not the lock itself, the note this process keeps of holding it, which is what lets a
     caller take it again without waiting.

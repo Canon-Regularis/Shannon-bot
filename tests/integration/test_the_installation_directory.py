@@ -18,13 +18,13 @@ pytestmark = pytest.mark.integration
 
 
 async def test_an_owner_nobody_installed_on_resolves_to_nothing(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     assert await InstallationDirectory(db_sessionmaker).installation_for("stranger") is None
 
 
 async def test_an_installed_owner_resolves_to_its_installation(
-    db_session: AsyncSession, db_sessionmaker: async_sessionmaker
+    db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     await InstallationStore(db_session).remember(installation_id=42, account_login="octocat")
     await db_session.commit()
@@ -35,7 +35,7 @@ async def test_an_installed_owner_resolves_to_its_installation(
 
 
 async def test_the_owner_is_matched_whatever_case_the_caller_used(
-    db_session: AsyncSession, db_sessionmaker: async_sessionmaker
+    db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """The owner arrives off a webhook payload or a parsed link, and GitHub is careless about case
     in both. A directory that missed its own row half the time would send every other request out
@@ -47,7 +47,7 @@ async def test_the_owner_is_matched_whatever_case_the_caller_used(
 
 
 async def test_a_suspended_installation_resolves_to_nothing(
-    db_session: AsyncSession, db_sessionmaker: async_sessionmaker
+    db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """Somebody turned the App off. Minting against it fails, so there is nothing to gain by
     trying, and the row is kept rather than deleted so this stays distinguishable from an App
@@ -62,7 +62,7 @@ async def test_a_suspended_installation_resolves_to_nothing(
 
 async def test_a_suspended_installation_says_so_rather_than_looking_uninstalled(
     db_session: AsyncSession,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The whole reason the state is kept. Without the line, somebody pausing the App and then
@@ -79,7 +79,7 @@ async def test_a_suspended_installation_says_so_rather_than_looking_uninstalled(
 
 
 async def test_resuming_makes_it_resolve_again(
-    db_session: AsyncSession, db_sessionmaker: async_sessionmaker
+    db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     store = InstallationStore(db_session)
     await store.remember(installation_id=42, account_login="octocat", suspended=True)

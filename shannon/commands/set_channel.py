@@ -10,6 +10,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, ShannonError
@@ -45,7 +46,7 @@ class MapsChannels(Protocol):
 
 def build_set_channel_command(
     service: MapsChannels, relocation: RelocatesThreads, gate: PermissionGate
-) -> app_commands.Command:
+) -> SlashCommand:
     @app_commands.command(
         name="set_channel", description="Choose which channel a kind of GitHub item posts into"
     )

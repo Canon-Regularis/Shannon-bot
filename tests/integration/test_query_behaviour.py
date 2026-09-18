@@ -38,7 +38,7 @@ class QueryLog:
 async def test_a_sync_never_loads_assignments_it_does_not_read(
     registered: Repository,
     db_engine: AsyncEngine,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     issue_event,
 ) -> None:
     """Assignments are read one role at a time through the store.
@@ -63,7 +63,7 @@ async def test_a_sync_never_loads_assignments_it_does_not_read(
 
 async def test_reading_the_relationship_is_an_error_rather_than_a_silent_query(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     issue_event,
 ) -> None:
     """If someone reaches for it later, they should find out immediately."""
@@ -81,7 +81,7 @@ async def test_finding_an_item_by_number_uses_an_index(
     registered: Repository,
     db_session: AsyncSession,
     issue_event,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Comments and reviews take this path, so it has to stay flat as a repository grows.
 
@@ -111,7 +111,7 @@ async def test_the_number_lookup_still_finds_the_right_row(
     db_session: AsyncSession,
     issue_event,
     pr_event,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     issues = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
     await issues.sync(issue_event("opened"))

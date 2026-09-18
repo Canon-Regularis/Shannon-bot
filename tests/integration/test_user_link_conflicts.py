@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def service(db_sessionmaker: async_sessionmaker) -> UserLinkingService:
+def service(db_sessionmaker: async_sessionmaker[AsyncSession]) -> UserLinkingService:
     return UserLinkingService(db_sessionmaker, FakeGitHubClient())
 
 

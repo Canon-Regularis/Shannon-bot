@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 
 
 class RemembersWhoWantsPinging(Protocol):
@@ -38,7 +39,7 @@ _ROLES_STILL_REACH_YOU = (
 )
 
 
-def build_mentions_command(service: RemembersWhoWantsPinging) -> app_commands.Command:
+def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
     """The first command here that takes no permission gate, and the only one that should.
 
     Every other command in this bot decides something about the server: which repository it

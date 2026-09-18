@@ -18,16 +18,17 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
 from shannon.domain.errors import ShannonError
+from shannon.domain.json import JsonObject, is_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class GitHubIdentityVerification:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         *,
         client_id: str,
         client_secret: str,
@@ -206,9 +207,9 @@ class GitHubIdentityVerification:
         return login, github_user_id
 
 
-def _object(response: httpx.Response) -> Mapping[str, Any]:
+def _object(response: httpx.Response) -> JsonObject:
     try:
         payload: Any = response.json()
     except ValueError:
         return {}
-    return payload if isinstance(payload, Mapping) else {}
+    return payload if is_json_object(payload) else {}

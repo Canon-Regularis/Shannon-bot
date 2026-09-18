@@ -234,7 +234,7 @@ class FakeGitHubClient:
             raise self.error
         return self.permissions.get(login.lower(), "admin")
 
-    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any:
+    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
         """Whatever this fake was told to answer with at a path, or an empty list.
 
         Here because the protocol declares it, which is the point of the conformance table: the
@@ -247,7 +247,9 @@ class FakeGitHubClient:
             raise self.error
         return self.bodies.get(path, [])
 
-    async def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]:
+    async def get_pages(
+        self, path: str, *, owner: str = "", **params: str | int
+    ) -> AsyncIterator[object]:
         self.json_calls.append((path, params))
         self.json_owners.append(owner)
         if self.error is not None:

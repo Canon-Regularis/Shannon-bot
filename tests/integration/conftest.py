@@ -101,12 +101,12 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-def db_sessionmaker(db_engine: AsyncEngine) -> async_sessionmaker:
+def db_sessionmaker(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
 
 
 @pytest.fixture
-def queue(db_sessionmaker: async_sessionmaker) -> WebhookDeliveryQueue:
+def queue(db_sessionmaker: async_sessionmaker[AsyncSession]) -> WebhookDeliveryQueue:
     return WebhookDeliveryQueue(db_sessionmaker)
 
 
@@ -125,7 +125,7 @@ def threads() -> FakeThreadGateway:
 
 @pytest.fixture
 def sync_service(
-    db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
 ) -> ItemSyncService:
     """Pull request sync without the notifier, for tests that are not about pinging."""
     return build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
@@ -133,7 +133,7 @@ def sync_service(
 
 @pytest.fixture
 def notifying_sync_service(
-    db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
 ) -> ItemSyncService:
     return build_item_sync(
         db_sessionmaker,
@@ -147,14 +147,14 @@ def notifying_sync_service(
 
 @pytest.fixture
 def issue_service(
-    db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
 ) -> ItemSyncService:
     return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
 
 @pytest.fixture
 def notifying_issue_service(
-    db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+    db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
 ) -> ItemSyncService:
     return build_item_sync(
         db_sessionmaker,

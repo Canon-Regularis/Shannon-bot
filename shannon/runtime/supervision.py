@@ -66,7 +66,7 @@ def report_exit(what: str, shutdown: Shutdown, halt: Callable[[], None] | None =
     Left off for a task the process is still useful without, which is how the poller is wired.
     """
 
-    def report(task: asyncio.Task) -> None:
+    def report(task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         error = task.exception()
@@ -94,7 +94,7 @@ async def safely(what: str, closing: Awaitable[None]) -> None:
         logger.error("could not %s while shutting down: %s", what, error)
 
 
-async def stop(task: asyncio.Task | None, *, grace: float = 0.0) -> None:
+async def stop(task: asyncio.Task[None] | None, *, grace: float = 0.0) -> None:
     """Wait `grace` seconds for a task to finish on its own, then cancel it.
 
     Watches the task rather than awaiting its result. Awaiting adopts the exception of a task

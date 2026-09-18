@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -20,7 +20,9 @@ class InvalidGitHubUsernameError(ShannonError):
 class UserLinkingService:
     """Binds a GitHub login to a Discord account so that person can be pinged."""
 
-    def __init__(self, sessionmaker: async_sessionmaker, github: LooksUpUsers) -> None:
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], github: LooksUpUsers
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
 
@@ -81,7 +83,7 @@ class TeamLinkingService:
     this is gated like `/set_channel` rather than like `/link`.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> str:

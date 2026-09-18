@@ -93,7 +93,7 @@ async def test_what_the_command_writes_is_what_the_sync_reads(
     registered: Repository,
     db_engine: AsyncEngine,
     db_session: AsyncSession,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     pr_event,
 ) -> None:
     """The whole point, in one test. Everything else here is about the command answering
@@ -118,7 +118,7 @@ async def test_what_the_command_writes_is_what_the_sync_reads(
 
 
 async def test_the_service_answers_about_the_server_it_was_asked_about(
-    registered: Repository, db_sessionmaker: async_sessionmaker
+    registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """A bot in two servers is two conversations, and somebody drowning in one is not asking to
     go quiet in the other."""

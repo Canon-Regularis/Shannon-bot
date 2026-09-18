@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.installations import InstallationStore
@@ -47,7 +47,7 @@ class RepositoryRegistrationService:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         github: LooksUpRepository,
         installations: FindsInstallations | None = None,
     ) -> None:

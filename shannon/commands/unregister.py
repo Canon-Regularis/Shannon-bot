@@ -17,6 +17,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.unregistration import UnregisterOutcome
 
@@ -44,7 +45,7 @@ class UnregistersRepositories(Protocol):
 
 def build_unregister_command(
     service: UnregistersRepositories, verification: VerifiesIdentity, gate: PermissionGate
-) -> app_commands.Command:
+) -> SlashCommand:
     @app_commands.command(name="unregister", description="Unbind this server's GitHub repository")
     # The full name is required and is a confirmation rather than a lookup: the server has exactly
     # one repository, so there is nothing to disambiguate. It is here because this is irreversible

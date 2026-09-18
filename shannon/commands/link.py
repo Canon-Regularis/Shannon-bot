@@ -9,6 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.services.linking import InvalidGitHubUsernameError
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class LinksAccounts(Protocol):
     async def link(self, *, guild_id: int, github_username: str, discord_user_id: int) -> str: ...
 
 
-def build_link_command(service: LinksAccounts, gate: PermissionGate) -> app_commands.Command:
+def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(name="link", description="Connect a GitHub username to a Discord account")
     @app_commands.describe(
         github_username="The GitHub username to connect",

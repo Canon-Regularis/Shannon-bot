@@ -87,7 +87,7 @@ def github_says(
 
 @asynccontextmanager
 async def verifying(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     clock: Clock | None = None,
@@ -108,7 +108,7 @@ async def verifying(
 
 class TestHandingOutTheLink:
     async def test_the_link_carries_the_client_id_and_a_state(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -119,7 +119,9 @@ class TestHandingOutTheLink:
         assert "client_id=Iv23liAbC" in link
         assert "state=" in link
 
-    async def test_it_asks_for_no_scope(self, db_sessionmaker: async_sessionmaker) -> None:
+    async def test_it_asks_for_no_scope(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
         """A user token with the default empty scope can call `GET /user`, which is all this
         needs. Asking for more would be asking somebody to grant access to prove they have it."""
         handler, _ = github_says()
@@ -130,7 +132,7 @@ class TestHandingOutTheLink:
         assert "scope=" not in link
 
     async def test_the_redirect_matches_the_callback_this_service_serves(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """GitHub checks it against the App's registered callback, which is the second half of the
         protection the state provides."""
@@ -141,7 +143,9 @@ class TestHandingOutTheLink:
 
         assert "redirect_uri=https://shannon.example.com/oauth/github/callback" in link
 
-    async def test_every_link_is_different(self, db_sessionmaker: async_sessionmaker) -> None:
+    async def test_every_link_is_different(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
@@ -151,7 +155,7 @@ class TestHandingOutTheLink:
         assert first != second
 
     async def test_a_half_configured_deployment_knows_it_cannot_do_this(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -162,7 +166,9 @@ class TestHandingOutTheLink:
 
 
 class TestRedeemingIt:
-    async def test_it_answers_who_signed_in(self, db_sessionmaker: async_sessionmaker) -> None:
+    async def test_it_answers_who_signed_in(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
@@ -173,7 +179,7 @@ class TestRedeemingIt:
         assert (verified.guild_id, verified.discord_user_id) == (GUILD, ALICE)
 
     async def test_the_user_token_is_never_written_down(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """Used once and thrown away. One lasts eight hours and carries a six-month refresh token,
         so keeping either would mean holding a credential to somebody's whole GitHub account to
@@ -193,7 +199,7 @@ class TestRedeemingIt:
         assert all("gho_secret_value" not in str(value) for value in held)
 
     async def test_the_proof_is_remembered(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         handler, _ = github_says()
 
@@ -205,7 +211,9 @@ class TestRedeemingIt:
                 await verification.already_proved(guild_id=GUILD, discord_user_id=ALICE)
             ) == "octocat"
 
-    async def test_a_proof_goes_stale(self, db_sessionmaker: async_sessionmaker) -> None:
+    async def test_a_proof_goes_stale(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
         """It permits an irreversible command, and holding an account a while ago says little
         about holding it now."""
         clock = Clock()
@@ -219,7 +227,7 @@ class TestRedeemingIt:
             assert await verification.already_proved(guild_id=GUILD, discord_user_id=ALICE) is None
 
     async def test_one_link_cannot_be_redeemed_twice(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -232,7 +240,7 @@ class TestRedeemingIt:
                 await verification.redeem(state=state, code="abc")
 
     async def test_a_state_nobody_issued_is_refused(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The same message as an expired one and an already-used one. Telling them apart would
         confirm to somebody guessing states that a particular one was real."""
@@ -245,7 +253,7 @@ class TestRedeemingIt:
         assert seen == [], "it spent a round trip on a state it had already refused"
 
     async def test_an_expired_link_is_refused(
-        self, db_session: AsyncSession, db_sessionmaker: async_sessionmaker
+        self, db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         await IdentityVerificationStore(db_session).issue(
             state="old", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(minutes=-1)
@@ -258,7 +266,7 @@ class TestRedeemingIt:
                 await verification.redeem(state="old", code="abc")
 
     async def test_a_bad_code_is_caught_although_github_answers_200(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The single easiest thing to get wrong here. GitHub answers a bad code with 200 and an
         error in the body, so checking the status alone reads a refusal as a success and fails
@@ -272,7 +280,7 @@ class TestRedeemingIt:
                 await verification.redeem(state=_state(link), code="wrong")
 
     async def test_a_body_that_is_not_json_at_all_is_refused(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """An outage page rather than an answer, which is what a proxy in front of GitHub serves
         when something has gone wrong upstream."""
@@ -287,7 +295,7 @@ class TestRedeemingIt:
                 await verification.redeem(state=_state(link), code="abc")
 
     async def test_a_body_that_is_json_but_not_an_object_is_refused(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=json.dumps(["not", "an", "object"]))
@@ -300,7 +308,7 @@ class TestRedeemingIt:
 
     @pytest.mark.parametrize("missing", [{"login": None}, {"user_id": None}])
     async def test_a_user_github_will_not_name_is_refused(
-        self, db_sessionmaker: async_sessionmaker, missing: dict
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], missing: dict
     ) -> None:
         handler, _ = github_says(**missing)
 
@@ -313,7 +321,10 @@ class TestRedeemingIt:
 
 class TestUnbinding:
     async def test_an_admin_unbinds_it(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
     ) -> None:
         service = RepositoryUnregistrationService(db_sessionmaker, FakePermissions("admin"))
 
@@ -326,7 +337,10 @@ class TestUnbinding:
 
     @pytest.mark.parametrize("permission", ["write", "read", "none", "maintain", ""])
     async def test_anything_short_of_admin_is_refused(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, permission: str
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        permission: str,
     ) -> None:
         """GitHub folds `maintain` into `write` and `triage` into `read` before answering, so
         admin is the whole of the tier that may do this."""
@@ -338,7 +352,10 @@ class TestUnbinding:
             )
 
     async def test_a_refusal_leaves_the_binding_alone(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
     ) -> None:
         service = RepositoryUnregistrationService(db_sessionmaker, FakePermissions("write"))
 
@@ -350,7 +367,7 @@ class TestUnbinding:
         assert await db_session.scalar(select(Repository)) is not None
 
     async def test_the_permission_is_asked_about_the_registered_repository(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """Not about whatever was typed. The typed name is a confirmation, and acting on it would
         let somebody be asked about a repository they do hold admin on instead."""
@@ -363,7 +380,7 @@ class TestUnbinding:
         assert github.asked == [(owner, name, "octocat")]
 
     async def test_a_server_with_nothing_registered_is_told_so(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         service = RepositoryUnregistrationService(db_sessionmaker, FakePermissions())
 
@@ -371,7 +388,7 @@ class TestUnbinding:
             await service.unregister(guild_id=GUILD, full_name="acme/widget", login="octocat")
 
     async def test_a_name_that_does_not_match_is_refused_before_github_is_asked(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         github = FakePermissions("admin")
         service = RepositoryUnregistrationService(db_sessionmaker, github)
@@ -382,7 +399,7 @@ class TestUnbinding:
         assert github.asked == []
 
     async def test_the_confirmation_ignores_case_and_stray_spaces(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """It is a confirmation that somebody meant it, not a password."""
         service = RepositoryUnregistrationService(db_sessionmaker, FakePermissions("admin"))
@@ -394,7 +411,10 @@ class TestUnbinding:
         assert outcome.full_name == registered.repo_name
 
     async def test_it_counts_the_threads_it_orphans(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
     ) -> None:
         """Counted before the delete, because the rows cascade away with the binding. It is the
         surprising part of the command and the reply says it."""
@@ -420,7 +440,10 @@ class TestUnbinding:
         assert outcome.threads_orphaned == 3
 
     async def test_unbinding_takes_the_tracked_items_with_it(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
     ) -> None:
         db_session.add(
             TrackedItem(
@@ -444,7 +467,7 @@ class TestUnbinding:
 
 class TestTheCallbackRoute:
     async def test_a_redeemed_link_says_who_signed_in(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -459,7 +482,7 @@ class TestTheCallbackRoute:
         assert "Signed in as octocat" in response.text
 
     async def test_it_does_not_echo_the_state_or_the_code_back(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """This page is on the open internet. Neither value belongs in a body or a log."""
         handler, _ = github_says()
@@ -479,7 +502,7 @@ class TestTheCallbackRoute:
         "params", [{}, {"code": "abc"}, {"state": "abc"}, {"code": "", "state": ""}]
     )
     async def test_an_incomplete_link_is_refused(
-        self, db_sessionmaker: async_sessionmaker, params: dict
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], params: dict
     ) -> None:
         handler, _ = github_says()
 
@@ -492,7 +515,7 @@ class TestTheCallbackRoute:
         assert response.status_code == 400
 
     async def test_a_state_nobody_issued_is_refused(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -508,7 +531,7 @@ class TestTheCallbackRoute:
         assert "expired or has already been used" in response.text
 
     async def test_a_deployment_that_cannot_verify_says_so_rather_than_failing_oddly(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         handler, _ = github_says()
 
@@ -523,7 +546,7 @@ class TestTheCallbackRoute:
         assert response.status_code == 500
 
     async def test_a_service_with_no_verification_wired_in_at_all(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         async with _browser(None) as client:
             response = await client.get(

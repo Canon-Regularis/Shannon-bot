@@ -119,7 +119,7 @@ async def require_a_working_database(engine: AsyncEngine) -> None:
         await connection.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
 
 
-def gateway_ready(bot: Gateway, bot_task: asyncio.Task) -> ReadyCheck:
+def gateway_ready(bot: Gateway, bot_task: asyncio.Task[None]) -> ReadyCheck:
     """Wait for the gateway, and give up if the bot stops trying to reach it.
 
     `wait_until_ready` waits on an event that is only ever set once a connection succeeds, so a
@@ -149,9 +149,9 @@ class _Running:
     """The tasks this process started, and the flag that says whether it asked them to end."""
 
     shutdown: Shutdown
-    worker_task: asyncio.Task
-    bot_task: asyncio.Task | None
-    poller_task: asyncio.Task | None = None
+    worker_task: asyncio.Task[None]
+    bot_task: asyncio.Task[None] | None
+    poller_task: asyncio.Task[None] | None = None
 
 
 async def _start(
@@ -172,7 +172,7 @@ async def _start(
     everything the webhooks bring it.
     """
     shutdown = Shutdown()
-    bot_task: asyncio.Task | None = None
+    bot_task: asyncio.Task[None] | None = None
     ready: ReadyCheck | None = None
 
     token = settings.discord_token.get_secret_value()
@@ -194,7 +194,7 @@ async def _start(
 
     # Only when a board was configured. Starting a task that returns at once would have the done
     # callback report the poller as having stopped, on every boot, for everybody not using one.
-    poller_task: asyncio.Task | None = None
+    poller_task: asyncio.Task[None] | None = None
     if container.poller.enabled:
         poller_task = asyncio.create_task(container.poller.run_forever())
         poller_task.add_done_callback(report_exit("project poller", shutdown))

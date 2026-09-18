@@ -4,9 +4,9 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.db.stores.muted_members import MutedMemberStore
@@ -19,6 +19,7 @@ from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.safe_text import quote
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread
 from shannon.domain.errors import ItemNotReadyError, PermanentError
+from shannon.domain.json import JsonObject
 from shannon.domain.models import ItemNote
 from shannon.github.mentions import names_in
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
@@ -34,7 +35,7 @@ Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], str]
 # A callable rather than a service, because what it needs is the item read from GitHub and
 # put through the ordinary sync, and this module has no business knowing either of those.
 Rebuild = Callable[[ItemNote], Awaitable[None]]
-NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
+NoteParser = Callable[[str, JsonObject], ItemNote | None]
 # Whether a note has earned a message of its own. Optional, because only one of the three
 # mirrors carries a note that can arrive meaning nothing.
 WorthPosting = Callable[[ItemNote], bool]
@@ -85,7 +86,7 @@ class ItemNoteMirror:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: PostsAndKnowsServers,
         *,
         render: Renderer,
@@ -371,7 +372,7 @@ def build_note_handler(
     """
 
     async def handle(
-        action: str, payload: Mapping[str, Any], arrived: int | None = None
+        action: str, payload: JsonObject, arrived: int | None = None
     ) -> WebhookOutcome:
         snapshot = parse(action, payload)
         if snapshot is None:

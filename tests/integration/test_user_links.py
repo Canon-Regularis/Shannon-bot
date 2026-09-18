@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def service(db_sessionmaker: async_sessionmaker) -> UserLinkingService:
+def service(db_sessionmaker: async_sessionmaker[AsyncSession]) -> UserLinkingService:
     return UserLinkingService(db_sessionmaker, FakeGitHubClient())
 
 
@@ -118,7 +118,7 @@ class TestALoginNobodyHolds:
         return FakeGitHubClient(users={"monalisa": 900})
 
     async def test_a_login_github_has_never_heard_of_is_refused(
-        self, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], github: FakeGitHubClient
     ) -> None:
         service = UserLinkingService(db_sessionmaker, github)
 
@@ -126,7 +126,10 @@ class TestALoginNobodyHolds:
             await service.link(guild_id=1, github_username="monalisaa", discord_user_id=555)
 
     async def test_the_one_it_has_heard_of_is_linked(
-        self, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient, db_session
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
+        db_session,
     ) -> None:
         service = UserLinkingService(db_sessionmaker, github)
 
@@ -135,7 +138,10 @@ class TestALoginNobodyHolds:
 
     @pytest.mark.parametrize("typed", ["mona--lisa", "monalisa-", "-monalisa", "mona_lisa"])
     async def test_a_shape_github_cannot_issue_never_reaches_the_network(
-        self, db_sessionmaker: async_sessionmaker, github: FakeGitHubClient, typed: str
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
+        typed: str,
     ) -> None:
         """GitHub's rule is single hyphens, never leading or trailing. The pattern was looser,
         so these were stored; being narrower now also saves a call that could only say no."""
@@ -147,7 +153,7 @@ class TestALoginNobodyHolds:
         assert github.user_calls == [], "it asked GitHub about a name it could rule out itself"
 
     async def test_github_being_unreachable_refuses_rather_than_guesses(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """A link that cannot be checked is worth less than the person trying again in a minute,
         and the reply table already knows how to say GitHub could not be reached."""

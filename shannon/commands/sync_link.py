@@ -10,6 +10,7 @@ from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.manual import ManualSyncOutcome
 
@@ -56,7 +57,7 @@ class SyncsByLink(Protocol):
     async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome: ...
 
 
-def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> app_commands.Command:
+def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(name="pr", description="Sync a GitHub pull request into Discord")
     @app_commands.describe(pr_link="Link to the GitHub pull request")
     @app_commands.guild_only()
@@ -68,7 +69,7 @@ def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> app_commands
     return pr
 
 
-def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> app_commands.Command:
+def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(name="issue", description="Sync a GitHub issue into Discord")
     @app_commands.describe(issue_link="Link to the GitHub issue")
     @app_commands.guild_only()

@@ -91,7 +91,7 @@ def github_with(*, pulls=(), issues=()) -> FakeGitHubClient:
 
 
 def refresh_with(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     github: FakeGitHubClient,
     *,
@@ -137,7 +137,7 @@ class TestMirroringTheBacklog:
     async def test_every_untracked_open_item_gets_a_thread(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12), an_issue(13)])
@@ -154,7 +154,7 @@ class TestMirroringTheBacklog:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The whole reason this service gets its own sync services rather than the ones `/pr`
@@ -182,7 +182,7 @@ class TestMirroringTheBacklog:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The service the container builds, rather than one this file assembled.
@@ -207,7 +207,7 @@ class TestMirroringTheBacklog:
     async def test_an_item_that_already_has_a_thread_is_left_alone(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(issues=[an_issue(12)])
@@ -225,7 +225,7 @@ class TestMirroringTheBacklog:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The row is committed before the Discord call that gives it a thread, so a refused
@@ -256,7 +256,7 @@ class TestMirroringTheBacklog:
     async def test_a_closed_item_is_never_reached_for(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(issues=[an_issue(12, state="closed")])
@@ -271,7 +271,7 @@ class TestMirroringTheBacklog:
     async def test_a_repository_with_nothing_open_is_not_a_failure(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         outcome = await refresh_with(db_sessionmaker, threads, github_with()).refresh(
@@ -285,7 +285,7 @@ class TestWhatEachScopeReads:
     async def test_issues_only_never_asks_for_pull_requests(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
@@ -300,7 +300,7 @@ class TestWhatEachScopeReads:
     async def test_pull_requests_only_never_asks_for_issues(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
@@ -315,7 +315,7 @@ class TestWhatEachScopeReads:
     async def test_everything_reads_both(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
@@ -331,7 +331,7 @@ class TestTheCap:
     async def test_it_mirrors_no_more_than_the_cap_and_says_what_is_left(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(issues=[an_issue(12), an_issue(13), an_issue(14)])
@@ -346,7 +346,7 @@ class TestTheCap:
     async def test_a_second_run_carries_on_where_the_first_stopped(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         github = github_with(issues=[an_issue(12), an_issue(13), an_issue(14)])
@@ -361,7 +361,7 @@ class TestTheCap:
     async def test_the_count_left_covers_both_kinds(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Both lists are read before either is mirrored, even when the first exhausts the cap.
@@ -381,7 +381,7 @@ class TestWhenOneItemFails:
     async def test_the_rest_are_still_mirrored(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -400,7 +400,7 @@ class TestWhenOneItemFails:
     async def test_a_surprise_does_not_strand_the_command(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -435,7 +435,7 @@ class TestWhenOneItemFails:
     async def test_an_item_a_newer_sync_overtook_is_neither_mirrored_nor_failed(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """A webhook can attach a thread between the read and the sync. Nothing went wrong and
@@ -458,7 +458,7 @@ class TestWhatStopsTheRun:
     async def test_no_channel_mapped_stops_at_the_first_item(
         self,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Nothing about the item decided that, so every one after it would be refused the same
@@ -486,7 +486,7 @@ class TestWhatStopsTheRun:
         assert threads.created == []
 
     async def test_an_unregistered_server_is_told_to_register(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> None:
         with pytest.raises(NotRegisteredError, match="/register"):
             await refresh_with(db_sessionmaker, threads, github_with()).refresh(
@@ -496,7 +496,7 @@ class TestWhatStopsTheRun:
     async def test_a_name_that_now_serves_somebody_elses_repository_is_refused(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The hazard `/pr` already guards: a freed name taken by somebody else would have this
@@ -515,7 +515,7 @@ class TestWhatStopsTheRun:
     async def test_a_spent_rate_limit_comes_back_untouched(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Waiting is the only thing that helps, and the reply table already says how long."""
@@ -530,7 +530,7 @@ class TestWhatStopsTheRun:
     async def test_a_refused_thread_is_one_item_rather_than_the_run(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -560,7 +560,7 @@ class TestTheRoleRowsItWrites:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Silent is not the same as incomplete. The block names everybody, the rows are written,

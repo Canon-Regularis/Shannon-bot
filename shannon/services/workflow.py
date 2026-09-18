@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
@@ -124,7 +124,7 @@ class ItemWorkflow:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         github: LabelsItems,
         threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
@@ -600,7 +600,7 @@ def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> Tracke
     return replace(snapshot, labels=tuple(kept))
 
 
-async def locate(sessionmaker: async_sessionmaker, thread_id: int) -> FoundItem:
+async def locate(sessionmaker: async_sessionmaker[AsyncSession], thread_id: int) -> FoundItem:
     """Which item a thread is, as plain values out of the session.
 
     A function rather than a method, because it is the one question every command run INSIDE a
@@ -668,7 +668,7 @@ class FoundItem:
 
 
 def build_item_workflow(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     github: GitHubClient,
     threads: ShutsAndKnowsServers,
     *,

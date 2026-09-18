@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.muted_members import MutedMemberStore
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class MentionPreferences:
     """A member's own answer to whether this bot may notify them here."""
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def wants_mentions(self, *, guild_id: int, discord_user_id: int) -> bool:

@@ -41,7 +41,7 @@ def written(threads: FakeThreadGateway) -> tuple[str, tuple | None]:
 
 async def test_a_service_that_notifies_names_them_and_may_ring_them(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -60,7 +60,7 @@ async def test_a_service_that_notifies_names_them_and_may_ring_them(
 
 async def test_a_service_that_does_not_notify_still_names_them(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -78,7 +78,7 @@ async def test_a_service_that_does_not_notify_still_names_them(
 
 async def test_the_two_write_the_same_block(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -109,7 +109,7 @@ async def test_the_two_write_the_same_block(
 
 async def test_mentions_off_still_means_plain_text_and_nobody(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -130,7 +130,7 @@ async def test_mentions_off_still_means_plain_text_and_nobody(
 
 async def test_both_off_together_is_the_same_as_either(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:

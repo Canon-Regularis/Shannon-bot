@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository
 from shannon.services.sync.items import ItemSyncService
@@ -31,7 +31,7 @@ CLOSED = {"state": "closed", "closed_at": "2026-08-11T12:00:00Z"}
 async def test_a_thread_the_row_says_is_shut_is_shut_again(
     registered: Repository,
     issue_service: ItemSyncService,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     issue_event,
 ) -> None:
@@ -52,7 +52,7 @@ async def test_a_thread_the_row_says_is_shut_is_shut_again(
 async def test_a_thread_on_an_open_item_is_left_alone(
     registered: Repository,
     issue_service: ItemSyncService,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     issue_event,
 ) -> None:
@@ -73,7 +73,7 @@ async def test_a_thread_on_an_open_item_is_left_alone(
 
 async def test_an_item_that_is_no_longer_there_costs_no_call(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
 ) -> None:
     """Checked rather than trusted, the way the rest of this path checks it: the cost of being
@@ -86,7 +86,7 @@ async def test_an_item_that_is_no_longer_there_costs_no_call(
 async def test_a_refusal_is_swallowed_and_said(
     registered: Repository,
     issue_service: ItemSyncService,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     issue_event,
     caplog: pytest.LogCaptureFixture,
@@ -114,7 +114,7 @@ async def test_a_refusal_is_swallowed_and_said(
 async def test_a_thread_that_is_gone_is_the_same_answer(
     registered: Repository,
     issue_service: ItemSyncService,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     issue_event,
 ) -> None:

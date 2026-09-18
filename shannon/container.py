@@ -4,8 +4,7 @@ import logging
 from dataclasses import dataclass
 
 import httpx
-from discord import app_commands
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
@@ -38,6 +37,7 @@ from shannon.discord_bot.formatting import (
 )
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
+from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import ItemNote
@@ -100,7 +100,7 @@ class Container:
 
     settings: Settings
     engine: AsyncEngine
-    sessionmaker: async_sessionmaker
+    sessionmaker: async_sessionmaker[AsyncSession]
     github: GitHubClient
     queue: WebhookDeliveryQueue
     worker: DeliveryWorker
@@ -108,7 +108,7 @@ class Container:
     event_router: EventRouter
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
-    commands: tuple[app_commands.Command, ...]
+    commands: tuple[SlashCommand, ...]
     # Held so the OAuth callback route can reach it. The route is the one place in this project
     # that is entered from outside rather than called, so it reads its collaborator off app state
     # rather than being handed one.
@@ -246,7 +246,7 @@ def _every(*announcers: AnnouncesInThread) -> AnnouncesInThread:
 
 
 def _sync_services(
-    sessionmaker: async_sessionmaker, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], threads: ThreadGateway
 ) -> tuple[ItemSyncService, ItemSyncService]:
     """One service per object type, differing only in policy and who gets pinged.
 
@@ -302,7 +302,7 @@ def _sync_services(
 
 
 def _event_router(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: ThreadGateway,
     github: GitHubClient,
     pr_sync: ItemSyncService,
@@ -408,7 +408,7 @@ def _event_router(
 
 
 def _refresh(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> RepositoryRefresh:
     """The refresh path's own sync services, built with no notifier.
 
@@ -433,7 +433,7 @@ def _refresh(
 
 
 def _regenerate(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> ItemRegeneration:
     """The redraw path's own sync services: no notifier, and no allow-list.
 
@@ -467,7 +467,7 @@ def _regenerate(
 
 
 def _relocation(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> ThreadRelocation:
     """The relocation path's own sync services: built to relocate, and built without a notifier.
 
@@ -502,7 +502,7 @@ def _relocation(
 
 
 def _commands(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     github: GitHubClient,
     gate: PermissionGate,
     workflow: ItemWorkflow,
@@ -513,7 +513,7 @@ def _commands(
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
-) -> tuple[app_commands.Command, ...]:
+) -> tuple[SlashCommand, ...]:
     """Every slash command the bot installs.
 
     A command missing from here is one that silently stops existing in Discord, so the tuple is

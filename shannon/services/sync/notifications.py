@@ -61,7 +61,7 @@ class ActorNotifier:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: PostsToThread,
         *,
         role: ActorRole,

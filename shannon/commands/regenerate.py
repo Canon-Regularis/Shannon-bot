@@ -20,6 +20,7 @@ from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.regenerate import RegenerateOutcome
 
@@ -36,7 +37,7 @@ class RedrawsAnItem(Protocol):
     async def regenerate(self, *, thread_id: int) -> RegenerateOutcome: ...
 
 
-def build_regenerate_command(service: RedrawsAnItem, gate: PermissionGate) -> app_commands.Command:
+def build_regenerate_command(service: RedrawsAnItem, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(
         name="regenerate",
         description="Redraw this item's details from GitHub, without pinging anybody",

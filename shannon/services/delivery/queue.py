@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.webhook_events import WebhookEventStore
 from shannon.domain.enums import DeliveryStatus
@@ -92,7 +92,7 @@ class WebhookDeliveryQueue:
     delivery immediately, so it cannot ride along in whatever transaction is doing the work.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool:

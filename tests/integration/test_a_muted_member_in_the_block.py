@@ -92,7 +92,7 @@ async def test_somebody_who_did_not_mute_is_still_on_the_list(
 
 async def test_a_block_with_nobody_to_mention_says_nobody_may_be_notified(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     db_session: AsyncSession,
     pr_event,

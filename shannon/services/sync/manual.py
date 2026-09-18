@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository
 from shannon.db.stores.repositories import RepositoryStore
@@ -65,7 +65,7 @@ class ManualSync:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         github: LooksUpRepository,
         sync: SyncsItems,
         *,
@@ -184,7 +184,7 @@ class ManualSync:
 
 
 def build_pull_request_sync(
-    sessionmaker: async_sessionmaker, github: GitHubClient, sync: SyncsItems
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, sync: SyncsItems
 ) -> ManualSync:
     return ManualSync(
         sessionmaker,
@@ -197,7 +197,7 @@ def build_pull_request_sync(
 
 
 def build_issue_sync(
-    sessionmaker: async_sessionmaker, github: GitHubClient, sync: SyncsItems
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, sync: SyncsItems
 ) -> ManualSync:
     return ManualSync(
         sessionmaker,

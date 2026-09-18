@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
 from shannon.discord_bot.threads import PostsToThread
+from shannon.domain.json import JsonObject
 from shannon.domain.models import TrackedSnapshot
 from shannon.services.sync.shutting import KeepsThreadsShut
 
@@ -51,7 +51,7 @@ class Arrival:
     # at all, so reading it there would make every announcer handle a None that cannot happen.
     action: str
     snapshot: TrackedSnapshot
-    payload: Mapping[str, Any]
+    payload: JsonObject
     tracked_item_id: int
     thread_id: int
     # The number the queue gave this delivery, which is the order it reached this bot. It is what
@@ -87,7 +87,7 @@ class ClaimedLine:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: PostsToThread,
         shut_again: KeepsThreadsShut,
     ) -> None:

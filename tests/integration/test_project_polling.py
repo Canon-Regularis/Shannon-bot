@@ -87,7 +87,7 @@ def github_client(pr_event, issue_event) -> FakeGitHubClient:
 
 @pytest.fixture
 def workflow(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     github_client: FakeGitHubClient,
     threads: FakeThreadGateway,
 ) -> ItemWorkflow:
@@ -102,7 +102,9 @@ def workflow(
 
 @pytest.fixture
 def poller_for(
-    db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway, workflow: ItemWorkflow
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    threads: FakeThreadGateway,
+    workflow: ItemWorkflow,
 ):
     def build(
         board: FakeBoard, *, project_number: int = PROJECT, may_set_status: bool = True
@@ -319,7 +321,7 @@ class TestWhenThereIsNothingToDo:
         assert board.reads == [], "a board was read with no project configured"
 
     async def test_an_unregistered_guild_reads_nothing(
-        self, db_sessionmaker: async_sessionmaker, poller_for
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], poller_for
     ) -> None:
         """The process runs before anybody has run /register, which is not an error."""
         board = FakeBoard(card())
@@ -377,7 +379,7 @@ class TestTheLoop:
     async def test_a_stop_does_not_wait_out_the_interval(
         self,
         board_channel: None,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         workflow: ItemWorkflow,
     ) -> None:
@@ -428,7 +430,7 @@ class TestABoardThatMayNotSetAStatus:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         """A pull request already mirrored, and the GitHub id it was stored under."""
@@ -494,7 +496,7 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         """A pull request already mirrored, and the GitHub id it was stored under."""
@@ -566,7 +568,7 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         poller_for,
         github_client: FakeGitHubClient,
         issue_event,
@@ -692,7 +694,7 @@ class TestTheBoardDoesNotOverruleACommand:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         snapshot = pr_event("opened")
@@ -788,7 +790,7 @@ class TestTheBoardDoesNotOverruleACommand:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         poller_for,
         github_client: FakeGitHubClient,
         issue_event,
@@ -821,7 +823,7 @@ class TestWhenSomethingElseGoesWrongMidPoll:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         snapshot = pr_event("opened")
@@ -874,7 +876,7 @@ class TestASecondReviewFound:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         snapshot = pr_event("opened")
@@ -1116,7 +1118,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
         issue_event,
     ) -> tuple[int, int]:
@@ -1185,7 +1187,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
     async def test_a_draft_the_sync_did_not_expect_to_fail_on_is_still_only_one_card(
         self,
         board_channel: None,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         workflow: ItemWorkflow,
         caplog: pytest.LogCaptureFixture,
@@ -1208,7 +1210,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
     async def test_a_move_the_workflow_did_not_expect_to_fail_on_is_still_only_one_card(
         self,
         mirrored: tuple[int, int],
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -1248,7 +1250,7 @@ class TestProgressRecordedForAStepThatFailed:
         self,
         registered: Repository,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> int:
         snapshot = pr_event("opened")
@@ -1697,7 +1699,7 @@ class TestATicketWhoseThreadSomebodyDeleted:
         board_channel: None,
         poller_for,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         board = FakeBoard(card())
@@ -1723,7 +1725,7 @@ class TestATicketWhoseThreadSomebodyDeleted:
         board_channel: None,
         poller_for,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """A card in Done is DONE on the row, and its thread was never locked for it.

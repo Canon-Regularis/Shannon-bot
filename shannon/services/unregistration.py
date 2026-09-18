@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
@@ -56,7 +56,9 @@ class UnregisterOutcome:
 class RepositoryUnregistrationService:
     """Unbinds a repository from a server, once somebody has proved they may."""
 
-    def __init__(self, sessionmaker: async_sessionmaker, github: ReadsPermissions) -> None:
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], github: ReadsPermissions
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
 

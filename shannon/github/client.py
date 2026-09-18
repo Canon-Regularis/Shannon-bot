@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import httpx
 
+from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import (
     CommitRange,
     CommitStats,
@@ -175,9 +176,11 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
     # module that checks every field it touches. Declared here because the wiring hands this
     # same object to the board reader, and a stand-in that satisfied the protocol without them
     # would build a container that fails on the first poll rather than at the seam.
-    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any: ...
+    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
 
-    def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]: ...
+    def get_pages(
+        self, path: str, *, owner: str = "", **params: str | int
+    ) -> AsyncIterator[object]: ...
 
 
 class HttpGitHubClient:
@@ -290,8 +293,8 @@ class HttpGitHubClient:
         payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}", owner)
 
         # The PR response embeds its own repository under base.repo, which saves a second call.
-        base = payload.get("base") if isinstance(payload, dict) else None
-        repo = mapping.repository(base.get("repo") if isinstance(base, dict) else None)
+        base = payload.get("base")
+        repo = mapping.repository(base.get("repo") if is_json_object(base) else None)
         if repo is None:
             repo = await self.get_repository(owner, name)
 
@@ -369,7 +372,7 @@ class HttpGitHubClient:
             sort="updated",
             direction="desc",
         ):
-            for row in body if isinstance(body, list) else []:
+            for row in body if is_json_list(body) else []:
                 item = parse(row, repository)
                 if item is not None and item.github_object_id not in found:
                     found[item.github_object_id] = item
@@ -461,7 +464,9 @@ class HttpGitHubClient:
         # for a chain that never resolves it is still the right one.
         _raise_for_status(response, path)
 
-    async def get_pages(self, path: str, *, owner: str = "", **params: Any) -> AsyncIterator[Any]:
+    async def get_pages(
+        self, path: str, *, owner: str = "", **params: str | int
+    ) -> AsyncIterator[object]:
         """Every page of a list endpoint, following GitHub's own Link header.
 
         The project endpoints paginate by cursor rather than by page number: there is no `page`
@@ -506,7 +511,7 @@ class HttpGitHubClient:
         if url is not None:
             logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
 
-    async def get_json(self, path: str, *, owner: str = "", **params: Any) -> Any:
+    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
         """Whatever GitHub answers at a path, list or object alike.
 
         The typed readers above each know what they asked for and refuse anything else. The
@@ -542,7 +547,7 @@ class HttpGitHubClient:
         token = await self._tokens.token_for(owner)
         return {"Authorization": f"Bearer {token}"} if token else {}
 
-    async def _get(self, path: str, owner: str = "") -> dict[str, Any]:
+    async def _get(self, path: str, owner: str = "") -> JsonObject:
         try:
             response = await self._client.get(path, headers=await self._authorization(owner))
         except httpx.HTTPError as exc:
@@ -555,7 +560,7 @@ class HttpGitHubClient:
         except ValueError as exc:
             raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
-        if not isinstance(payload, dict):
+        if not is_json_object(payload):
             raise GitHubUnavailableError(f"GitHub returned an unexpected body for {path}")
         return payload
 

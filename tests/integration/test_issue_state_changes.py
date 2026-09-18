@@ -283,7 +283,7 @@ class TestLockingAfterANewerSyncHasBeenThrough:
     async def test_a_superseded_close_does_not_lock_a_reopened_issue(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -308,7 +308,7 @@ class TestLockingAfterANewerSyncHasBeenThrough:
     async def test_a_reopen_landing_mid_flight_stops_the_close_locking(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         issue_event,
     ) -> None:
         """The other half of the window, and the half the arrival order cannot catch.
@@ -349,7 +349,7 @@ class TestLockingAfterANewerSyncHasBeenThrough:
     async def test_the_newest_close_still_locks(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -369,7 +369,9 @@ class TestLockingAfterANewerSyncHasBeenThrough:
         assert thread.locked is True
 
 
-async def _reopened_where_this_one_cannot_see(sessionmaker: async_sessionmaker) -> None:
+async def _reopened_where_this_one_cannot_see(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     """What a reopen leaves on the row: a later stamp, and the issue open again.
 
     Only the stamp decides anything, because that is what the second look reads. The status is

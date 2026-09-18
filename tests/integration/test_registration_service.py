@@ -44,7 +44,7 @@ def github() -> FakeGitHubClient:
 
 @pytest.fixture
 def service(
-    db_sessionmaker: async_sessionmaker, github: FakeGitHubClient
+    db_sessionmaker: async_sessionmaker[AsyncSession], github: FakeGitHubClient
 ) -> RepositoryRegistrationService:
     return RepositoryRegistrationService(db_sessionmaker, github)
 
@@ -202,7 +202,7 @@ async def _blocked_on_a_lock(
 
 async def test_a_registration_that_commits_between_the_check_and_the_insert(
     service: RepositoryRegistrationService,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     """The losing path, arranged rather than raced.
@@ -245,7 +245,7 @@ class TestARepositoryRenamedOnGitHub:
     async def test_the_stored_name_follows_the_rename(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
     ) -> None:
@@ -264,7 +264,7 @@ class TestARepositoryRenamedOnGitHub:
     async def test_an_unchanged_name_is_left_alone(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -281,7 +281,7 @@ class TestARepositoryRenamedOnGitHub:
     async def test_a_stale_delivery_does_not_put_the_old_name_back(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
     ) -> None:
@@ -341,7 +341,7 @@ class TestARepositoryTheAppIsNotInstalledOn:
     """
 
     async def test_it_is_refused_before_github_is_asked_about_the_repository(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The order is the fix rather than an optimisation. Read first and a private repository
         reports as missing; ask first and the answer is both true and actionable."""
@@ -356,7 +356,7 @@ class TestARepositoryTheAppIsNotInstalledOn:
         assert github.repository_calls == [], "it went looking for a repository it cannot see"
 
     async def test_the_reply_says_what_to_do_about_it(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         service = RepositoryRegistrationService(
             db_sessionmaker, FakeGitHubClient(), FakeInstallations(installation=None)
@@ -369,7 +369,7 @@ class TestARepositoryTheAppIsNotInstalledOn:
         assert "https://github.com/apps/shannon-bot/installations/new" in refusal.value.message
 
     async def test_a_deployment_whose_slug_could_not_be_read_still_says_the_useful_part(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The link makes the message nicer and is not the message. Failing the command because
         GitHub would not say what the App is called would be the wrong trade."""
@@ -384,7 +384,7 @@ class TestARepositoryTheAppIsNotInstalledOn:
         assert "https://github.com/apps" not in refusal.value.message
 
     async def test_nothing_is_written_down(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         service = RepositoryRegistrationService(
             db_sessionmaker, FakeGitHubClient(), FakeInstallations(installation=None)
@@ -398,7 +398,7 @@ class TestARepositoryTheAppIsNotInstalledOn:
 
 class TestARepositoryTheAppCanSee:
     async def test_registering_records_the_installation_on_the_way_past(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """`/register` is the one command that always knows the answer, so it is the cheapest
         place to learn it. Every call about that owner afterwards resolves from the database."""
@@ -415,7 +415,7 @@ class TestARepositoryTheAppCanSee:
         assert found.installation_id == 42
 
     async def test_a_private_repository_is_recorded_as_private(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """The whole point of the issue, end to end: it registers rather than reporting as
         missing, and the row says what it is."""
@@ -434,7 +434,7 @@ class TestARepositoryTheAppCanSee:
         assert stored.private is True
 
     async def test_a_service_built_without_the_check_behaves_as_it_always_did(
-        self, db_sessionmaker: async_sessionmaker
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The seam is optional so that everything written before the App existed goes on working,
         including a deployment that has not set one up yet."""

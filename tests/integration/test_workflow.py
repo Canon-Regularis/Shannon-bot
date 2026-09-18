@@ -53,7 +53,7 @@ def github(pr_event, issue_event) -> FakeGitHubClient:
 
 @pytest.fixture
 def workflow(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     github: FakeGitHubClient,
     threads: FakeThreadGateway,
     sync_service: ItemSyncService,
@@ -275,7 +275,7 @@ class TestTheRepositoryNameTakenBySomebodyElse:
     async def test_the_command_refuses_rather_than_writing_to_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         thread_id: int,
         threads: FakeThreadGateway,
         somebody_elses: FakeGitHubClient,
@@ -296,7 +296,7 @@ class TestTheRepositoryNameTakenBySomebodyElse:
     async def test_setting_a_priority_is_refused_the_same_way(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         thread_id: int,
         threads: FakeThreadGateway,
         somebody_elses: FakeGitHubClient,
@@ -478,7 +478,7 @@ class TestTheAwkwardOnes:
         workflow: ItemWorkflow,
         thread_id: int,
         github: FakeGitHubClient,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """GitHub is written before the stored copy, so the row can go in between. Deleted from
         inside the label write, which is where that gap actually is."""
@@ -545,7 +545,7 @@ class TestWhatAReviewFound:
         thread_id: int,
         threads: FakeThreadGateway,
         github: FakeGitHubClient,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """Whether to give the thread back was decided from a read taken three calls earlier.
@@ -651,7 +651,7 @@ class TestWhatAReviewFound:
     async def test_a_replacement_thread_for_a_finished_pull_request_comes_back_shut(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         workflow: ItemWorkflow,
         thread_id: int,
         threads: FakeThreadGateway,
@@ -685,7 +685,7 @@ class TestWhatAReviewFound:
     async def test_a_lock_missed_on_the_rebuild_is_taken_on_the_next_delivery(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         workflow: ItemWorkflow,
         thread_id: int,
         threads: FakeThreadGateway,
@@ -753,7 +753,7 @@ class TestWhatAReviewFound:
     async def test_a_lock_no_permission_will_ever_grant_does_not_fail_the_delivery(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         workflow: ItemWorkflow,
         thread_id: int,
         threads: FakeThreadGateway,
@@ -782,7 +782,7 @@ class TestWhatAReviewFound:
     async def test_a_replacement_for_an_unfinished_one_is_left_open(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         thread_id: int,
         threads: FakeThreadGateway,
         pr_event,
@@ -843,7 +843,7 @@ class TestAMoveWhoseLastStepFailed:
         workflow: ItemWorkflow,
         thread_id: int,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """Putting it back is only right where the row still says what this wrote. Two commands
@@ -937,7 +937,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
         workflow: ItemWorkflow,
         thread_id: int,
         threads: FakeThreadGateway,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         # A pull request has to be ready for merge before it can be marked done.
@@ -980,7 +980,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
         thread_id: int,
         threads: FakeThreadGateway,
         github: FakeGitHubClient,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """Waiting for the item is only half of it. The other half is looking again afterwards.

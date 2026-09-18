@@ -23,7 +23,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def channels(db_sessionmaker: async_sessionmaker) -> ChannelMappingService:
+def channels(db_sessionmaker: async_sessionmaker[AsyncSession]) -> ChannelMappingService:
     """Wired the way the container wires it, fallbacks and all.
 
     Built bare, this answers "nothing was mapped before" for a kind that has been landing in

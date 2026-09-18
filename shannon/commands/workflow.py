@@ -20,6 +20,7 @@ from shannon.commands._permissions import WORKFLOW_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import Priority, Status
 from shannon.domain.errors import ShannonError
 from shannon.services.workflow import WorkflowOutcome
@@ -51,9 +52,7 @@ class MovesItems(Protocol):
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome: ...
 
 
-def build_workflow_commands(
-    service: MovesItems, gate: PermissionGate
-) -> tuple[app_commands.Command, ...]:
+def build_workflow_commands(service: MovesItems, gate: PermissionGate) -> tuple[SlashCommand, ...]:
     """Every status and priority command, built from the two tables above.
 
     One builder rather than eight, because the eight differ only in the label they set and the
@@ -70,7 +69,7 @@ def build_workflow_commands(
 
 def _status_command(
     name: str, status: Status, service: MovesItems, gate: PermissionGate
-) -> app_commands.Command:
+) -> SlashCommand:
     @app_commands.command(name=name, description=f"Mark this item {_spoken(status.value)}")
     @app_commands.guild_only()
     async def run(interaction: discord.Interaction) -> None:
@@ -87,7 +86,7 @@ def _status_command(
 
 def _priority_command(
     name: str, priority: Priority, service: MovesItems, gate: PermissionGate
-) -> app_commands.Command:
+) -> SlashCommand:
     @app_commands.command(
         name=name, description=f"Give this item {priority.value.lower()} priority"
     )
