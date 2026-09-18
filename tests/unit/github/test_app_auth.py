@@ -31,6 +31,7 @@ pytestmark = pytest.mark.unit
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 NOW = datetime(2026, 9, 17, 12, 0, 0, tzinfo=UTC)
 CLIENT_ID = "Iv23liAbCdEfGhIjKlMn"
+RSA_PRIVATE_KEY_KIND = "RSA PRIVATE KEY"
 
 
 def pem_of(key: object, *, password: bytes | None = None) -> str:
@@ -42,6 +43,17 @@ def pem_of(key: object, *, password: bytes | None = None) -> str:
     return key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, encryption
     ).decode("ascii")
+
+
+def broken_rsa_pem(*lines: str) -> str:
+    return "\n".join(
+        [
+            f"-----BEGIN {RSA_PRIVATE_KEY_KIND}-----",
+            *lines,
+            f"-----END {RSA_PRIVATE_KEY_KIND}-----",
+            "",
+        ]
+    )
 
 
 PEM = pem_of(KEY)
@@ -157,8 +169,8 @@ class TestAKeyThatWasSetAndIsWrong:
         "broken",
         [
             "not a key at all",
-            "-----BEGIN RSA PRIVATE KEY-----\ntruncated\n-----END RSA PRIVATE KEY-----\n",
-            "-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----\n",
+            broken_rsa_pem("truncated"),
+            broken_rsa_pem(),
         ],
     )
     def test_a_key_that_will_not_parse_says_which_setting_is_wrong(self, broken: str) -> None:
