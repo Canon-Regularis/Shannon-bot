@@ -164,6 +164,7 @@ class ItemSyncService:
         notifier: Notifier | None = None,
         *,
         mentions: bool = True,
+        notifies: bool = True,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -175,6 +176,18 @@ class ItemSyncService:
         # in bulk, so a backlog mirror names people in plain text and notifies nobody. Built with
         # it rather than told per call, the same as the notifier: there is nothing to turn on.
         self._mentions = mentions
+        # Whether anybody the block names may actually be RUNG. Its own switch because the two
+        # used to be one, and one caller needs them apart: a redraw names somebody linked since
+        # the thread opened as a live mention, which is the whole point of it, and must ring
+        # nobody doing so.
+        #
+        # Off means an empty allow-list, which Discord reads as "notify nobody". None would leave
+        # the client's own rule in force instead, which is a different answer entirely.
+        #
+        # On the ordinary path this changes nothing, because the block is an edit and an edit
+        # notifies nobody whatever it says. It is for the one path that POSTS the block instead:
+        # a metadata message somebody deleted, which `_edit_or_post` replaces with a new message.
+        self._notifies = notifies
 
     async def sync(
         self,
@@ -797,13 +810,19 @@ class ItemSyncService:
         # questions: the block still shows a muted person as a mention, so the thread records who
         # is on the item, and Discord is told separately not to ring them.
         #
-        # Always a tuple and never None. A path built without mentions resolves nobody, so this
-        # comes back empty, and an empty allow-list tells Discord to notify nobody where None
-        # would leave the client's own rule in force. That is what makes a backlog mirror silent
-        # twice over, off one switch, rather than by the rendering alone.
-        notify = await MutedMemberStore(session).may_be_pinged(
-            guild_id=placement.repository.discord_guild_id, ids=mentions.values()
-        )
+        # Always a tuple and never None. An empty allow-list tells Discord to notify nobody,
+        # where None would leave the client's own rule in force.
+        #
+        # It comes back empty two ways. A path built without mentions resolves nobody, so there
+        # is nothing to ask about, which is what makes a backlog mirror silent twice over off one
+        # switch rather than by the rendering alone. And a path built without `notifies` does not
+        # ask at all, which is how a block can name people as live mentions and still ring none
+        # of them.
+        notify: tuple[int, ...] = ()
+        if self._notifies:
+            notify = await MutedMemberStore(session).may_be_pinged(
+                guild_id=placement.repository.discord_guild_id, ids=mentions.values()
+            )
 
         metadata = self._policy.render(
             shown, status=item.status, priority=item.priority, mentions=mentions
@@ -898,6 +917,7 @@ def build_item_sync(
     *,
     relocates: bool = False,
     mentions: bool = True,
+    notifies: bool = True,
 ) -> ItemSyncService:
     """Assemble a sync service and the thread binding it drives.
 
@@ -915,6 +935,7 @@ def build_item_sync(
         ItemThreads(sessionmaker, threads, relocates=relocates),
         notifier,
         mentions=mentions,
+        notifies=notifies,
     )
 
 
