@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.commands.assign import build_assign_command, build_unassign_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
 from shannon.commands.mentions import build_mentions_command
@@ -51,6 +52,7 @@ from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
+from shannon.services.assignment import ItemAssignment
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
@@ -501,6 +503,25 @@ def _relocation(
     )
 
 
+def _assignment(
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient
+) -> ItemAssignment:
+    """Putting a person on an item, with a reader per kind and nothing that renders.
+
+    No sync service and no thread gateway, unlike every other builder here, and that absence is
+    the design. This writes to GitHub and stops; GitHub's own delivery comes back and the ordinary
+    mirror does the rest, so anything that could touch a thread would only be a way to do it twice.
+    """
+    return ItemAssignment(
+        sessionmaker,
+        github,
+        {
+            ObjectType.PR: lambda owner, name, number: github.get_pull_request(owner, name, number),
+            ObjectType.ISSUE: lambda owner, name, number: github.get_issue(owner, name, number),
+        },
+    )
+
+
 def _commands(
     sessionmaker: async_sessionmaker[AsyncSession],
     github: GitHubClient,
@@ -513,6 +534,7 @@ def _commands(
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
+    assignment: ItemAssignment,
 ) -> tuple[SlashCommand, ...]:
     """Every slash command the bot installs.
 
@@ -538,6 +560,10 @@ def _commands(
         # The only one here with no gate, which is visible at a glance and is the point. See
         # `_permissions.UNGATED`.
         build_mentions_command(MentionPreferences(sessionmaker)),
+        # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
+        # service, which decides from the thread whether that means a reviewer or an assignee.
+        build_assign_command(assignment, gate),
+        build_unassign_command(assignment, gate),
         *build_workflow_commands(workflow, gate),
     )
 
@@ -644,5 +670,6 @@ def build_container(
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,
+            _assignment(sessionmaker, github),
         ),
     )

@@ -66,6 +66,7 @@ class TestWhatItWiresUp:
         container = container_with(DisposableEngine(), FakeGitHubClient())
 
         assert sorted(command.name for command in container.commands) == [
+            "assign",
             "issue",
             "link",
             "link_team",
@@ -83,6 +84,7 @@ class TestWhatItWiresUp:
             "set_med_priority",
             "set_not_reviewed",
             "set_ready_for_merge",
+            "unassign",
             "unregister",
         ]
 

@@ -17,6 +17,7 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.commands.assign import PutsSomebodyOnAnItem
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.mentions import RemembersWhoWantsPinging
@@ -59,6 +60,7 @@ from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
 from shannon.runtime.liveness import ProcessLiveness
+from shannon.services.assignment import ItemAssignment, PutsPeopleOnItems
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -143,6 +145,11 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (VerifiesIdentity, GitHubIdentityVerification),
     (UnregistersRepositories, RepositoryUnregistrationService),
     (RedrawsAnItem, ItemRegeneration),
+    # The second thing in this project that writes to GitHub, and the first that writes a
+    # person. Both sides, because the fake is what every test of it runs against.
+    (PutsPeopleOnItems, HttpGitHubClient),
+    (PutsPeopleOnItems, FakeGitHubClient),
+    (PutsSomebodyOnAnItem, ItemAssignment),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),
