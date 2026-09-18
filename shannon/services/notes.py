@@ -35,6 +35,9 @@ Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], str]
 # put through the ordinary sync, and this module has no business knowing either of those.
 Rebuild = Callable[[ItemNote], Awaitable[None]]
 NoteParser = Callable[[str, Mapping[str, Any]], ItemNote | None]
+# Whether a note has earned a message of its own. Optional, because only one of the three
+# mirrors carries a note that can arrive meaning nothing.
+WorthPosting = Callable[[ItemNote], bool]
 Follow = Callable[[ItemNote], Awaitable[None]]
 
 
@@ -88,19 +91,40 @@ class ItemNoteMirror:
         render: Renderer,
         rebuild: Rebuild | None = None,
         shut_again: KeepsThreadsShut,
+        worth_posting: WorthPosting | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
         self._render = render
         self._rebuild = rebuild
         self._shut_again = shut_again
+        self._worth_posting = worth_posting
 
     async def mirror(self, snapshot: ItemNote) -> bool:
-        """Post the note, returning whether there was anywhere to post it."""
+        """Post the note, returning whether it belonged to anything mirrored here.
+
+        False is the answer for a note on an item nobody tracks, and the handler turns that into
+        `ignored`. True covers both the note being posted and this mirror deciding it was not
+        worth posting, because the item is tracked either way and the delivery did its work.
+
+        Asked after the thread is found and not before it, which is the whole reason the check
+        sits here rather than in the handler. Up there it would answer `processed` for an item
+        nobody tracks, and `ignored` is how anybody watching sees that a registered repository is
+        sending events for items with no thread.
+        """
         try:
             target = await self._find_thread(snapshot)
             if target is None:
                 return False
+            if self._worth_posting is not None and not self._worth_posting(snapshot):
+                logger.info(
+                    "a note on %s#%s has earned no message of its own, so none is posted",
+                    snapshot.repository.full_name,
+                    snapshot.item_number,
+                )
+                # No claim is taken, so a later decision to stop declining these would replay
+                # every one of them rather than finding them all recorded as mirrored.
+                return True
             return await self._post(snapshot, target)
         except ItemNotReadyError:
             # Both ways of having nowhere to post arrive here: an item whose thread was never

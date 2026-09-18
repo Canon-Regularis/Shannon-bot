@@ -76,3 +76,22 @@ class ReviewRequestLedger:
                 snapshot.repository.full_name,
                 snapshot.item_number,
             )
+
+
+def is_worth_a_message(snapshot: ReviewSnapshot) -> bool:
+    """Whether a submitted review says anything its inline comments do not.
+
+    GitHub wraps every inline note in a review. Leaving three notes and pressing Comment, or
+    replying once to somebody else's note, both submit a `commented` review with no body of its
+    own, and mirroring that posts `**alice** left a review` with nothing underneath it. Once per
+    reply, on top of the comment that actually said something.
+
+    The verdict is the content for the other two states, so an approval with no body still posts:
+    "approved this pull request" is the whole of what somebody wanted to say.
+
+    Told to the mirror rather than to the parser, which matters more than it looks. A review this
+    declines still has to run the ledger that closes the request it answers, and a parser that
+    returned nothing would skip that. Since this is the ordinary way to answer a review without
+    approving, doing it there would leave the reviewer pinged again for the review they just gave.
+    """
+    return snapshot.verdict != "commented" or bool(snapshot.body.strip())
