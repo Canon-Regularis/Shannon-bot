@@ -31,6 +31,7 @@ from shannon.discord_bot.formatting import (
     format_force_push,
     format_label_change,
     format_review,
+    format_review_comment,
     format_reviewer_ping,
     format_state_change,
     format_team_ping,
@@ -47,6 +48,7 @@ from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.installations import build_installation_handler
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.channels import ChannelMappingService
@@ -57,7 +59,7 @@ from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
-from shannon.services.reviews import ReviewRequestLedger
+from shannon.services.reviews import ReviewRequestLedger, is_worth_a_message
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.commit_lines import CommitLine
 from shannon.services.sync.items import (
@@ -321,8 +323,10 @@ def _event_router(
         the deletion is lost, and so is every one after it until an unrelated item event happens
         to arrive.
 
-        The only call to GitHub anywhere on the note path, and it fires when a thread has
-        actually gone rather than on every comment.
+        The only call to GitHub anywhere on the note path. It fires when a thread has actually
+        gone rather than on every comment, though a review round now gives it more chances to:
+        every inline comment on an item whose thread is missing arrives here, and only the first
+        of them spends a call, because the ones behind it find the thread that one built.
         """
         owner, _, name = note.repository.full_name.partition("/")
         if note.object_type is ObjectType.PR:
@@ -339,7 +343,19 @@ def _event_router(
         sessionmaker, threads, render=format_comment, rebuild=rebuild, shut_again=shut_again
     )
     reviews = ItemNoteMirror(
-        sessionmaker, threads, render=format_review, rebuild=rebuild, shut_again=shut_again
+        sessionmaker,
+        threads,
+        render=format_review,
+        rebuild=rebuild,
+        shut_again=shut_again,
+        # The one mirror that is allowed to keep a note to itself. A review carrying nothing but
+        # inline comments is GitHub's wrapper around them rather than something somebody said.
+        worth_posting=is_worth_a_message,
+    )
+    # Its own mirror rather than a branch inside the comments one, because the renderer is the
+    # only thing that differs and the renderer is what this class takes injected.
+    review_comments = ItemNoteMirror(
+        sessionmaker, threads, render=format_review_comment, rebuild=rebuild, shut_again=shut_again
     )
 
     router = EventRouter()
@@ -381,6 +397,12 @@ def _event_router(
         build_note_handler(
             reviews, parse_review_event, then=ReviewRequestLedger(sessionmaker).fulfilled
         ),
+    )
+    # No ledger on this one. The review wrapping these is what closes the request they answer,
+    # and GitHub sends that wrapper whether or not anybody pressed a button to make it.
+    router.register(
+        "pull_request_review_comment",
+        build_note_handler(review_comments, parse_review_comment_event),
     )
     return router
 

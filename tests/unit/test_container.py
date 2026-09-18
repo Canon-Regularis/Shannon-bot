@@ -94,6 +94,7 @@ class TestWhatItWiresUp:
             "issues",
             "issue_comment",
             "pull_request_review",
+            "pull_request_review_comment",
             # Not about an item. These keep the account-to-installation map current, and a
             # deployment that dropped them would go on minting tokens against installations that
             # had been removed.

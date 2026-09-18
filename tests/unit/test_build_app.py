@@ -60,7 +60,13 @@ def test_the_endpoint_is_given_a_queue_to_write_to(app: FastAPI) -> None:
 
 
 def test_the_router_is_wired_to_a_handler_for_every_event(app: FastAPI) -> None:
-    for event in ("pull_request", "issues", "issue_comment", "pull_request_review"):
+    for event in (
+        "pull_request",
+        "issues",
+        "issue_comment",
+        "pull_request_review",
+        "pull_request_review_comment",
+    ):
         assert app.state.event_router.handles(event), f"{event} would be dropped on arrival"
 
 
