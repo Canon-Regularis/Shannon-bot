@@ -96,6 +96,16 @@ class FakeGitHubClient:
         # call including the read that comes first, which is no use for showing what a
         # refused WRITE leaves behind: nothing has happened yet when the read fails.
         self.write_error: Exception | None = None
+        # Who has been put on which item, and every call that tried. The calls are recorded before
+        # any staged failure is raised, so a test can assert what was asked for as well as what
+        # landed.
+        self.reviewers: dict[tuple[str, int], list[str]] = {}
+        self.assignees: dict[tuple[str, int], list[str]] = {}
+        self.people_calls: list[tuple[str, tuple[str, int], tuple[str, ...]]] = []
+        # Who GitHub would refuse to assign. Anything not named here can be assigned, because that
+        # is the ordinary case and a fake that refused by default would make every test say so.
+        self.unassignable: set[str] = set()
+        self.assignable_calls: list[tuple[str, str]] = []
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -211,6 +221,59 @@ class FakeGitHubClient:
             held for held in self.labels.get(key, []) if held.casefold() != label.casefold()
         ]
         self._restate(key)
+
+    async def request_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        key = (f"{owner}/{name}".lower(), number)
+        self.people_calls.append(("request_reviewers", key, tuple(logins)))
+        self._refuse_if_staged()
+        self.reviewers.setdefault(key, []).extend(logins)
+
+    async def remove_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        key = (f"{owner}/{name}".lower(), number)
+        self.people_calls.append(("remove_reviewers", key, tuple(logins)))
+        self._refuse_if_staged()
+        wanted = {login.casefold() for login in logins}
+        self.reviewers[key] = [
+            held for held in self.reviewers.get(key, []) if held.casefold() not in wanted
+        ]
+
+    async def add_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        key = (f"{owner}/{name}".lower(), number)
+        self.people_calls.append(("add_assignees", key, tuple(logins)))
+        self._refuse_if_staged()
+        # Silently dropped, exactly as GitHub does it. A test that forgets the assignability
+        # check should see the same nothing-happened a user would.
+        self.assignees.setdefault(key, []).extend(
+            login for login in logins if login.casefold() not in self.unassignable
+        )
+
+    async def remove_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        key = (f"{owner}/{name}".lower(), number)
+        self.people_calls.append(("remove_assignees", key, tuple(logins)))
+        self._refuse_if_staged()
+        wanted = {login.casefold() for login in logins}
+        self.assignees[key] = [
+            held for held in self.assignees.get(key, []) if held.casefold() not in wanted
+        ]
+
+    async def can_be_assigned(self, owner: str, name: str, login: str) -> bool:
+        self.assignable_calls.append((f"{owner}/{name}".lower(), login))
+        self._refuse_if_staged()
+        return login.casefold() not in self.unassignable
+
+    def _refuse_if_staged(self) -> None:
+        if self.write_error is not None:
+            raise self.write_error
+        if self.error is not None:
+            raise self.error
 
     def set_labels(self, key: tuple[str, int], names: list[str]) -> None:
         """Arrange the labels an item is already carrying, the way a repository would have them.

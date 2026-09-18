@@ -15,6 +15,7 @@ from shannon.github.errors import (
     GitHubError,
     GitHubNotFoundError,
     GitHubRateLimitError,
+    GitHubRefusedError,
     GitHubUnavailableError,
 )
 from tests.support import github_payloads as payloads
@@ -1119,3 +1120,167 @@ class TestWhatOneAccountMayDoToARepository:
         async with client_with(handler) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.permission_for("acme", "widget", "octocat")
+
+
+class TestWritingPeople:
+    """Issue #106. The first writes this bot makes about a person rather than a label."""
+
+    def _recording(self, status: int = 201):
+        seen: list[tuple[str, str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content) if request.content else None
+            seen.append((request.method, request.url.path, body))
+            return httpx.Response(status, content=json.dumps({}))
+
+        return seen, handler
+
+    async def test_asking_for_a_review_uses_the_pulls_endpoint(self) -> None:
+        """Not the issues one the labels use. GitHub keeps reviewers off that endpoint entirely,
+        because an issue has none."""
+        seen, handler = self._recording()
+
+        async with client_with(handler) as client:
+            await client.request_reviewers("acme", "widget", 7, ["alice"])
+
+        assert seen == [
+            ("POST", "/repos/acme/widget/pulls/7/requested_reviewers", {"reviewers": ["alice"]})
+        ]
+
+    async def test_withdrawing_a_review(self) -> None:
+        seen, handler = self._recording(status=200)
+
+        async with client_with(handler) as client:
+            await client.remove_reviewers("acme", "widget", 7, ["alice"])
+
+        assert seen == [
+            ("DELETE", "/repos/acme/widget/pulls/7/requested_reviewers", {"reviewers": ["alice"]})
+        ]
+
+    async def test_assigning_uses_the_issues_endpoint(self) -> None:
+        seen, handler = self._recording()
+
+        async with client_with(handler) as client:
+            await client.add_assignees("acme", "widget", 12, ["alice"])
+
+        assert seen == [
+            ("POST", "/repos/acme/widget/issues/12/assignees", {"assignees": ["alice"]})
+        ]
+
+    async def test_unassigning(self) -> None:
+        seen, handler = self._recording(status=200)
+
+        async with client_with(handler) as client:
+            await client.remove_assignees("acme", "widget", 12, ["alice"])
+
+        assert seen == [
+            ("DELETE", "/repos/acme/widget/issues/12/assignees", {"assignees": ["alice"]})
+        ]
+
+    async def test_a_withdrawal_of_something_never_asked_for_is_done_rather_than_failed(
+        self,
+    ) -> None:
+        """The same rule the label removal follows: a 404 means the end state is the wanted one."""
+        _, handler = self._recording(status=404)
+
+        async with client_with(handler) as client:
+            await client.remove_reviewers("acme", "widget", 7, ["alice"])
+            await client.remove_assignees("acme", "widget", 12, ["alice"])
+
+    async def test_a_repository_name_with_a_slash_in_it_cannot_change_the_path(self) -> None:
+        """`add_label` does not encode these and is the odd one out. A name is GitHub's to shape,
+        and a stray separator would read as another path segment."""
+        wire: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path.decode())
+            return httpx.Response(201, content="{}")
+
+        async with client_with(handler) as client:
+            await client.request_reviewers("acme", "wid/get", 7, ["alice"])
+
+        assert wire == ["/repos/acme/wid%2Fget/pulls/7/requested_reviewers"]
+
+
+class TestAskingWhetherSomebodyCanBeAssigned:
+    """GitHub is silent about this on the write itself, so it has to be asked separately."""
+
+    async def test_a_person_it_would_take(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(204)
+
+        async with client_with(handler) as client:
+            assert await client.can_be_assigned("acme", "widget", "alice") is True
+
+    async def test_a_person_it_would_not(self) -> None:
+        """404 is an answer here rather than a failure, which is why it is caught."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            assert await client.can_be_assigned("acme", "widget", "stranger") is False
+
+    async def test_the_login_is_encoded(self) -> None:
+        wire: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path.decode())
+            return httpx.Response(204)
+
+        async with client_with(handler) as client:
+            await client.can_be_assigned("acme", "widget", "a/b")
+
+        assert wire == ["/repos/acme/widget/assignees/a%2Fb"]
+
+
+class TestARefusalToldApartFromAnOutage:
+    """Issue #106. A 422 used to fall into the catch-all and read as GitHub being unreachable,
+    which is both wrong and retryable, for a refusal that retrying can never change."""
+
+    async def test_github_s_own_sentence_is_carried(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422,
+                content=json.dumps(
+                    {"message": "Reviews may only be requested from collaborators."}
+                ),
+            )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="only be requested from collaborators"):
+                await client.request_reviewers("acme", "widget", 7, ["stranger"])
+
+    async def test_a_body_that_is_not_json_still_says_something(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, content="not json at all")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="requested_reviewers"):
+                await client.request_reviewers("acme", "widget", 7, ["stranger"])
+
+    async def test_a_body_that_is_json_but_not_an_object(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, content=json.dumps(["nope"]))
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="refused the request"):
+                await client.request_reviewers("acme", "widget", 7, ["stranger"])
+
+    async def test_a_body_with_no_message_in_it(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, content=json.dumps({"errors": []}))
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="refused the request"):
+                await client.request_reviewers("acme", "widget", 7, ["stranger"])
+
+    async def test_it_is_not_reported_as_unavailable(self) -> None:
+        """The distinction the type exists for: every caller treats unavailable as retryable."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, content=json.dumps({"message": "Nope."}))
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError):
+                await client.add_assignees("acme", "widget", 12, ["stranger"])

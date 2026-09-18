@@ -23,6 +23,7 @@ from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
     GitHubRateLimitError,
+    GitHubRefusedError,
     GitHubUnavailableError,
 )
 
@@ -171,6 +172,24 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
+
+    async def request_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None: ...
+
+    async def remove_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None: ...
+
+    async def add_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None: ...
+
+    async def remove_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None: ...
+
+    async def can_be_assigned(self, owner: str, name: str, login: str) -> bool: ...
 
     # Untyped bodies, for the project endpoints, which answer with arrays and are parsed by a
     # module that checks every field it touches. Declared here because the wiring hands this
@@ -429,6 +448,77 @@ class HttpGitHubClient:
         with contextlib.suppress(GitHubNotFoundError):
             await self._send("DELETE", path, owner)
 
+    async def request_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        """Ask the named accounts to review a pull request.
+
+        Its own endpoint rather than the issues one the labels use: a reviewer is not an assignee,
+        and GitHub keeps the two apart on pull requests. It refuses with a 422 for an account that
+        is not a collaborator, for the pull request's own author and for somebody already asked,
+        which is why `_raise_for_status` learned to tell a refusal from an outage.
+        """
+        await self._send(
+            "POST",
+            f"{_repository(owner, name)}/pulls/{number}/requested_reviewers",
+            owner,
+            json={"reviewers": list(logins)},
+        )
+
+    async def remove_reviewers(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        """Withdraw a review request, treating one that was never made as done."""
+        with contextlib.suppress(GitHubNotFoundError):
+            await self._send(
+                "DELETE",
+                f"{_repository(owner, name)}/pulls/{number}/requested_reviewers",
+                owner,
+                json={"reviewers": list(logins)},
+            )
+
+    async def add_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        """Put the named accounts on an issue.
+
+        GitHub does NOT refuse somebody who cannot be assigned here; it drops them and answers 201
+        as though it had done what was asked. `can_be_assigned` is asked first for that reason, and
+        this method cannot be made to report the difference on its own.
+        """
+        await self._send(
+            "POST",
+            f"{_repository(owner, name)}/issues/{number}/assignees",
+            owner,
+            json={"assignees": list(logins)},
+        )
+
+    async def remove_assignees(
+        self, owner: str, name: str, number: int, logins: Sequence[str]
+    ) -> None:
+        """Take the named accounts off an issue, treating one not on it as done."""
+        with contextlib.suppress(GitHubNotFoundError):
+            await self._send(
+                "DELETE",
+                f"{_repository(owner, name)}/issues/{number}/assignees",
+                owner,
+                json={"assignees": list(logins)},
+            )
+
+    async def can_be_assigned(self, owner: str, name: str, login: str) -> bool:
+        """Whether GitHub would actually put this account on an item in this repository.
+
+        Asked because the assignee write is silent about it. 204 means yes and 404 means no, and
+        both are answers rather than failures, which is why the 404 is caught here and nothing
+        above has to know that this question is asked by asking for a page.
+        """
+        path = f"{_repository(owner, name)}/assignees/{quote(login, safe='')}"
+        try:
+            await self._send("GET", path, owner)
+        except GitHubNotFoundError:
+            return False
+        return True
+
     async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
         """A write, whose answer is only ever whether it worked.
 
@@ -565,6 +655,16 @@ class HttpGitHubClient:
         return payload
 
 
+def _repository(owner: str, name: str) -> str:
+    """The path segment naming one repository, with both halves escaped.
+
+    `permission_for` quoted these and `add_label` did not, which is a difference nobody meant. A
+    repository name is GitHub's to shape and a stray slash in one would otherwise read as another
+    path segment and send the write somewhere else entirely.
+    """
+    return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+
+
 def _headers() -> dict[str, str]:
     """The headers every request carries whoever it is about.
 
@@ -608,7 +708,29 @@ def _raise_for_status(response: httpx.Response, path: str) -> None:
         raise GitHubRateLimitError("GitHub rate limit reached", retry_after=_retry_after(response))
     if status in {401, 403}:
         raise GitHubAuthError(f"GitHub refused the request for {path} ({status})")
+    # Above the catch-all, because a 422 is the opposite of what the catch-all means. GitHub read
+    # the request and declined it, so retrying sends the same refusal back, and it is nearly always
+    # the caller's to fix: a reviewer who is not a collaborator, the item's own author, somebody
+    # already asked. Under the catch-all all of those read as "GitHub could not be reached".
+    if status == 422:
+        raise GitHubRefusedError(_refusal(response, path))
     raise GitHubUnavailableError(f"GitHub returned {status} for {path}")
+
+
+def _refusal(response: httpx.Response, path: str) -> str:
+    """GitHub's own words for why it would not do something.
+
+    Read rather than replaced. The reasons are specific, numerous and GitHub's to change, so a list
+    of them kept here would be a worse sentence and one more thing to hold in step. A body that is
+    not the shape this expects falls back to naming the path, which is still better than silence.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return f"GitHub refused the request for {path}"
+
+    said = payload.get("message") if is_json_object(payload) else None
+    return said if isinstance(said, str) and said else f"GitHub refused the request for {path}"
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
