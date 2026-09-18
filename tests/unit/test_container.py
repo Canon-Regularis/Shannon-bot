@@ -75,6 +75,7 @@ class TestWhatItWiresUp:
             "refresh",
             "regenerate",
             "register",
+            "request_review",
             "set_backlog",
             "set_channel",
             "set_done",
@@ -86,6 +87,7 @@ class TestWhatItWiresUp:
             "set_ready_for_merge",
             "unassign",
             "unregister",
+            "unrequest_review",
         ]
 
     async def test_the_router_handles_every_event_the_webhook_accepts(self) -> None:
