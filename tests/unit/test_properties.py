@@ -32,6 +32,7 @@ from shannon.github.urls import parse_issue_url, parse_pull_request_url
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.sync.staleness import is_superseded
 
@@ -292,6 +293,12 @@ class TestParsersAgainstArbitraryPayloads:
 
         parse_review_event(action, payload)
 
+    @given(st.text(max_size=20), json_objects)
+    @settings(max_examples=300)
+    def test_the_review_comment_parser_never_raises(self, action: str, payload: dict) -> None:
+
+        parse_review_comment_event(action, payload)
+
     @given(json_values)
     @settings(max_examples=300)
     def test_the_field_mappers_never_raise(self, value: object) -> None:
@@ -303,3 +310,4 @@ class TestParsersAgainstArbitraryPayloads:
         mapping.repository(value)
         mapping.issue(value, REPO)
         mapping.pull_request(value, REPO)
+        mapping.review_comment(value, REPO, item_number=1)

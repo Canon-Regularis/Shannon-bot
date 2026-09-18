@@ -14,6 +14,9 @@ PR_AS_ISSUE_ID = 5111095062
 ISSUE_ID = 4661345308
 COMMENT_ID = 2211334455
 REVIEW_ID = 4846678607
+# Deliberately next door to COMMENT_ID. The two live in separate key spaces, and a test that
+# quietly mixed them would be easier to believe if the numbers looked nothing alike.
+REVIEW_COMMENT_ID = 2211334456
 
 
 def user(login: str, user_id: int = 1) -> dict[str, Any]:
@@ -185,6 +188,52 @@ def pull_request_review_event(action: str = "submitted", **review_overrides: Any
     return {
         "action": action,
         "review": review(**review_overrides),
+        "pull_request": pull_request(),
+        "repository": repository(),
+        "sender": user("monalisa", 200),
+    }
+
+
+def review_comment(**overrides: Any) -> dict[str, Any]:
+    """One inline comment on a diff, as a single-line comment, which is what most of them are.
+
+    There is no `in_reply_to_id` key at all rather than one holding None. Absence is what GitHub
+    sends on a comment that opens a thread, and absence is what the parser has to survive.
+    """
+    payload: dict[str, Any] = {
+        "id": REVIEW_COMMENT_ID,
+        "pull_request_review_id": REVIEW_ID,
+        "path": "shannon/services/notes.py",
+        "diff_hunk": "@@ -200,6 +200,9 @@ class ItemNoteMirror:",
+        "commit_id": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+        "original_commit_id": "9c2a1f0bb6a5c34c2cbb0f5ddc0e8a5a8b3d1e77",
+        # Deprecated by GitHub and read by nothing here. Carried so the fixture looks like the
+        # body that actually arrives, rather than like the subset this bot happens to want.
+        "position": 14,
+        "original_position": 14,
+        "line": 205,
+        "original_line": 205,
+        "start_line": None,
+        "original_start_line": None,
+        "side": "RIGHT",
+        "start_side": None,
+        "subject_type": "line",
+        "user": user("monalisa", 200),
+        "body": "This claim wants giving back on cancellation too.",
+        "html_url": f"https://github.com/{OWNER}/{REPO}/pull/7#discussion_r{REVIEW_COMMENT_ID}",
+        "created_at": "2026-08-11T10:30:00Z",
+        "updated_at": "2026-08-11T10:30:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def pull_request_review_comment_event(
+    action: str = "created", **comment_overrides: Any
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "comment": review_comment(**comment_overrides),
         "pull_request": pull_request(),
         "repository": repository(),
         "sender": user("monalisa", 200),
