@@ -5233,3 +5233,50 @@ to set the project number will find it.
   tracked item's title and labels, the assignees' logins, the Discord thread name, and the log.
   Along with the two gaps in pruning, which are that a stuck delivery is never pruned at any age
   and that pruning only runs while the worker does.
+
+## Redrawing a thread that has gone quiet
+
+- **`/regenerate` reads an item from GitHub again and rewrites its block.** Run inside the item's
+  own thread, no argument, the way the `/set_*` commands work. Closes #65.
+- **It is for the threads nothing else reaches.** Every other thing that rewrites a block is
+  something arriving: a delivery, a manual `/pr`, a `/set_*`, the board poller. An item that has
+  gone quiet gets none of them and a closed one never will again, so whatever its block said on
+  the day it was last touched is what it says for ever. A pull request closed last month gains
+  labels, assignees and a changed title with nothing to carry them across.
+- **The tagging bug in the issue has the same root cause.** `/refresh` opens backlog threads with
+  mentions off, which is right: every one of those is a first block, a first block is posted, and
+  twenty-five of them would notify everybody on all twenty-five about a backlog that had been
+  sitting there. But nothing ever revisits those threads. `/refresh` skips anything already
+  threaded and lists only open items, `/link` writes a row and touches no thread, and a quiet item
+  sends no webhook. So somebody who linked after their thread was opened stayed named in plain
+  text, which is exactly what somebody who never linked at all looks like — the failure `/link`
+  already warns it cannot tell apart.
+- **Naming somebody and ringing them are now two switches rather than one.** `mentions=False`
+  turned off the account lookup, the rendering and the Discord allow-list together. A redraw needs
+  three of those inverted and the fourth kept: it must name people as live mentions, which is the
+  whole fix, and must ring nobody doing it. So `ItemSyncService` gained `notifies`, read in one
+  place beside the allow-list it decides.
+- **On the ordinary path that changes nothing**, because the block is an edit and an edit notifies
+  nobody whatever it says. It is for the one path that posts the block instead: a metadata message
+  somebody deleted, which is replaced with a new message carrying whatever the block carries. That
+  is the only place an empty allow-list is load-bearing, and it is why the guarantee is made by
+  construction rather than left true by luck.
+- **A closed, locked thread needed no new code.** A command passes no delivery number, so the
+  staleness guard lets it through where it would refuse a late webhook; writing wakes an archived
+  thread; the block is edited in place; and the sync puts the lock back. The row's record of the
+  lock survives, because it is cleared only when the thread pointer moves to a different thread
+  and a redraw swaps a thread for itself.
+- **A redraw that writes nothing is refused rather than reported as success.** `ManualSync` has
+  this hole and it does not matter there, because `/pr` is asked to mirror an item rather than to
+  correct one. Here, being told it worked is what stops somebody looking further at a block they
+  already know is wrong.
+- **The reply says the two things that are surprises**: a thread that had to be replaced, because
+  the link is then not the thread the command was run in, and a lock that could not be put back,
+  because waking an archived thread and failing to re-shut it leaves a finished item's thread open
+  where it had been closed.
+- **`locate` and `FoundItem` stopped being private to the workflow service.** Which item a thread
+  is, is the question every command run inside one asks first, and it belongs to no single service.
+- Deliberately not done, and said rather than hidden: a redraw re-reads the people on an item,
+  which can clear a spent review-request claim. Nothing is posted at the time, so what that costs
+  is a ping on the item's next genuine delivery, which for the closed items this exists for never
+  comes. Guarding it would mean refusing to correct a stale assignee list, which is the feature.
