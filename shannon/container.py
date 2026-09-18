@@ -6,10 +6,15 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.commands.assign import build_assign_command, build_unassign_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
 from shannon.commands.mentions import build_mentions_command
+from shannon.commands.people import (
+    build_assign_command,
+    build_request_review_command,
+    build_unassign_command,
+    build_unrequest_review_command,
+)
 from shannon.commands.refresh import build_refresh_command
 from shannon.commands.regenerate import build_regenerate_command
 from shannon.commands.register import build_register_command
@@ -52,13 +57,13 @@ from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
-from shannon.services.assignment import ItemAssignment
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, build_note_handler
+from shannon.services.people import ItemPeople
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger, is_worth_a_message
@@ -172,44 +177,44 @@ class Container:
 
 
 @dataclass(frozen=True, slots=True)
-class _Both:
-    """Two notifiers behind the one seam the sync path has for notifying.
+class _Notifiers:
+    """Every notifier behind the one seam the sync path has for notifying.
 
-    A pull request can have people and teams asked for a review, and the two are told in
-    different words off different tables. Composing them here keeps `ItemSyncService` asking one
-    thing one question, which is what let a second kind of reviewer be added without touching it.
+    A pull request tells three different people three different things off three different tables:
+    a reviewer, a review team, and since issue #105 an assignee. Composing them here keeps
+    `ItemSyncService` asking one thing one question, which is what let the second and then the
+    third be added without touching it at all.
+
+    A pair until the third arrived, and that is the whole reason it is a tuple now.
     """
 
-    people: Notifier
-    teams: Notifier
+    notifiers: tuple[Notifier, ...]
 
     async def notify(
         self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
     ) -> tuple[str, ...]:
-        told = await self.people.notify(
-            tracked_item_id=tracked_item_id,
-            thread_id=thread_id,
-            guild_id=guild_id,
-            the_block_pinged=the_block_pinged,
-        )
-        told_teams = await self.teams.notify(
-            tracked_item_id=tracked_item_id,
-            thread_id=thread_id,
-            guild_id=guild_id,
-            the_block_pinged=the_block_pinged,
-        )
-        return (*told, *told_teams)
+        told: list[str] = []
+        for notifier in self.notifiers:
+            told.extend(
+                await notifier.notify(
+                    tracked_item_id=tracked_item_id,
+                    thread_id=thread_id,
+                    guild_id=guild_id,
+                    the_block_pinged=the_block_pinged,
+                )
+            )
+        return tuple(told)
 
 
-def _both(people: Notifier, teams: Notifier) -> Notifier:
-    return _Both(people, teams)
+def _notifying(*notifiers: Notifier) -> Notifier:
+    return _Notifiers(notifiers)
 
 
 @dataclass(frozen=True, slots=True)
 class _EveryAnnouncer:
     """Every announcer behind the one seam the item handler has for saying something.
 
-    The same shape `_both` above gives the two notifiers, and for the same reason: which lines a
+    The same shape `_notifying` above gives the notifiers, and for the same reason: which lines a
     thread gets is a wiring decision, and the handler that runs them should not grow a parameter
     for each. A third is a longer tuple here and no edit to `items.py`.
 
@@ -260,13 +265,29 @@ def _sync_services(
             sessionmaker,
             threads,
             PullRequestPolicy(),
-            _both(
+            _notifying(
                 ActorNotifier(
                     sessionmaker,
                     threads,
                     role=ActorRole.REVIEWER,
                     render=format_reviewer_ping,
                     # So the line names somebody who ran `/mentions off` without ringing them.
+                    muted=MutedMemberStore,
+                ),
+                # Issue #105. A pull request has an assignee list as well as a reviewer one, and
+                # nothing told the people on it: the block names them, and every block after the
+                # first is an edit, which Discord does not notify. So assigning somebody to a pull
+                # request reached them nowhere at all.
+                #
+                # Migration 0021 is what makes this safe to switch on. Every `ASSIGNEE` row on a
+                # pull request predates this notifier and therefore has no `notified_at`, and
+                # `claim_notifications` asks nothing else, so without the stamp the next delivery
+                # on each open pull request would ping everybody already assigned to it.
+                ActorNotifier(
+                    sessionmaker,
+                    threads,
+                    role=ActorRole.ASSIGNEE,
+                    render=format_assignee_ping,
                     muted=MutedMemberStore,
                 ),
                 ActorNotifier(
@@ -503,16 +524,14 @@ def _relocation(
     )
 
 
-def _assignment(
-    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient
-) -> ItemAssignment:
+def _people(sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient) -> ItemPeople:
     """Putting a person on an item, with a reader per kind and nothing that renders.
 
     No sync service and no thread gateway, unlike every other builder here, and that absence is
     the design. This writes to GitHub and stops; GitHub's own delivery comes back and the ordinary
     mirror does the rest, so anything that could touch a thread would only be a way to do it twice.
     """
-    return ItemAssignment(
+    return ItemPeople(
         sessionmaker,
         github,
         {
@@ -534,7 +553,7 @@ def _commands(
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
-    assignment: ItemAssignment,
+    people: ItemPeople,
 ) -> tuple[SlashCommand, ...]:
     """Every slash command the bot installs.
 
@@ -562,8 +581,10 @@ def _commands(
         build_mentions_command(MentionPreferences(sessionmaker)),
         # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
         # service, which decides from the thread whether that means a reviewer or an assignee.
-        build_assign_command(assignment, gate),
-        build_unassign_command(assignment, gate),
+        build_assign_command(people, gate),
+        build_unassign_command(people, gate),
+        build_request_review_command(people, gate),
+        build_unrequest_review_command(people, gate),
         *build_workflow_commands(workflow, gate),
     )
 
@@ -670,6 +691,6 @@ def build_container(
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,
-            _assignment(sessionmaker, github),
+            _people(sessionmaker, github),
         ),
     )
