@@ -259,6 +259,45 @@ class ReviewSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewCommentSnapshot:
+    """One inline comment left on a pull request's diff.
+
+    Its own kind rather than a `CommentSnapshot` carrying a few more fields, because the two come
+    off different events and GitHub numbers them separately. A review comment and an issue comment
+    can share an id, and one key space would take the second for the first and drop it.
+
+    Where the comment points is carried as GitHub reports it, and nothing here tries to improve on
+    it: `line` is the end of the range as the branch stands now, `start_line` is set only on a
+    multi-line comment, and `original_line` is where it was written, which is the only one left
+    once the diff has moved under it.
+    """
+
+    repository: RepositorySnapshot
+    item_number: int
+    comment_id: int
+    html_url: str
+    body: str
+    path: str
+    line: int | None = None
+    start_line: int | None = None
+    original_line: int | None = None
+    # Set on a reply into an existing thread and absent on the comment that opened it.
+    in_reply_to_id: int | None = None
+    author: Actor | None = None
+    created_at: datetime | None = None
+
+    # Only pull requests have review comments. Fixed rather than passed in, because the rebuild
+    # that mends a deleted thread branches on this field and its other arm reads the pull request
+    # as an issue. GitHub serves that happily, and it would open a second thread for the same item.
+    object_type: ObjectType = field(default=ObjectType.PR, init=False)
+
+    @property
+    def note_key(self) -> str:
+        """A key space of its own, for the reason the class docstring gives."""
+        return f"review-comment:{self.comment_id}"
+
+
+@dataclass(frozen=True, slots=True)
 class CommitRef:
     """One commit as the compare endpoint describes it, which is everything but the numbers.
 

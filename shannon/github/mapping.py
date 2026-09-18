@@ -15,6 +15,7 @@ from shannon.domain.models import (
     Label,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewCommentSnapshot,
     ReviewSnapshot,
 )
 from shannon.domain.time import as_utc
@@ -286,6 +287,46 @@ def review(payload: Any, repo: RepositorySnapshot, *, item_number: int) -> Revie
         state=state if isinstance(state, str) else "",
         **_note_fields(payload, created="submitted_at"),
     )
+
+
+def review_comment(
+    payload: Any, repo: RepositorySnapshot, *, item_number: int
+) -> ReviewCommentSnapshot | None:
+    """Build a snapshot from one inline comment on a pull request's diff.
+
+    Everything saying where the comment points is optional. GitHub leaves `start_line` out of a
+    single-line comment, leaves `in_reply_to_id` out of one that opens a thread, and empties `line`
+    on one the diff has moved out from under. None of the three is a failure, so none of them
+    refuses the snapshot.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+
+    comment_id = payload.get("id")
+    if not isinstance(comment_id, int):
+        return None
+
+    path = payload.get("path")
+    return ReviewCommentSnapshot(
+        repository=repo,
+        item_number=item_number,
+        comment_id=comment_id,
+        path=path if isinstance(path, str) else "",
+        line=_optional_int(payload.get("line")),
+        start_line=_optional_int(payload.get("start_line")),
+        original_line=_optional_int(payload.get("original_line")),
+        in_reply_to_id=_optional_int(payload.get("in_reply_to_id")),
+        **_note_fields(payload, created="created_at"),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    """A number GitHub may send, may send as null, or may leave out of the body altogether.
+
+    All three mean the same thing to a reader and none of them is a failure, so they collapse to
+    one answer here rather than being told apart three times at the call site.
+    """
+    return value if isinstance(value, int) else None
 
 
 def _note_fields(payload: Payload, *, created: str) -> dict[str, Any]:

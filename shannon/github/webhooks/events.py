@@ -57,6 +57,15 @@ COMMENT_ACTIONS = frozenset({"created"})
 # the thread records what was said when it was said.
 REVIEW_ACTIONS = frozenset({"submitted"})
 
+# One inline comment on the diff, which is where a review actually says what it means. Edits and
+# deletions are left out for the reason the comment actions above give.
+#
+# GitHub sends one of these per comment and a `pull_request_review` wrapping the lot, so a review
+# round costs one delivery more than the number of notes in it. That is a real increase in queue
+# volume, though a far smaller one than `synchronize` above: a push happens whether or not anybody
+# is reading, and this only happens when somebody sits down to review.
+REVIEW_COMMENT_ACTIONS = frozenset({"created"})
+
 # Somebody installing, uninstalling, pausing or resuming the App, and somebody adding or removing
 # repositories from an existing installation. Not about an item at all, which is what makes these
 # different from everything above: they are the only events that change what this bot is ABLE to
@@ -74,6 +83,7 @@ SUPPORTED_EVENTS: Mapping[str, frozenset[str]] = {
     "issues": ISSUE_ACTIONS,
     "issue_comment": COMMENT_ACTIONS,
     "pull_request_review": REVIEW_ACTIONS,
+    "pull_request_review_comment": REVIEW_COMMENT_ACTIONS,
     "installation": INSTALLATION_ACTIONS,
     "installation_repositories": INSTALLATION_REPOSITORY_ACTIONS,
 }
