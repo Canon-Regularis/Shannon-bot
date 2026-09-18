@@ -243,13 +243,15 @@ async def test_a_comment_on_a_deleted_issue_thread_is_rebuilt_the_same_way(
     assert len(comment_posts(threads)) == 1, "the comment was lost with the thread"
 
 
-async def test_a_comment_and_a_review_sharing_a_number_are_different_notes(
+async def test_three_notes_sharing_a_number_are_told_apart(
     registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
-    """GitHub numbers comments and reviews separately, so the two collide.
+    """GitHub numbers issue comments, reviews and review comments separately, so all three collide.
 
     Keyed on the number alone, whichever arrived second would be taken for one already posted
-    and silently dropped.
+    and silently dropped. Three key spaces rather than two since issue #107, and a review comment
+    is the likeliest of the three to share a number with an issue comment: both are counted out
+    of the same repository.
     """
     threads = FakeThreadGateway()
     container = build_stack(db_engine, threads=threads)
@@ -265,12 +267,18 @@ async def test_a_comment_and_a_review_sharing_a_number_are_different_notes(
             payloads.pull_request_review_event("submitted", id=shared),
             delivery="review-1",
         )
+        await post(
+            client,
+            "pull_request_review_comment",
+            payloads.pull_request_review_comment_event("created", id=shared),
+            delivery="review-comment-1",
+        )
         while await container.worker.run_once():
             pass
 
     keys = set((await db_session.scalars(select(MirroredNote.note_key))).all())
-    assert keys == {f"comment:{shared}", f"review:{shared}"}
-    assert len(threads.posts) >= 2, "one of the two notes was dropped as a duplicate of the other"
+    assert keys == {f"comment:{shared}", f"review:{shared}", f"review-comment:{shared}"}
+    assert len(threads.posts) >= 3, "one of the three notes was dropped as a duplicate of another"
 
 
 async def status_of(container, delivery: str) -> DeliveryStatus:
