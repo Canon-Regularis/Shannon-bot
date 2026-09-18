@@ -37,6 +37,15 @@ COMMIT_MESSAGE_LIMIT = 250
 # else. Wider than anything git's own tooling encourages, so no ordinary subject is ever cut.
 COMMIT_TITLE_LIMIT = 120
 
+# The file an inline review comment sits on. A path is repository content, and nothing stops one
+# being long enough to be the whole message by itself.
+#
+# Here rather than left to `fit` for the reason above, and more sharply. The file and line are the
+# FIRST line of that message and `fit` drops lines from the END, so a path over the limit leaves
+# `fit` nothing it can keep: it falls back to cutting characters, and the comment body and the
+# link to GitHub both go with it.
+REVIEW_PATH_LIMIT = 120
+
 
 def clipped(body: str, *, limit: int) -> str:
     """GitHub-authored text, cut to length and made safe, with nothing wrapped round it.
@@ -55,6 +64,21 @@ def clipped(body: str, *, limit: int) -> str:
     if len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return as_plain_text(text)
+
+
+def clipped_path(path: str) -> str:
+    """A file path cut to length, and deliberately not escaped.
+
+    Not `clipped`, which escapes markdown. This goes inside a code span, where an escape is shown
+    rather than applied, so every backslash in a path would arrive doubled and visible.
+
+    The FRONT is what goes. The end of a path is its file name, which is the part anybody reading
+    the line actually wants, and it is the half GitHub keeps in its own interface too.
+    """
+    path = path.strip()
+    if len(path) <= REVIEW_PATH_LIMIT:
+        return path
+    return "…" + path[-(REVIEW_PATH_LIMIT - 1) :]
 
 
 def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:

@@ -18,6 +18,7 @@ from shannon.discord_bot.safe_text import (
     as_plain_text,
     as_prose,
     clipped,
+    clipped_path,
     code_span,
     defuse_mentions,
     fit,
@@ -32,6 +33,7 @@ from shannon.domain.models import (
     IssueSnapshot,
     LabelMove,
     PullRequestSnapshot,
+    ReviewCommentSnapshot,
     ReviewSnapshot,
     TicketSnapshot,
     TrackedSnapshot,
@@ -343,6 +345,53 @@ def format_review(
     return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions, roles)
 
 
+def format_review_comment(
+    snapshot: ReviewCommentSnapshot,
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> str:
+    """Render one inline review comment for its Discord thread.
+
+    A message of its own rather than folded into the review carrying it, because GitHub delivers
+    the two separately with no promised order and nothing here may wait on a delivery that might
+    never come.
+
+    The diff hunk is left out on purpose. It is untrusted repository content several lines long,
+    and `fit` drops lines from the end, so a hunk would be the first thing cut and would take the
+    link back to GitHub down with it.
+    """
+    verb = "replied" if snapshot.in_reply_to_id is not None else "commented"
+    where = _where(snapshot)
+    return _note(snapshot, f"{verb} on {where}" if where else verb, mentions, roles)
+
+
+def _where(snapshot: ReviewCommentSnapshot) -> str:
+    """Which file and line, as the comment itself reports them.
+
+    Defused before fencing, for the reason `_tags` gives below: a code span stops markdown reading
+    a name, not Discord reading a mention, and a path is repository content that may be called
+    anything somebody can commit.
+
+    `line` is asked before `start_line`, which is not a matter of taste. GitHub never sends a
+    start without an end, so asking the other way round would leave a branch nothing can reach.
+    """
+    if not snapshot.path:
+        return ""
+
+    named = code_span(defuse_mentions(clipped_path(snapshot.path)))
+    if snapshot.line is None:
+        if snapshot.original_line is None:
+            # A comment on the file rather than on any line in it.
+            return named
+        # The diff has moved out from under it, so the only line it still knows is where it was
+        # written. Said out loud, because a number quietly pointing somewhere else is worse than
+        # no number at all.
+        return f"{named} L{snapshot.original_line} (outdated)"
+    if snapshot.start_line is None:
+        return f"{named} L{snapshot.line}"
+    return f"{named} L{snapshot.start_line}-{snapshot.line}"
+
+
 def _metadata(
     snapshot: TrackedSnapshot,
     *,
@@ -402,7 +451,7 @@ def _with_the_description(block: str, body: str) -> str:
 
 
 def _note(
-    snapshot: CommentSnapshot | ReviewSnapshot,
+    snapshot: CommentSnapshot | ReviewSnapshot | ReviewCommentSnapshot,
     verb: str,
     mentions: Mapping[str, int] | None,
     roles: Mapping[str, int] | None = None,
