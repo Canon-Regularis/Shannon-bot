@@ -21,13 +21,13 @@ class ProcessLiveness:
     """What /health reports, kept where the things it reports on actually live."""
 
     engine: AsyncEngine
-    worker_task: asyncio.Task | None = None
+    worker_task: asyncio.Task[None] | None = None
     # None means no token was configured, which is the deliberate no-bot mode. Otherwise a
     # finished task means the gateway has gone.
-    bot_task: asyncio.Task | None = None
+    bot_task: asyncio.Task[None] | None = None
     # None means no board was configured, which is the default. Otherwise a finished task means
     # the board is no longer being read.
-    poller_task: asyncio.Task | None = None
+    poller_task: asyncio.Task[None] | None = None
     # Whether the client has actually reached the gateway, which the task being alive does not
     # say. None when there is no bot to ask.
     gateway_is_ready: Callable[[], bool] | None = None

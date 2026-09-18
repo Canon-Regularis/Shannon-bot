@@ -12,13 +12,13 @@ simple: write down what the payload says, and stop.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.installations import InstallationStore
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 
 logger = logging.getLogger(__name__)
@@ -51,10 +51,10 @@ def parse_installation_event(payload: Any) -> InstallationEvent | None:
     be absent because a row that records a login with no id is still useful, and one that records a
     made-up id is not.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     installation = payload.get("installation")
-    if not isinstance(installation, Mapping):
+    if not is_json_object(installation):
         return None
 
     installation_id = installation.get("id")
@@ -62,11 +62,11 @@ def parse_installation_event(payload: Any) -> InstallationEvent | None:
         return None
 
     account = installation.get("account")
-    login = account.get("login") if isinstance(account, Mapping) else None
+    login = account.get("login") if is_json_object(account) else None
     if not isinstance(login, str) or not login:
         return None
 
-    account_id = account.get("id") if isinstance(account, Mapping) else None
+    account_id = account.get("id") if is_json_object(account) else None
     return InstallationEvent(
         installation_id=installation_id,
         account_login=login,
@@ -74,11 +74,11 @@ def parse_installation_event(payload: Any) -> InstallationEvent | None:
     )
 
 
-def build_installation_handler(sessionmaker: async_sessionmaker) -> EventHandler:
+def build_installation_handler(sessionmaker: async_sessionmaker[AsyncSession]) -> EventHandler:
     """Keep the installation directory in step with what GitHub says about itself."""
 
     async def handle(
-        action: str, payload: Mapping[str, Any], arrived: int | None = None
+        action: str, payload: JsonObject, arrived: int | None = None
     ) -> WebhookOutcome:
         found = parse_installation_event(payload)
         if found is None:

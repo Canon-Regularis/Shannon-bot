@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
@@ -27,7 +27,7 @@ class ChannelMappingService:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         fallbacks: Mapping[ObjectType, ObjectType] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 class KeepsThreadsShut:
     """Shut a thread again, if the row says that is what it should be."""
 
-    def __init__(self, sessionmaker: async_sessionmaker, threads: ShutsThread) -> None:
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], threads: ShutsThread
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
 
+from shannon.domain.json import JsonObject
 from shannon.domain.models import PullRequestSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import PULL_REQUEST_ACTIONS
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 REVIEW_REQUESTED = "review_requested"
 
 
-def parse_pull_request_event(action: str, payload: Mapping[str, Any]) -> PullRequestSnapshot | None:
+def parse_pull_request_event(action: str, payload: JsonObject) -> PullRequestSnapshot | None:
     """Turn a `pull_request` webhook body into the same snapshot the REST client produces.
 
     Returns None when the action is out of scope or the body is missing something the sync
@@ -39,9 +38,7 @@ def parse_pull_request_event(action: str, payload: Mapping[str, Any]) -> PullReq
     return snapshot
 
 
-def _with_event_reviewer(
-    snapshot: PullRequestSnapshot, payload: Mapping[str, Any]
-) -> PullRequestSnapshot:
+def _with_event_reviewer(snapshot: PullRequestSnapshot, payload: JsonObject) -> PullRequestSnapshot:
     """Fold `review_requested`'s top-level reviewer into the reviewer list, and record it.
 
     GitHub puts whoever was just added at the top level of the event, as `requested_reviewer` for

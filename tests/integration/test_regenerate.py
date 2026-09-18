@@ -48,7 +48,7 @@ async def link(session: AsyncSession, login: str, account: int, discord_id: int)
 
 
 def redrawing(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     *,
     pull_request=None,
@@ -99,7 +99,7 @@ class TestTheBugThisExistsFor:
     async def test_somebody_linked_after_the_thread_opened_becomes_a_mention(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -128,7 +128,7 @@ class TestTheBugThisExistsFor:
     async def test_and_rings_nobody_doing_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -152,7 +152,7 @@ class TestTheBugThisExistsFor:
     async def test_it_posts_no_ping_line(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -183,7 +183,7 @@ class TestTheWiringTheContainerActuallyBuilds:
     async def test_the_wired_service_names_people_and_rings_nobody(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -209,7 +209,7 @@ class TestWhatItAsksGitHubFor:
     async def test_it_asks_about_the_item_the_row_names(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -236,7 +236,7 @@ class TestWhatItAsksGitHubFor:
     async def test_a_repository_renamed_under_the_same_id_is_reported_by_its_new_name(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -264,7 +264,7 @@ class TestAThreadNothingElseWillReach:
     async def test_a_closed_pull_request_is_redrawn_and_shut_again(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -288,7 +288,7 @@ class TestAThreadNothingElseWillReach:
     async def test_the_row_still_says_the_thread_is_shut(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -311,7 +311,7 @@ class TestAThreadNothingElseWillReach:
     async def test_a_closed_issue_too(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         issue_event,
     ) -> None:
@@ -330,7 +330,7 @@ class TestAThreadNothingElseWillReach:
     async def test_a_refused_reshut_is_reported_rather_than_swallowed(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -350,7 +350,7 @@ class TestAThreadNothingElseWillReach:
 
 class TestWhatItRefuses:
     async def test_a_thread_this_bot_does_not_track(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker, pr_event
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession], pr_event
     ) -> None:
         threads = FakeThreadGateway()
 
@@ -362,7 +362,7 @@ class TestWhatItRefuses:
     async def test_a_board_card_has_nothing_on_github_to_read(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -382,7 +382,7 @@ class TestWhatItRefuses:
     async def test_a_repository_renamed_away_from_under_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -408,7 +408,7 @@ class TestWhatItRefuses:
     async def test_an_item_deleted_on_github(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -425,7 +425,7 @@ class TestWhatItRefuses:
     async def test_a_kind_with_nowhere_to_put_it_says_which_command_fixes_that(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -447,7 +447,7 @@ class TestWhatItRefuses:
     async def test_a_sync_that_writes_nothing_is_not_reported_as_success(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:

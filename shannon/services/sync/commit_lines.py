@@ -12,12 +12,12 @@ calls and is last in the chain for that reason.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
-from typing import Any
+from collections.abc import Callable
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.discord_bot.threads import PostsToThread
+from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, Commit, CommitRange, CommitRef
 from shannon.github import mapping
 from shannon.github.client import ReadsCommits
@@ -85,7 +85,7 @@ class CommitLine:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: PostsToThread,
         github: ReadsCommits,
         *,
@@ -216,7 +216,7 @@ class CommitLine:
         )
 
 
-def _ends(payload: Mapping[str, Any]) -> tuple[str, str] | None:
+def _ends(payload: JsonObject) -> tuple[str, str] | None:
     """The two ends of the push, or None for a payload that cannot say what moved."""
     before = payload.get("before")
     after = payload.get("after")

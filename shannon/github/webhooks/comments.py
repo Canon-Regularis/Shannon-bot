@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.domain.models import CommentSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import COMMENT_ACTIONS
@@ -11,7 +10,7 @@ from shannon.github.webhooks.events import COMMENT_ACTIONS
 logger = logging.getLogger(__name__)
 
 
-def parse_comment_event(action: str, payload: Mapping[str, Any]) -> CommentSnapshot | None:
+def parse_comment_event(action: str, payload: JsonObject) -> CommentSnapshot | None:
     """Turn an `issue_comment` webhook body into a snapshot.
 
     GitHub sends this event for pull requests as well as issues, with the pull request
@@ -26,7 +25,7 @@ def parse_comment_event(action: str, payload: Mapping[str, Any]) -> CommentSnaps
         return None
 
     item = payload.get("issue")
-    number = item.get("number") if isinstance(item, Mapping) else None
+    number = item.get("number") if is_json_object(item) else None
     if not isinstance(number, int):
         logger.warning("issue_comment.%s arrived without an item number", action)
         return None

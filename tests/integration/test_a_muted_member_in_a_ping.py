@@ -40,7 +40,9 @@ async def link(session: AsyncSession, login: str, account: int, discord_id: int)
     await session.commit()
 
 
-def notifying(sessionmaker: async_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
+def notifying(
+    sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
+) -> ItemSyncService:
     """The reviewer notifier as the container assembles it, with the mute seam turned on."""
     return build_item_sync(
         sessionmaker,
@@ -67,7 +69,7 @@ async def opened_with_nobody_asked(service: ItemSyncService, pr_event) -> None:
 
 async def test_the_line_names_them_and_notifies_nobody(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
     pr_event,
@@ -85,7 +87,7 @@ async def test_the_line_names_them_and_notifies_nobody(
 
 async def test_the_line_is_still_posted(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
     pr_event,
@@ -107,7 +109,7 @@ async def test_the_line_is_still_posted(
 
 async def test_somebody_who_did_not_mute_is_still_on_the_list(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
     pr_event,
@@ -131,7 +133,7 @@ async def test_somebody_who_did_not_mute_is_still_on_the_list(
 
 async def test_a_notifier_built_without_the_seam_says_nothing_about_who_may_be_pinged(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
     pr_event,
@@ -156,7 +158,7 @@ async def test_a_notifier_built_without_the_seam_says_nothing_about_who_may_be_p
 
 async def test_a_team_review_still_pings_the_role(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
 ) -> None:
@@ -196,7 +198,7 @@ async def test_a_team_review_still_pings_the_role(
 
 async def test_the_block_that_opens_a_thread_still_spends_the_claim_for_a_muted_member(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     threads: FakeThreadGateway,
     pr_event,

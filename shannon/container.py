@@ -4,9 +4,9 @@ import logging
 from dataclasses import dataclass
 
 import httpx
-from discord import app_commands
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.commands.assign import build_assign_command, build_unassign_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
 from shannon.commands.mentions import build_mentions_command
@@ -38,6 +38,7 @@ from shannon.discord_bot.formatting import (
 )
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
+from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import ItemNote
@@ -51,6 +52,7 @@ from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
+from shannon.services.assignment import ItemAssignment
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
@@ -100,7 +102,7 @@ class Container:
 
     settings: Settings
     engine: AsyncEngine
-    sessionmaker: async_sessionmaker
+    sessionmaker: async_sessionmaker[AsyncSession]
     github: GitHubClient
     queue: WebhookDeliveryQueue
     worker: DeliveryWorker
@@ -108,7 +110,7 @@ class Container:
     event_router: EventRouter
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
-    commands: tuple[app_commands.Command, ...]
+    commands: tuple[SlashCommand, ...]
     # Held so the OAuth callback route can reach it. The route is the one place in this project
     # that is entered from outside rather than called, so it reads its collaborator off app state
     # rather than being handed one.
@@ -246,7 +248,7 @@ def _every(*announcers: AnnouncesInThread) -> AnnouncesInThread:
 
 
 def _sync_services(
-    sessionmaker: async_sessionmaker, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], threads: ThreadGateway
 ) -> tuple[ItemSyncService, ItemSyncService]:
     """One service per object type, differing only in policy and who gets pinged.
 
@@ -302,7 +304,7 @@ def _sync_services(
 
 
 def _event_router(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: ThreadGateway,
     github: GitHubClient,
     pr_sync: ItemSyncService,
@@ -408,7 +410,7 @@ def _event_router(
 
 
 def _refresh(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> RepositoryRefresh:
     """The refresh path's own sync services, built with no notifier.
 
@@ -433,7 +435,7 @@ def _refresh(
 
 
 def _regenerate(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> ItemRegeneration:
     """The redraw path's own sync services: no notifier, and no allow-list.
 
@@ -467,7 +469,7 @@ def _regenerate(
 
 
 def _relocation(
-    sessionmaker: async_sessionmaker, github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
 ) -> ThreadRelocation:
     """The relocation path's own sync services: built to relocate, and built without a notifier.
 
@@ -501,8 +503,27 @@ def _relocation(
     )
 
 
+def _assignment(
+    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient
+) -> ItemAssignment:
+    """Putting a person on an item, with a reader per kind and nothing that renders.
+
+    No sync service and no thread gateway, unlike every other builder here, and that absence is
+    the design. This writes to GitHub and stops; GitHub's own delivery comes back and the ordinary
+    mirror does the rest, so anything that could touch a thread would only be a way to do it twice.
+    """
+    return ItemAssignment(
+        sessionmaker,
+        github,
+        {
+            ObjectType.PR: lambda owner, name, number: github.get_pull_request(owner, name, number),
+            ObjectType.ISSUE: lambda owner, name, number: github.get_issue(owner, name, number),
+        },
+    )
+
+
 def _commands(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     github: GitHubClient,
     gate: PermissionGate,
     workflow: ItemWorkflow,
@@ -513,7 +534,8 @@ def _commands(
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
-) -> tuple[app_commands.Command, ...]:
+    assignment: ItemAssignment,
+) -> tuple[SlashCommand, ...]:
     """Every slash command the bot installs.
 
     A command missing from here is one that silently stops existing in Discord, so the tuple is
@@ -538,6 +560,10 @@ def _commands(
         # The only one here with no gate, which is visible at a glance and is the point. See
         # `_permissions.UNGATED`.
         build_mentions_command(MentionPreferences(sessionmaker)),
+        # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
+        # service, which decides from the thread whether that means a reviewer or an assignee.
+        build_assign_command(assignment, gate),
+        build_unassign_command(assignment, gate),
         *build_workflow_commands(workflow, gate),
     )
 
@@ -644,5 +670,6 @@ def build_container(
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,
+            _assignment(sessionmaker, github),
         ),
     )

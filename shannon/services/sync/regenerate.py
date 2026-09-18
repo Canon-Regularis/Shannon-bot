@@ -20,7 +20,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import RepositoryMismatchError
@@ -51,7 +51,7 @@ class ItemRegeneration:
     """Reads one item from GitHub again and rewrites the block in its thread."""
 
     def __init__(
-        self, sessionmaker: async_sessionmaker, kinds: Mapping[ObjectType, ItemKind]
+        self, sessionmaker: async_sessionmaker[AsyncSession], kinds: Mapping[ObjectType, ItemKind]
     ) -> None:
         self._sessionmaker = sessionmaker
         self._kinds = kinds

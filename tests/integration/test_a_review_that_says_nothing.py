@@ -47,7 +47,7 @@ async def tracked(
 
 
 def handler_over(
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     ran: list[object],
     *,
@@ -74,7 +74,10 @@ def handler_over(
 
 class TestWhatIsDeclined:
     async def test_a_review_carrying_only_inline_notes_posts_nothing(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         before = len(threads.posts)
         handler = handler_over(db_sessionmaker, threads, [])
@@ -87,7 +90,10 @@ class TestWhatIsDeclined:
         assert len(threads.posts) == before
 
     async def test_a_body_of_nothing_but_whitespace_counts_as_no_body(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         """Pressing Comment with the summary box holding a stray newline is the same act."""
         before = len(threads.posts)
@@ -102,7 +108,7 @@ class TestWhatIsDeclined:
     async def test_nothing_is_claimed_for_a_review_that_was_declined(
         self,
         tracked: AsyncClient,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
@@ -118,7 +124,10 @@ class TestWhatIsDeclined:
 
 class TestWhatStillPosts:
     async def test_an_approval_with_no_body_at_all(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         """The verdict is the content. Approving without writing anything is the common case and
         is exactly what somebody wanted to say."""
@@ -129,7 +138,10 @@ class TestWhatStillPosts:
         assert "approved this pull request" in threads.posts[-1][1]
 
     async def test_changes_requested_with_no_body(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         handler = handler_over(db_sessionmaker, threads, [])
 
@@ -140,7 +152,10 @@ class TestWhatStillPosts:
         assert "requested changes" in threads.posts[-1][1]
 
     async def test_a_comment_review_that_actually_says_something(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         handler = handler_over(db_sessionmaker, threads, [])
 
@@ -152,7 +167,10 @@ class TestWhatStillPosts:
         assert "two things inline" in threads.posts[-1][1]
 
     async def test_a_mirror_with_no_opinion_posts_everything(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         """The comments mirror is built without a predicate, and an issue comment carrying no
         text is still a thing somebody did."""
@@ -165,7 +183,10 @@ class TestWhatStillPosts:
 
 class TestWhatHappensAnyway:
     async def test_the_review_is_still_read_even_though_it_is_not_posted(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         """The whole reason this is decided by the mirror and not by the parser. The wrapper is
         what closes the review request it answers, and this is the ordinary way to answer one
@@ -179,7 +200,10 @@ class TestWhatHappensAnyway:
         assert len(ran) == 1
 
     async def test_a_declined_review_on_an_untracked_pull_request_is_still_ignored(
-        self, tracked: AsyncClient, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
     ) -> None:
         """A regression test for where this check is allowed to live. Asked before the thread is
         looked up, it would answer `processed` here, and `ignored` is how anybody watching sees

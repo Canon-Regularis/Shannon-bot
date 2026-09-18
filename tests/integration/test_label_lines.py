@@ -139,7 +139,7 @@ async def test_a_label_that_came_off_and_went_back_on_is_said_both_times(
 
 async def test_the_same_delivery_handled_twice_says_it_once(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     """The queue is at-least-once by design: a delivery whose status could not be written comes
@@ -176,7 +176,7 @@ async def test_the_same_delivery_handled_twice_says_it_once(
 
 
 async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
-    registered: Repository, db_sessionmaker: async_sessionmaker
+    registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     """A claim taken and not given back is worse than saying nothing: the retry reads it as
     already said and the line is lost for good, with the delivery reported handled."""
@@ -206,7 +206,7 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
 
 async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Both halves failing at once is rare and unrecoverable, so the one thing owed is a line
@@ -249,7 +249,7 @@ class _RefusesTheFirstPost(FakeThreadGateway):
 class _FailsToGiveItBack:
     """A sessionmaker that hands out working sessions until the claim is being released."""
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
         # Two: the announcer reads what the block already showed before it claims anything, and
         # the read has to work or the line is never reached at all.

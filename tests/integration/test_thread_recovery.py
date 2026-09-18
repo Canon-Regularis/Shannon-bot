@@ -134,7 +134,7 @@ class TestAThreadThatWasOpenedButNotWrittenTo:
     async def test_the_thread_id_is_recorded_before_the_failure_surfaces(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -149,7 +149,7 @@ class TestAThreadThatWasOpenedButNotWrittenTo:
     async def test_the_retry_writes_into_it_rather_than_opening_another(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> None:
         threads = _EmptyOnFirstCreate()
@@ -216,7 +216,7 @@ class TestTwoSyncsRacingToOpenAThread:
     async def test_the_loser_is_still_taken_away_when_something_else_claimed_first(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         sync_service: ItemSyncService,
         threads: FakeThreadGateway,
@@ -294,7 +294,7 @@ class TestAnIssueWhoseThreadWasDeleted:
     async def test_the_issue_gets_a_replacement_thread(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -314,7 +314,7 @@ class TestANoteOnADeletedThread:
 
     @pytest.fixture
     def mirror(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> ItemNoteMirror:
         return ItemNoteMirror(
             db_sessionmaker,
@@ -325,7 +325,7 @@ class TestANoteOnADeletedThread:
 
     @pytest.fixture
     def issues(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> ItemSyncService:
         return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
@@ -369,7 +369,7 @@ class TestANoteOnADeletedThread:
         self,
         registered: Repository,
         issues: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -394,7 +394,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
     async def test_the_replacement_is_kept_rather_than_destroyed(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -417,7 +417,7 @@ class TestARebuildWhoseSlotWasClearedUnderIt:
     async def test_the_item_is_never_left_holding_nothing(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -442,7 +442,7 @@ class TestTheStalenessWatermark:
     async def test_an_old_snapshot_applied_without_a_thread_does_not_lower_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -466,7 +466,7 @@ class TestTheStalenessWatermark:
     async def test_a_newer_snapshot_still_advances_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -497,7 +497,7 @@ class TestBeingOutOfTheServerForAWhile:
     async def test_a_refusal_while_out_of_the_server_is_worth_waiting_out(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -517,7 +517,7 @@ class TestBeingOutOfTheServerForAWhile:
     async def test_a_permission_it_was_never_given_still_fails_at_once(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -534,7 +534,7 @@ class TestBeingOutOfTheServerForAWhile:
     async def test_a_lock_a_late_delivery_still_owes_is_not_stepped_over_while_out(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -606,7 +606,7 @@ class TestTheChannelUnderneathBeingDeleted:
     async def test_every_thread_that_was_in_it_is_let_go_of(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -633,7 +633,7 @@ class TestTheChannelUnderneathBeingDeleted:
     async def test_a_channel_holding_nothing_of_ours_is_left_alone(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -651,7 +651,7 @@ class TestTheChannelUnderneathBeingDeleted:
     async def test_a_thread_whose_channel_nobody_recorded_is_left_alone(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -692,7 +692,7 @@ class TestAStaleDeliveryThatRebuiltTheThread:
 
     @pytest.fixture
     def issues(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> ItemSyncService:
         return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
@@ -700,7 +700,7 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         self,
         registered: Repository,
         issues: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -741,7 +741,7 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         self,
         registered: Repository,
         issues: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         issue_event,
@@ -841,7 +841,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
     async def test_the_column_is_not_cleared_by_a_thread_swapped_for_itself(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         threads: FakeThreadGateway,
         pr_event,
@@ -895,7 +895,7 @@ class TestAClaimThatCouldNotBeGivenBack:
     async def test_it_says_the_comment_is_lost(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         db_session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
@@ -938,7 +938,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
 
     @pytest.fixture
     def issues(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> ItemSyncService:
         return build_item_sync(db_sessionmaker, threads, IssuePolicy())
 
@@ -946,7 +946,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
         self,
         registered: Repository,
         issues: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -985,7 +985,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
         self,
         registered: Repository,
         issues: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -1023,7 +1023,7 @@ class TestTheSlotBeingClearedMidRebuild:
     async def test_the_replacement_is_kept_when_the_slot_empties_underneath(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
         pr_event,
     ) -> None:
@@ -1043,7 +1043,7 @@ class TestTheSlotBeingClearedMidRebuild:
     async def test_an_item_that_has_gone_takes_its_thread_with_it(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         pr_event,
     ) -> None:
         """Unregistering mid-flight leaves nothing to attach to, and a thread nobody can reach."""

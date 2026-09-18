@@ -23,6 +23,7 @@ from shannon.github.errors import (
     GitHubError,
     GitHubNotFoundError,
     GitHubRateLimitError,
+    GitHubRefusedError,
 )
 from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
@@ -56,6 +57,11 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
         "GitHub refused this bot's access, so it could not read that {noun}. "
         "An admin needs to check its GitHub token.",
     ),
+    # Also above the catch-all, and for the sharper half of the same reason. GitHub answered and
+    # said no, and it said why in a sentence better than any kept here: not a collaborator, the
+    # item's own author, already asked. Reported as unreachable, all of those read as a fault to
+    # wait out rather than something the person in front of the bot can put right in ten seconds.
+    (GitHubRefusedError, "GitHub would not do that. {message}"),
     (GitHubError, "GitHub could not be reached. {message}"),
     # The same split as the two GitHub rows above, for the same reason, on the side of it that
     # is likelier to happen. Both of these are a DiscordGatewayError and both used to fall

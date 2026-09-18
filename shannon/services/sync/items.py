@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -20,6 +20,7 @@ from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.threads import KnowsItsServers, Notify, OpensThreads, ShutsThread
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
+from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
@@ -30,7 +31,7 @@ from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 
 logger = logging.getLogger(__name__)
 
-SnapshotParser = Callable[[str, Mapping[str, Any]], TrackedSnapshot | None]
+SnapshotParser = Callable[[str, JsonObject], TrackedSnapshot | None]
 
 
 class SyncOutcome(StrEnum):
@@ -157,7 +158,7 @@ class ItemSyncService:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: ShutsAndKnowsServers,
         policy: SyncPolicy,
         binding: ThreadBinding,
@@ -217,7 +218,15 @@ class ItemSyncService:
         decision = await self._record(snapshot, arrived)
         # The database step either hands over work to do or answers on its own.
         if isinstance(decision, SyncResult):
-            if decision.outcome is SyncOutcome.STALE:
+            # The id is tested beside the outcome rather than trusted from it. Both answers of
+            # STALE are built off a row that was read, so it is always set, and the two below
+            # would no-op anyway on a None: one updates rows by an id that matches nothing, the
+            # other reads a row that is not there and returns. The test costs nothing at runtime
+            # and nothing in coverage, being the second half of a short-circuit that the stale
+            # path already takes, and it says on the line what is otherwise only true two
+            # methods away. The same reasoning put `thread_id is None` in the guard inside
+            # `_settle_a_lock_still_owed`, where the comment says the case cannot happen either.
+            if decision.outcome is SyncOutcome.STALE and decision.tracked_item_id is not None:
                 await self._reopen_what_this_one_asked_for(decision.tracked_item_id, snapshot)
                 await self._settle_a_lock_still_owed(decision.tracked_item_id, decision.thread_id)
             return decision
@@ -910,7 +919,7 @@ class ItemSyncService:
 
 
 def build_item_sync(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: OpensAndShutsThreads,
     policy: SyncPolicy,
     notifier: Notifier | None = None,
@@ -961,7 +970,7 @@ def build_item_handler(
     """
 
     async def handle(
-        action: str, payload: Mapping[str, Any], arrived: int | None = None
+        action: str, payload: JsonObject, arrived: int | None = None
     ) -> WebhookOutcome:
         snapshot = parse(action, payload)
         if snapshot is None:

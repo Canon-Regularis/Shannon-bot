@@ -48,7 +48,10 @@ class DeliveryClient:
     """
 
     def __init__(
-        self, app_client: AsyncClient, worker: DeliveryWorker, sessionmaker: async_sessionmaker
+        self,
+        app_client: AsyncClient,
+        worker: DeliveryWorker,
+        sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         self.http = app_client
         self.worker = worker

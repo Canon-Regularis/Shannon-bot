@@ -62,7 +62,9 @@ def asked_of(
 
 
 @pytest.fixture
-def notifying(db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway) -> ItemSyncService:
+def notifying(
+    db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
+) -> ItemSyncService:
     """The pull request path with both notifiers, the way the container assembles it."""
     return build_item_sync(
         db_sessionmaker,
@@ -181,7 +183,7 @@ class TestClosingATeamsRequest:
         self,
         registered: Repository,
         notifying: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """A team's request is closed by GitHub dropping it, which deletes the row on the next
@@ -228,7 +230,7 @@ class TestClosingATeamsRequest:
         self,
         registered: Repository,
         notifying: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The case the stamp exists for, which a team could not reach before it had one: a
@@ -245,7 +247,7 @@ class TestClosingATeamsRequest:
 
 class TestLinkingATeam:
     async def test_a_slug_is_stored_lowercased(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """GitHub lowercases a slug itself, so matching case sensitively would only make a
         hand-typed name fail to find the row it just wrote."""
@@ -259,7 +261,7 @@ class TestLinkingATeam:
         assert found == {"backend-team": ROLE}
 
     async def test_pointing_a_team_somewhere_new_replaces_the_old_role(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         service = TeamLinkingService(db_sessionmaker)
         await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
@@ -270,7 +272,7 @@ class TestLinkingATeam:
         assert found == {"backend": ROLE + 1}
 
     async def test_two_teams_may_share_one_role(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """Unlike a person, whose account belongs to them. A server may keep one reviewers role
         that several teams should reach."""
@@ -285,7 +287,7 @@ class TestLinkingATeam:
 
     @pytest.mark.parametrize("slug", ["", "  ", "-leading", "a" * 200, "not a team"])
     async def test_something_that_is_not_a_team_is_refused(
-        self, db_sessionmaker: async_sessionmaker, slug: str
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], slug: str
     ) -> None:
         with pytest.raises(InvalidGitHubTeamError):
             await TeamLinkingService(db_sessionmaker).link(
@@ -293,7 +295,7 @@ class TestLinkingATeam:
             )
 
     async def test_a_guild_only_sees_its_own_links(
-        self, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         await TeamLinkingService(db_sessionmaker).link(
             guild_id=1, github_team="backend", discord_role_id=ROLE
@@ -315,7 +317,7 @@ class TestATeamIsNotToldTwice:
         self,
         registered: Repository,
         notifying: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """A review by one person closed every team's request, including teams GitHub never
@@ -457,7 +459,7 @@ class TestATeamIsNotAPerson:
         self,
         registered: Repository,
         notifying: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         from shannon.services.linking import UserLinkingService
@@ -477,7 +479,7 @@ class TestATeamIsNotAPerson:
         self,
         registered: Repository,
         notifying: ItemSyncService,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The ping reads the team map, which only /link_team writes, and that one is gated."""
@@ -494,7 +496,7 @@ class TestATeamIsNotAPerson:
 
 
 async def test_re_pointing_a_team_moves_its_timestamp(
-    db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+    db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
 ) -> None:
     """An upsert does not fire SQLAlchemy's `onupdate`, so a row re-pointed at a new role kept
     the timestamp of the first link and read as untouched since."""

@@ -25,6 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "hypothesis>=6.165.3",
+    # Two checkers rather than one. Pyright is the engine behind Pylance, so what an editor shows
+    # is what CI enforces; mypy disagrees with it often enough to be worth the second opinion.
+    "mypy>=1.18.0",
+    "pyright>=1.1.400",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
@@ -82,3 +86,299 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+
+# Two type checkers, both gating. Pyright is the engine behind Pylance, so an error in the editor
+# is an error in CI and there is no second list to keep in your head; mypy is run beside it because
+# the two disagree, and each catches things the other waves through.
+#
+# Pinned to the floor rather than to what development happens to run, so anything that only works
+# on a newer interpreter is caught here rather than by the 3.12 leg of the test matrix.
+#
+# `Any` is allowed only where data genuinely arrives untyped: `json.loads` and `response.json()`.
+# It gets narrowed on the next line. Everywhere else it is a defect, which is what strict enforces.
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["shannon", "tests"]
+# A suppression has to name what it is suppressing, so that a later fix can find it again.
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# Tests are checked, but not held to the source's standard. They are full of fixtures whose types
+# pytest supplies, gateways subclassed inline to fail on demand, and mocks that are `Any` by
+# construction, and forcing those into strict form buys noise rather than correctness.
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+warn_return_any = false
+
+# The ratchet. Every file below still fails one of the two checkers, and each is here so the gate
+# can be switched on today rather than after the whole tree is clean. A file leaves this list when
+# it is fixed and never goes back, and anything NOT listed is gated from the moment it is written,
+# which is the property that makes this worth doing before the work is finished rather than after.
+[[tool.mypy.overrides]]
+module = [
+    "shannon.api.dependencies",
+    "shannon.commands.refresh",
+    "shannon.commands.workflow",
+    "shannon.container",
+    "shannon.db.stores.assignments",
+    "shannon.db.stores.channel_mappings",
+    "shannon.db.stores.identities",
+    "shannon.db.stores.installations",
+    "shannon.db.stores.repositories",
+    "shannon.db.stores.team_links",
+    "shannon.db.stores.thread_pointers",
+    "shannon.db.stores.tracked_items",
+    "shannon.db.stores.webhook_events",
+    "shannon.discord_bot.client",
+    "shannon.discord_bot.formatting",
+    "shannon.discord_bot.threads",
+    "shannon.github.app_auth",
+    "shannon.main",
+    "shannon.runtime.lifespan",
+    "shannon.runtime.supervision",
+    "shannon.services.delivery.worker",
+    "shannon.services.projects",
+    "shannon.services.sync.items",
+    "shannon.services.sync.manual",
+    "shannon.services.sync.policies",
+    "shannon.services.sync.refresh",
+    "shannon.services.sync.relocation",
+    "shannon.services.workflow",
+    "tests.fakes.github",
+    "tests.integration.conftest",
+    "tests.integration.test_a_block_that_names_without_ringing",
+    "tests.integration.test_a_muted_member_in_a_comment",
+    "tests.integration.test_a_muted_member_in_a_ping",
+    "tests.integration.test_a_muted_member_in_the_block",
+    "tests.integration.test_a_review_that_says_nothing",
+    "tests.integration.test_body_mentions",
+    "tests.integration.test_comment_sync",
+    "tests.integration.test_commit_lines",
+    "tests.integration.test_concurrent_sync",
+    "tests.integration.test_delivery_queue",
+    "tests.integration.test_delivery_worker",
+    "tests.integration.test_issue_state_changes",
+    "tests.integration.test_issue_sync_service",
+    "tests.integration.test_issue_webhook_create",
+    "tests.integration.test_issue_webhook_update",
+    "tests.integration.test_label_lines",
+    "tests.integration.test_lifespan",
+    "tests.integration.test_manual_sync",
+    "tests.integration.test_note_idempotency",
+    "tests.integration.test_pr_state_changes",
+    "tests.integration.test_pr_sync_service",
+    "tests.integration.test_pr_webhook_create",
+    "tests.integration.test_pr_webhook_update",
+    "tests.integration.test_project_polling",
+    "tests.integration.test_query_behaviour",
+    "tests.integration.test_rebuilding_from_an_old_delivery",
+    "tests.integration.test_refresh",
+    "tests.integration.test_regenerate",
+    "tests.integration.test_registration_service",
+    "tests.integration.test_relocation",
+    "tests.integration.test_repository_visibility",
+    "tests.integration.test_review_comments",
+    "tests.integration.test_review_request_replay",
+    "tests.integration.test_reviewer_pings",
+    "tests.integration.test_shutting",
+    "tests.integration.test_state_lines",
+    "tests.integration.test_team_reviews",
+    "tests.integration.test_thread_orphans",
+    "tests.integration.test_thread_recovery",
+    "tests.integration.test_turning_your_own_pings_off",
+    "tests.integration.test_workflow",
+    "tests.support.stack",
+    "tests.support.webhooks",
+    "tests.unit.api.conftest",
+    "tests.unit.api.test_health",
+    "tests.unit.api.test_webhook_acceptance",
+    "tests.unit.api.test_webhook_endpoint",
+    "tests.unit.api.test_webhook_signature_gate",
+    "tests.unit.commands.test_command_errors",
+    "tests.unit.commands.test_link_team_command",
+    "tests.unit.commands.test_mentions_command",
+    "tests.unit.commands.test_permission_tables",
+    "tests.unit.commands.test_refresh_command",
+    "tests.unit.commands.test_workflow_commands",
+    "tests.unit.discord_bot.test_client",
+    "tests.unit.discord_bot.test_commit_lines",
+    "tests.unit.discord_bot.test_descriptions",
+    "tests.unit.discord_bot.test_issue_formatting",
+    "tests.unit.discord_bot.test_responses",
+    "tests.unit.discord_bot.test_review_comment_lines",
+    "tests.unit.discord_bot.test_safe_text",
+    "tests.unit.domain.test_state_changes",
+    "tests.unit.github.test_app_auth",
+    "tests.unit.github.test_client",
+    "tests.unit.github.test_installation_tokens",
+    "tests.unit.github.test_label_moves",
+    "tests.unit.github.test_mapping",
+    "tests.unit.github.test_project_boards",
+    "tests.unit.github.test_pull_request_parser",
+    "tests.unit.github.test_signature",
+    "tests.unit.runtime.test_liveness",
+    "tests.unit.services.sync.test_policies",
+    "tests.unit.test_a_database_url_that_will_not_parse",
+    "tests.unit.test_build_app",
+    "tests.unit.test_config_secrecy",
+    "tests.unit.test_container",
+    "tests.unit.test_properties",
+    "tests.unit.test_stand_ins_match_what_they_replace",
+    "tests.unit.test_the_commands_discord_will_accept",
+    "tests.unit.test_the_shutdown_budget_fits_the_container",
+]
+ignore_errors = true
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["shannon", "tests"]
+# The same ratchet, in pyright's dialect. The two lists differ because the two tools do.
+ignore = [
+    # Not on this list because it is old. It is here because `FakeInteraction` cannot satisfy
+    # `discord.Interaction`, which is a concrete generic class, so every command test in the
+    # project is in the same position and every one of them is listed below. The fix is the one
+    # the typing work already schedules: give the commands a narrow protocol naming what they
+    # actually read, which the fake then satisfies structurally and without a single cast.
+    "tests/unit/commands/test_assign_command.py",
+    "shannon/api/routes/webhooks.py",
+    "shannon/commands/link.py",
+    "shannon/commands/link_team.py",
+    "shannon/commands/mentions.py",
+    "shannon/commands/refresh.py",
+    "shannon/commands/regenerate.py",
+    "shannon/commands/register.py",
+    "shannon/commands/set_channel.py",
+    "shannon/commands/sync_link.py",
+    "shannon/commands/unregister.py",
+    "shannon/commands/workflow.py",
+    "shannon/container.py",
+    "shannon/db/base.py",
+    "shannon/db/stores/assignments.py",
+    "shannon/db/stores/identities.py",
+    "shannon/db/stores/installations.py",
+    "shannon/db/stores/team_links.py",
+    "shannon/db/stores/thread_pointers.py",
+    "shannon/db/stores/webhook_events.py",
+    "shannon/discord_bot/formatting.py",
+    "shannon/discord_bot/threads.py",
+    "shannon/github/app_auth.py",
+    "shannon/main.py",
+    "shannon/runtime/lifespan.py",
+    "shannon/services/delivery/queue.py",
+    "shannon/services/delivery/worker.py",
+    "shannon/services/projects.py",
+    "shannon/services/sync/items.py",
+    "shannon/services/sync/manual.py",
+    "shannon/services/sync/one_at_a_time.py",
+    "shannon/services/sync/policies.py",
+    "shannon/services/sync/refresh.py",
+    "shannon/services/sync/relocation.py",
+    "shannon/services/workflow.py",
+    "tests/fakes/github.py",
+    "tests/integration/conftest.py",
+    "tests/integration/test_a_block_that_names_without_ringing.py",
+    "tests/integration/test_a_muted_member_in_a_comment.py",
+    "tests/integration/test_a_muted_member_in_a_ping.py",
+    "tests/integration/test_a_muted_member_in_the_block.py",
+    "tests/integration/test_a_review_that_says_nothing.py",
+    "tests/integration/test_body_mentions.py",
+    "tests/integration/test_comment_sync.py",
+    "tests/integration/test_commit_lines.py",
+    "tests/integration/test_concurrent_sync.py",
+    "tests/integration/test_delivery_queue.py",
+    "tests/integration/test_delivery_worker.py",
+    "tests/integration/test_issue_state_changes.py",
+    "tests/integration/test_issue_sync_service.py",
+    "tests/integration/test_issue_webhook_create.py",
+    "tests/integration/test_issue_webhook_update.py",
+    "tests/integration/test_label_lines.py",
+    "tests/integration/test_lifespan.py",
+    "tests/integration/test_manual_sync.py",
+    "tests/integration/test_pr_state_changes.py",
+    "tests/integration/test_pr_sync_service.py",
+    "tests/integration/test_pr_webhook_create.py",
+    "tests/integration/test_pr_webhook_update.py",
+    "tests/integration/test_project_polling.py",
+    "tests/integration/test_query_behaviour.py",
+    "tests/integration/test_rebuilding_from_an_old_delivery.py",
+    "tests/integration/test_refresh.py",
+    "tests/integration/test_regenerate.py",
+    "tests/integration/test_registration_service.py",
+    "tests/integration/test_relocation.py",
+    "tests/integration/test_repository_visibility.py",
+    "tests/integration/test_review_comments.py",
+    "tests/integration/test_review_request_replay.py",
+    "tests/integration/test_reviewer_pings.py",
+    "tests/integration/test_shutting.py",
+    "tests/integration/test_state_lines.py",
+    "tests/integration/test_team_reviews.py",
+    "tests/integration/test_thread_orphans.py",
+    "tests/integration/test_thread_recovery.py",
+    "tests/integration/test_turning_your_own_pings_off.py",
+    "tests/integration/test_workflow.py",
+    "tests/support/stack.py",
+    "tests/support/webhooks.py",
+    "tests/unit/api/test_health.py",
+    "tests/unit/commands/test_command_errors.py",
+    "tests/unit/commands/test_link_command.py",
+    "tests/unit/commands/test_link_team_command.py",
+    "tests/unit/commands/test_mentions_command.py",
+    "tests/unit/commands/test_permission_tables.py",
+    "tests/unit/commands/test_refresh_command.py",
+    "tests/unit/commands/test_regenerate_command.py",
+    "tests/unit/commands/test_register_command.py",
+    "tests/unit/commands/test_set_channel_command.py",
+    "tests/unit/commands/test_sync_link_command.py",
+    "tests/unit/commands/test_unregister_command.py",
+    "tests/unit/commands/test_workflow_commands.py",
+    "tests/unit/discord_bot/test_client.py",
+    "tests/unit/discord_bot/test_commit_lines.py",
+    "tests/unit/discord_bot/test_descriptions.py",
+    "tests/unit/discord_bot/test_issue_formatting.py",
+    "tests/unit/discord_bot/test_responses.py",
+    "tests/unit/discord_bot/test_review_comment_lines.py",
+    "tests/unit/discord_bot/test_safe_text.py",
+    "tests/unit/domain/test_state_changes.py",
+    "tests/unit/github/test_app_auth.py",
+    "tests/unit/github/test_client.py",
+    "tests/unit/github/test_installation_tokens.py",
+    "tests/unit/github/test_label_moves.py",
+    "tests/unit/github/test_mapping.py",
+    "tests/unit/github/test_project_boards.py",
+    "tests/unit/github/test_pull_request_parser.py",
+    "tests/unit/runtime/test_liveness.py",
+    "tests/unit/services/sync/test_policies.py",
+    "tests/unit/test_a_database_url_that_will_not_parse.py",
+    "tests/unit/test_build_app.py",
+    "tests/unit/test_config_secrecy.py",
+    "tests/unit/test_container.py",
+    "tests/unit/test_properties.py",
+    "tests/unit/test_stand_ins_match_what_they_replace.py",
+    "tests/unit/test_the_commands_discord_will_accept.py",
+    "tests/unit/test_the_shutdown_budget_fits_the_container.py",
+]
+
+# Pyright honours per-rule overrides in an execution environment but NOT `typeCheckingMode`, so
+# holding the tests to standard means naming the rules strict adds. This list was derived by
+# running the tree at both levels and taking the difference, rather than read off the docs.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+reportUnknownLambdaType = "none"
+reportMissingParameterType = "none"
+reportMissingTypeArgument = "none"
+reportMissingTypeStubs = "none"
+# A test reaching for a private name is usually reading the thing it is testing.
+reportPrivateUsage = "none"
+reportDeprecated = "none"
+# Ruff already fails the build on an unused import, under F401.
+reportUnusedImport = "none"

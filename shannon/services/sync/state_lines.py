@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.threads import PostsToThread
@@ -46,7 +46,7 @@ class StateLine:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: PostsToThread,
         *,
         render: Renderer,

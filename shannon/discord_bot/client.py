@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 
 from shannon.discord_bot.responses import reply
+from shannon.discord_bot.slash import SlashCommand
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class ShannonBot(discord.Client):
         # of finding out, and taking an hour over a channel nobody is using any more costs that
         # item nothing.
         self._letting_go = asyncio.Semaphore(2)
-        self._pending: list[app_commands.Command] = []
+        self._pending: list[SlashCommand] = []
         # Whether the websocket is up right now, kept from the events discord.py already sends.
         # `is_ready` cannot answer it: it reports whether the cache has ever been filled, is set
         # once when READY arrives and cleared only by `close`, so a connection that came up and
@@ -118,7 +119,7 @@ class ShannonBot(discord.Client):
         with contextlib.suppress(discord.HTTPException):
             await reply(interaction, self._explain_error(error))
 
-    def install(self, *commands: app_commands.Command) -> None:
+    def install(self, *commands: SlashCommand) -> None:
         self._pending.extend(commands)
 
     def tell_when_a_channel_goes(self, gone: ChannelGone) -> None:

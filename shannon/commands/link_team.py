@@ -10,6 +10,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ class LinksTeams(Protocol):
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> str: ...
 
 
-def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> app_commands.Command:
+def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(name="link_team", description="Connect a GitHub team to a Discord role")
     @app_commands.describe(
         github_team="The GitHub team, as it appears in the URL",

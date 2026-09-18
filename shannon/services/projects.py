@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, URL_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
@@ -69,7 +69,7 @@ class ProjectPoller:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         projects: ReadsBoards,
         sync: SyncsItems,
         workflow: MovesStatus,

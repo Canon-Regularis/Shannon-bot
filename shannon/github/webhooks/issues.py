@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
+from shannon.domain.json import JsonObject
 from shannon.domain.models import IssueSnapshot
 from shannon.github import mapping
 from shannon.github.webhooks.events import ISSUE_ACTIONS
@@ -11,7 +10,7 @@ from shannon.github.webhooks.events import ISSUE_ACTIONS
 logger = logging.getLogger(__name__)
 
 
-def parse_issue_event(action: str, payload: Mapping[str, Any]) -> IssueSnapshot | None:
+def parse_issue_event(action: str, payload: JsonObject) -> IssueSnapshot | None:
     """Turn an `issues` webhook body into the same snapshot the REST client produces.
 
     Returns None when the action is out of scope or the body is missing something the sync path

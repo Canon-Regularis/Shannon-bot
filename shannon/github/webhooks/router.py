@@ -9,9 +9,8 @@ webhook imports `events` to name an outcome, and none of it wants the registry.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
+from shannon.domain.json import JsonObject
 from shannon.github.webhooks.events import (
     SUPPORTED_EVENTS,
     EventHandler,
@@ -53,7 +52,7 @@ class EventRouter:
         self,
         event: str,
         action: str | None,
-        payload: Mapping[str, Any],
+        payload: JsonObject,
         arrived: int | None = None,
     ) -> WebhookOutcome:
         if not is_supported(event, action):

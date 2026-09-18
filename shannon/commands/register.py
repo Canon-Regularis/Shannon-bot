@@ -10,6 +10,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.errors import ShannonError
 from shannon.services.registration import RegistrationResult
@@ -25,9 +26,7 @@ class RegistersRepositories(Protocol):
     ) -> RegistrationResult: ...
 
 
-def build_register_command(
-    service: RegistersRepositories, gate: PermissionGate
-) -> app_commands.Command:
+def build_register_command(service: RegistersRepositories, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(
         name="register", description="Bind a GitHub repository to this Discord server"
     )

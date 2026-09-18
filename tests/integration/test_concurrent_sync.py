@@ -26,7 +26,7 @@ pytestmark = pytest.mark.integration
 
 async def test_two_events_for_a_new_pull_request_at_once_create_one_item(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -51,7 +51,7 @@ async def test_two_events_for_a_new_pull_request_at_once_create_one_item(
 
 async def test_two_events_for_a_new_issue_at_once_create_one_item(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     issue_event,
 ) -> None:
@@ -71,7 +71,7 @@ async def test_two_events_for_a_new_issue_at_once_create_one_item(
 
 async def test_a_burst_of_deliveries_still_leaves_one_item(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -90,7 +90,9 @@ async def test_a_burst_of_deliveries_still_leaves_one_item(
 
 
 async def test_two_people_running_set_channel_at_once_leave_one_mapping(
-    registered: Repository, db_sessionmaker: async_sessionmaker, db_session: AsyncSession
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
 ) -> None:
     """Both find nothing mapped, and a read-then-write would have both insert."""
     service = ChannelMappingService(db_sessionmaker)
@@ -120,7 +122,7 @@ async def test_two_people_running_set_channel_at_once_leave_one_mapping(
 
 async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -170,7 +172,7 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
 
 async def test_a_rename_does_not_take_back_a_ping_claimed_while_it_ran(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -228,7 +230,7 @@ async def test_a_rename_does_not_take_back_a_ping_claimed_while_it_ran(
 
 async def test_a_later_sync_cannot_push_the_high_water_mark_back_down(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -284,7 +286,7 @@ class TestAnItemThatWentAwayBetweenTwoStatements:
     """
 
     async def test_it_says_which_item_rather_than_returning_nothing(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         class _RowIsGone(TrackedItemStore):
             async def get(self, **kwargs) -> None:
@@ -301,7 +303,7 @@ class TestAnItemThatWentAwayBetweenTwoStatements:
 
 async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -352,7 +354,7 @@ async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
 
 async def test_a_brand_new_item_is_judged_against_whoever_created_it_first(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -418,7 +420,7 @@ async def test_a_brand_new_item_is_judged_against_whoever_created_it_first(
 
 async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned_away(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -467,7 +469,7 @@ async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned
 
 async def test_a_brand_new_item_the_loser_knows_more_about_is_still_written(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     pr_event,
 ) -> None:
@@ -521,7 +523,7 @@ async def test_a_brand_new_item_the_loser_knows_more_about_is_still_written(
 
 async def test_two_syncs_of_one_item_do_not_share_the_discord_phase(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     issue_event,
 ) -> None:
     """The Discord phase is the one part of a sync that nothing used to order.
@@ -553,7 +555,9 @@ async def test_two_syncs_of_one_item_do_not_share_the_discord_phase(
     )
 
 
-async def blocked_on_a_row(sessionmaker: async_sessionmaker, task: asyncio.Task) -> None:
+async def blocked_on_a_row(
+    sessionmaker: async_sessionmaker[AsyncSession], task: asyncio.Task
+) -> None:
     """Wait until the task is genuinely waiting on a lock somebody else holds.
 
     Sleeping a fixed moment instead is what these used to do, and on a loaded machine the task

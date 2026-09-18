@@ -47,7 +47,7 @@ def markers(threads: FakeThreadGateway) -> list[str]:
     return [body for _, body in threads.posts if body.startswith("###")]
 
 
-def issue_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGateway):
+def issue_handler(sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway):
     return build_item_handler(
         build_item_sync(sessionmaker, threads, IssuePolicy()),
         parse_issue_event,
@@ -60,7 +60,9 @@ def issue_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGateway):
     )
 
 
-def pull_request_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGateway):
+def pull_request_handler(
+    sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
+):
     return build_item_handler(
         build_item_sync(sessionmaker, threads, PullRequestPolicy()),
         parse_pull_request_event,
@@ -73,7 +75,9 @@ def pull_request_handler(sessionmaker: async_sessionmaker, threads: FakeThreadGa
     )
 
 
-async def move_the_item_on(sessionmaker: async_sessionmaker, *, state: str, at: datetime) -> None:
+async def move_the_item_on(
+    sessionmaker: async_sessionmaker[AsyncSession], *, state: str, at: datetime
+) -> None:
     """What a later delivery leaves on the row, written directly.
 
     Directly rather than by putting another delivery through, because a sync running inside
@@ -105,7 +109,7 @@ class _RefusesToGiveTheThreadBack(FakeThreadGateway):
 
 class TestWhatEachMoveSays:
     async def test_closing_an_issue_says_so_and_says_the_thread_is_shut(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         threads = FakeThreadGateway()
         handle = issue_handler(db_sessionmaker, threads)
@@ -122,7 +126,7 @@ class TestWhatEachMoveSays:
         assert thread.archived is True, "the header it posted left the thread open"
 
     async def test_reopening_an_issue_says_the_thread_is_back(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         threads = FakeThreadGateway()
         handle = issue_handler(db_sessionmaker, threads)
@@ -139,7 +143,7 @@ class TestWhatEachMoveSays:
         assert threads.threads[threads.created[0].thread_id].locked is False
 
     async def test_a_pull_request_closed_without_merging_is_shut_too(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """An abandoned pull request is exactly the thread worth getting out of the way, and it
         is the one that can genuinely be reopened on GitHub, so it is told how.
@@ -154,7 +158,7 @@ class TestWhatEachMoveSays:
         assert threads.threads[threads.created[0].thread_id].archived is True
 
     async def test_a_merged_pull_request_is_told_apart_from_an_abandoned_one(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """GitHub has no `merged` action: a merge arrives as a close with a flag beside it, and
         work finished reads differently from work dropped.
@@ -169,7 +173,7 @@ class TestWhatEachMoveSays:
         assert threads.threads[threads.created[0].thread_id].archived is True
 
     async def test_a_thread_discord_would_not_shut_says_which_permission_is_missing(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The whole point of carrying the refusal instead of raising on it.
 
@@ -191,7 +195,7 @@ class TestWhatEachMoveSays:
         assert threads.threads[threads.created[0].thread_id].archived is False
 
     async def test_an_action_that_moves_no_state_says_nothing(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """An `edited` delivery carries the item state too. One that reads closed did not just
         close: it was closed already, and something else about it changed.
@@ -214,7 +218,7 @@ class TestSayingItOnce:
     async def test_the_same_delivery_handled_twice_says_it_once(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         db_session: AsyncSession,
     ) -> None:
         """The queue is at-least-once by design: a delivery whose status could not be written
@@ -242,7 +246,7 @@ class TestAnItemThatHasMovedOnSince:
     """The gate is the row rather than the outcome of the sync, and these tell the two apart."""
 
     async def test_a_close_overtaken_by_a_reopen_says_nothing(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """Otherwise a close announces itself for an item that is open, under a block that says
         Open, and a reader has no way to tell which of the two to believe.
@@ -259,7 +263,7 @@ class TestAnItemThatHasMovedOnSince:
         assert markers(threads) == []
 
     async def test_a_close_overtaken_by_something_that_still_says_closed_is_still_said(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The case a gate on the outcome of the sync would lose for good. This delivery is
         refused as superseded, whatever overtook it was not a state move so it announced nothing,
@@ -277,7 +281,7 @@ class TestAnItemThatHasMovedOnSince:
         assert markers(threads) == [SHUT]
 
     async def test_a_reopen_whose_unlock_was_refused_does_not_promise_the_thread_is_open(
-        self, registered: Repository, db_sessionmaker: async_sessionmaker
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """A refused unlock is logged and stepped over rather than failing the delivery, on
         purpose, so a reopened item really does reach the announcement in a thread that is still

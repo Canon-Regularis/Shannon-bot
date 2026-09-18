@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from sqlalchemy.exc import ArgumentError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 
@@ -42,5 +47,5 @@ def build_probe_engine(engine: AsyncEngine) -> AsyncEngine:
     return create_async_engine(engine.url, poolclass=NullPool, pool_pre_ping=False)
 
 
-def build_sessionmaker(engine: AsyncEngine) -> async_sessionmaker:
+def build_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)

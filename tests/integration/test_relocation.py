@@ -90,7 +90,7 @@ def github_with(*, pulls=(), issues=()) -> FakeGitHubClient:
 
 
 def relocation_with(
-    sessionmaker: async_sessionmaker,
+    sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
     github: FakeGitHubClient,
     *,
@@ -131,7 +131,9 @@ async def remap(
 
 
 async def strand_an_issue(
-    sessionmaker: async_sessionmaker, threads: FakeThreadGateway, snapshot: IssueSnapshot
+    sessionmaker: async_sessionmaker[AsyncSession],
+    threads: FakeThreadGateway,
+    snapshot: IssueSnapshot,
 ) -> int:
     """Mirror an issue into the channel it is mapped to now, which a remap will orphan."""
     service = build_item_sync(sessionmaker, threads, IssuePolicy())
@@ -154,7 +156,7 @@ class TestMovingAStrandedThread:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         snapshot = an_issue()
@@ -176,7 +178,7 @@ class TestMovingAStrandedThread:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Posting reopens an archived thread, so shutting first would be undone by the very line
@@ -201,7 +203,7 @@ class TestMovingAStrandedThread:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The line is written before the lock is attempted, so a server without Manage Threads
@@ -221,7 +223,7 @@ class TestMovingAStrandedThread:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         snapshot = an_issue()
@@ -239,7 +241,7 @@ class TestMovingAStrandedThread:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Rehousing somebody's thread is not a reason to notify them about it again."""
@@ -262,7 +264,7 @@ class TestTheRowNeverPointsAtNothing:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """The one failure that would cost an item its only thread rather than a signpost.
@@ -292,7 +294,7 @@ class TestWhenTheRowDoesNotRememberTheChannel:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Every thread claimed before that column existed. Guessing would abandon a working
@@ -315,7 +317,7 @@ class TestWhenTheRowDoesNotRememberTheChannel:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """And the answer is written down, so it stops being a candidate rather than costing a
@@ -343,7 +345,7 @@ class TestWhenTheRowDoesNotRememberTheChannel:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Not moved and not failed: the pointer was worthless, and the item gets a fresh thread
@@ -368,7 +370,7 @@ class TestWhenTheRowDoesNotRememberTheChannel:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -398,7 +400,7 @@ class TestWhichKindsMove:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """`forget_channel` matches on the channel alone, which would strand pull requests
@@ -419,7 +421,7 @@ class TestWhichKindsMove:
     async def test_a_kind_borrowing_this_channel_moves_with_it(
         self,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Issues fall back to the pull request channel, so pointing pull requests somewhere new
@@ -446,7 +448,7 @@ class TestWhichKindsMove:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         issue = an_issue()
@@ -464,7 +466,7 @@ class TestTheCap:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         issues = [an_issue(12), an_issue(13), an_issue(14)]
@@ -486,7 +488,7 @@ class TestWhenOneItemFails:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -508,7 +510,7 @@ class TestWhenOneItemFails:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -527,7 +529,7 @@ class TestWhenOneItemFails:
         assert "an unexpected failure moving" in caplog.text
 
     async def test_an_unregistered_server_is_told_to_register(
-        self, db_sessionmaker: async_sessionmaker, threads: FakeThreadGateway
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
     ) -> None:
         with pytest.raises(NotRegisteredError, match="/register"):
             await relocation_with(db_sessionmaker, threads, github_with()).relocate(
@@ -540,7 +542,7 @@ class TestTheOrdinaryDeliveryPath:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Relocating is built into the binding rather than asked for per call, so a webhook
@@ -564,7 +566,7 @@ class TestTheWiring:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Both halves live in the wiring and neither is visible from the service, so nothing
@@ -630,7 +632,7 @@ class TestABoardCard:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         old = await self.a_card_in(db_session, registered, threads, 500)
@@ -658,7 +660,7 @@ class TestWhenTheOldThreadCannotBeToldAnything:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -687,7 +689,7 @@ class TestWhenNothingWasDisplaced:
         self,
         registered: Repository,
         db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
         """Something attached a thread in the right channel while this was in flight, or the sync

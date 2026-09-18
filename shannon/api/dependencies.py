@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Protocol
 
 from fastapi import Depends, Request
 
 from shannon.config import Settings
+from shannon.domain.json import JsonObject
 from shannon.github.webhooks.events import WebhookOutcome
 from shannon.services.delivery.queue import DeliveryInbox
 
@@ -24,7 +24,7 @@ class EventIntake(Protocol):
     def will_act_on(self, event: str, action: str | None) -> bool: ...
 
     async def dispatch(
-        self, event: str, action: str | None, payload: Mapping[str, Any]
+        self, event: str, action: str | None, payload: JsonObject
     ) -> WebhookOutcome: ...
 
 

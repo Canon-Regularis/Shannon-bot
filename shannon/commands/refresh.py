@@ -10,6 +10,7 @@ from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
 
@@ -53,9 +54,7 @@ class RefreshesARepository(Protocol):
     async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome: ...
 
 
-def build_refresh_command(
-    service: RefreshesARepository, gate: PermissionGate
-) -> app_commands.Command:
+def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(
         name="refresh", description="Open threads for any GitHub items that do not have one"
     )

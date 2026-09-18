@@ -12,15 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.installations import InstallationStore
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.github.app_auth import app_jwt
 from shannon.github.errors import GitHubAuthError
 from shannon.github.mapping import parse_timestamp
@@ -48,7 +49,7 @@ class InstallationDirectory:
     trouble than one small query.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def installation_for(self, owner: str) -> int | None:
@@ -207,13 +208,13 @@ class InstallationTokens:
         return token
 
 
-def _body(response: httpx.Response) -> Mapping[str, Any]:
+def _body(response: httpx.Response) -> JsonObject:
     """A JSON object, or an empty one. Used where a missing field is already handled below."""
     try:
         payload: Any = response.json()
     except ValueError:
         return {}
-    return payload if isinstance(payload, Mapping) else {}
+    return payload if is_json_object(payload) else {}
 
 
 def _minted(response: httpx.Response) -> tuple[str, datetime]:
@@ -229,10 +230,8 @@ def _minted(response: httpx.Response) -> tuple[str, datetime]:
     except ValueError as exc:
         raise GitHubAuthError("GitHub returned a non-JSON installation token") from exc
 
-    token = payload.get("token") if isinstance(payload, Mapping) else None
-    expires_at = (
-        parse_timestamp(payload.get("expires_at")) if isinstance(payload, Mapping) else None
-    )
+    token = payload.get("token") if is_json_object(payload) else None
+    expires_at = parse_timestamp(payload.get("expires_at")) if is_json_object(payload) else None
     if not isinstance(token, str) or not token or expires_at is None:
         raise GitHubAuthError("GitHub returned an installation token with no token or no expiry")
     return token, expires_at

@@ -5,7 +5,7 @@ import contextlib
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
@@ -68,7 +68,7 @@ class ItemThreads:
 
     def __init__(
         self,
-        sessionmaker: async_sessionmaker,
+        sessionmaker: async_sessionmaker[AsyncSession],
         threads: OpensThreads,
         *,
         relocates: bool = False,

@@ -72,6 +72,33 @@ class UserLinkStore:
             resolved[row.github_username] = row.discord_user_id
         return resolved
 
+    async def login_for(self, *, guild_id: int, discord_user_id: int) -> str | None:
+        """Which GitHub account this Discord member claimed here, or None if they never did.
+
+        The other direction of `resolve_many`, and deliberately not its mirror image. That one is
+        asked about somebody an item names, and has the account id off the payload to hold the
+        stored one against, so a login that has since changed hands is caught and dropped. This one
+        is asked about a Discord member and has no second id to compare with, so it can only answer
+        with the claim as it was made.
+
+        Which is the right answer for what it is for. A GitHub write built on this names an account
+        somebody trusted enough to run `/link` pointed at, and GitHub then applies its own rules
+        about who may go on the item. A link gone stale asks the wrong person for a review; it
+        cannot put somebody on an item who had no business being there.
+
+        One row at most, and no ordering needed to prove it: `uq_user_links_guild_discord` is unique
+        on exactly this pair, and its index is what serves the lookup.
+        """
+        found = await self._session.scalar(
+            select(UserLink.github_username).where(
+                UserLink.discord_guild_id == guild_id,
+                UserLink.discord_user_id == discord_user_id,
+            )
+        )
+        # Narrowed rather than handed straight back, the way `permission_for` narrows its answer.
+        # A scalar off a column comes back untyped, and a login is the one thing this may promise.
+        return found if isinstance(found, str) else None
+
     async def link(
         self,
         *,

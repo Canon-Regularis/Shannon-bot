@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import TypedDict
 
 from shannon.domain.enums import ObjectType
+from shannon.domain.json import JsonObject, is_json_array, is_json_list, is_json_object
 from shannon.domain.models import (
     Actor,
     CommentSnapshot,
@@ -20,10 +20,41 @@ from shannon.domain.models import (
 )
 from shannon.domain.time import as_utc
 
-Payload = Mapping[str, Any]
+Payload = JsonObject
 
 
-def parse_timestamp(value: Any) -> datetime | None:
+class _SharedFields(TypedDict):
+    """What `_shared_fields` hands back, spelled out so the `**` into a snapshot stays checked.
+
+    A plain dict cannot do that job here. `dict[str, object]` refuses to unpack into a typed
+    constructor at all, and `dict[str, Any]` unpacks into anything at all, which is the same as
+    not checking it.
+    """
+
+    repository: RepositorySnapshot
+    github_object_id: int
+    number: int
+    title: str
+    html_url: str
+    state: str
+    author: Actor | None
+    assignees: tuple[Actor, ...]
+    labels: tuple[Label, ...]
+    updated_at: datetime | None
+    action: str | None
+    body: str
+
+
+class _NoteFields(TypedDict):
+    """The same, for what a comment and a review carry alike."""
+
+    html_url: str
+    body: str
+    author: Actor | None
+    created_at: datetime | None
+
+
+def parse_timestamp(value: object) -> datetime | None:
     """Read a GitHub timestamp, always as an aware one.
 
     Normalising here means nothing downstream has to wonder whether a timestamp carries an
@@ -38,9 +69,9 @@ def parse_timestamp(value: Any) -> datetime | None:
         return None
 
 
-def actor(payload: Any) -> Actor | None:
+def actor(payload: object) -> Actor | None:
     """GitHub sends `null` for a deleted account, so this has to tolerate a missing object."""
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     login = payload.get("login")
     if not isinstance(login, str) or not login:
@@ -51,14 +82,14 @@ def actor(payload: Any) -> Actor | None:
     )
 
 
-def actors(payloads: Any) -> tuple[Actor, ...]:
-    if not isinstance(payloads, Iterable) or isinstance(payloads, str | bytes | Mapping):
+def actors(payloads: object) -> tuple[Actor, ...]:
+    if not is_json_array(payloads):
         return ()
     parsed = (actor(item) for item in payloads)
     return tuple(item for item in parsed if item is not None)
 
 
-def team(payload: Any) -> Actor | None:
+def team(payload: object) -> Actor | None:
     """A GitHub team asked for a review, read as though it were a person.
 
     A team is not a user: it has a slug and a name where an account has a login, and no id in the
@@ -73,7 +104,7 @@ def team(payload: Any) -> Actor | None:
     The slug is preferred over the name because it is the stable, URL-safe handle; the name is a
     display string somebody can change.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     handle = payload.get("slug") or payload.get("name")
     if not isinstance(handle, str) or not handle:
@@ -81,20 +112,20 @@ def team(payload: Any) -> Actor | None:
     return Actor(login=handle)
 
 
-def teams(payloads: Any) -> tuple[Actor, ...]:
-    if not isinstance(payloads, Iterable) or isinstance(payloads, str | bytes | Mapping):
+def teams(payloads: object) -> tuple[Actor, ...]:
+    if not is_json_array(payloads):
         return ()
     parsed = (team(item) for item in payloads)
     return tuple(item for item in parsed if item is not None)
 
 
-def labels(payloads: Any) -> tuple[Label, ...]:
-    if not isinstance(payloads, Iterable) or isinstance(payloads, str | bytes | Mapping):
+def labels(payloads: object) -> tuple[Label, ...]:
+    if not is_json_array(payloads):
         return ()
 
     result: list[Label] = []
     for item in payloads:
-        if not isinstance(item, Mapping):
+        if not is_json_object(item):
             continue
         name = item.get("name")
         if isinstance(name, str) and name:
@@ -103,8 +134,8 @@ def labels(payloads: Any) -> tuple[Label, ...]:
     return tuple(result)
 
 
-def repository(payload: Any) -> RepositorySnapshot | None:
-    if not isinstance(payload, Mapping):
+def repository(payload: object) -> RepositorySnapshot | None:
+    if not is_json_object(payload):
         return None
 
     repo_id = payload.get("id")
@@ -147,7 +178,7 @@ def _owner_login(payload: Payload) -> str | None:
 
 
 def issue(
-    payload: Any, repo: RepositorySnapshot, *, action: str | None = None
+    payload: object, repo: RepositorySnapshot, *, action: str | None = None
 ) -> IssueSnapshot | None:
     """Build a snapshot from an issue object.
 
@@ -158,7 +189,7 @@ def issue(
     here. What a list row does carry, and a caller has to handle, is pull requests: GitHub serves
     those from the issues endpoint too, which is what `is_pull_request` below is for.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
 
     shared = _shared_fields(payload, repo, path="issues", action=action)
@@ -168,18 +199,18 @@ def issue(
     return IssueSnapshot(**shared, closed_at=parse_timestamp(payload.get("closed_at")))
 
 
-def is_pull_request(payload: Any) -> bool:
+def is_pull_request(payload: object) -> bool:
     """Whether an issue-shaped payload is really a pull request.
 
     GitHub serves pull requests from the issues endpoint too, and marks them only with this
     key. Without the check, `/issue` pointed at a pull request number would track it a second
     time under the wrong type.
     """
-    return isinstance(payload, Mapping) and payload.get("pull_request") is not None
+    return is_json_object(payload) and payload.get("pull_request") is not None
 
 
 def pull_request(
-    payload: Any, repo: RepositorySnapshot, *, action: str | None = None
+    payload: object, repo: RepositorySnapshot, *, action: str | None = None
 ) -> PullRequestSnapshot | None:
     """Build a snapshot from a pull request object.
 
@@ -191,7 +222,7 @@ def pull_request(
     issue shape: no requested reviewers, no requested teams, no repository on the base. This would
     build a snapshot from one without complaining and quietly say nobody had been asked to review.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
 
     shared = _shared_fields(payload, repo, path="pull", action=action)
@@ -210,7 +241,7 @@ def pull_request(
 
 def _shared_fields(
     payload: Payload, repo: RepositorySnapshot, *, path: str, action: str | None
-) -> dict[str, Any] | None:
+) -> _SharedFields | None:
     """The fields every mirrored object has, or None when the payload is unusable.
 
     Issues and pull requests are the same shape here apart from the URL path, so pulling them
@@ -247,14 +278,14 @@ def _shared_fields(
 
 
 def comment(
-    payload: Any, repo: RepositorySnapshot, *, item_number: int, on: Any
+    payload: object, repo: RepositorySnapshot, *, item_number: int, on: object
 ) -> CommentSnapshot | None:
     """Build a snapshot from a comment object.
 
     `on` is the issue the comment was left under, needed only to tell which kind of item it is:
     GitHub serves pull request comments from the issues endpoint and marks them with one key.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
 
     comment_id = payload.get("id")
@@ -270,9 +301,9 @@ def comment(
     )
 
 
-def review(payload: Any, repo: RepositorySnapshot, *, item_number: int) -> ReviewSnapshot | None:
+def review(payload: object, repo: RepositorySnapshot, *, item_number: int) -> ReviewSnapshot | None:
     """Build a snapshot from a submitted review."""
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
 
     review_id = payload.get("id")
@@ -290,7 +321,7 @@ def review(payload: Any, repo: RepositorySnapshot, *, item_number: int) -> Revie
 
 
 def review_comment(
-    payload: Any, repo: RepositorySnapshot, *, item_number: int
+    payload: object, repo: RepositorySnapshot, *, item_number: int
 ) -> ReviewCommentSnapshot | None:
     """Build a snapshot from one inline comment on a pull request's diff.
 
@@ -299,7 +330,7 @@ def review_comment(
     on one the diff has moved out from under. None of the three is a failure, so none of them
     refuses the snapshot.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
 
     comment_id = payload.get("id")
@@ -320,7 +351,7 @@ def review_comment(
     )
 
 
-def _optional_int(value: Any) -> int | None:
+def _optional_int(value: object) -> int | None:
     """A number GitHub may send, may send as null, or may leave out of the body altogether.
 
     All three mean the same thing to a reader and none of them is a failure, so they collapse to
@@ -329,7 +360,7 @@ def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _note_fields(payload: Payload, *, created: str) -> dict[str, Any]:
+def _note_fields(payload: Payload, *, created: str) -> _NoteFields:
     """What a comment and a review carry alike.
 
     They differ only in which key holds the time they were written, which is why that is a
@@ -345,20 +376,20 @@ def _note_fields(payload: Payload, *, created: str) -> dict[str, Any]:
     }
 
 
-def commit_ref(payload: Any) -> CommitRef | None:
+def commit_ref(payload: object) -> CommitRef | None:
     """One row of a compare, or None for a row that cannot be used.
 
     A row with no SHA is not a commit anybody can go and read, and nothing downstream could claim
     it, so it is dropped rather than rendered as a gap.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     sha = payload.get("sha")
     if not isinstance(sha, str) or not sha:
         return None
 
     inner = payload.get("commit")
-    message = inner.get("message") if isinstance(inner, Mapping) else None
+    message = inner.get("message") if is_json_object(inner) else None
     parents = payload.get("parents")
     return CommitRef(
         sha=sha,
@@ -366,24 +397,24 @@ def commit_ref(payload: Any) -> CommitRef | None:
         # `author` and not `commit.author`. The first is the GitHub account, resolved from the
         # email address; the second is whatever the committer typed into their git config.
         author=actor(payload.get("author")),
-        merge=isinstance(parents, list) and len(parents) > 1,
+        merge=is_json_list(parents) and len(parents) > 1,
     )
 
 
-def commit_range(payload: Any) -> CommitRange | None:
+def commit_range(payload: object) -> CommitRange | None:
     """A compare between two commits, or None for a body that says nothing usable.
 
     One unusable row does not lose the rest: the range is what the caller asked about, and
     dropping every other commit because GitHub sent one odd entry would say less than it knows.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     status = payload.get("status")
     if not isinstance(status, str) or not status:
         return None
 
     rows = payload.get("commits")
-    rows = rows if isinstance(rows, list) else []
+    rows = rows if is_json_list(rows) else []
     parsed = (commit_ref(row) for row in rows)
     commits = tuple(found for found in parsed if found is not None)
     total = payload.get("total_commits")
@@ -396,17 +427,17 @@ def commit_range(payload: Any) -> CommitRange | None:
     )
 
 
-def commit_stats(payload: Any) -> CommitStats | None:
+def commit_stats(payload: object) -> CommitStats | None:
     """How much one commit changed, or None for a body without the numbers.
 
     The file count is the length of the list, because GitHub sends no count on a commit. That
     list stops at three hundred entries, so a very wide commit understates its files while its
     additions and deletions stay exact.
     """
-    if not isinstance(payload, Mapping):
+    if not is_json_object(payload):
         return None
     stats = payload.get("stats")
-    if not isinstance(stats, Mapping):
+    if not is_json_object(stats):
         return None
 
     additions = stats.get("additions")
@@ -418,5 +449,5 @@ def commit_stats(payload: Any) -> CommitStats | None:
     return CommitStats(
         additions=additions,
         deletions=deletions,
-        changed_files=len(files) if isinstance(files, list) else 0,
+        changed_files=len(files) if is_json_list(files) else 0,
     )

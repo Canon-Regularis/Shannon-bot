@@ -373,7 +373,7 @@ class TestNoteTargeting:
 
 async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
     registered: Repository,
-    db_sessionmaker: async_sessionmaker,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
     threads: FakeThreadGateway,
 ) -> None:
     """`then` closes a review request, so it must not run for a note that was never read.
@@ -411,7 +411,7 @@ class TestARetryAfterTheCommentLanded:
     async def test_the_step_beside_it_failing_first_posts_nothing(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -438,7 +438,7 @@ class TestARetryAfterTheCommentLanded:
     async def test_a_handler_run_again_after_the_post_landed_does_not_post_twice(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:
@@ -467,7 +467,7 @@ class TestARetryAfterTheCommentLanded:
     async def test_the_step_after_it_still_runs(
         self,
         registered: Repository,
-        db_sessionmaker: async_sessionmaker,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
         issue_event,
     ) -> None:

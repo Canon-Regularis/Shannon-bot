@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class ItemLock:
     which is a Discord call the sync path never sees.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     @asynccontextmanager

@@ -85,6 +85,18 @@ uv run shannon
 Startup refuses to open the port until the database answers and has been migrated. Without a
 Discord token it still serves the endpoint and works the queue, and warns that it is doing so.
 
+The checks CI runs, which are worth running before pushing:
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+uv run mypy                          # strict on shannon, relaxed on tests
+uv run pyright                       # the engine behind Pylance, so the editor agrees
+uv run pytest -q --cov
+```
+
+Both type checkers carry a list of files that are not clean yet, in `pyproject.toml`. A file leaves
+that list when it is fixed and does not go back, and anything not on it has to stay clean.
+
 ## Connecting it to GitHub and Discord
 
 Neither side is configured by this repository, and the bot cannot do either for you.
@@ -363,6 +375,8 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
+| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Asks that person for a review on a pull request, or puts them on an issue, because an issue has no reviewers. They need a linked GitHub account. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
+| `/unassign <member>` | Developer, Project Manager | The same in reverse, withdrawing a review request or taking an assignee off |
 | `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
