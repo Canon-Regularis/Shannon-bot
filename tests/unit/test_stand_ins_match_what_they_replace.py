@@ -17,10 +17,10 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
-from shannon.commands.assign import PutsSomebodyOnAnItem
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.mentions import RemembersWhoWantsPinging
+from shannon.commands.people import PutsSomebodyOnAnItem
 from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
@@ -60,7 +60,6 @@ from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
 from shannon.runtime.liveness import ProcessLiveness
-from shannon.services.assignment import ItemAssignment, PutsPeopleOnItems
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -71,6 +70,7 @@ from shannon.services.delivery.worker import DeliveryWorker
 from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
+from shannon.services.people import ItemPeople, PutsPeopleOnItems
 from shannon.services.projects import ReadsBoards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.sync.announcements import AnnouncesInThread
@@ -149,7 +149,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # person. Both sides, because the fake is what every test of it runs against.
     (PutsPeopleOnItems, HttpGitHubClient),
     (PutsPeopleOnItems, FakeGitHubClient),
-    (PutsSomebodyOnAnItem, ItemAssignment),
+    (PutsSomebodyOnAnItem, ItemPeople),
     (DeliveryInbox, InMemoryDeliveryQueue),
     (DeliveryInbox, WebhookDeliveryQueue),
     (DeliveryQueue, WebhookDeliveryQueue),

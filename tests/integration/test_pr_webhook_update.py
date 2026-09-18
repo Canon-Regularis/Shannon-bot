@@ -100,10 +100,19 @@ async def test_a_removed_label_disappears_from_the_metadata(
 async def test_a_reassignment_reaches_the_metadata_and_the_database(
     tracked: AsyncClient, threads: FakeThreadGateway, db_session: AsyncSession
 ) -> None:
+    # The later timestamp is required now and was not before, which is worth saying rather than
+    # leaving as a magic string. Issue #105 gave pull request assignees the notifier issues have
+    # always had, so their rows carry a `notified_at`, and `_already_told_and_newer` will not let
+    # a payload that is not strictly newer delete a row somebody has already been pinged from.
+    # The issue sibling of this test has carried the same stamp for the same reason all along.
     await deliver(
         tracked,
         "pull_request",
-        payloads.pull_request_event("assigned", assignees=[payloads.user("octocat", 583231)]),
+        payloads.pull_request_event(
+            "assigned",
+            assignees=[payloads.user("octocat", 583231)],
+            updated_at="2026-08-11T10:30:00Z",
+        ),
         delivery="d1",
     )
 

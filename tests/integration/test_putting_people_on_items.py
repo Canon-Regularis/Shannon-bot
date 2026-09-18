@@ -1,8 +1,14 @@
 """Putting somebody on an item from Discord, and what deliberately does not happen in the thread.
 
-Issue #106. The design decision this file exists to pin is an absence: the service writes to GitHub
-and stops. GitHub sends the change back as a delivery, and the ordinary mirror rewrites the block
-and posts the line. Anything done here as well would be the second copy of it.
+Issues #106 and #105. Two things this file exists to pin.
+
+The first is an absence: the service writes to GitHub and stops. GitHub sends the change back as a
+delivery, and the ordinary mirror rewrites the block and posts the line. Anything done here as well
+would be the second copy of it.
+
+The second is that a pull request has two lists rather than one. It can hold an assignee and a
+reviewer at the same time, and they need not be the same person. The service used to infer which
+list from the kind of item, which read well and left no way to assign a pull request at all.
 """
 
 from __future__ import annotations
@@ -17,10 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.domain.enums import ObjectType
+from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.domain.models import Actor
-from shannon.services.assignment import ItemAssignment
+from shannon.services.people import ItemPeople
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -69,8 +75,8 @@ def github(pr_event, issue_event) -> FakeGitHubClient:
 @pytest.fixture
 def service(
     db_sessionmaker: async_sessionmaker[AsyncSession], github: FakeGitHubClient
-) -> ItemAssignment:
-    return ItemAssignment(
+) -> ItemPeople:
+    return ItemPeople(
         db_sessionmaker,
         github,
         {
@@ -85,21 +91,56 @@ def thread_for(threads: FakeThreadGateway, channel_id: int) -> int:
 
 
 class TestAPullRequest:
-    async def test_it_asks_github_for_a_review(
+    """It has both lists, and which one is used is told to the service rather than guessed."""
+
+    async def test_assigning_puts_them_on_the_assignees(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
     ) -> None:
+        """Issue #105. This used to be impossible: a pull request always meant a reviewer."""
         outcome = await service.assign(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
 
+        assert github.people_calls == [("add_assignees", (REPO_FULL, 7), ("newbie",))]
+        assert (outcome.role, outcome.added, outcome.login) == (ActorRole.ASSIGNEE, True, "newbie")
+
+    async def test_asking_for_a_review_uses_the_reviewers(
+        self,
+        tracked,
+        linked,
+        service: ItemPeople,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> None:
+        outcome = await service.request_review(
+            thread_id=thread_for(threads, 99), discord_user_id=ALICE
+        )
+
         assert github.people_calls == [("request_reviewers", (REPO_FULL, 7), ("newbie",))]
-        assert (outcome.reviewing, outcome.added, outcome.login) == (True, True, "newbie")
+        assert outcome.role is ActorRole.REVIEWER
+
+    async def test_one_person_can_hold_both_roles_at_once(
+        self,
+        tracked,
+        linked,
+        service: ItemPeople,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """GitHub keeps two lists and nothing stops somebody being on both. Inferring the list
+        from the item made that unsayable, which is the whole of issue #105."""
+        thread = thread_for(threads, 99)
+
+        await service.assign(thread_id=thread, discord_user_id=ALICE)
+        await service.request_review(thread_id=thread, discord_user_id=ALICE)
+
+        assert [call[0] for call in github.people_calls] == ["add_assignees", "request_reviewers"]
 
     async def test_it_posts_nothing_into_the_thread(
-        self, tracked, linked, service: ItemAssignment, threads: FakeThreadGateway
+        self, tracked, linked, service: ItemPeople, threads: FakeThreadGateway
     ) -> None:
         """The whole design in one assertion. GitHub's own delivery says it in the thread, once,
         through the mirror that already existed. A line from here would be the second copy."""
@@ -109,43 +150,49 @@ class TestAPullRequest:
 
         assert len(threads.posts) == before
 
-    async def test_withdrawing_one(
+    async def test_withdrawing_a_review(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
         github.pull_requests[(REPO_FULL, 7)] = replace(pr_event("opened"), reviewers=(NEWBIE,))
 
-        outcome = await service.unassign(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
+        outcome = await service.unrequest_review(
+            thread_id=thread_for(threads, 99), discord_user_id=ALICE
+        )
 
         assert github.people_calls == [("remove_reviewers", (REPO_FULL, 7), ("newbie",))]
         assert outcome.added is False
 
-    async def test_the_author_is_refused_without_asking_github(
+    async def test_the_author_can_be_assigned_though_not_asked_to_review(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
+        """An asymmetry of GitHub's, and a second reason the two lists cannot share one command."""
         github.pull_requests[(REPO_FULL, 7)] = replace(pr_event("opened"), author=NEWBIE)
+        thread = thread_for(threads, 99)
+
+        await service.assign(thread_id=thread, discord_user_id=ALICE)
 
         with pytest.raises(WorkflowRefusedError, match="opened this pull request"):
-            await service.assign(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
+            await service.request_review(thread_id=thread, discord_user_id=ALICE)
 
-        assert github.people_calls == []
+        assert github.people_calls == [("add_assignees", (REPO_FULL, 7), ("newbie",))]
 
     async def test_somebody_already_asked_is_refused_without_asking_github(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
         pr_event,
@@ -153,31 +200,45 @@ class TestAPullRequest:
         github.pull_requests[(REPO_FULL, 7)] = replace(pr_event("opened"), reviewers=(NEWBIE,))
 
         with pytest.raises(WorkflowRefusedError, match="already been asked"):
-            await service.assign(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
+            await service.request_review(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
 
         assert github.people_calls == []
 
 
 class TestAnIssue:
-    async def test_it_assigns_rather_than_asking_for_a_review(
+    async def test_assigning_works_the_same_way(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
     ) -> None:
-        """An issue has no reviewers at all, which is why one command covers both."""
         outcome = await service.assign(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
 
         assert github.people_calls == [("add_assignees", (REPO_FULL, 12), ("newbie",))]
-        assert outcome.reviewing is False
+        assert outcome.role is ActorRole.ASSIGNEE
+
+    async def test_asking_for_a_review_on_one_is_refused(
+        self,
+        tracked,
+        linked,
+        service: ItemPeople,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """An issue has no reviewers at all. Refused here rather than left to GitHub, whose 404
+        for the endpoint tells nobody anything they can act on."""
+        with pytest.raises(WorkflowRefusedError, match="an issue has no reviewers"):
+            await service.request_review(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
+
+        assert github.people_calls == []
 
     async def test_it_asks_whether_github_would_take_them_first(
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
     ) -> None:
@@ -189,7 +250,7 @@ class TestAnIssue:
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
     ) -> None:
@@ -206,7 +267,7 @@ class TestAnIssue:
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
         issue_event,
@@ -222,7 +283,7 @@ class TestAnIssue:
 
 class TestWhatItRefuses:
     async def test_a_thread_this_bot_does_not_track(
-        self, tracked, linked, service: ItemAssignment
+        self, tracked, linked, service: ItemPeople
     ) -> None:
         with pytest.raises(NotAnItemThreadError):
             await service.assign(thread_id=999999, discord_user_id=ALICE)
@@ -231,7 +292,7 @@ class TestWhatItRefuses:
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         db_session: AsyncSession,
     ) -> None:
@@ -261,7 +322,7 @@ class TestWhatItRefuses:
     async def test_a_member_who_has_not_linked(
         self,
         tracked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
     ) -> None:
@@ -274,7 +335,7 @@ class TestWhatItRefuses:
         self,
         tracked,
         linked,
-        service: ItemAssignment,
+        service: ItemPeople,
         github: FakeGitHubClient,
         threads: FakeThreadGateway,
         pr_event,

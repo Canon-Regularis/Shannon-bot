@@ -245,7 +245,7 @@ ignore = [
     # project is in the same position and every one of them is listed below. The fix is the one
     # the typing work already schedules: give the commands a narrow protocol naming what they
     # actually read, which the fake then satisfies structurally and without a single cast.
-    "tests/unit/commands/test_assign_command.py",
+    "tests/unit/commands/test_people_commands.py",
     "shannon/api/routes/webhooks.py",
     "shannon/commands/link.py",
     "shannon/commands/link_team.py",

@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.container import _both
+from shannon.container import _notifying
 from shannon.db.models import ItemAssignment, Repository
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.discord_bot.formatting import format_reviewer_ping, format_team_ping
@@ -70,7 +70,7 @@ def notifying(
         db_sessionmaker,
         threads,
         PullRequestPolicy(),
-        _both(
+        _notifying(
             ActorNotifier(
                 db_sessionmaker, threads, role=ActorRole.REVIEWER, render=format_reviewer_ping
             ),
