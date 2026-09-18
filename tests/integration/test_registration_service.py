@@ -157,11 +157,27 @@ async def test_a_burst_of_registrations_leaves_one_repository_and_no_raw_databas
     assert len((await db_session.scalars(select(ChannelMapping))).all()) == 1
 
 
-async def _blocked_on_a_lock(session: AsyncSession, timeout: float = 10.0) -> bool:
+async def _blocked_on_a_lock(
+    session: AsyncSession, racing: asyncio.Task, timeout: float = 30.0
+) -> bool:
     """Wait until some backend on this database is stuck behind another one's lock.
 
     PostgreSQL says so itself, which is what makes this a signal rather than a guess: a second
     insert on a unique index waits on the first transaction's id until it commits or rolls back.
+
+    The task is watched alongside the lock, and that is not caution. There are two ways this never
+    sees a lock: the insert has not got there yet, and the insert is never going to because the
+    caller already fell over. Polling alone cannot tell them apart, so the second one spun here
+    for the whole timeout and then failed with a bare `TimeoutError` pointing at `asyncio.sleep`,
+    while the exception that actually explained it sat unretrieved on the task. That happened on
+    CI and the log said nothing anybody could act on.
+
+    So a task that finishes without ever blocking has its result read, which re-raises whatever it
+    hit, with its own traceback. Only a genuinely slow insert reaches the timeout now.
+
+    Thirty seconds rather than ten. Nothing is waited for that is not already happening, so the
+    number only decides how long a heavily loaded runner is given before the suite calls it a
+    failure, and a shared CI runner is slower than anything this was timed against.
     """
     async with asyncio.timeout(timeout):
         while True:
@@ -173,6 +189,14 @@ async def _blocked_on_a_lock(session: AsyncSession, timeout: float = 10.0) -> bo
             )
             if waiting:
                 return True
+            if racing.done():
+                # Re-raises if it failed. If it somehow succeeded, the arrangement itself is
+                # wrong: the row it was supposed to collide with was not there.
+                racing.result()
+                raise AssertionError(
+                    "the registration finished without ever blocking on the index, so the row "
+                    "it was meant to collide with was not there"
+                )
             await asyncio.sleep(0.02)
 
 
@@ -202,7 +226,9 @@ async def test_a_registration_that_commits_between_the_check_and_the_insert(
         await blocker.flush()
 
         racing = asyncio.create_task(service.register(guild_id=1, channel_id=10, link=REPO_LINK))
-        assert await _blocked_on_a_lock(db_session), "the second insert never reached the index"
+        assert await _blocked_on_a_lock(db_session, racing), (
+            "the second insert never reached the index"
+        )
 
         await blocker.commit()
 
