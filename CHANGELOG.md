@@ -5384,3 +5384,39 @@ to set the project number will find it.
   yet beyond the sessionmaker fill-in. The commands still take `discord.Interaction` rather than a
   narrow protocol, which is what stops the fakes satisfying them without a cast.
 
+
+## Putting somebody on an item, from Discord
+
+- **`/assign` and `/unassign` put a person on the item whose thread you are in, and GitHub agrees.**
+  Run with no link, the way the `/set_*` commands are, and take one argument: who. Closes #106.
+- **One command, two things, because GitHub keeps them apart and you should not have to.** A pull
+  request gets a review request. An issue gets an assignee, since an issue has no reviewers at all.
+  The reply says which of the two it did, because calling an assignment a review would teach
+  somebody the wrong thing about their own repository.
+- **It writes to GitHub and does nothing else, and that absence is the design.** GitHub sends the
+  change straight back as a `review_requested` or an `assigned` delivery, and the mirror that has
+  always been there rewrites the block's people line and posts the ping, with the claim making sure
+  that happens once. A line from the command as well would be the second copy of it, and racing the
+  delivery to get in first would buy nothing at all.
+- **A 422 is now told apart from GitHub being unreachable.** The review endpoint answers one for
+  every ordinary mistake: not a collaborator, the pull request's own author, somebody already
+  asked. All of those fell into the catch-all and read as "GitHub could not be reached", which is
+  wrong twice over, because every caller then treats it as worth retrying and retrying a refusal
+  never changes it. `GitHubRefusedError` carries GitHub's own sentence, which names the reason
+  better than anything kept here could.
+- **Two of those refusals are made before GitHub is asked**, in a module that talks to nothing. Not
+  to save the call: GitHub's words for the author case name the endpoint and the collaborator rule,
+  which is true and is not what somebody in a Discord thread needed to be told.
+- **The assignee endpoint needed the opposite treatment, because it does not refuse at all.** GitHub
+  documents that it drops anyone without push access and answers as though it had done what was
+  asked. So the issue path asks first whether the account can be assigned, and a command that
+  reported success for nothing having happened is the thing that stops.
+- **`user_links` gained the direction it never had.** Every read of it went from a GitHub login to a
+  Discord account, because that is what rendering a mention needs. Writing to GitHub starts from the
+  other end. No migration: the columns were there and the unique constraint on the guild and the
+  Discord account is the index that serves it.
+- **It cannot check what the other direction checks, and that is worth knowing.** `resolve_many` has
+  the account id off the payload to hold the stored one against, so a login that has changed hands
+  is caught. This has no second id to compare with, so it answers with the claim as it was made. A
+  stale link asks the wrong person for a review; it cannot put somebody on an item who had no
+  business being there, because GitHub still applies its own rules.
