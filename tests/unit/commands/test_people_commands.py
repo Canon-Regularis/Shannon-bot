@@ -1,19 +1,25 @@
-"""`/assign` and `/unassign`, against a stub.
+"""The four commands that put somebody on an item, against a stub.
 
-Issue #106. The commands are three guards and a sentence each, so what is worth pinning is the
-wording: one command does two different things depending on the thread it is in, and a reply that
-said "assigned" for a review request would teach people the wrong thing about their own repository.
+Issues #106 and #105. Each is three guards and a sentence, so what is worth pinning is the wording.
+There are two lists on a pull request and a person can be on both, so a reply that said "assigned"
+for a review request would teach somebody the wrong thing about their own repository.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from shannon.commands.assign import build_assign_command, build_unassign_command
+from shannon.commands.people import (
+    build_assign_command,
+    build_request_review_command,
+    build_unassign_command,
+    build_unrequest_review_command,
+)
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.domain.enums import ActorRole
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.github.errors import GitHubNotFoundError, GitHubRefusedError
-from shannon.services.assignment import AssignmentOutcome
+from shannon.services.people import PeopleOutcome
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
@@ -24,35 +30,43 @@ THREAD = 9001
 WHO = 4242
 
 
-def outcome(*, reviewing: bool = True, added: bool = True) -> AssignmentOutcome:
-    return AssignmentOutcome(
-        login="alice",
-        full_name="acme/widget",
-        number=7,
-        reviewing=reviewing,
-        added=added,
-    )
+def outcome(*, role: ActorRole = ActorRole.ASSIGNEE, added: bool = True) -> PeopleOutcome:
+    return PeopleOutcome(login="alice", full_name="acme/widget", number=7, role=role, added=added)
 
 
 class StubAssignment:
     def __init__(
-        self, *, result: AssignmentOutcome | None = None, error: Exception | None = None
+        self, *, result: PeopleOutcome | None = None, error: Exception | None = None
     ) -> None:
         self.result = result or outcome()
         self.error = error
         self.calls: list[tuple[str, int, int]] = []
 
-    async def assign(self, *, thread_id: int, discord_user_id: int) -> AssignmentOutcome:
+    async def assign(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome:
         return self._record("assign", thread_id, discord_user_id)
 
-    async def unassign(self, *, thread_id: int, discord_user_id: int) -> AssignmentOutcome:
+    async def unassign(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome:
         return self._record("unassign", thread_id, discord_user_id)
 
-    def _record(self, what: str, thread_id: int, discord_user_id: int) -> AssignmentOutcome:
+    async def request_review(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome:
+        return self._record("request_review", thread_id, discord_user_id)
+
+    async def unrequest_review(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome:
+        return self._record("unrequest_review", thread_id, discord_user_id)
+
+    def _record(self, what: str, thread_id: int, discord_user_id: int) -> PeopleOutcome:
         self.calls.append((what, thread_id, discord_user_id))
         if self.error is not None:
             raise self.error
         return self.result
+
+
+BUILDERS = {
+    "assign": build_assign_command,
+    "unassign": build_unassign_command,
+    "request_review": build_request_review_command,
+    "unrequest_review": build_unrequest_review_command,
+}
 
 
 def run_it(
@@ -60,11 +74,10 @@ def run_it(
     service: StubAssignment | None = None,
     who=None,
     channel_id: int | None = THREAD,
-    removing: bool = False,
+    command_name: str = "assign",
 ):
     service = service or StubAssignment()
-    build = build_unassign_command if removing else build_assign_command
-    command = build(service, default_gate())
+    command = BUILDERS[command_name](service, default_gate())
     interaction = FakeInteraction(user=who or developer(), channel_id=channel_id)
     return command, interaction, service, FakeMember(id=WHO)
 
@@ -92,7 +105,9 @@ class TestWhoMayRunIt:
     async def test_the_removal_is_gated_the_same_way(self) -> None:
         from tests.unit.commands.conftest import member_with
 
-        command, interaction, service, member = run_it(who=member_with("Reviewer"), removing=True)
+        command, interaction, service, member = run_it(
+            who=member_with("Reviewer"), command_name="unassign"
+        )
 
         await command.callback(interaction, member)
 
@@ -134,41 +149,49 @@ class TestWhereItHasToBeRun:
 
 
 class TestWhatItSays:
-    async def test_a_review_asked_for(self) -> None:
+    """Four sentences, chosen by the role the service reports rather than by which command ran.
+
+    That separation is what lets the service refuse a review on an issue and still answer in the
+    caller's terms, and it is why the reply never has to know which of the four was typed.
+    """
+
+    async def test_somebody_assigned(self) -> None:
         command, interaction, _, member = run_it()
-
-        await command.callback(interaction, member)
-
-        assert interaction.reply == f"Asked <@{WHO}> for a review on acme/widget#7."
-
-    async def test_an_issue_assigned(self) -> None:
-        """The same command, said differently, because GitHub keeps the two apart and calling an
-        assignment a review would teach somebody the wrong thing about their own repository."""
-        command, interaction, _, member = run_it(
-            service=StubAssignment(result=outcome(reviewing=False))
-        )
 
         await command.callback(interaction, member)
 
         assert interaction.reply == f"Assigned <@{WHO}> to acme/widget#7."
 
+    async def test_somebody_taken_off_the_assignees(self) -> None:
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(added=False)), command_name="unassign"
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.reply == f"Took <@{WHO}> off the assignees on acme/widget#7."
+
+    async def test_a_review_asked_for(self) -> None:
+        """Said differently from an assignment, because they are different lists and somebody can
+        be on both at once. Calling one the other teaches the wrong thing about the repository."""
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(role=ActorRole.REVIEWER)),
+            command_name="request_review",
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.reply == f"Asked <@{WHO}> for a review on acme/widget#7."
+
     async def test_a_review_withdrawn(self) -> None:
         command, interaction, _, member = run_it(
-            service=StubAssignment(result=outcome(added=False)), removing=True
+            service=StubAssignment(result=outcome(role=ActorRole.REVIEWER, added=False)),
+            command_name="unrequest_review",
         )
 
         await command.callback(interaction, member)
 
         assert interaction.reply == f"Withdrew the review request from <@{WHO}> on acme/widget#7."
-
-    async def test_an_assignee_taken_off(self) -> None:
-        command, interaction, _, member = run_it(
-            service=StubAssignment(result=outcome(reviewing=False, added=False)), removing=True
-        )
-
-        await command.callback(interaction, member)
-
-        assert interaction.reply == f"Took <@{WHO}> off acme/widget#7."
 
     async def test_the_person_is_named_as_the_mention_that_was_picked(self) -> None:
         """Not the GitHub login it resolved to. Both are true, and the one somebody chose out of a
@@ -178,6 +201,19 @@ class TestWhatItSays:
         await command.callback(interaction, member)
 
         assert "alice" not in interaction.reply
+
+
+class TestEachCommandCallsItsOwnMethod:
+    """Four builders over one helper, so the only thing separating them is which method they were
+    handed. Crossing two of those wires is invisible to every other test in this file."""
+
+    @pytest.mark.parametrize("name", ["assign", "unassign", "request_review", "unrequest_review"])
+    async def test_the_method_matches_the_command(self, name: str) -> None:
+        command, interaction, service, member = run_it(command_name=name)
+
+        await command.callback(interaction, member)
+
+        assert service.calls == [(name, THREAD, WHO)]
 
 
 class TestWhatItRefuses:
