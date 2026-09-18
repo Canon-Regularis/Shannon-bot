@@ -198,6 +198,7 @@ issues.labeled
 issues.assigned
 issue_comment.created
 pull_request_review.submitted
+pull_request_review_comment.created
 ```
 
 Project boards are read rather than delivered. This section previously named

@@ -12,8 +12,12 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 - **Threads.** One per item, opened on the first event and edited in place after. The metadata
   block carries name, type, state, link, author, assignees, reviewers, status, priority, tags,
   last updated, and the description the item was opened with where there is one.
-- **Comments and reviews.** Quoted into the item's thread with a link back. Edits and deletions
-  are not mirrored, so a thread records what was said at the time.
+- **Comments and reviews.** Quoted into the item's thread with a link back. An inline review
+  comment gets a message of its own naming the file and the line it sits on, and a reply says that
+  it is one. A review carrying nothing but inline notes posts no message of its own: GitHub wraps
+  every note on a diff in a review, so mirroring that wrapper says "left a review" with nothing
+  underneath it, once for every reply. Edits and deletions are not mirrored, so a thread records
+  what was said at the time.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
   Anybody unlinked is still named in plain text. At most ten per comment are mentioned, because
@@ -90,13 +94,14 @@ this is deployed plus `/webhooks/github`, the content type is `application/json`
 the same string as `SHANNON_GITHUB_WEBHOOK_SECRET`. An unset secret answers 500 to every delivery
 rather than waving them through, so a mismatch shows up at once rather than quietly.
 
-Choose individual events, and choose these four:
+Choose individual events, and choose these five:
 
 ```text
 Pull requests
 Issues
 Issue comments
 Pull request reviews
+Pull request review comments
 ```
 
 Anything else is answered `ignored` without a row, so subscribing to more costs nothing but noise.

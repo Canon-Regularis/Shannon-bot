@@ -5280,3 +5280,54 @@ to set the project number will find it.
   which can clear a spent review-request claim. Nothing is posted at the time, so what that costs
   is a ping on the item's next genuine delivery, which for the closed items this exists for never
   comes. Guarding it would mean refusing to correct a stale assignee list, which is the feature.
+
+## Streaming a review into its thread
+
+- **An inline review comment now gets a message of its own in the item's thread.** It names who
+  left it, says which file and which line it sits on, quotes the body and links back to it. A
+  reply into an existing thread says that it is a reply. Closes #107.
+- **That is where a review actually says what it means.** `pull_request_review_comment` was not a
+  supported event anywhere in this project, so what reached Discord was the summary box and
+  nothing else. A review carrying nothing but notes on the diff arrived as "left a review" with an
+  empty body, which is the limit this changelog recorded when reviews were first mirrored.
+- **One message per comment rather than one per review.** GitHub delivers the review and each of
+  its comments separately with no promised order, so folding them together would mean waiting on a
+  delivery that may never come, or reading the comments back out of the API on every review. Kept
+  apart, each one resolves its own thread and carries its own key, so any delivery order ends with
+  the same set of messages in the thread and nothing has to hold a batch together.
+- **A review carrying nothing but inline notes now posts no message of its own.** GitHub wraps
+  every note on a diff in a review, so replying once to somebody else's comment submits a
+  `commented` review with no body. Beside the comment that actually said something, mirroring that
+  is "left a review" with nothing underneath it, once per reply.
+- **Deciding that in the mirror rather than in the parser is the whole of it.** The wrapper is the
+  only thing that closes the review request it answers, and pressing Comment is the ordinary way
+  to answer a review without approving. A parser that refused it would leave `fulfilled_at` null
+  on the common path, and the next delivery would ping the reviewer to review what they had just
+  reviewed.
+- **And it is asked after the thread is found rather than before it.** Asked first, a declined
+  review on an item nobody tracks would answer `processed`, and `ignored` is how anybody watching
+  sees that a registered repository is sending events for items with no thread. No claim is taken
+  for a note that was declined either, so undoing this decision later would post every one of them
+  rather than finding them all already recorded as mirrored.
+- **Which kind of item a review comment belongs to is fixed on the snapshot, not read off the
+  body.** The rebuild that mends a deleted thread branches on that field, and its other arm reads
+  the item through the issues endpoint, which GitHub serves for a pull request without complaint.
+  A snapshot claiming to be an issue would not fail. It would open a second thread for the same
+  pull request in the issues channel.
+- **The file path is defused before it is fenced, and cut to 120 characters.** Both have precedent
+  here. A code span stops markdown reading a name and does not stop Discord reading a mention, and
+  `<@1234>.py` is a legal file name. And the file and line are the FIRST line of the message while
+  `fit` drops lines from the END, so an unbounded path leaves `fit` nothing it can keep and takes
+  the comment body and the link to GitHub down with it. The cut takes the front, because the end
+  of a path is its file name and that is the half anybody reading the line wants.
+- **The diff hunk is not rendered.** It is untrusted repository content several lines long, and it
+  would be the first thing dropped when a message ran long, taking the link with it. The link goes
+  to the hunk, which is where anybody wanting to see the code was headed anyway.
+- **This costs one delivery per inline comment.** A review round is now one delivery more than the
+  number of notes in it, where before it was one. Much smaller than the increase `synchronize`
+  brought with commit lines: a push happens whether or not anybody is reading, and this happens
+  only when somebody sits down to review.
+- Deliberately not done, and said rather than hidden: a dismissed review still posts nothing, so a
+  thread goes on showing an approval that no longer counts, and taking somebody off a review says
+  nothing in the thread either. Each needs a key and wording of its own, and a dismissal has to
+  name who dismissed it rather than whose review it was, which is not the same person.
