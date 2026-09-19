@@ -24,6 +24,7 @@ from shannon.discord_bot.panels import (
     Block,
     BlockKind,
     Panel,
+    PanelImage,
     PanelLink,
 )
 
@@ -31,6 +32,7 @@ pytestmark = pytest.mark.unit
 
 K = BlockKind
 AVATAR = "https://avatars.githubusercontent.com/u/1?v=4"
+SHOT = "https://user-images.githubusercontent.com/1/a.png"
 
 
 def panel(*blocks: tuple[BlockKind, str], **extra: Any) -> Panel:
@@ -75,13 +77,22 @@ class TestTheLaw:
         ),
         st.one_of(st.none(), st.sampled_from(list(Accent))),
         st.one_of(st.none(), st.just(AVATAR)),
+        st.lists(st.just(PanelImage(url=SHOT)), max_size=4).map(tuple),
     )
     def test_it_holds_for_any_panel(
-        self, blocks: list[tuple[BlockKind, str]], accent: Accent | None, thumbnail: str | None
+        self,
+        blocks: list[tuple[BlockKind, str]],
+        accent: Accent | None,
+        thumbnail: str | None,
+        images: tuple[PanelImage, ...],
     ) -> None:
         """The one that carries the design. Without it, recording `panel.text` in the fake is a
-        claim nobody is checking."""
-        said = panel(*blocks, accent=accent, thumbnail_url=thumbnail)
+        claim nobody is checking.
+
+        Generated WITH pictures since issue #126, which is the only honest way to say the law
+        still holds now that a card can carry a part that draws rather than speaks.
+        """
+        said = panel(*blocks, accent=accent, thumbnail_url=thumbnail, images=images)
 
         view = as_view(said)
 
@@ -208,6 +219,69 @@ def test_the_widest_panel_this_project_builds_is_far_under_the_ceiling() -> None
         accent=Accent.OPEN,
         thumbnail_url=AVATAR,
         link=PanelLink(label="Open on GitHub", url="https://example.invalid"),
+        images=tuple(PanelImage(url=SHOT) for _ in range(4)),
     )
 
     assert parts_in(as_view(widest)) < 20
+
+
+class TestThePictures:
+    """Issue #126. Discord renders no inline image anywhere, so one has to be a component."""
+
+    def test_no_pictures_means_no_gallery(self) -> None:
+        assert not any(isinstance(item, ui.MediaGallery) for item in as_view(BLOCK).walk_children())
+
+    def test_a_gallery_is_one_component_however_many_pictures(self) -> None:
+        """Its items are values rather than items, so nothing walks into it. That is what keeps
+        four pictures costing what one does against the ceiling of forty."""
+        one = Panel(blocks=BLOCK.blocks, accent=Accent.OPEN, images=(PanelImage(url=SHOT),))
+        four = Panel(
+            blocks=BLOCK.blocks,
+            accent=Accent.OPEN,
+            images=tuple(PanelImage(url=f"{SHOT}?{n}") for n in range(4)),
+        )
+
+        assert parts_in(as_view(four)) == parts_in(as_view(one))
+        assert parts_in(as_view(four)) == parts_in(as_view(BLOCK)) + 1
+
+    def test_it_adds_no_words_and_no_length(self) -> None:
+        """The law, said about the part that draws rather than speaks."""
+        shown = Panel(blocks=BLOCK.blocks, accent=Accent.OPEN, images=(PanelImage(url=SHOT),))
+
+        assert words(as_view(shown)) == words(as_view(BLOCK))
+        assert as_view(shown).content_length() == as_view(BLOCK).content_length()
+
+    def test_it_sits_under_the_blocks_and_above_the_button(self) -> None:
+        """They belong to the description they came out of, and the button is always last."""
+        shown = Panel(
+            blocks=BLOCK.blocks,
+            accent=Accent.OPEN,
+            images=(PanelImage(url=SHOT),),
+            link=PanelLink(label="Open on GitHub", url="https://example.invalid"),
+        )
+
+        drawn = [type(item).__name__ for item in as_view(shown).walk_children()]
+        assert drawn.index("MediaGallery") > max(
+            index for index, name in enumerate(drawn) if name == "TextDisplay"
+        )
+        assert drawn.index("MediaGallery") < drawn.index("ActionRow")
+
+    def test_the_words_of_a_picture_reach_the_item(self) -> None:
+        shown = Panel(
+            blocks=BLOCK.blocks,
+            accent=Accent.OPEN,
+            images=(PanelImage(url=SHOT, alt="the stack trace"),),
+        )
+
+        gallery = next(
+            item for item in as_view(shown).walk_children() if isinstance(item, ui.MediaGallery)
+        )
+        assert gallery.items[0].description == "the stack trace"
+
+    def test_a_picture_with_no_words_carries_none(self) -> None:
+        shown = Panel(blocks=BLOCK.blocks, accent=Accent.OPEN, images=(PanelImage(url=SHOT),))
+
+        gallery = next(
+            item for item in as_view(shown).walk_children() if isinstance(item, ui.MediaGallery)
+        )
+        assert gallery.items[0].description is None
