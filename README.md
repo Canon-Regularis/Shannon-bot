@@ -400,7 +400,7 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
-| `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |
+| `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and point at the `/set_*` command that owns them |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
@@ -440,9 +440,17 @@ What gets published is what people typed. Bot messages are skipped, which is als
 comments mirrored in from GitHub being sent straight back to it; so are attachments, stickers and
 the lines Discord writes itself. Editing a message afterwards changes nothing, because a transcript
 is a record of what was said when it was said, and deleting one before the batch goes out keeps it
-out. Names, issue references and anything else that would notify an account or touch another item
-are neutralised on the way, with one deliberate exception: a full GitHub URL somebody pasted stays
-a working link, and GitHub does cross-reference those.
+out. Tagging somebody in the thread reaches them on GitHub. A tag of a member who has run `/link`
+is published as a real `@login` and notifies that account; a tag of anybody else is published
+as their Discord name and notifies nobody, because a display name that happens to match a login
+would otherwise ring a stranger who was never in the conversation. At most ten accounts are
+tagged per comment, for the reason the comment mirror caps its own: without a limit one thread
+could ping every linked member of the server, and people past the limit are still named.
+
+Everything else that would notify an account or touch another item is still neutralised on the
+way, with one deliberate exception: a full GitHub URL somebody pasted stays a working link, and
+GitHub does cross-reference those. Role and channel mentions are published as their names and
+notify nobody, here or there.
 
 There is no way for one person in a thread to opt out of being transcribed. That is why the notice
 is posted before anything is captured rather than after.
@@ -506,7 +514,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0022`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0023`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

@@ -7,6 +7,7 @@ nothing anywhere saying so.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import LoggedMessage, Repository
+from shannon.db.stores.logged_messages import mentioned_in
 from shannon.discord_bot.capture import CapturedMessage
 from shannon.services.sync.items import ItemSyncService
 from shannon.services.transcripts.log import ConversationLog
@@ -46,7 +48,12 @@ async def logging_thread(log: ConversationLog, thread_id: int) -> int:
 
 
 def said(
-    thread_id: int, *, message_id: int = 501, content: str = "hello", minute: int = 0
+    thread_id: int,
+    *,
+    message_id: int = 501,
+    content: str = "hello",
+    minute: int = 0,
+    mentions: Mapping[int, str] | None = None,
 ) -> CapturedMessage:
     return CapturedMessage(
         thread_id=thread_id,
@@ -55,6 +62,7 @@ def said(
         author_display_name="alice",
         content=content,
         said_at=AT + timedelta(minutes=minute),
+        mentions=mentions or {},
     )
 
 
@@ -159,3 +167,47 @@ async def test_a_message_in_a_thread_with_no_text_is_noted_once(
         log.nothing_to_capture(logging_thread)
 
     assert caplog.text.count("carried no text") == 1, "said on every empty message, not once"
+
+
+class TestWhoAMessageTagged:
+    """Issue #121. The ids have to survive the row, because a display name is not something the
+    GitHub side can turn back into an account."""
+
+    async def test_the_map_is_kept_with_the_message(
+        self, log: ConversationLog, logging_thread: int, db_session: AsyncSession
+    ) -> None:
+        await log.capture(
+            said(
+                logging_thread,
+                content="hey <@111111111111111111>",
+                mentions={111111111111111111: "Alice"},
+            )
+        )
+
+        rows = await held(db_session)
+        assert rows[0].content == "hey <@111111111111111111>"
+        assert mentioned_in(rows[0]) == {111111111111111111: "Alice"}
+
+    async def test_a_message_that_tagged_nobody_keeps_an_empty_one(
+        self, log: ConversationLog, logging_thread: int, db_session: AsyncSession
+    ) -> None:
+        await log.capture(said(logging_thread, content="hello"))
+
+        rows = await held(db_session)
+        assert rows[0].mentions == {}
+        assert mentioned_in(rows[0]) == {}
+
+    async def test_a_key_that_is_not_an_id_is_stepped_over(
+        self, log: ConversationLog, logging_thread: int, db_session: AsyncSession
+    ) -> None:
+        """Capture is the only writer, so any other shape could only be a hand edit, and a whole
+        transcript refusing to publish over one is the worse failure."""
+        await log.capture(
+            said(logging_thread, content="hi", mentions={111111111111111111: "Alice"})
+        )
+        rows = await held(db_session)
+        rows[0].mentions = {"111111111111111111": "Alice", "not-an-id": "Nobody"}
+        await db_session.commit()
+
+        db_session.expire_all()
+        assert mentioned_in((await held(db_session))[0]) == {111111111111111111: "Alice"}

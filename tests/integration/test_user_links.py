@@ -292,3 +292,47 @@ class TestTheOtherDirection:
 
         assert await store.login_for(guild_id=1, discord_user_id=42) == "octocat"
         assert await store.login_for(guild_id=1, discord_user_id=99) == "monalisa"
+
+
+class TestSeveralAtOnce:
+    """The batched half of the other direction, added for issue #121.
+
+    A published transcript needs a login for its author and for everybody each message tagged, and
+    asking one at a time turned a forty-line batch into several hundred queries.
+    """
+
+    async def test_it_answers_everybody_it_knows(self, db_session: AsyncSession) -> None:
+        store = UserLinkStore(db_session)
+        await store.link(guild_id=1, github_username="Alice", github_user_id=1, discord_user_id=11)
+        await store.link(guild_id=1, github_username="Bob", github_user_id=2, discord_user_id=22)
+
+        found = await store.logins_for(guild_id=1, discord_user_ids=[11, 22])
+
+        assert found == {11: "alice", 22: "bob"}
+
+    async def test_somebody_nobody_linked_is_simply_absent(self, db_session: AsyncSession) -> None:
+        """The same answer `login_for` gives as None, in the shape a batch wants."""
+        store = UserLinkStore(db_session)
+        await store.link(guild_id=1, github_username="Alice", github_user_id=1, discord_user_id=11)
+
+        found = await store.logins_for(guild_id=1, discord_user_ids=[11, 99])
+
+        assert found == {11: "alice"}
+
+    async def test_a_link_in_another_server_is_not_this_ones(
+        self, db_session: AsyncSession
+    ) -> None:
+        store = UserLinkStore(db_session)
+        await store.link(guild_id=2, github_username="Alice", github_user_id=1, discord_user_id=11)
+
+        assert await store.logins_for(guild_id=1, discord_user_ids=[11]) == {}
+
+    async def test_asking_about_nobody_answers_without_a_query(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Most messages tag nobody, so this is the common case rather than an edge one. Proved
+        against a closed session, which cannot answer a query at all."""
+        store = UserLinkStore(db_session)
+        await db_session.close()
+
+        assert await store.logins_for(guild_id=1, discord_user_ids=[]) == {}

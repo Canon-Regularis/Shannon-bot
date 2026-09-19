@@ -5814,3 +5814,53 @@ to set the project number will find it.
 - Nothing in the bot changed. A check suite carrying no pull requests is dropped before it reaches
   Discord, and GitHub leaves that array empty for a push to the default branch and for a tag, so
   neither of the runs this affects ever reached a thread.
+
+
+## A tag in the thread reaches the account
+
+- **Tagging somebody in a logged thread now tags them on GitHub.** Closes #121. A `<@123>` was
+  turned into `@DisplayName` by discord.py's `clean_content` before anything of ours saw the
+  message, and the id, which is the only thing `/link` knows a person by, was gone by the time the
+  comment was rendered. Capture does that transform itself now and keeps the id.
+- **The live bug it closes, coming the other way, is the worse of the two.** `@DisplayName` reached
+  GitHub intact, and GitHub reads an `@` at a word boundary as a mention, so anybody whose Discord
+  name happened to match a login was silently subscribing a stranger to the item. An unlinked
+  person is published with a zero-width space inside the name: it reads as their name and rings
+  nobody.
+- **`message.mentions` is the authority and the text is only a pointer into it.** Discord builds
+  that list itself, so an id written in a message that Discord did not read as a mention is left as
+  `@deleted-user`. That is also what makes the token pointless to forge: typing `<@123>` IS
+  mentioning 123 and rings them on Discord too, so there is nothing to be had by typing it rather
+  than clicking a name. The equivalence holds only for Discord's own syntax, which is why nothing
+  invented goes in the token: a shape Discord does not parse would ping on GitHub having pinged
+  nobody here.
+- **The mention is built outside the text it goes into.** The render neutralises what somebody
+  typed in fragments and drops the mention between them, so no amount of typing produces a live
+  `@login` and no neutralising takes one apart. Searching the finished comment for a display name
+  was the obvious alternative and is the one that cannot be made safe: display names hold regex
+  characters and spaces, collide with each other, sit inside ordinary words, and cannot be told
+  apart from somebody quoting a name. A Hypothesis property asserts the whole claim over generated
+  text, which is that every live `@` in a published message is one the renderer was handed.
+- **Ten accounts per comment**, the limit the comment mirror already uses and for the argument it
+  already makes, counted across the whole comment because that is what GitHub notifies from. A name
+  written in ten messages is one notification. Past the limit people are named and not rung, which
+  is what somebody who never ran `/link` already gets.
+- **The author's line is still a link and never an `@`.** Being recorded as having spoken is not a
+  request to be notified, and a forty-line transcript would otherwise subscribe every speaker to
+  the item. Tagging somebody is the opposite of that. Two different questions, two answers.
+- **`/mentions off` deliberately does not reach this.** It governs what this bot's Discord messages
+  may ring, and it is documented and tested as exactly that. A GitHub notification is GitHub's to
+  send, about somebody else's words, under settings that are also GitHub's.
+- **`logged_messages` gains a `mentions` column**, revision `0023`: who each message tagged, by
+  Discord id, with the name each had when it was said. On the row rather than in a table of its own
+  because it has no life of its own, and no backfill because rows written before it are messages
+  whose ids `clean_content` had already destroyed.
+- **The flush stopped asking one query per line.** Authors and tags are the same question of the
+  same table in the same server, so they are asked together, once per batch. Forty lines was forty
+  queries for the authors alone and would have become several hundred.
+- **A hole in `/link`'s validation, found on the way.** `is_login` anchored with `^` and `$`, and
+  `$` also matches before a trailing newline, so it called `alice\n` a login. The same rule was
+  spelled correctly a file away with `\A` and `\Z`, which is what the two consolidated on.
+- **Roles and channels are unchanged.** They still publish as their names and notify nobody. Issue
+  #121 is about people, and a team mention on GitHub reaches everybody in the team, which is a
+  bigger blast radius than anybody asked for.

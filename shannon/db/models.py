@@ -581,6 +581,18 @@ class LoggedMessage(TimestampMixin, Base):
     discord_author_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     author_display_name: Mapped[str] = mapped_column(String(DISPLAY_NAME_WIDTH), nullable=False)
     content: Mapped[str] = mapped_column(String(TRANSCRIPT_LINE_WIDTH), nullable=False)
+    # Who this message tagged, by Discord id, with the name each had when it was said.
+    # Issue #121. The content carries `<@123>` where somebody was tagged and this says
+    # who 123 is; without it the flush could turn a linked person into an `@login` and
+    # would have nothing left to call anybody else.
+    #
+    # A column rather than a table because it has no life of its own: written once with
+    # the row, read once with it, deleted with it, and never queried by the ids in it.
+    # JSON has no integer keys, so the ids go in as decimal strings, and `mentioned_in`
+    # is the only thing that reads them back.
+    mentions: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
     # Discord's clock rather than ours. It is what the rendered line is stamped with, and what the
     # quiet gap is measured against, so a flush held up by an outage does not read as a thread
     # that went quiet and publish a batch the moment the outage ends.

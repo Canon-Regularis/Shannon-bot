@@ -13,6 +13,7 @@ import pytest
 from shannon.github.safe_text import (
     GITHUB_BODY_LIMIT,
     LINE_LIMIT,
+    as_a_tag,
     as_inline_text,
     balanced,
     defuse,
@@ -23,6 +24,9 @@ from shannon.github.safe_text import (
 pytestmark = pytest.mark.unit
 
 ZWSP = "​"
+
+# A snowflake, which is what the tag pattern matches on.
+ALICE = 111111111111111111
 
 
 class TestWhatWouldNotifySomebody:
@@ -132,3 +136,56 @@ class TestFittingTheWholeBody:
         body = "```\n" + "\n".join("x" * 100 for _ in range(1000))
 
         assert fit_body(body).endswith("```")
+
+
+class TestATag:
+    """How somebody nobody linked is written where they were tagged. Issue #121."""
+
+    def test_it_reads_as_a_tag_and_rings_nobody(self) -> None:
+        said = as_a_tag("Alice")
+
+        assert said == "@" + ZWSP + "Alice"
+        assert "@Alice" not in said
+
+    def test_a_name_that_is_itself_a_login_cannot_notify_whoever_holds_it(self) -> None:
+        """The live bug issue #121 closes coming the other way. A display name of `@torvalds`
+        used to reach GitHub intact and subscribe a stranger to the item."""
+        assert "@torvalds" not in as_a_tag("@torvalds")
+
+    def test_a_name_full_of_markup_cannot_restyle_the_line(self) -> None:
+        assert as_a_tag("**bob**") == "@" + ZWSP + r"\*\*bob\*\*"
+
+
+class TestATagInsideAMessage:
+    """The fragment rule: what the caller supplies goes BETWEEN the pieces of what somebody typed,
+    so no `defuse` ever sees a mention this bot built and no fragment can be turned into one."""
+
+    def test_a_verified_token_becomes_what_it_was_given(self) -> None:
+        said = one_message(f"hey <@{ALICE}> look", {ALICE: "@alice-gh"})
+
+        assert said == "hey @alice-gh look"
+
+    def test_a_typed_at_in_the_same_message_is_still_defused(self) -> None:
+        """The whole point of splitting rather than substituting. One message, both answers."""
+        said = one_message(f"hey <@{ALICE}>, is @octocat upstream?", {ALICE: "@alice-gh"})
+
+        assert "@alice-gh" in said
+        assert "@" + ZWSP + "octocat" in said
+        assert "@octocat" not in said
+
+    def test_a_token_nobody_answered_for_is_defused_with_the_text_round_it(self) -> None:
+        said = one_message(f"hey <@{ALICE}> look")
+
+        assert said == f"hey <@{ZWSP}{ALICE}> look"
+
+    def test_a_token_the_cut_landed_inside_rings_nobody(self) -> None:
+        """It no longer matches, so it stays in a fragment and is neutralised. That is the safe
+        way for this to fail."""
+        said = one_message("x" * (LINE_LIMIT - 8) + f" <@{ALICE}>", {ALICE: "@alice-gh"})
+
+        assert "@alice-gh" not in said
+
+    def test_a_spelling_carrying_a_backtick_cannot_open_a_fence(self) -> None:
+        said = one_message(f"<@{ALICE}>", {ALICE: as_a_tag("a`b")})
+
+        assert "```" not in said

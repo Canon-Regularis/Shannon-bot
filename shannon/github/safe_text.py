@@ -12,6 +12,7 @@ hostile input, and nothing about threads or conversations.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 # GitHub refuses a comment body over this with a 422. The transcript budget below is what the
 # flush actually aims at, so this is the backstop for a single message that is already enormous.
@@ -105,17 +106,63 @@ def balanced(text: str) -> str:
     return text + "\n```"
 
 
-def one_message(content: str) -> str:
+def as_a_tag(name: str) -> str:
+    """Somebody's name where they were tagged, reading as a tag and ringing nobody.
+
+    Two hazards at once and neither covers the other. The zero-width space stops a
+    display name that happens to be a GitHub login notifying whoever holds it, which is
+    the live bug issue #121 closes coming the other way: `@TheirDisplayName` used to
+    reach GitHub intact. The escaping stops a name full of markup restyling everybody
+    else's words.
+    """
+    return "@" + _INVISIBLE + as_inline_text(name)
+
+
+# The token `discord_bot.capture` leaves where somebody tagged a person, and the only
+# thing in a captured message allowed to become a live mention. The id in it came off
+# `message.mentions` rather than out of the text, so Discord had already decided it was
+# a mention of somebody; all that is decided here is how to spell it.
+_TAGGED = re.compile(r"<@([0-9]{15,20})>")
+
+
+def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
     """One captured Discord message, made safe and cut to what it may contribute.
 
-    The order is the whole of it, and it is the one `clipped` on the Discord side spells out: the
-    RAW text is cut first and neutralised afterwards. Cutting the neutralised text instead can
-    land between an `@` and the zero-width space protecting it, which puts the mention back.
+    Two orderings, and both are load-bearing.
+
+    The RAW text is cut first and neutralised afterwards, which is the rule `clipped` on the
+    Discord side spells out: cutting the neutralised text can land between an `@` and the
+    zero-width space protecting it, which puts the mention back. A cut landing inside a `<@123>`
+    leaves a token that no longer matches, so it stays in a fragment and is neutralised with the
+    text around it. That is the safe way for it to fail, because it rings nobody.
+
+    And the text is neutralised in FRAGMENTS, never as one assembled string. What the caller
+    supplies is dropped BETWEEN the pieces of what somebody typed, so no `defuse` ever sees a
+    mention this bot built and no fragment can be turned into one. An `@octocat` somebody typed is
+    inside a fragment and comes out broken; an `@octocat` this bot put there is in no fragment at
+    all. It is the rule `discord_bot.formatting._note` states in the other direction: the mention
+    is built outside the untrusted text, because handing assembled text to a swap lets what
+    somebody typed be read as a name.
+
+    An id the caller says nothing about is left where it is, so the fragment it sits in defuses it.
+    The map is the authority and the text is only ever a pointer into it.
     """
     text = _LINE_ENDINGS.sub("\n", content).strip()
     if len(text) > LINE_LIMIT:
         text = text[:LINE_LIMIT].rstrip() + "[...]"
-    return balanced(defuse(text))
+
+    spelled = tagged or {}
+    pieces: list[str] = []
+    typed_from = 0
+    for token in _TAGGED.finditer(text):
+        mention = spelled.get(int(token.group(1)))
+        if mention is None:
+            continue
+        pieces.append(defuse(text[typed_from : token.start()]))
+        pieces.append(mention)
+        typed_from = token.end()
+    pieces.append(defuse(text[typed_from:]))
+    return balanced("".join(pieces))
 
 
 def fit_body(body: str) -> str:

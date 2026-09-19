@@ -182,6 +182,7 @@ class ConversationLog:
                 author_display_name=message.author_display_name,
                 content=message.content,
                 said_at=message.said_at,
+                mentions=message.mentions,
             )
 
     def nothing_to_capture(self, thread_id: int) -> None:

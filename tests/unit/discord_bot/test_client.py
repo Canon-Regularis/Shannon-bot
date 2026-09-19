@@ -448,7 +448,7 @@ class TestReadingAThread:
         capture = RecordingCapture()
         bot.tell_when_a_message_arrives(capture)
 
-        await bot.on_message(a_message(clean_content="  "))
+        await bot.on_message(a_message(content="  "))
 
         assert capture.said_nothing == [THREAD]
         assert capture.awaited == []
