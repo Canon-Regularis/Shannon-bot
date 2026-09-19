@@ -73,7 +73,7 @@ class TestWhatReachesTheThread:
 
         said = inline_posts(threads)[-1]
         assert "**monalisa** commented on `shannon/services/notes.py` L205" in said
-        assert "> This claim wants giving back on cancellation too." in said
+        assert "This claim wants giving back on cancellation too." in said
         assert said.splitlines()[-1].endswith(f"#discussion_r{payloads.REVIEW_COMMENT_ID}>")
 
     async def test_a_reply_is_told_apart_from_a_first_comment(

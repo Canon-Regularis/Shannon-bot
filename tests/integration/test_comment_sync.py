@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.panels import Panel
 from shannon.domain.enums import ObjectType, Status
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
@@ -62,7 +63,7 @@ async def test_the_comment_carries_everything_the_issue_asks_for(
     content = threads.posts[-1][1]
     assert "**monalisa** commented" in content
     assert "<t:" in content
-    assert "> Reproduced on main" in content
+    assert "Reproduced on main" in content
     assert f"issuecomment-{payloads.COMMENT_ID}" in content
 
 
@@ -384,7 +385,7 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
     mirror = ItemNoteMirror(
         db_sessionmaker,
         threads,
-        render=lambda note, mentions, roles: "hello",
+        render=lambda note, mentions, roles: Panel.of_text("hello"),
         shut_again=KeepsThreadsShut(db_sessionmaker, threads),
     )
     ran: list[object] = []
@@ -420,7 +421,7 @@ class TestARetryAfterTheCommentLanded:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         failures = _FailsAfterTheNote()
@@ -454,7 +455,7 @@ class TestARetryAfterTheCommentLanded:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         handler = build_note_handler(mirror, parse_comment_event)
@@ -476,7 +477,7 @@ class TestARetryAfterTheCommentLanded:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
         seen: list[object] = []

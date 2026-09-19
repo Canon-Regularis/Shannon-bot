@@ -6,11 +6,13 @@ from datetime import UTC, datetime
 import pytest
 
 from shannon.discord_bot.formatting import (
+    OPEN_ON_GITHUB,
     format_pull_request,
     format_thread_moved,
     format_thread_moving,
 )
-from shannon.discord_bot.safe_text import MESSAGE_LIMIT, as_plain_text
+from shannon.discord_bot.panels import PANEL_BUDGET, Accent, BlockKind, Panel
+from shannon.discord_bot.safe_text import as_plain_text
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
 
@@ -21,6 +23,7 @@ REPO = RepositorySnapshot(
     html_url="https://github.com/Canon-Regularis/Shannon-bot",
 )
 UPDATED = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+AVATAR = "https://avatars.githubusercontent.com/u/583231?v=4"
 
 SNAPSHOT = PullRequestSnapshot(
     repository=REPO,
@@ -37,12 +40,24 @@ SNAPSHOT = PullRequestSnapshot(
 )
 
 
-def lines(message: str) -> dict[str, str]:
+def lines(block: Panel) -> dict[str, str]:
+    """The field rows, read out of the one block that holds them.
+
+    That block rather than the whole card, which is what this used to split. The description
+    sits in a block of its own since issue #113, so its own lines can no longer arrive here
+    looking like rows whose label happened to be missing.
+    """
     result = {}
-    for line in message.split("\n"):
+    for line in fields_in(block).split("\n"):
         label, _, value = line.partition(":** ")
         result[label.removeprefix("**")] = value
     return result
+
+
+def fields_in(block: Panel) -> str:
+    """The one FIELDS block, and an error rather than a guess if there is not exactly one."""
+    (said,) = [part.text for part in block.blocks if part.kind is BlockKind.FIELDS]
+    return said
 
 
 def test_every_required_field_is_present() -> None:
@@ -150,8 +165,8 @@ def test_status_and_priority_are_taken_from_the_caller() -> None:
 
 
 def test_output_is_stable_for_the_same_input() -> None:
-    first = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
-    second = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
+    first = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).text
+    second = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).text
 
     assert first == second
 
@@ -159,18 +174,18 @@ def test_output_is_stable_for_the_same_input() -> None:
 def test_an_absurd_title_is_truncated_to_fit_discord() -> None:
     huge = replace(SNAPSHOT, title="x" * 5000)
 
-    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED).trimmed().text
 
-    assert len(message) <= MESSAGE_LIMIT
+    assert len(message) <= PANEL_BUDGET
 
 
 def test_truncation_never_leaves_bold_hanging_open() -> None:
     """A cut inside `**` turns the rest of the message into one long bold run."""
     huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
 
-    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED).trimmed().text
 
-    assert len(message) <= MESSAGE_LIMIT
+    assert len(message) <= PANEL_BUDGET
     assert message.count("**") % 2 == 0
 
 
@@ -178,7 +193,7 @@ def test_truncation_keeps_whole_lines() -> None:
     """Every kept line must be one the untruncated block actually contains, start to finish."""
     huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
 
-    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED).trimmed().text
 
     kept = message.removesuffix("\n…").split("\n")
     # Checked against the shape a line must have, not against the function's own output, or
@@ -193,7 +208,7 @@ def test_truncation_drops_from_the_end() -> None:
     """The lines that survive are the first ones, not an arbitrary subset."""
     huge = replace(SNAPSHOT, reviewers=tuple(Actor(f"reviewer{index}") for index in range(400)))
 
-    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED).trimmed().text
 
     kept = message.removesuffix("\n…").split("\n")
     labels = [line.split(":**")[0] for line in kept]
@@ -209,9 +224,9 @@ def test_a_single_line_longer_than_the_whole_limit_is_still_cut() -> None:
     """No boundary to cut on, so the hard cut is the only option left."""
     huge = replace(SNAPSHOT, title="x" * 5000, labels=())
 
-    message = format_pull_request(huge, status=Status.NOT_REVIEWED)
+    message = format_pull_request(huge, status=Status.NOT_REVIEWED).trimmed().text
 
-    assert len(message) <= MESSAGE_LIMIT
+    assert len(message) <= PANEL_BUDGET
     assert message.endswith("…")
 
 
@@ -234,7 +249,7 @@ def test_a_label_cannot_open_a_code_block_in_the_metadata(label: str) -> None:
     """
     labelled = replace(SNAPSHOT, labels=(Label(label),))
 
-    message = format_pull_request(labelled, status=Status.NOT_REVIEWED)
+    message = format_pull_request(labelled, status=Status.NOT_REVIEWED).trimmed().text
 
     assert "```" not in message, f"{label!r} put a code block fence in the metadata"
 
@@ -291,13 +306,13 @@ class TestMarkupGluedToALink:
         """Bold runs past a newline, so an odd marker re-pairs every label with the wrong value."""
         titled = replace(SNAPSHOT, title="Fix https://a.com/**")
 
-        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED)
+        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED).text
 
         assert rendered.count("**") % 2 == 0
 
     def test_the_link_back_to_github_is_still_a_link(self) -> None:
         """The cost of escaping links is paid by previews, not by the pointer that matters."""
-        rendered = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
+        rendered = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).text
 
         assert SNAPSHOT.html_url in rendered
 
@@ -342,7 +357,9 @@ class TestMarkupAfterAMarkdownLink:
     @pytest.mark.parametrize("title", LINKED_TITLES)
     def test_the_block_a_title_lands_in_stays_paired(self, title: str) -> None:
         """Bold runs past a newline, so an odd marker re-pairs every label below it."""
-        rendered = format_pull_request(replace(SNAPSHOT, title=title), status=Status.NOT_REVIEWED)
+        rendered = format_pull_request(
+            replace(SNAPSHOT, title=title), status=Status.NOT_REVIEWED
+        ).text
 
         assert rendered.count("**") % 2 == 0
 
@@ -350,7 +367,7 @@ class TestMarkupAfterAMarkdownLink:
         """A live fence opens a code block that runs to the end of the message."""
         titled = replace(SNAPSHOT, title="Fixed in [abc123](https://x.dev/c) then ``` (end)")
 
-        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED)
+        rendered = format_pull_request(titled, status=Status.NOT_REVIEWED).text
 
         assert SNAPSHOT.html_url in rendered
 
@@ -390,3 +407,77 @@ class TestSayingWhereAnItemWent:
     def test_both_are_subtext(self, line: str) -> None:
         """Quieter than the headers beside them: this is a signpost, not news."""
         assert line.startswith("-# ")
+
+
+class TestTheCardTheBlockIsDrawnOn:
+    """Issue #116. The bar, the face and the button, which are the whole of what a reader sees
+    before a word of the block has been read."""
+
+    @pytest.mark.parametrize(
+        ("snapshot", "accent"),
+        [
+            (SNAPSHOT, Accent.OPEN),
+            (replace(SNAPSHOT, draft=True), Accent.DRAFT),
+            (replace(SNAPSHOT, state="closed"), Accent.CLOSED),
+            (replace(SNAPSHOT, state="closed", merged=True), Accent.MERGED),
+            (replace(SNAPSHOT, merged=True), Accent.MERGED),
+        ],
+    )
+    def test_a_pull_request_carries_githubs_colour_for_its_state(
+        self, snapshot: PullRequestSnapshot, accent: Accent
+    ) -> None:
+        """Merged before closed, because GitHub carries merging as a flag beside the state and a
+        merged pull request is closed too. Red for both would lose the one distinction anybody
+        scrolling a channel actually wants."""
+        assert format_pull_request(snapshot, status=Status.NOT_REVIEWED).accent == accent
+
+    def test_a_draft_is_grey_rather_than_a_paler_green(self) -> None:
+        """It is the one state that says "not yet", so it reads as quieter than the open ones
+        beside it rather than as another shade of the same thing."""
+        draft = format_pull_request(replace(SNAPSHOT, draft=True), status=Status.NOT_REVIEWED)
+
+        assert draft.accent != format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).accent
+
+    def test_the_authors_face_is_the_picture(self) -> None:
+        with_picture = replace(SNAPSHOT, author=Actor("octocat", avatar_url=AVATAR))
+
+        card = format_pull_request(with_picture, status=Status.NOT_REVIEWED)
+
+        assert card.thumbnail_url == AVATAR
+
+    def test_an_item_whose_author_github_does_not_know_has_no_picture(self) -> None:
+        """GitHub answers with no account whenever the address is registered to nobody, and a
+        broken image where a face should be is worse than no face."""
+        card = format_pull_request(replace(SNAPSHOT, author=None), status=Status.NOT_REVIEWED)
+
+        assert card.thumbnail_url is None
+
+    def test_the_button_opens_the_item_on_github(self) -> None:
+        card = format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED)
+
+        assert card.link is not None
+        assert card.link.url == SNAPSHOT.html_url
+        assert card.link.label == OPEN_ON_GITHUB
+
+    def test_the_link_row_survives_the_button_that_repeats_it(self) -> None:
+        """`requirements.md` lists the row and two tests pin the field list, so the button is
+        beside it rather than instead of it. The redundancy is cheaper than the churn."""
+        assert lines(format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED))["GitHub Link"] == (
+            SNAPSHOT.html_url
+        )
+
+    def test_a_url_discord_could_not_parse_gets_no_button_rather_than_no_message(self) -> None:
+        """Discord refuses the WHOLE message over a link it cannot read, so an item whose URL
+        arrived malformed would have no block at all. The row above still carries the address.
+        """
+        odd = replace(SNAPSHOT, html_url="javascript:alert(1)")
+
+        card = format_pull_request(odd, status=Status.NOT_REVIEWED)
+
+        assert card.link is None
+        assert lines(card)["GitHub Link"] == "javascript:alert(1)"
+
+    def test_the_block_is_never_sent_as_plain_text(self) -> None:
+        """A plain panel goes out as a string and costs no components. This one has a bar, a
+        button and usually a face, so it never can."""
+        assert not format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).is_plain

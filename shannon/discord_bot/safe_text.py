@@ -108,19 +108,6 @@ def clipped_job(name: str, *, limit: int) -> str:
     return "…" + name[-(limit - 1) :]
 
 
-def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:
-    """A comment body, made safe to drop into a Discord message.
-
-    Blockquoting alone does not stop GitHub markdown rendering: bold, code fences and mentions
-    all still resolve inside a quote. So the text is neutralised first, which also means the
-    preview can be cut anywhere without leaving a `**` open and bolding everything after it.
-    """
-    text = clipped(body, limit=limit)
-    if not text:
-        return ""
-    return "\n".join(f"> {line}" if line else ">" for line in text.splitlines())
-
-
 # GitHub's web form submits CRLF, and every rule below is anchored to a line. Folded first so
 # the rest of them see one kind of line ending, and so a blank line costs one character against
 # the preview limit rather than two.
@@ -258,17 +245,22 @@ def code_span(text: str) -> str:
     return f"{fence}{padding}{text}{padding}{fence}"
 
 
-def fit(message: str) -> str:
-    """Trim to Discord's limit on a line boundary.
+def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
+    """Trim to a limit on a line boundary.
 
     Each line is built balanced, so dropping whole lines leaves what remains rendering properly.
     Cutting at an arbitrary character can land inside `**bold**` or halfway through a `<@123>`
     mention, and the rest of the message goes with it.
+
+    `limit` defaults to Discord's ceiling on a plain message, which is what every caller wanted
+    when this only trimmed whole messages. Issue #116 gave it a second job: a panel is trimmed by
+    dropping whole blocks and then handing this one what room is left, so the same rule about line
+    boundaries applies one level down.
     """
-    if len(message) <= MESSAGE_LIMIT:
+    if len(message) <= limit:
         return message
 
-    budget = MESSAGE_LIMIT - len(TRUNCATED)
+    budget = limit - len(TRUNCATED)
     kept: list[str] = []
     used = 0
     # No ordinary exit, so the branch coverage floor is told not to look for one: this is only

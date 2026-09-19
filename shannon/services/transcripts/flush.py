@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.conversations import ConversationStore, PendingBatch
 from shannon.db.stores.logged_messages import LoggedMessageStore
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.errors import ShannonError
 from shannon.services.transcripts.lines import TranscriptLine
@@ -293,7 +294,9 @@ class TranscriptFlusher:
         await self._done(batch, through)
         with_reason = GAVE_UP.format(reason=error.message, count=batch.count)
         try:
-            await self._threads.post(thread_id=batch.discord_thread_id, content=with_reason)
+            await self._threads.post(
+                thread_id=batch.discord_thread_id, panel=Panel.of_text(with_reason)
+            )
         except Exception:
             logger.warning(
                 "could not say in thread %s that a transcript was dropped",

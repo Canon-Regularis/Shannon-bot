@@ -17,6 +17,7 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import KnowsItsServers, Notify, OpensThreads, ShutsThread
 from shannon.domain.enums import ActorRole, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
@@ -128,11 +129,11 @@ class ThreadBinding(Protocol):
         target: ThreadTarget,
         *,
         name: str,
-        content: str,
-        replacement: str | None = None,
+        panel: Panel,
+        replacement: Panel | None = None,
         notify: Notify = None,
     ) -> ThreadWrite:
-        """`replacement` is what a thread opened to REPLACE one gets instead of `content`.
+        """`replacement` is what a thread opened to REPLACE one gets instead of `panel`.
 
         Two renderings of the same item, differing only in whether the people on it are live
         mentions. Which one a write needs is not known until the write is under way: an edit
@@ -310,7 +311,7 @@ class ItemSyncService:
         written = await self._binding.write(
             state.target,
             name=state.thread_name,
-            content=state.metadata,
+            panel=state.metadata,
             replacement=state.quiet_metadata,
             notify=state.notify,
         )
@@ -1032,7 +1033,7 @@ class _SyncState:
     tracked_item_id: int
     guild_id: int
     channel_id: int
-    metadata: str
+    metadata: Panel
     # The thread's name, rendered beside the block it belongs with rather than in the caller,
     # so the two cannot end up describing different states.
     thread_name: str
@@ -1060,7 +1061,7 @@ class _SyncState:
     # block is POSTED. What a reader has been shown, which the item's own labels cannot answer.
     labels: tuple[str, ...]
     # The same block with nobody mentioned, for a thread that replaces one. See `ThreadBinding`.
-    quiet_metadata: str
+    quiet_metadata: Panel
     # Which of the people the block names this bot may notify. Empty where it names nobody, which
     # is never the same answer as having no opinion. See `Notify`.
     notify: tuple[int, ...]

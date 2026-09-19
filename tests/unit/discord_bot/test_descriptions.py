@@ -16,7 +16,8 @@ from datetime import UTC, datetime
 import pytest
 
 from shannon.discord_bot.formatting import format_issue, format_pull_request
-from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT, MESSAGE_LIMIT
+from shannon.discord_bot.panels import PANEL_BUDGET
+from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
     Actor,
@@ -51,15 +52,25 @@ LABEL = "**Description:**"
 
 
 def block(body: str, snapshot: PullRequestSnapshot | IssueSnapshot = PULL_REQUEST) -> str:
+    """The card's words, cut to the budget, which is what a reader sees.
+
+    Trimmed here rather than raw, because trimming moved out of the renderer and into the panel
+    when the block became a card: the renderer says everything and the send decides what fits.
+    """
     render = format_issue if isinstance(snapshot, IssueSnapshot) else format_pull_request
-    return render(replace(snapshot, body=body), status=Status.NOT_REVIEWED, priority=Priority.UNSET)
+    card = render(replace(snapshot, body=body), status=Status.NOT_REVIEWED, priority=Priority.UNSET)
+    return card.trimmed().text
 
 
 class TestWhenThereIsSomethingToShow:
-    def test_it_is_labelled_and_quoted(self) -> None:
+    def test_it_is_labelled_and_left_as_written(self) -> None:
+        """Unquoted since issue #113, which asked for the `> ` markers to go and nothing
+        else. The label stays: `requirements.md` lists it and it is not what the issue was
+        about."""
         rendered = block("Lets a tag in a comment reach the person.")
 
-        assert f"{LABEL}\n> Lets a tag in a comment reach the person." in rendered
+        assert f"{LABEL}\nLets a tag in a comment reach the person." in rendered
+        assert "> " not in rendered.split(LABEL)[1], "the markers #113 objected to are back"
 
     def test_it_comes_after_everything_else(self) -> None:
         """The fields are what a reader scanning a channel wants; this is the prose under them.
@@ -77,7 +88,7 @@ class TestWhenThereIsSomethingToShow:
         of them with a stray one on a line of its own."""
         rendered = block("## Summary\n\n- one\n- two")
 
-        assert f"{LABEL}\n> Summary\n>\n> • one\n> • two" in rendered
+        assert f"{LABEL}\nSummary\n\n• one\n• two" in rendered
         assert "\\" not in rendered.split(LABEL)[1]
 
 
@@ -121,7 +132,7 @@ class TestNothingUntrustedGetsThrough:
             mentions={"octocat": 4242},
         )
 
-        assert "<@4242>" not in rendered.split(LABEL)[1]
+        assert "<@4242>" not in rendered.text.split(LABEL)[1]
 
     def test_it_cannot_forge_a_field(self) -> None:
         """The block is read by eye as `**Label:** value` rows, and a description sits inside it."""
@@ -144,26 +155,30 @@ class TestWhenThereIsTooMuch:
         assert rendered.endswith("…")
         assert rendered.split(LABEL)[1].count("w") == DESCRIPTION_PREVIEW_LIMIT
 
-    def test_the_block_still_fits_discord(self) -> None:
-        assert len(block("*" * DESCRIPTION_PREVIEW_LIMIT)) <= MESSAGE_LIMIT
+    def test_the_block_still_fits_a_card(self) -> None:
+        assert len(block("*" * DESCRIPTION_PREVIEW_LIMIT)) <= PANEL_BUDGET
 
-    def test_a_block_with_no_room_leaves_the_section_out_whole(self) -> None:
-        """`fit` drops lines from the end, so a block with room for the label and not for the
-        quote under it keeps the label and loses the description, ending the message on a label
-        and a truncation marker. Reproduced before this existed; it is a real shape, not a fear.
+    def test_a_card_with_no_room_drops_the_description_whole(self) -> None:
+        """The label can no longer be left standing over nothing, and not because somebody is
+        careful about it. The label and the text under it are ONE block, and a panel over budget
+        drops whole blocks from the end, so the two cannot be separated by a trim at all.
+
+        This used to be arranged by arithmetic in `_with_the_description`, which measured the
+        assembled string and threw the description away if the pair did not fit. The rule is the
+        same and the structure now enforces it.
         """
-        crowded = replace(PULL_REQUEST, title="T" * 1100, body="w" * DESCRIPTION_PREVIEW_LIMIT)
+        crowded = replace(PULL_REQUEST, title="T" * 4000, body="w" * DESCRIPTION_PREVIEW_LIMIT)
 
-        rendered = format_pull_request(crowded, status=Status.NOT_REVIEWED)
+        rendered = format_pull_request(crowded, status=Status.NOT_REVIEWED).trimmed()
 
-        assert LABEL not in rendered, "a label was left standing over nothing"
-        assert len(rendered) <= MESSAGE_LIMIT
+        assert LABEL not in rendered.text, "a label was left standing over nothing"
+        assert rendered.length() <= PANEL_BUDGET
 
     def test_everything_at_once_still_fits_discord(self) -> None:
         """Every field at its widest and a description on top, which is the shape that actually
         overflows. Written out rather than left to the property tests: two hundred generated
-        examples never put a full block and a full description together, so with the guard taken
-        out they went on passing while this renders at 2334 characters.
+        examples never put a full block and a full description together, so with the trimming
+        taken out they went on passing while this renders at over two thousand characters.
         """
         crowded = replace(
             PULL_REQUEST,
@@ -174,7 +189,9 @@ class TestWhenThereIsTooMuch:
             body="w" * 3000,
         )
 
-        assert len(format_pull_request(crowded, status=Status.NOT_REVIEWED)) <= MESSAGE_LIMIT
+        assert format_pull_request(crowded, status=Status.NOT_REVIEWED).trimmed().length() <= (
+            PANEL_BUDGET
+        )
 
     def test_a_description_that_does_fit_is_shown_whole(self) -> None:
         """The other side of the same branch, or the test above passes against a block that never

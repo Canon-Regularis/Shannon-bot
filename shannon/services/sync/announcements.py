@@ -20,6 +20,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.json import JsonObject
 from shannon.domain.models import TrackedSnapshot
@@ -101,7 +102,7 @@ class ClaimedLine:
         tracked_item_id: int,
         thread_id: int,
         note_key: str,
-        content: str,
+        panel: Panel,
         notify: Notify = None,
     ) -> None:
         """Claim the line, post it, and give the claim back if the post did not land.
@@ -127,7 +128,7 @@ class ClaimedLine:
             return
 
         try:
-            await self._threads.post(thread_id=thread_id, content=content, notify=notify)
+            await self._threads.post(thread_id=thread_id, panel=panel, notify=notify)
         except BaseException:
             # Nothing was said, so the claim goes back or the retry reads it as already announced
             # and the line is lost. Cancellation counts as a failure here for the reason the note

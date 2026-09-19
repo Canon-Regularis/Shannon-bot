@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from shannon.db.models import Repository
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_commit, format_commits_left, format_force_push
+from shannon.discord_bot.panels import Panel
 from shannon.domain.models import Actor, CommitRange, CommitRef, CommitStats
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.sync.commit_lines import COMMITS_PER_PUSH, CommitLine
@@ -96,7 +97,7 @@ class TestWhatAPushSays:
 
         assert said(threads) == [
             "📝 **octocat** has committed Add the webhook endpoint\n"
-            "> Answers the check.\n"
+            "Answers the check.\n"
             "-# With changes: +4, -1, 2 files changed"
         ]
 
@@ -431,11 +432,11 @@ class RefusesOnePost(FakeThreadGateway):
         self._refuse = refuse
         self._posts = 0
 
-    async def post(self, *, thread_id: int, content: str, notify=None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify=None) -> int | None:
         self._posts += 1
         if self._posts == self._refuse:
             raise DiscordGatewayError("Discord would not take that message")
-        return await super().post(thread_id=thread_id, content=content, notify=notify)
+        return await super().post(thread_id=thread_id, panel=panel, notify=notify)
 
 
 def handler_for(sessionmaker, threads: FakeThreadGateway, github: FakeGitHubClient):

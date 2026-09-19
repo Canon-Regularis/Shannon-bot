@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadStartedEmptyError
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import ThreadHandle
 from shannon.domain.enums import Status
 from shannon.domain.errors import ItemNotReadyError, PermanentError
@@ -246,7 +247,7 @@ class TestTwoSyncsRacingToOpenAThread:
                 message_id=None,
             ),
             name="#7 Add the webhook endpoint",
-            content="metadata",
+            panel=Panel.of_text("metadata"),
         )
 
         assert wrote.handle.thread_id == won, "the loser overwrote the thread that had won"
@@ -319,7 +320,7 @@ class TestANoteOnADeletedThread:
         return ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
 
@@ -908,7 +909,7 @@ class TestAClaimThatCouldNotBeGivenBack:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             refusing,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             shut_again=KeepsThreadsShut(db_sessionmaker, refusing),
         )
 
@@ -961,7 +962,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             rebuild=rebuild,
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )
@@ -1001,7 +1002,7 @@ class TestARebuildThatDidNotWorkTheFirstTime:
         mirror = ItemNoteMirror(
             db_sessionmaker,
             threads,
-            render=lambda note, mentions, roles: "hello",
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
             rebuild=rebuild,
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         )

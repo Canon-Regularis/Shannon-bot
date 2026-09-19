@@ -72,8 +72,13 @@ def _a_message_that_names_somebody_says_who_it_may_notify(
 
         @functools.wraps(original)
         def watched(self, *args, _name=name, _original=original, **kwargs):
-            if _AN_ACCOUNT_MENTION.search(kwargs.get("content", "")) and "notify" not in kwargs:
-                seen.append((_name, kwargs["content"]))
+            # `panel.text` rather than a content string since issue #116 moved the gateway onto
+            # panels. It is the same words in the same order, which is exactly the guarantee the
+            # adapter is written to keep, so this gate reads what a reader would read.
+            panel = kwargs.get("panel")
+            said = panel.text if panel is not None else ""
+            if _AN_ACCOUNT_MENTION.search(said) and "notify" not in kwargs:
+                seen.append((_name, said))
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(FakeThreadGateway, name, watched)

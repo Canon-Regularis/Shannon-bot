@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.conversations import ConversationStore
 from shannon.db.stores.logged_messages import LoggedMessageStore
 from shannon.discord_bot.capture import CapturedMessage
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import ShannonError
@@ -114,7 +115,7 @@ class ConversationLog:
 
         await self._threads.post(
             thread_id=thread_id,
-            content=STARTED.format(full_name=found.full_name, number=found.number),
+            panel=Panel.of_text(STARTED.format(full_name=found.full_name, number=found.number)),
         )
 
         async with self._sessionmaker() as session, session.begin():
@@ -156,7 +157,7 @@ class ConversationLog:
         # reason to tell whoever ran the command that it failed. They would try again and be told
         # it was never logging.
         try:
-            await self._threads.post(thread_id=thread_id, content=STOPPED)
+            await self._threads.post(thread_id=thread_id, panel=Panel.of_text(STOPPED))
         except Exception:
             logger.warning("could not say in thread %s that logging stopped", thread_id)
         return found.full_name, found.number

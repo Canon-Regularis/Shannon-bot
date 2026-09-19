@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, Commit, CommitRange, CommitRef
@@ -55,9 +56,9 @@ AHEAD = "ahead"
 # payload and is worth refusing rather than turning into a request for a compare against nothing.
 _NOTHING = "0" * 40
 
-Renderer = Callable[[Commit], str]
-PushRenderer = Callable[[Actor | None], str]
-CountRenderer = Callable[[int], str]
+Renderer = Callable[[Commit], Panel]
+PushRenderer = Callable[[Actor | None], Panel]
+CountRenderer = Callable[[int], Panel]
 
 
 class CommitLine:
@@ -136,7 +137,7 @@ class CommitLine:
                 tracked_item_id=arrival.tracked_item_id,
                 thread_id=arrival.thread_id,
                 note_key=f"force-push:{arrival.arrived}",
-                content=self._rewritten(pushed_by),
+                panel=self._rewritten(pushed_by),
             )
             return
 
@@ -183,7 +184,7 @@ class CommitLine:
             # mirrored note already keep theirs. One place says what a key looks like, and the
             # reason it is the SHA is written down beside it.
             note_key=commit.note_key,
-            content=self._render(commit),
+            panel=self._render(commit),
         )
         return True
 
@@ -212,7 +213,7 @@ class CommitLine:
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"commits-left:{arrival.arrived}",
-            content=self._left(left),
+            panel=self._left(left),
         )
 
 
