@@ -98,6 +98,22 @@ class PanelLink:
 
 
 @dataclass(frozen=True, slots=True)
+class PanelImage:
+    """A picture to show under the blocks. Issue #126.
+
+    The URL is somebody else's and the alt text is somebody else's words. Both are checked and made
+    safe before they reach here, exactly as a block's text is: this module states what a message
+    shows and never decides what is safe to show.
+
+    `alt` is optional because an image written without any has none, and a word this project
+    invented would tell somebody who cannot see the picture nothing.
+    """
+
+    url: str
+    alt: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Panel:
     """A message, as the thing that wrote it sees it."""
 
@@ -107,6 +123,11 @@ class Panel:
     # section is what a heading and its subheading become.
     thumbnail_url: str | None = None
     link: PanelLink | None = None
+    # Pictures under the blocks, for the description they were lifted out of. NOT
+    # counted by `length()`: Discord measures a view by its text displays and a gallery
+    # is not one, so these cost nothing at all against the budget and exactly one
+    # component against the ceiling of forty, however many pictures are in them.
+    images: tuple[PanelImage, ...] = ()
 
     @classmethod
     def of_text(cls, text: str) -> Panel:
@@ -128,7 +149,8 @@ class Panel:
 
         It is a projection and not a second renderer, which is the law `layout` is written to
         keep: the text displays in the view it builds are exactly these strings, in this order.
-        Grouping, rules, the bar, the picture and the button add structure and never words.
+        Grouping, rules, the bar, the picture, the gallery and the button add structure and
+        never words.
         """
         return "\n".join(block.text for block in self.blocks)
 
@@ -138,14 +160,27 @@ class Panel:
 
         A plain panel has nothing structural to say, so it is sent as text and costs no components
         at all. Note this is not the same question as "does it have one block".
+
+        The pictures are in here rather than left out as a detail. A card whose only structure is a
+        gallery would otherwise be sent as the text it came from, and the pictures would simply not
+        appear.
         """
-        return self.accent is None and self.thumbnail_url is None and self.link is None
+        return (
+            self.accent is None
+            and self.thumbnail_url is None
+            and self.link is None
+            and not self.images
+        )
 
     def length(self) -> int:
         """What this costs against the view budget, counted the way Discord counts it.
 
         The sum of the block texts, without the newlines `text` joins them with: those are this
         module's, not Discord's, and each block is its own component on the wire.
+
+        The gallery is not in here and that is not an omission. `content_length` on the other side
+        counts text displays and nothing else, so a gallery costs no part of the four thousand
+        however many pictures it holds.
         """
         return sum(len(block.text) for block in self.blocks)
 

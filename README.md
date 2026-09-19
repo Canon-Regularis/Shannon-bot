@@ -13,7 +13,12 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   block carries name, type, state, link, author, assignees, reviewers, status, priority, tags,
   last updated, and the description the item was opened with where there is one. It is a card
   with a bar down its side in GitHub's own colour for the item's state, the author's avatar
-  beside it, the description under a rule, and a button to the item on GitHub.
+  beside it, the description under a rule, and a button to the item on GitHub. The
+  description keeps the formatting it was written with: bold, lists, quotes and code, and
+  up to four pictures shown under it. A link to GitHub stays a link; a link anywhere else
+  keeps its words and gains the host it really goes to, so `click here` cannot be
+  somewhere else. Headings are dropped, because a card built out of labels has one voice
+  already.
 - **Comments and reviews.** Posted into the item's thread with a link back. An inline review
   comment gets a message of its own naming the file and the line it sits on, and a reply says that
   it is one. A review carrying nothing but inline notes posts no message of its own: GitHub wraps
@@ -467,7 +472,8 @@ shannon/
   github/       REST client, URL parsing, signature check, payload parsers
   discord_bot/  gateway client, thread gateway, permission gate, rendering, text safety
                 panels.py holds what a message says and imports no discord; layout.py is the
-                only module in the project that imports discord.ui
+                only module in the project that imports discord.ui; rich_text.py is the
+                only one that lets GitHub markup through, for the description block
   services/     sync/      one item into its thread: policies, staleness, threads,
                            notifications, and the same job driven by a command
                 delivery/  the queue and the worker that drains it

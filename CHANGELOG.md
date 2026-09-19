@@ -5865,30 +5865,75 @@ to set the project number will find it.
   #121 is about people, and a team mention on GitHub reaches everybody in the team, which is a
   bigger blast radius than anybody asked for.
 
-## Published exactly when the check is green
 
-- **The image could be published from a run whose required check was red.** `publish` asked four
-  jobs whether anything had failed and `CI` asked five, and the fifth was the duplicate gate every
-  other job now sits behind. That gate fails open on purpose, so one that BROKE let the work run
-  and pass while `CI` went red on the gate itself, and `publish`, reading a shorter list, saw four
-  successes and shipped an image out of a red run. It depends on `CI` directly now, which is the
-  only spelling of "published exactly when `CI` is green" that a job added to the matrix tomorrow
-  cannot quietly undo. It still rests on `audit` running unconditionally, and both comments say so.
-- **Everything this workflow fetches from a stranger is pinned now.** The duplicate gate ran from a
-  tag, which is somebody else's code holding `github.token` in front of five of the six jobs and
-  inside the required check's `needs`; it runs from a commit. `setup-uv` was pinned in the matrix
-  job and nowhere else, so lint and the audit still asked what uv released this morning.
-  `pip-audit` and `gitleaks` ran from `latest`, which is how the only unconditional job here
-  starts failing on a day nobody pushed anything: the advisory database has to move, the scanner
-  reading it does not.
-- **The image smoke test could not see a container say no.** The wait gave sixty seconds and the
-  `HEALTHCHECK` needs about ninety-five to reach a verdict, so the early exit on `unhealthy` was
-  unreachable and a container that had already failed was reported as one that never answered.
-  A healthy one replies on the first probe either way, which is why the sixty went unnoticed.
-- **No test waits for ever now.** `pytest-timeout` at sixty seconds, against a slowest test of
-  about eight. Two loops in the transcript tests polled with `asyncio.sleep(0)` and nothing
-  bounding them, and a bare yield never lets the loop block: one of them was waiting out a five
-  second tick and spent the whole of it at full CPU, on three Python versions, on every run. Both
-  now use the bounded helper the delivery and polling tests already spell out. The unbounded waits
-  elsewhere are unchanged, but on the runner a stuck one now fails under its own name after a
-  minute, rather than the job being cancelled at fifteen with no test to point at.
+## The description reads the way it was written
+
+- **A description keeps its formatting now.** Closes #125. Bold, italics, strikethrough, spoilers,
+  inline code, code blocks, lists and blockquotes all survive into the card. They used to arrive
+  backslashed, because every scrap of GitHub text went through the same escaping, so an item opened
+  with a bulleted list of bold names read as a wall of punctuation.
+- **`as_plain_text` did not change, and could not.** It is what stops a pull request title
+  restyling the eleven matched pairs the block is built out of, and it closed two holes in
+  discord.py's escaper that took real work to find. The description simply stopped calling it.
+  `shannon/discord_bot/rich_text.py` is the one place in the project that lets GitHub markup
+  through, it is for the description block and nothing else, and its docstring says so. The names
+  are meant to be read together: `as_plain_text` and `as_rich_text`.
+- **That is also how the greedy link alternative stopped mattering.** `escape_markdown` matches
+  `[text](url)` as one span, greedily, so on a line carrying a link it runs to the last parenthesis
+  and ships everything between unescaped. `safe_text` defeats it by breaking the bracket off the
+  parenthesis. The description does not call `escape_markdown` at all, so there is nothing to
+  defeat, and the title path keeps both the rule and the tests that prove it.
+- **Links say where they go.** A link to `github.com` or to the host GitHub serves user content
+  from renders as an ordinary masked link. A link anywhere else keeps its words and gains its host,
+  so `[click here](https://evil.example/x)` reads `click here (evil.example)`. Nothing is silently
+  blocked and nothing is silently masked, which is the only pair worth having: anybody who can open
+  an issue writes a description, and a masked link is the one piece of markdown where what a reader
+  sees and where they are taken are different strings. A `javascript:` URL is not a link at all and
+  the characters are shown as typed. `github.com.evil.example` is not GitHub, which is why the rule
+  matches the whole host or a dot and the whole host rather than a suffix.
+- **The host is shown in punycode.** One spelled with a Cyrillic letter renders as `github.com` and
+  is not. Naming a host is only worth doing if a reader can trust their eyes about it.
+- **Pictures are shown as pictures.** Closes #126. Discord renders no inline image anywhere, so
+  `![a screenshot](...)` left a line of URL where a reader expected a picture. Up to four now come
+  out of the text and into a real media gallery under the description, and the alt text stays where
+  the image was so the sentence around it still reads.
+- **Only what GitHub itself serves is fetched.** Discord fetches a gallery's media before it will
+  accept the message, so an address in an issue body is an address a stranger chooses for this bot,
+  and one that does not resolve does not cost the card a picture, it costs the item its whole
+  block. That is the rule `mapping._avatar` already applies to an avatar, applied to the one URL in
+  the system somebody else picks. Private repositories show no pictures for the same reason: theirs
+  sit behind a signed URL Discord cannot follow, and a repository whose visibility GitHub did not
+  state shows none either, because not saying is not evidence.
+- **An HTML `<img>` tag is not lifted**, only markdown. GitHub accepts both and people use the
+  first for sizing. Written down rather than left to be discovered.
+- **The markers are balanced anyway.** An odd `**` is closed and an open code fence is closed
+  before the text is sent. Each text display is drawn on its own, so this should not be necessary;
+  it is two lines, the whole card is matched `**Label:** value` pairs, and that is not a layout to
+  bet on a renderer behaving the way the documentation implies.
+- **Headings still go, and `-#` is now broken apart.** A card built out of labels has one voice
+  already. `-#` is Discord's small grey subtext and is how every footnote this bot writes is
+  written, so a description able to produce one could put words in the bot's mouth inside the bot's
+  own card. It was dead before this only by accident, because the old escaping backslashed a
+  line-leading dash. That is the rule here most easily left out, and it has its own test.
+- **The pictures come out before the seven-hundred-character cut, and that ordering is the
+  feature.** A bug report whose screenshots all sit past character seven hundred is an ordinary bug
+  report, and cutting first would show none of them. It also stops a hundred characters of opaque
+  URL being spent from a budget meant to hold words.
+- **The forgery test was replaced rather than weakened.** It asserted that a description could not
+  contain `**Status:** DONE` at all, on the grounds that the block is read by eye as `**Label:**
+  value` rows and a description sat inside it. That stopped being true at issue #116: the rows are
+  one component and the description is another, with a rule between them and its own label above.
+  What must stay impossible is a forged row landing AMONG the rows, and the replacement asserts
+  that on the panel's blocks, which is structural rather than a matter of escaping.
+- **`as_prose` is gone.** Its two distinctive rules, bullets rewritten to a mark and quote markers
+  stripped, existed only because of the escaping that followed them: a dash was rewritten because
+  Discord's escaper put a backslash in front of one. With nothing escaping a description, a dash is
+  a list and a `>` is a quote, which is what both were on GitHub.
+- **A gallery adds no words and costs no budget.** `content_length` counts text displays and a
+  gallery is not one, so `Panel.length()` is unchanged and the law the layout keeps is unchanged:
+  the text displays in a view are exactly the panel's block texts, in order. The Hypothesis
+  property now generates panels carrying pictures, which is the only honest way to say so.
+- Three things to check in a real server. Whether a masked link renders in a text display at all,
+  which if it does not is one line to fix by sending every link down the naming branch. What
+  Discord does with a gallery URL it cannot fetch, which decides whether the public-repository gate
+  is load-bearing or merely cautious. And how four pictures lay out under a card on a phone.

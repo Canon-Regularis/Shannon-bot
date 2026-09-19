@@ -9,17 +9,23 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
-from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel, PanelLink
+from shannon.discord_bot.panels import (
+    Accent,
+    Block,
+    BlockKind,
+    Panel,
+    PanelImage,
+    PanelLink,
+)
+from shannon.discord_bot.rich_text import as_rich_text
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
     COMMIT_MESSAGE_LIMIT,
     COMMIT_TITLE_LIMIT,
-    DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
     JOB_NAME_LIMIT,
     JOB_NAME_LIMIT_JOINED,
     as_plain_text,
-    as_prose,
     clipped,
     clipped_job,
     clipped_path,
@@ -509,16 +515,32 @@ def _metadata(
     # holds twice a message, and the description under this block is what should give way
     # first. `Panel.trimmed` does both, at the send, over the blocks it can see.
     blocks = [Block(BlockKind.FIELDS, "\n".join(lines))]
-    blocks += _the_description(snapshot.body)
+    described = as_rich_text(snapshot.body)
+    blocks += _the_description(described.text)
     return Panel(
         blocks=tuple(blocks),
         accent=accent,
         thumbnail_url=snapshot.author.avatar_url if snapshot.author else None,
         link=_opens_github(snapshot.html_url),
+        images=_pictures(snapshot, described.images),
     )
 
 
-def _the_description(body: str) -> list[Block]:
+def _pictures(snapshot: TrackedSnapshot, lifted: tuple[PanelImage, ...]) -> tuple[PanelImage, ...]:
+    """The pictures a card may actually show.
+
+    Public repositories only, and that is about what Discord does rather than about privacy. A
+    private repository's images sit behind a short-lived signed URL, and Discord fetches a
+    gallery's media itself before it will accept the message at all, so those are guaranteed
+    failures. A failure there does not cost the card a picture, it costs the item its whole block,
+    which is the same reasoning `mapping._avatar` records about an avatar.
+
+    `None` shows none either. It means GitHub did not say, and not saying is not evidence.
+    """
+    return lifted if snapshot.repository.private is False else ()
+
+
+def _the_description(described: str) -> list[Block]:
     """The description under the fields, where there is one.
 
     Last, because it is the one part of the block that is prose rather than a field, and because
@@ -533,8 +555,11 @@ def _the_description(body: str) -> list[Block]:
 
     Unquoted since issue #113. What separates it from the fields is the rule above it, which is
     what the `> ` markers were doing badly.
+
+    Handed text that has already been through `rich_text` since issue #125, rather than reaching
+    for the escaping every other renderer here uses. This is the one block in the project that
+    keeps the formatting it was written with, and the one place a picture can come from.
     """
-    described = clipped(as_prose(body), limit=DESCRIPTION_PREVIEW_LIMIT)
     if not described:
         return []
     return [Block(BlockKind.BODY, f"**Description:**\n{described}")]
