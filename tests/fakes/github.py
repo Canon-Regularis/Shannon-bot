@@ -111,6 +111,8 @@ class FakeGitHubClient:
         self.repo_labels: dict[str, list[str]] = {}
         self.label_list_calls: list[str] = []
         self.assignable_calls: list[tuple[str, str]] = []
+        # Every comment written, as (owner/name, number, body). Issue #103.
+        self.comments: list[tuple[str, int, str]] = []
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -211,6 +213,16 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return list(self.repo_labels.get(key, []))
+
+    async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
+        # Refused before it is recorded, unlike the label writes below. `comments` is read as
+        # what GitHub HOLDS rather than what it was asked for, and a test about an outage means
+        # to say nothing was published.
+        if self.write_error is not None:
+            raise self.write_error
+        if self.error is not None:
+            raise self.error
+        self.comments.append((f"{owner}/{name}".lower(), number, body))
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         key = (f"{owner}/{name}".lower(), number)

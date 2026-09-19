@@ -247,6 +247,41 @@ class TestWritingLabels:
 
         assert seen == [("POST", "/repos/acme/widget/issues/7/labels", {"labels": ["IN_REVIEW"]})]
 
+    async def test_adding_a_comment_posts_it_to_the_issues_endpoint(self) -> None:
+        """The same endpoint as the labels above, and for the same reason: GitHub serves a pull
+        request's comments from the issues path. Issue #103."""
+        seen, handler = self._recording()
+
+        async with client_with(handler) as client:
+            await client.add_comment("acme", "widget", 7, "a transcript")
+
+        assert seen == [("POST", "/repos/acme/widget/issues/7/comments", {"body": "a transcript"})]
+
+    async def test_a_comment_escapes_the_repository_name(self) -> None:
+        """Every write goes through `_repository`, which quotes both halves. A stray slash in a
+        name would otherwise read as another path segment and post the comment elsewhere.
+
+        Asserted against the raw path rather than `url.path`, which is the decoded form and shows
+        the escape undone whether or not it was ever applied. Reading that one made this test pass
+        for a moment while proving nothing.
+        """
+        wire: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.add_comment("acme", "widget/evil", 7, "hello")
+
+        assert wire == [b"/repos/acme/widget%2Fevil/issues/7/comments"]
+
+    async def test_a_refused_comment_is_reported_rather_than_swallowed(self) -> None:
+        """What the flusher counts as a failure and eventually gives up a batch over."""
+        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+            with pytest.raises(GitHubAuthError):
+                await client.add_comment("acme", "widget", 7, "hello")
+
     async def test_removing_a_label_names_it_in_the_path(self) -> None:
         seen, handler = self._recording()
 
