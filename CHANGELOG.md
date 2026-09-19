@@ -272,7 +272,8 @@ Issues #2 to #26.
     an unsigned one and expect 401.
   - Dependency audit against known vulnerabilities, and a secret scan over the full history.
   - Pull request runs cancel their own superseded runs; runs on main do not, because they gate
-    releases.
+    releases. Runs on main also stopped running in full for a tree that has already been
+    through this workflow and passed, which is the stage at the end of this file.
 - **`.github/workflows/release.yml`** publishes the image to GHCR with signed build provenance
   and an SBOM. Pushes to main publish `edge` for amd64; version tags publish semver tags for
   amd64 and arm64, since arm64 goes through emulation and is only worth paying for on a real
@@ -5752,3 +5753,64 @@ to set the project number will find it.
   feature rests on it, and if it does not then a muted member gets rung while every test still
   passes. Whether a forum channel's list preview survives a components starter message, which is
   drawn from content the message no longer has. And what the block looks like on a phone.
+
+## The same tree, tested twice
+
+- **A merge to main no longer re-runs the checks the pull request just ran.** Closes #120. Nor
+  does a version tag pushed at a commit already on main. Between them that was fourteen jobs on a
+  release day, every one of which had already answered: the suite on three Python versions, an
+  image build with a smoke test, lint, two type checkers and a secret scan over the whole history.
+- **The commit cannot be matched, so the tree is.** This repository merges with a merge commit, so
+  the commit that lands on main has never existed before and nothing can look up the run that
+  tested it. The tree can: `refs/pull/N/merge` had exactly that tree when it went green, and a
+  version tag is a new ref on a commit main has already tested. `fkirc/skip-duplicate-actions`
+  looks that tree hash up in this workflow's own run history. The lock file is in the tree, so
+  "same tree" really does mean same inputs rather than same source.
+- **It will not fire on every merge, and that is right.** GitHub recomputes the merge ref when
+  main moves and does not re-run the pull request, so a merge that happens after main moved lands
+  a tree nothing has tested. Those still run in full, because the combination is new. This removes
+  most of the duplication rather than all of it. If it turns out to fire rarely, the answer is the
+  "require branches to be up to date before merging" setting and not more workflow code.
+- **Three jobs are skippable and one is not.** Lint, the matrix and the image build read the tree
+  and nothing else. The audit does not: `pip-audit` asks what is known today, against a database
+  that moves on a day nobody pushed anything, and `gitleaks` reads the whole history. A tree that
+  was clean last week is not evidence that it is clean now. So the audit runs on every push to
+  main and every tag, duplicate or not.
+- **The trap this walked up to, which is the whole of the risk.** A job in `needs` that is SKIPPED
+  skips the job that needs it, and `publish` needed all four. Gating the three the obvious way
+  would have published no image for any merge commit, `deploy.sh` would have refused to deploy
+  main for ever because there is no `sha-<commit>` in the registry, and the hourly `Deployed`
+  issue would have said CI was green and sent somebody to run that deploy. A run whose jobs merely
+  skipped still concludes `success`, so the monitor would have been confidently wrong. `publish`
+  now asks whether anything FAILED rather than whether everything succeeded, which is the question
+  the required check already asks, so the image is published exactly when `CI` is green. That
+  rests on the audit running unconditionally, and the comment on both jobs says so.
+- **Every gate is fail-open.** `!cancelled()` rather than a plain comparison, because an `if`
+  holding no status-check function has an implicit `success()` added to it, which would make a
+  duplicate check that broke skip the jobs instead of running them. `!=` rather than `== 'false'`
+  for the same reason: a failed gate leaves the output an empty string. A broken optimiser costs a
+  rebuild; it must not cost a check that nobody ran. The gate is in the required check's `needs`
+  as well, so a broken one is red rather than quiet.
+- **`if: >-` is not formatting.** A plain scalar beginning `!` is a YAML tag indicator, so
+  `if: !cancelled() && ...` is a parse error rather than a condition. The folded block was already
+  the house style on `publish` and is now the style on all four.
+- **Pull requests are never skipped**, by adding them to the action's `do_not_skip` list. A pull
+  request is where somebody is waiting to read the result, and the work this issue is about is
+  duplicated after the merge rather than before it. `workflow_dispatch` stays on that list too,
+  which makes a manual run the way to force everything to run again on any ref, publishing
+  nothing. "Re-run all jobs" is not that escape hatch: a re-run carries the same event and finds
+  the same green predecessor.
+- **Nothing new cancels anything.** `cancel_others` is off. The concurrency block already decides
+  what gets cancelled and leaves main alone on purpose, and a second mechanism reaching a run on
+  main would take the image publish with it.
+- **No path filtering.** Skipping the image build on a documentation change is a different claim
+  with a different way of being wrong: a docs-only filter that quietly includes `uv.lock` or the
+  `Dockerfile` skips the smoke test on a change that needed it. This one is only about work
+  already done.
+- **The permission is `actions: read`, which is less than the action asks for.** Its README says
+  `actions: write`, which is what cancelling other runs needs, and that is off. A permissions
+  block sets every scope it does not name to none, so `contents: read` is repeated rather than
+  inherited; `deployed.yml` carries the same warning after the same surprise.
+- Nothing in the bot changed. A check suite carrying no pull requests is dropped before it reaches
+  Discord, and GitHub leaves that array empty for a push to the default branch and for a tag, so
+  neither of the runs this affects ever reached a thread.

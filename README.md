@@ -99,6 +99,12 @@ uv run pytest -q --cov
 Both type checkers carry a list of files that are not clean yet, in `pyproject.toml`. A file leaves
 that list when it is fixed and does not go back, and anything not on it has to stay clean.
 
+Those jobs run on every pull request. On a push to `main` or a version tag CI first asks whether
+this exact tree has already been through the workflow and passed, and when it has it runs only
+the audit and the publish. A merge commit is a new commit carrying content the pull request has
+already tested. The audit is never skipped, because whether a dependency has a known vulnerability
+is a question about today rather than about the tree.
+
 ## Connecting it to GitHub and Discord
 
 Neither side is configured by this repository, and the bot cannot do either for you.

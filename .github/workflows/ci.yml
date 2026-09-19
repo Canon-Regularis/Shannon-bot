@@ -27,10 +27,67 @@ env:
 # set here: uv rejects it alongside --locked.
 
 jobs:
+  duplicate:
+    # Has this exact tree already been through this workflow and passed?
+    #
+    # The commit cannot answer that. This repository merges with a merge commit, so the SHA that
+    # lands on main has never existed before and no lookup by commit can find the run that tested
+    # its contents. The tree can: `refs/pull/N/merge` had exactly this tree when it went green,
+    # and a version tag is a new ref on a commit main has already tested.
+    #
+    # A job rather than a step inside each of them, because the answer is one API conversation and
+    # three jobs want it.
+    name: Has this tree already passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    # A permissions block sets every scope it does not name to none, so `contents` is repeated
+    # here rather than inherited. `deployed.yml` carries the same warning after the same surprise.
+    permissions:
+      contents: read
+      # The verdict lives in this workflow's own run history, which `contents` cannot see. Read
+      # rather than write: write is only needed to cancel other runs, which is off below.
+      actions: read
+    outputs:
+      should_skip: ${{ steps.check.outputs.should_skip }}
+    steps:
+      - id: check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          github_token: ${{ github.token }}
+          skip_after_successful_duplicate: "true"
+          # The concurrency block above already decides what gets cancelled, and leaves main alone
+          # on purpose because those runs gate releases. A second mechanism reaching a run on main
+          # would take the image publish with it.
+          cancel_others: "false"
+          # Two runs on main are two different commits and both need an answer.
+          concurrent_skipping: "never"
+          # The action's own default list plus `pull_request`. A pull request is where somebody is
+          # waiting to read the result, and the work this fixes is duplicated after the merge
+          # rather than before it. `workflow_dispatch` staying on the list is the escape hatch: a
+          # manual run always runs everything, and publishes nothing.
+          do_not_skip: '["workflow_dispatch", "schedule", "merge_group", "pull_request"]'
+
+      - name: Say why
+        env:
+          SHOULD_SKIP: ${{ steps.check.outputs.should_skip }}
+          REASON: ${{ steps.check.outputs.reason }}
+          SKIPPED_BY: ${{ steps.check.outputs.skipped_by }}
+        run: echo "should_skip=$SHOULD_SKIP reason=$REASON skipped_by=$SKIPPED_BY"
+
   quality:
     name: Lint, format and types
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    needs: [duplicate]
+    # `!cancelled()` rather than a plain comparison, and it is load-bearing twice. An `if` holding
+    # no status-check function has an implicit `success()` added to it, which would make a
+    # duplicate check that BROKE skip this job rather than run it. Fail open: a broken optimiser
+    # costs a rebuild, it must not cost a check that nobody ran. `!=` for the same reason, since a
+    # failed gate leaves the output an empty string. Not `always()`, so a superseded pull request
+    # run still stops dead.
+    if: >-
+      !cancelled() &&
+      needs.duplicate.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -65,6 +122,16 @@ jobs:
     name: Tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [duplicate]
+    # `!cancelled()` rather than a plain comparison, and it is load-bearing twice. An `if` holding
+    # no status-check function has an implicit `success()` added to it, which would make a
+    # duplicate check that BROKE skip this job rather than run it. Fail open: a broken optimiser
+    # costs a rebuild, it must not cost a check that nobody ran. `!=` for the same reason, since a
+    # failed gate leaves the output an empty string. Not `always()`, so a superseded pull request
+    # run still stops dead.
+    if: >-
+      !cancelled() &&
+      needs.duplicate.outputs.should_skip != 'true'
     strategy:
       # One version failing should not hide the result for the others.
       fail-fast: false
@@ -125,6 +192,16 @@ jobs:
     name: Image build and smoke test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [duplicate]
+    # `!cancelled()` rather than a plain comparison, and it is load-bearing twice. An `if` holding
+    # no status-check function has an implicit `success()` added to it, which would make a
+    # duplicate check that BROKE skip this job rather than run it. Fail open: a broken optimiser
+    # costs a rebuild, it must not cost a check that nobody ran. `!=` for the same reason, since a
+    # failed gate leaves the output an empty string. Not `always()`, so a superseded pull request
+    # run still stops dead.
+    if: >-
+      !cancelled() &&
+      needs.duplicate.outputs.should_skip != 'true'
 
     services:
       postgres:
@@ -215,6 +292,12 @@ jobs:
         run: docker logs shannon || true
 
   audit:
+    # Not gated on the duplicate check above, and not by oversight. Everything else here
+    # reads the tree and nothing else, so a tree that passed passes again. This one asks what
+    # is known TODAY: `pip-audit` against a database that moves on a day nobody pushed
+    # anything, and `gitleaks` over the whole history. A tree that was clean last week is not
+    # evidence that it is clean now. It is also the job that stops `publish` firing off a run
+    # in which nothing ran, which is what the condition on `publish` rests on.
     name: Dependency and secret audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -245,7 +328,7 @@ jobs:
     # anyone having to update branch protection.
     name: CI
     runs-on: ubuntu-latest
-    needs: [quality, test, image, audit]
+    needs: [duplicate, quality, test, image, audit]
     if: always()
     timeout-minutes: 2
     steps:
@@ -255,10 +338,23 @@ jobs:
           [ "${{ contains(needs.*.result, 'cancelled') }}" = "false" ] || exit 1
 
   publish:
-    # The image is only published from a commit that has just passed everything above it.
+    # The image is published from a commit that has just passed everything above it, or from one
+    # whose tree passed the last time this workflow saw it. So the question is whether anything
+    # FAILED rather than whether everything succeeded: a job the duplicate check skipped did not
+    # fail, and a job in `needs` that is skipped skips the job that needs it. Read the strict way,
+    # every merge commit would publish no image at all, `deploy.sh` would refuse to deploy main
+    # for ever because there is no `sha-<commit>` in the registry, and the hourly drift issue
+    # would report CI green and send somebody to run that deploy.
+    #
+    # It is the same question the required check above asks, so the image is published exactly
+    # when `CI` is green. It rests on at least one of these four running unconditionally, and
+    # `audit` is that job: gating it would re-open this silently.
     name: Publish
     needs: [quality, test, image, audit]
     if: >-
+      !cancelled() &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled') &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     permissions:
