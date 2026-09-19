@@ -12,6 +12,7 @@ import httpx
 
 from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import (
+    CheckRun,
     CommitRange,
     CommitStats,
     IssueSnapshot,
@@ -140,7 +141,24 @@ class ReadsCommits(Protocol):
     async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None: ...
 
 
-class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
+class ReadsChecks(Protocol):
+    """Every CI job on one commit, which is all the check announcer needs of GitHub.
+
+    Its own protocol on the same grounds as the one above: this runs on every completed check
+    suite, which is every push to every branch running CI, and a handle that reads jobs has no
+    business being able to write a label on the second noisiest path in the project.
+
+    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives. A
+    commit that has been collected never comes back, so sixteen attempts over two hours would
+    reach the same answer and hold a delivery open for it.
+    """
+
+    async def list_check_runs(
+        self, owner: str, name: str, sha: str
+    ) -> Sequence[CheckRun] | None: ...
+
+
+class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, Protocol):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module
@@ -170,6 +188,10 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
 
     async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
+
+    async def list_check_runs(
+        self, owner: str, name: str, sha: str
+    ) -> Sequence[CheckRun] | None: ...
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None: ...
 
@@ -311,6 +333,32 @@ class HttpGitHubClient:
             logger.info("GitHub has no commit %s on %s/%s", sha, owner, name)
             return None
         return mapping.commit_stats(payload)
+
+    async def list_check_runs(self, owner: str, name: str, sha: str) -> Sequence[CheckRun] | None:
+        """Every CI job on one commit, across every checks provider the repository uses.
+
+        The commit rather than the suite that reported it. A check suite belongs to one app, so a
+        repository running GitHub Actions beside anything else has several of them finishing at
+        different moments, and answering about one would be answering about part of it.
+
+        `filter=latest` is GitHub's default and is stated anyway, because it is what makes a
+        re-run replace its predecessor rather than sit beside it, and a reader that lost that
+        would report every attempt at once.
+
+        The page body is an OBJECT with the list under `check_runs`, unlike the labels list
+        above. `mapping.check_runs` is where that is handled and where it is written down.
+        """
+        found: list[CheckRun] = []
+        path = f"{_repository(owner, name)}/commits/{quote(sha, safe='')}/check-runs"
+        try:
+            async for body in self.get_pages(
+                path, owner=owner, filter="latest", per_page=LIST_PAGE_SIZE
+            ):
+                found.extend(mapping.check_runs(body))
+        except GitHubNotFoundError:
+            logger.info("GitHub has no commit %s on %s/%s, so no checks", sha, owner, name)
+            return None
+        return found
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}", owner)

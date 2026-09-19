@@ -328,6 +328,61 @@ class TestWritingLabels:
                 await client.add_label("acme", "widget", 7, "DONE")
 
 
+class TestReadingTheChecksOnACommit:
+    """Issue #112. The wrapper is the trap: this endpoint answers an OBJECT with the list under
+    `check_runs`, unlike the labels list beside it, and a reader copied from that one pages
+    happily and finds nothing at all."""
+
+    async def test_it_reads_the_list_out_of_the_wrapper(self) -> None:
+        body = payloads.check_runs_page(
+            payloads.check_run(), payloads.check_run(id=2, name="CI", conclusion="failure")
+        )
+
+        async with client_with(responds(200, body)) as client:
+            found = await client.list_check_runs("acme", "widget", "c" * 40)
+
+        assert found is not None
+        assert [run.name for run in found] == ["Lint, format and types", "CI"]
+        assert [run.conclusion for run in found] == ["success", "failure"]
+
+    async def test_it_asks_for_the_latest_attempt_only(self) -> None:
+        """What makes a re-run replace its predecessor rather than sit beside it. Without it every
+        attempt is listed at once and the counts are nonsense."""
+        seen: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.url.params))
+            return httpx.Response(200, content=json.dumps(payloads.check_runs_page()))
+
+        async with client_with(handler) as client:
+            await client.list_check_runs("acme", "widget", "c" * 40)
+
+        assert seen[0]["filter"] == "latest"
+
+    async def test_it_escapes_the_sha_and_the_repository(self) -> None:
+        wire: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps(payloads.check_runs_page()))
+
+        async with client_with(handler) as client:
+            await client.list_check_runs("acme", "widget/evil", "a/b")
+
+        assert wire[0].startswith(b"/repos/acme/widget%2Fevil/commits/a%2Fb/check-runs")
+
+    async def test_a_commit_github_has_collected_answers_none(self) -> None:
+        """None rather than raising, for the reason `ReadsCommits` gives: a SHA that has gone
+        never comes back, so sixteen attempts over two hours reach the same answer."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            assert await client.list_check_runs("acme", "widget", "c" * 40) is None
+
+    async def test_an_empty_suite_is_an_empty_list_rather_than_none(self) -> None:
+        """A different answer from the one above. Nothing ran is not the same as nothing there."""
+        async with client_with(responds(200, payloads.check_runs_page())) as client:
+            assert await client.list_check_runs("acme", "widget", "c" * 40) == []
+
+
 class TestPagingThroughAList:
     """The project endpoints paginate by a cursor in the Link header and have no page number.
 

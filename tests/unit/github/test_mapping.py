@@ -382,3 +382,68 @@ class TestWhetherARepositoryIsPrivate:
             )
             is not None
         )
+
+
+class TestACheckRun:
+    """Issue #112. A job's name is the whole of what a reader gets, so one without a usable name
+    is dropped rather than rendered as an empty code span."""
+
+    def test_a_usable_row(self) -> None:
+        found = mapping.check_run(
+            {
+                "id": 7,
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://x/job/7",
+            }
+        )
+
+        assert found is not None
+        assert (found.check_run_id, found.name, found.conclusion) == (7, "Tests", "failure")
+
+    @pytest.mark.parametrize("row", [None, "Tests", 7, []])
+    def test_a_row_that_is_not_an_object(self, row: object) -> None:
+        assert mapping.check_run(row) is None
+
+    @pytest.mark.parametrize("name", [None, "", 7])
+    def test_a_row_with_no_usable_name(self, name: object) -> None:
+        assert mapping.check_run({"id": 7, "name": name}) is None
+
+    @pytest.mark.parametrize("number", [None, "7", 7.0])
+    def test_a_row_with_no_usable_id(self, number: object) -> None:
+        """The id is what the claim key is built from, and a run without one cannot be counted
+        into it."""
+        assert mapping.check_run({"id": number, "name": "Tests"}) is None
+
+    def test_a_run_github_has_not_finished_describing(self) -> None:
+        """An empty status reads as "not completed" and holds the whole announcement back, which
+        is the safe direction: a result said late beats one said wrong."""
+        found = mapping.check_run({"id": 7, "name": "Tests", "conclusion": None})
+
+        assert found is not None
+        assert (found.status, found.conclusion, found.html_url) == ("", "", "")
+
+
+class TestAPageOfCheckRuns:
+    def test_the_list_comes_out_of_the_wrapper(self) -> None:
+        """This endpoint answers an object with the list under `check_runs`, unlike the labels
+        list the client pages through beside it."""
+        found = mapping.check_runs({"total_count": 1, "check_runs": [{"id": 1, "name": "CI"}]})
+
+        assert [run.name for run in found] == ["CI"]
+
+    @pytest.mark.parametrize("body", [None, [], "nothing", 7])
+    def test_a_body_that_is_not_an_object(self, body: object) -> None:
+        """An array is the shape a reader copied from the labels list would send, and it yields
+        nothing rather than failing, which is why there is a test saying so."""
+        assert mapping.check_runs(body) == []
+
+    @pytest.mark.parametrize("rows", [None, {"id": 1}, "runs"])
+    def test_a_body_whose_runs_are_not_a_list(self, rows: object) -> None:
+        assert mapping.check_runs({"check_runs": rows}) == []
+
+    def test_an_unusable_row_is_skipped_rather_than_failing_the_page(self) -> None:
+        found = mapping.check_runs({"check_runs": [{"id": 1}, {"id": 2, "name": "CI"}, None]})
+
+        assert [run.name for run in found] == ["CI"]
