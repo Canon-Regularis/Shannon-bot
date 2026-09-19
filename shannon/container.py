@@ -36,6 +36,7 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
+    format_check_results,
     format_comment,
     format_commit,
     format_commits_left,
@@ -56,6 +57,7 @@ from shannon.domain.models import ItemNote
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.github.installations import InstallationDirectory, InstallationTokens
 from shannon.github.projects import HttpProjectBoards
+from shannon.github.webhooks.checks import parse_check_suite_event
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.installations import build_installation_handler
 from shannon.github.webhooks.issues import parse_issue_event
@@ -64,6 +66,7 @@ from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.channels import ChannelMappingService
+from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
 from shannon.services.linking import TeamLinkingService, UserLinkingService
@@ -456,6 +459,22 @@ def _event_router(
     router.register(
         "pull_request_review_comment",
         build_note_handler(review_comments, parse_review_comment_event),
+    )
+    # Not an announcer, though it says one line and claims it like one. An announcer hangs off an
+    # item delivery and is handed the thread it is about; a check suite is its own delivery and
+    # has to find the thread itself, which is the note mirror's shape rather than the tag line's.
+    router.register(
+        "check_suite",
+        build_check_suite_handler(
+            CheckSuiteAnnouncer(
+                sessionmaker,
+                threads,
+                github,
+                render=format_check_results,
+                shut_again=shut_again,
+            ),
+            parse_check_suite_event,
+        ),
     )
     return router
 

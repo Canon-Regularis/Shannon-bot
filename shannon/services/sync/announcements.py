@@ -20,7 +20,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.mirrored_notes import MirroredNoteStore
-from shannon.discord_bot.threads import PostsToThread
+from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.json import JsonObject
 from shannon.domain.models import TrackedSnapshot
 from shannon.services.sync.shutting import KeepsThreadsShut
@@ -96,9 +96,24 @@ class ClaimedLine:
         self._shut_again = shut_again
 
     async def say_once(
-        self, *, tracked_item_id: int, thread_id: int, note_key: str, content: str
+        self,
+        *,
+        tracked_item_id: int,
+        thread_id: int,
+        note_key: str,
+        content: str,
+        notify: Notify = None,
     ) -> None:
         """Claim the line, post it, and give the claim back if the post did not land.
+
+        `notify` defaults to None, which is what every caller but one passes and which leaves the
+        client's own rule in force untouched. Issue #112 added it because a CI result is the first
+        claimed line that has to ring anybody.
+
+        It does not let a line ping by accident. An allow-list permits a notification; it does not
+        produce one. `_person` is still the only thing that builds a mention and it still needs a
+        map to look an account up in, so a renderer handed none cannot name anybody whatever this
+        permits, which is the guarantee the commit lines rest on.
 
         Claimed before the post and not recorded after it, for the reason the note mirror gives:
         the queue is at-least-once by design, a delivery whose status could not be written comes
@@ -112,7 +127,7 @@ class ClaimedLine:
             return
 
         try:
-            await self._threads.post(thread_id=thread_id, content=content)
+            await self._threads.post(thread_id=thread_id, content=content, notify=notify)
         except BaseException:
             # Nothing was said, so the claim goes back or the retry reads it as already announced
             # and the line is lost. Cancellation counts as a failure here for the reason the note

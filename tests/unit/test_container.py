@@ -103,6 +103,10 @@ class TestWhatItWiresUp:
             "issue_comment",
             "pull_request_review",
             "pull_request_review_comment",
+            # Issue #112. Adding a key to `SUPPORTED_EVENTS` and forgetting to register a handler
+            # answers `ignored` at the endpoint and writes no row, so the delivery is gone and
+            # nothing anywhere says why.
+            "check_suite",
             # Not about an item. These keep the account-to-installation map current, and a
             # deployment that dropped them would go on minting tokens against installations that
             # had been removed.
