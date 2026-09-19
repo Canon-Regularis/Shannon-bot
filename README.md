@@ -11,8 +11,10 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 
 - **Threads.** One per item, opened on the first event and edited in place after. The metadata
   block carries name, type, state, link, author, assignees, reviewers, status, priority, tags,
-  last updated, and the description the item was opened with where there is one.
-- **Comments and reviews.** Quoted into the item's thread with a link back. An inline review
+  last updated, and the description the item was opened with where there is one. It is a card
+  with a bar down its side in GitHub's own colour for the item's state, the author's avatar
+  beside it, the description under a rule, and a button to the item on GitHub.
+- **Comments and reviews.** Posted into the item's thread with a link back. An inline review
   comment gets a message of its own naming the file and the line it sits on, and a reply says that
   it is one. A review carrying nothing but inline notes posts no message of its own: GitHub wraps
   every note on a diff in a review, so mirroring that wrapper says "left a review" with nothing
@@ -450,6 +452,8 @@ shannon/
   db/           models, session factory, one store per table
   github/       REST client, URL parsing, signature check, payload parsers
   discord_bot/  gateway client, thread gateway, permission gate, rendering, text safety
+                panels.py holds what a message says and imports no discord; layout.py is the
+                only module in the project that imports discord.ui
   services/     sync/      one item into its thread: policies, staleness, threads,
                            notifications, and the same job driven by a command
                 delivery/  the queue and the worker that drains it
@@ -534,7 +538,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Five things the bot is known to get wrong. All are narrow, and all are written down here rather
+Six things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -579,6 +583,15 @@ call per commit asking whether the default branch already has it, which triples 
 in order to hide something that is true. A rebase is a separate case and is handled: every commit
 on a rewritten branch has a new hash, so the thread says the branch was force-pushed rather than
 announcing them all again.
+
+**A message this bot has sent cannot go back to being plain text.** Discord's components flag is
+one way: once it has seen a message carrying one, that flag can never be taken off it. Every block
+and every line this bot writes now carries it, so reverting to a build from before that change
+leaves the old code sending content to a message Discord will only accept components for. It
+answers 400, the worker retries for two hours and gives up, and the block is frozen where it is
+while its thread carries on receiving lines. Rolling back across that change is roll-forward only.
+The other visible effect is that link previews have stopped: a components message carries no
+embeds, so the automatic preview that used to appear under a bare GitHub URL is gone.
 
 ## License
 
