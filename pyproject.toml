@@ -248,6 +248,7 @@ ignore = [
     # actually read, which the fake then satisfies structurally and without a single cast.
     "tests/unit/commands/test_people_commands.py",
     "tests/unit/commands/test_label_commands.py",
+    "tests/unit/commands/test_conversation_commands.py",
     "shannon/api/routes/webhooks.py",
     "shannon/commands/link.py",
     "shannon/commands/link_team.py",

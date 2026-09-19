@@ -27,6 +27,11 @@ from shannon.github.errors import (
 )
 from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
+from shannon.services.transcripts.log import (
+    AlreadyLoggingError,
+    CannotLogError,
+    NotLoggingError,
+)
 from shannon.services.workflow import ItemMovedError, NotAnItemThreadError, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
@@ -94,6 +99,11 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),
     (ItemMovedError, "{message}"),
+    # All three say which thread and what state it is in, which is the whole of what somebody
+    # running one of these needs, so there is nothing a template here could add.
+    (AlreadyLoggingError, "{message}"),
+    (NotLoggingError, "{message}"),
+    (CannotLogError, "{message}"),
 )
 
 # Said when nothing above matches. Deliberately vague: whatever went wrong is a bug or an
