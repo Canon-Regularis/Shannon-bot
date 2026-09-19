@@ -39,6 +39,8 @@ from tests.support.db import map_channel, register_repository
 # Every table, and it has to stay every table: one left out here is one whose rows survive into
 # the next test, which shows up as a test passing or failing according to what ran before it.
 TABLES = (
+    "logged_messages",
+    "logged_conversations",
     "item_assignments",
     "mirrored_notes",
     "tracked_items",

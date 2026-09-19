@@ -31,6 +31,12 @@ TITLE_WIDTH = 512
 URL_WIDTH = 512
 COLUMN_WIDTH = 128
 
+# One captured Discord message. Discord's own ceiling on a message is 4000 characters, so this
+# cuts only text Discord itself was unwilling to carry.
+TRANSCRIPT_LINE_WIDTH = 4000
+# A global name and a per-server nickname are 32 characters each. This is slack, not a measurement.
+DISPLAY_NAME_WIDTH = 128
+
 
 class Repository(TimestampMixin, Base):
     __tablename__ = "repositories"
@@ -492,3 +498,90 @@ class VerifiedIdentity(TimestampMixin, Base):
     # answering about the account that just authorised, which always carries an id.
     github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LoggedConversation(TimestampMixin, Base):
+    """One Discord thread whose messages are being published to its GitHub item. Issue #103.
+
+    A row is kept after it stops rather than deleted. Publishing what people said into a public
+    repository is worth being able to say afterwards who turned it on and when, and the rows are
+    a handful per item. That is why uniqueness is partial: one OPEN conversation per item, and
+    any number of finished ones behind it.
+
+    `discord_thread_id` duplicates what `tracked_items` already holds, on purpose. It records
+    which thread was armed, and the item's own pointer can be replaced underneath it by a rebuild
+    or a relocation. Without it a conversation would go on capturing in a thread the item no
+    longer points at, and nothing could tell.
+    """
+
+    __tablename__ = "logged_conversations"
+    __table_args__ = (
+        # Partial, so the rule is "one open conversation per item" rather than "one ever". A
+        # plain unique constraint would mean an item could never be logged a second time.
+        Index(
+            "uq_logged_conversations_open_item",
+            "tracked_item_id",
+            unique=True,
+            postgresql_where=text("stopped_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tracked_item_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
+    )
+    discord_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    started_by_discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Null means it is still running, and it is what the partial index above is built on.
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stopped_by_discord_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # The batch in flight, and how far along the message rows it reaches. Held on the conversation
+    # rather than stamped on every line: one row is updated per flush instead of all of them, and
+    # "one flush at a time per conversation" becomes a property of the schema rather than a rule
+    # somebody has to keep. A claim older than the retry window is taken to belong to a process
+    # that died holding it.
+    flush_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    flush_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    flush_through_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Consecutive failures, to bound a conversation GitHub will never accept. Reset by a flush
+    # that lands, so an outage costs nothing once it is over.
+    failed_flushes: Mapped[int] = mapped_column(nullable=False, server_default=text("0"), default=0)
+
+
+class LoggedMessage(TimestampMixin, Base):
+    """One captured Discord message, waiting to be published. Issue #103.
+
+    Deleted once the comment carrying it lands, and kept no longer. These rows hold what people
+    said, which is reason enough not to keep them past the job they exist for.
+
+    Buffered in a table rather than in memory because GitHub can be down. An in-memory buffer
+    facing a failed write either grows without bound or drops the batch, and dropping it loses
+    part of a conversation with nothing anywhere saying so.
+    """
+
+    __tablename__ = "logged_messages"
+    __table_args__ = (
+        # Capture is idempotent on this. Its index leads with `conversation_id`, which is also
+        # the ordered read the flush does and the delete that follows, so a second index on that
+        # column alone would be this one again.
+        UniqueConstraint(
+            "conversation_id", "discord_message_id", name="uq_logged_messages_conversation_message"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("logged_conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    discord_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discord_author_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    author_display_name: Mapped[str] = mapped_column(String(DISPLAY_NAME_WIDTH), nullable=False)
+    content: Mapped[str] = mapped_column(String(TRANSCRIPT_LINE_WIDTH), nullable=False)
+    # Discord's clock rather than ours. It is what the rendered line is stamped with, and what the
+    # quiet gap is measured against, so a flush held up by an outage does not read as a thread
+    # that went quiet and publish a batch the moment the outage ends.
+    said_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
