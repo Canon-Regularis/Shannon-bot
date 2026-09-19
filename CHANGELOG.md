@@ -5864,3 +5864,31 @@ to set the project number will find it.
 - **Roles and channels are unchanged.** They still publish as their names and notify nobody. Issue
   #121 is about people, and a team mention on GitHub reaches everybody in the team, which is a
   bigger blast radius than anybody asked for.
+
+## Published exactly when the check is green
+
+- **The image could be published from a run whose required check was red.** `publish` asked four
+  jobs whether anything had failed and `CI` asked five, and the fifth was the duplicate gate every
+  other job now sits behind. That gate fails open on purpose, so one that BROKE let the work run
+  and pass while `CI` went red on the gate itself, and `publish`, reading a shorter list, saw four
+  successes and shipped an image out of a red run. It depends on `CI` directly now, which is the
+  only spelling of "published exactly when `CI` is green" that a job added to the matrix tomorrow
+  cannot quietly undo. It still rests on `audit` running unconditionally, and both comments say so.
+- **Everything this workflow fetches from a stranger is pinned now.** The duplicate gate ran from a
+  tag, which is somebody else's code holding `github.token` in front of five of the six jobs and
+  inside the required check's `needs`; it runs from a commit. `setup-uv` was pinned in the matrix
+  job and nowhere else, so lint and the audit still asked what uv released this morning.
+  `pip-audit` and `gitleaks` ran from `latest`, which is how the only unconditional job here
+  starts failing on a day nobody pushed anything: the advisory database has to move, the scanner
+  reading it does not.
+- **The image smoke test could not see a container say no.** The wait gave sixty seconds and the
+  `HEALTHCHECK` needs about ninety-five to reach a verdict, so the early exit on `unhealthy` was
+  unreachable and a container that had already failed was reported as one that never answered.
+  A healthy one replies on the first probe either way, which is why the sixty went unnoticed.
+- **No test waits for ever now.** `pytest-timeout` at sixty seconds, against a slowest test of
+  about eight. Two loops in the transcript tests polled with `asyncio.sleep(0)` and nothing
+  bounding them, and a bare yield never lets the loop block: one of them was waiting out a five
+  second tick and spent the whole of it at full CPU, on three Python versions, on every run. Both
+  now use the bounded helper the delivery and polling tests already spell out. The unbounded waits
+  elsewhere are unchanged, but on the runner a stuck one now fails under its own name after a
+  minute, rather than the job being cancelled at fifteen with no test to point at.
