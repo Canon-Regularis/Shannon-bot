@@ -75,6 +75,15 @@ REVIEW_COMMENT_ACTIONS = frozenset({"created"})
 #
 # GitHub delivers them whether or not they are ticked in the App's settings, so listing them here
 # is about acting on them rather than about receiving them.
+# Only a suite that has finished. `requested` and `rerequested` say CI has STARTED, which a
+# thread has nothing to do with, and acting on either would announce an empty result.
+#
+# The second largest increase in queue volume this project has taken, after `synchronize` above,
+# and larger in one respect: this fires for a push to ANY branch running CI, not only one with an
+# open pull request, plus every push to the default branch. Most of those write a row and are then
+# answered "nothing tracked here". Bounded by the same seven-day pruner.
+CHECK_SUITE_ACTIONS = frozenset({"completed"})
+
 INSTALLATION_ACTIONS = frozenset(
     {"created", "deleted", "suspend", "unsuspend", "new_permissions_accepted"}
 )
@@ -86,6 +95,7 @@ SUPPORTED_EVENTS: Mapping[str, frozenset[str]] = {
     "issue_comment": COMMENT_ACTIONS,
     "pull_request_review": REVIEW_ACTIONS,
     "pull_request_review_comment": REVIEW_COMMENT_ACTIONS,
+    "check_suite": CHECK_SUITE_ACTIONS,
     "installation": INSTALLATION_ACTIONS,
     "installation_repositories": INSTALLATION_REPOSITORY_ACTIONS,
 }
