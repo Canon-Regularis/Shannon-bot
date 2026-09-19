@@ -171,6 +171,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsCommits, Protocol):
 
     async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
 
+    async def add_comment(self, owner: str, name: str, number: int, body: str) -> None: ...
+
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None: ...
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None: ...
@@ -424,6 +426,25 @@ class HttpGitHubClient:
 
         permission = payload.get("permission")
         return permission if isinstance(permission, str) else "none"
+
+    async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
+        """Say something on an item, as the App rather than as a person.
+
+        The issues endpoint serves pull requests too, so one method covers both, the same way
+        `add_label` below does.
+
+        Nothing is read back. The created comment's id would be the obvious thing to want, since
+        GitHub sends this straight back as an `issue_comment` delivery, but what recognises the
+        echo is a marker in the body rather than anything about the row it lands in. So this stays
+        a plain write and `_send` keeps its promise that a write only ever answers whether it
+        worked.
+        """
+        await self._send(
+            "POST",
+            f"{_repository(owner, name)}/issues/{number}/comments",
+            owner,
+            json={"body": body},
+        )
 
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Put a label on an item.

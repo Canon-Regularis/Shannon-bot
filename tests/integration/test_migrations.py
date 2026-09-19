@@ -60,6 +60,8 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
         "github_installations",
         "identity_verifications",
         "item_assignments",
+        "logged_conversations",
+        "logged_messages",
         "mirrored_notes",
         "muted_members",
         "repositories",

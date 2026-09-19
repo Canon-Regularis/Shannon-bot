@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.commands.conversations import (
+    build_log_conversation_command,
+    build_stop_conversation_command,
+)
 from shannon.commands.labels import build_label_command, build_unlabel_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
@@ -90,6 +95,10 @@ from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
+from shannon.services.transcripts.flush import TranscriptFlusher
+from shannon.services.transcripts.lines import not_a_transcript
+from shannon.services.transcripts.log import ConversationLog
+from shannon.services.transcripts.publish import TranscriptPublisher
 from shannon.services.unregistration import RepositoryUnregistrationService
 from shannon.services.verification import GitHubIdentityVerification
 from shannon.services.workflow import ItemKind, ItemWorkflow, build_item_workflow
@@ -116,6 +125,10 @@ class Container:
     event_router: EventRouter
     pr_sync: ItemSyncService
     issue_sync: ItemSyncService
+    # Held because the process has to fill its set before the gateway connects, and has to start
+    # and stop the task that publishes what it holds. Issue #103.
+    conversations: ConversationLog
+    flusher: TranscriptFlusher
     commands: tuple[SlashCommand, ...]
     # Held so the OAuth callback route can reach it. The route is the one place in this project
     # that is entered from outside rather than called, so it reads its collaborator off app state
@@ -141,6 +154,9 @@ class Container:
                 channel_id,
                 len(forgotten),
             )
+        # Whatever was being logged in those threads has nowhere left to be said, so it stops
+        # being logged rather than staying armed against a thread that is gone. Issue #103.
+        await self.conversations.forget_items(forgotten)
 
     async def forget_thread(self, thread_id: int) -> None:
         """Let go of a thread somebody deleted in Discord.
@@ -161,6 +177,8 @@ class Container:
         logger.info(
             "thread %s was deleted, so tracked item %s lets go of it", thread_id, tracked_item_id
         )
+        # And whatever was being published out of it stops. Issue #103.
+        await self.conversations.forget_threads([thread_id])
 
     async def aclose(self) -> None:
         """Close what was opened.
@@ -364,7 +382,16 @@ def _event_router(
     shut_again = KeepsThreadsShut(sessionmaker, threads)
 
     comments = ItemNoteMirror(
-        sessionmaker, threads, render=format_comment, rebuild=rebuild, shut_again=shut_again
+        sessionmaker,
+        threads,
+        render=format_comment,
+        rebuild=rebuild,
+        shut_again=shut_again,
+        # The comment this bot posts when it publishes a Discord conversation comes straight back
+        # as an `issue_comment` delivery, and without this it would be mirrored into the very
+        # thread it was transcribed from. Issue #103, and the one place in this project where the
+        # echo everything else relies on has to be refused instead.
+        worth_posting=not_a_transcript,
     )
     reviews = ItemNoteMirror(
         sessionmaker,
@@ -372,8 +399,10 @@ def _event_router(
         render=format_review,
         rebuild=rebuild,
         shut_again=shut_again,
-        # The one mirror that is allowed to keep a note to itself. A review carrying nothing but
-        # inline comments is GitHub's wrapper around them rather than something somebody said.
+        # A review carrying nothing but inline comments is GitHub's wrapper around them rather
+        # than something somebody said. The comments mirror above declines a note too, for a
+        # different reason: that one is about a note this bot wrote, this one is about a note
+        # GitHub manufactured.
         worth_posting=is_worth_a_message,
     )
     # Its own mirror rather than a branch inside the comments one, because the renderer is the
@@ -555,6 +584,9 @@ def _commands(
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
     people: ItemPeople,
+    conversations: ConversationLog,
+    *,
+    capturing: bool,
 ) -> tuple[SlashCommand, ...]:
     """Every slash command the bot installs.
 
@@ -591,6 +623,11 @@ def _commands(
         # somebody who has not run anything yet, so it holds the handle that cannot write.
         build_label_command(workflow, gate, workflow),
         build_unlabel_command(workflow, gate, workflow),
+        # Only the start is told whether this deployment can read messages. Turning capture off
+        # where it used to be on leaves conversations open, and somebody in one of those threads
+        # has been told logging is on, so stopping has to keep working.
+        build_log_conversation_command(conversations, gate, capturing=capturing),
+        build_stop_conversation_command(conversations, gate),
         *build_workflow_commands(workflow, gate),
     )
 
@@ -652,6 +689,10 @@ def build_container(
     )
     queue = WebhookDeliveryQueue(sessionmaker)
     event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
+    # Built here rather than inside `_commands`, because three things hold it: the two commands,
+    # the gateway listener that fills it with what people say, and the process that has to load
+    # its set before the gateway connects.
+    conversations = ConversationLog(sessionmaker, threads)
 
     return Container(
         settings=settings,
@@ -685,6 +726,14 @@ def build_container(
         pr_sync=pr_sync,
         issue_sync=issue_sync,
         verification=verification,
+        conversations=conversations,
+        flusher=TranscriptFlusher(
+            sessionmaker,
+            TranscriptPublisher(github),
+            threads,
+            quiet_gap=timedelta(seconds=settings.conversation_quiet_seconds),
+            tick=timedelta(seconds=settings.conversation_flush_tick_seconds),
+        ),
         commands=_commands(
             sessionmaker,
             github,
@@ -698,5 +747,7 @@ def build_container(
             tokens,
             verification,
             _people(sessionmaker, github),
+            conversations,
+            capturing=settings.capture_discord_messages,
         ),
     )

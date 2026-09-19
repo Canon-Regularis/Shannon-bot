@@ -30,6 +30,7 @@ async def test_a_working_process_reports_healthy() -> None:
         "worker": True,
         "bot": True,
         "poller": True,
+        "flusher": True,
         "version": "unknown",
     }
 
@@ -51,6 +52,36 @@ async def test_a_dead_board_poller_is_reported_without_failing_the_check() -> No
     assert response.status_code == 200
     assert response.json()["healthy"] is True, "a dead board restarted a working process"
     assert response.json()["poller"] is False, "a dead board was not reported at all"
+
+
+async def test_a_dead_transcript_flusher_is_reported_without_failing_the_check() -> None:
+    """The second thing said without being counted, and its own line rather than folded into the
+    board's: they fail for unrelated reasons and mean unrelated things. Issue #103.
+
+    Not counted because the rest of the process is unharmed. Webhooks arrive, threads are written,
+    and capture itself carries on into the table, so what is held there is published by the next
+    process with a working flusher. Restarting over this would throw away a working worker's batch
+    to fix something that is already waiting patiently.
+
+    Said at all because nothing halts the process when this task dies, so without a line here it
+    goes with one log entry while what people said piles up in a table for ever.
+    """
+    async with client_with(FakeLiveness(flusher=False)) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["healthy"] is True, "a dead flusher restarted a working process"
+    assert response.json()["flusher"] is False, "a dead flusher was not reported at all"
+
+
+async def test_an_unhealthy_process_does_not_also_complain_about_the_flusher() -> None:
+    """One line about what is actually wrong. A process whose database has gone reports that; the
+    flusher being down as well is a consequence, not a second thing to go and look at."""
+    async with client_with(FakeLiveness(database=False, flusher=False)) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["flusher"] is False
 
 
 async def test_no_board_configured_is_not_something_stopped() -> None:

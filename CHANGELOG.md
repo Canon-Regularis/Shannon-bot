@@ -5509,3 +5509,99 @@ to set the project number will find it.
   fixing it is a decision about whether the parser should be that permissive. The new refusal at
   least surfaces the clash rather than leaving it silent.
 
+
+## A conversation in a thread, published to the item
+
+- **`/log_conversation` and `/stop_conversation` publish what is said in a thread to the item's
+  GitHub comments.** Pull requests and issues both. Closes #103.
+- **This is the first thing here that reads Discord.** Everything until now ran one way: a webhook
+  arrives, a thread is written to. `ShannonBot` listened to six gateway events and none of them
+  was about messages, and the thread gateway is write-only by construction with the reason in its
+  docstring. So there was nothing to build on and the whole read path is new.
+- **It costs a privileged intent, and that is the highest-consequence line in the change.**
+  Message content is a Developer Portal checkbox, and without it every message arrives with its
+  text empty, so there is no way around it. Behind `SHANNON_CAPTURE_DISCORD_MESSAGES`, which
+  defaults off, because a process refused an intent it asked for does not start: the webhook
+  mirror, the delivery worker and the board poller would all go with it. Tick the box, then set
+  the flag. Until both are done the command refuses with a sentence saying so. Unlike `members`,
+  which was removed for its cost, it does not turn on guild chunking, so READY is not delayed and
+  the worker's wait on it is unchanged. There is a test that says so.
+- **The echo had to be refused rather than used, which is the opposite of every other command.**
+  `/assign`, `/label` and the rest write to GitHub and post nothing, because GitHub sends the
+  change straight back and the ordinary mirror is what says so in the thread. A transcript is made
+  out of a thread, so mirroring its comment back would replay the whole conversation into the
+  thread it came from, under this bot's name, a minute late.
+- **What recognises it is a marker at the front of the body.** `<!-- shannon-transcript -->`.
+  Two better-looking options were tried and dropped. Pre-claiming the comment id in
+  `mirrored_notes` needs the id back, which means a body-returning sibling for the most carefully
+  documented method in the GitHub client, and it records the claim after the act, which that table
+  says at length not to do; it would also put two opposite meanings in one table, in a place whose
+  own log line tells an operator to delete rows to have a comment posted again. Checking the
+  author against the App's own login is raceless and correct, but the only self-identifying call
+  in the project returns an empty string on failure by design, and a silent no-op there duplicates
+  every transcript. The marker needs no identity, no network call and no state, and it reuses the
+  `worth_posting` seam the comments mirror already had and never used. Because no id is needed,
+  `_send` is not touched.
+  The match is anchored to the start, so a GitHub quote reply, which copies a body verbatim behind
+  `> `, is still mirrored. There is a test for that, because getting it wrong drops comments real
+  people wrote and nothing would say so.
+- **Which threads are armed is an in-memory set, and it has to be.** `on_message` fires for every
+  message in every channel of every server. The check is synchronous and first, so a message
+  nobody asked for costs one set lookup: an async answer would allocate a coroutine per message in
+  the server, and a database answer would scan `tracked_items`, whose thread column carries no
+  index on purpose and whose index migration `0004` deliberately dropped.
+- **Commit, then change the set, in both directions.** Clearing the set first looks safer since it
+  cannot fail. It is the worse order: a commit that then failed would leave the row open and the
+  set clear, and the next restart would reload that row and quietly resume publishing what people
+  said after they had been told it had stopped.
+- **The notice is a precondition, not a courtesy.** `/log_conversation` posts a visible line into
+  the thread before anything is armed, and a thread that refuses it is not logged. The ephemeral
+  reply is seen by one person and that is the person who already knows. `muted_members` exists so
+  somebody can decline a ping; publishing their words into a public repository is a larger
+  imposition than a ping.
+- **Messages are buffered in a table rather than in memory.** GitHub can be down, and an in-memory
+  buffer facing a failed write either grows without bound or drops the batch, which loses part of
+  a conversation with nothing saying so. Two tables, because the fact that a thread is logging has
+  to survive a restart even when nothing has been said in it yet. The flush claim sits on the
+  conversation rather than on every row, so one row is updated per batch and one flush at a time
+  becomes a property of the schema.
+- **One window cannot be closed, and it was chosen rather than missed.** A process that dies
+  between GitHub accepting the comment and the rows being deleted publishes that batch again once
+  the claim reads as abandoned. A duplicate comment is visible and a person can delete it; a
+  transcript silently missing a chunk defeats the point of keeping the rows. There is a test
+  pinning the duplicate as documented behaviour so nobody quietly turns it into loss. Reading the
+  comments back before republishing would close it, and is not worth a paginated client method and
+  a recovery path for a window measured in milliseconds.
+- **Edits are ignored, deletions are honoured while pending.** An edit reflected only while the
+  message is still waiting would land or not depending on whether the quiet gap happened to
+  elapse, which is timing nobody can see. Deleting something before it goes out is a rule somebody
+  can hold in their head. The notice says both.
+- **Text going out is neutralised the way `safe_text` neutralises text coming in**, and the
+  hazards are different in that direction: a mention subscribes an account to the item, a `#40`
+  writes a line into another item's timeline, and an unterminated `<!--` hides everybody else's
+  words. An unbalanced code fence is closed rather than broken, so pasted code still renders. A
+  full GitHub URL is deliberately left alone: sharing a link is the point, and it does
+  cross-reference.
+- **Attribution is a link, not an `@handle`.** Somebody `/link` knows shows as a link to their
+  profile, which notifies nobody, and the bare login is the link text because an `@` inside the
+  brackets is read by GitHub's mention parser even though the rendered link shows no mention.
+- **Found on the way and fixed:** a claim whose messages were all deleted in Discord before
+  anybody finished it left a conversation the pending query could not see, because that query
+  joins against rows which were no longer there, so the claim stood until the next message arrived
+  and cost that message the whole retry window. Cleared at the start of each pass now.
+- **The flusher is reported by `/health` without counting towards it**, the way the board poller
+  is and for the same reason: nothing halts the process when it dies, so without a line there it
+  would go with one log entry while what people said piled up in a table for ever. Not counted,
+  because capture carries on into the table and the next working process publishes it.
+- **The seam for later.** The issue asks for a third command that picks individual messages, and
+  it is not built. The line is the currency rather than the buffer: `TranscriptLine` and `render`
+  know nothing about tables, and the publisher takes the `FoundItem` every in-thread command
+  already has rather than a conversation id, so it works in a thread with no open conversation.
+  That command should add a module, a `fetch_message` on the gateway and a helper, and touch none
+  of the capture rules, the flusher, the schema or the suppressor.
+- Known and not fixed: there is no way for one person in a thread to opt out of being
+  transcribed, and `muted_members` is the wrong table to reuse for one, since it means "do not
+  ring me" rather than "do not publish me". Relocating an item also leaves a conversation armed
+  against the old thread until that thread is deleted. Both are in the README.
+- **No new App permission.** `Issues: Read and write` already covers posting a comment, and it is
+  what the label and assignee writes have always relied on.

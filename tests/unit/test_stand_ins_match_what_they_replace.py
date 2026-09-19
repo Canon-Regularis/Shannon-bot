@@ -17,6 +17,7 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.commands.conversations import LogsConversations
 from shannon.commands.link import LinksAccounts
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.mentions import RemembersWhoWantsPinging
@@ -31,7 +32,7 @@ from shannon.container import Container, _OneToken
 from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.discord_bot.client import ShannonBot
+from shannon.discord_bot.client import CapturesMessages, ShannonBot
 from shannon.discord_bot.permissions import RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
@@ -58,7 +59,13 @@ from shannon.github.installations import (
 from shannon.github.projects import HttpProjectBoards, ReadsJson
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
-from shannon.runtime.lifespan import Gateway, ProcessParts, RunsDeliveries
+from shannon.runtime.lifespan import (
+    FlushesTranscripts,
+    Gateway,
+    ProcessParts,
+    ReloadsConversations,
+    RunsDeliveries,
+)
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
@@ -98,6 +105,9 @@ from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
+from shannon.services.transcripts.flush import TranscriptFlusher
+from shannon.services.transcripts.log import ConversationLog
+from shannon.services.transcripts.publish import SaysThings
 from shannon.services.unregistration import (
     ReadsPermissions,
     RepositoryUnregistrationService,
@@ -164,6 +174,15 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (Gateway, ShannonBot),
     (ProcessParts, Container),
     (RunsDeliveries, DeliveryWorker),
+    # Issue #103. One object behind four protocols, which is the point of splitting them: the
+    # gateway listener can capture a message and cannot start or stop logging, and the process
+    # can fill the set and cannot do either.
+    (LogsConversations, ConversationLog),
+    (CapturesMessages, ConversationLog),
+    (ReloadsConversations, ConversationLog),
+    (FlushesTranscripts, TranscriptFlusher),
+    (SaysThings, FakeGitHubClient),
+    (SaysThings, HttpGitHubClient),
     (LinksAccounts, UserLinkingService),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
