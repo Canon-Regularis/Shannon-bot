@@ -17,6 +17,7 @@ from shannon.discord_bot.panels import (
     Block,
     BlockKind,
     Panel,
+    PanelImage,
     PanelLink,
 )
 from shannon.discord_bot.safe_text import TRUNCATED
@@ -63,6 +64,7 @@ class TestWhetherItIsACard:
             {"accent": Accent.OPEN},
             {"thumbnail_url": "https://example.invalid/a.png"},
             {"link": PanelLink(label="Open", url="https://example.invalid")},
+            {"images": (PanelImage(url="https://example.invalid/a.png"),)},
         ],
     )
     def test_anything_structural_stops_it_being_plain(self, extra: dict[str, Any]) -> None:
@@ -140,3 +142,25 @@ class TestTheColours:
         assert Accent.PASSED.value == Accent.OPEN.value
         assert Accent.FAILED.value == Accent.CLOSED.value
         assert Accent.DRAFT.value == Accent.NEUTRAL.value
+
+
+class TestThePictures:
+    """Issue #126. They are structure rather than words, and the budget is about words."""
+
+    def test_a_gallery_costs_nothing_against_the_budget(self) -> None:
+        """Discord measures a view by its text displays, and a gallery is not one. So four
+        pictures cost the same as none, which is why `length()` does not mention them."""
+        bare = panel((K.BODY, "hello"))
+        shown = panel((K.BODY, "hello"), images=tuple(PanelImage(url=f"u{n}") for n in range(4)))
+
+        assert shown.length() == bare.length()
+
+    def test_a_card_whose_only_structure_is_a_gallery_is_not_plain(self) -> None:
+        """Otherwise it would go out as the text it came from and the pictures would not appear."""
+        assert panel((K.BODY, "hello"), images=(PanelImage(url="u"),)).is_plain is False
+
+    def test_the_pictures_survive_a_cut(self) -> None:
+        """They cost nothing, so dropping them would buy nothing."""
+        long = panel((K.BODY, "w" * (PANEL_BUDGET + 50)), images=(PanelImage(url="u"),))
+
+        assert long.trimmed().images == (PanelImage(url="u"),)

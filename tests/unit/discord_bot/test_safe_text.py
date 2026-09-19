@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.discord_bot.rich_text import as_rich_text
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
     COMMIT_MESSAGE_LIMIT,
@@ -25,9 +26,9 @@ from shannon.discord_bot.safe_text import (
     EMPTY,
     MESSAGE_LIMIT,
     as_plain_text,
-    as_prose,
     clipped,
     code_span,
+    cut,
     fit,
 )
 
@@ -257,7 +258,7 @@ class TestTheDescriptionLimit:
         block it goes under has ten fields of its own. A limit that fits on its own and not in a
         block would be a description that silently disappears from a busy item.
         """
-        worst = clipped(as_prose("*" * DESCRIPTION_PREVIEW_LIMIT), limit=DESCRIPTION_PREVIEW_LIMIT)
+        worst = as_rich_text("*" * DESCRIPTION_PREVIEW_LIMIT).text
 
         assert len(worst) < MESSAGE_LIMIT
 
@@ -267,81 +268,24 @@ class TestTheDescriptionLimit:
         assert len(cut.removesuffix("…")) == DESCRIPTION_PREVIEW_LIMIT
 
 
-class TestFlatteningMarkdownToProse:
-    """What makes a description readable, which is the escaping having nothing left to escape.
+class TestCuttingWithoutMakingSafe:
+    """The length half of `clipped`, lifted out so the one order that works exists once.
 
-    Every rule is checked with two occurrences. With one, a rule that forgot `re.MULTILINE` still
-    matches at the start of the string and the test passes while every later line goes untouched.
+    The RAW text is cut and only then neutralised, so a cut can never land between a backslash or
+    a zero-width space and the character it was protecting. `clipped` and `rich_text` both take
+    this cut and then neutralise differently, which is the whole reason it is its own function.
     """
 
-    def test_headings_lose_their_hashes(self) -> None:
-        assert as_prose("## Summary\ntext\n### Detail") == "Summary\ntext\nDetail"
+    def test_text_inside_the_limit_is_left_alone(self) -> None:
+        assert cut("a" * 40, limit=40) == "a" * 40
 
-    def test_a_line_leading_issue_reference_keeps_its_hash(self) -> None:
-        """The rule needs the space GitHub needs for a heading. Without it this reads `#3` as a
-        heading, strips the hash, and the reference is gone with no way to tell it was ever there.
-        """
-        assert as_prose("#3 is fixed by this\n#4 as well") == "#3 is fixed by this\n#4 as well"
+    def test_one_character_over_is_cut_and_marked(self) -> None:
+        assert cut("a" * 41, limit=40) == "a" * 40 + "…"
 
-    def test_bullets_become_a_mark_discord_will_not_escape_back(self) -> None:
-        """`-`, `*` and `+` are all markdown to Discord, so writing one of those here means the
-        escaper puts the backslash straight back on and nothing has been gained."""
-        flattened = as_prose("- one\n* two\n+ three")
+    def test_nothing_is_escaped_on_the_way(self) -> None:
+        """The difference from `clipped`, said out loud: this one only shortens."""
+        assert cut("**bold**", limit=40) == "**bold**"
 
-        assert flattened == "• one\n• two\n• three"
-        assert "\\" not in as_plain_text(flattened), "the escaper put the markers back"
-
-    def test_an_indented_bullet_is_flattened_too(self) -> None:
-        assert as_prose("  - one\n\t- two") == "• one\n• two"
-
-    def test_a_blank_line_before_a_bullet_survives(self) -> None:
-        r"""The rule matches spaces and tabs and not `\s`, which reaches back over the newline.
-        That is the bug in Discord's own escaper that makes one bullet come out escaped and the
-        next not, with a stray backslash left on the line above.
-        """
-        assert as_prose("intro\n\n- one\n- two") == "intro\n\n• one\n• two"
-
-    def test_quote_markers_are_dropped_because_they_are_what_113_objected_to(self) -> None:
-        """A surviving marker renders as exactly the blockquote the issue asked to be rid of."""
-        assert as_prose("> said this\n>> and this") == "said this\nand this"
-
-    def test_html_comments_go(self) -> None:
-        """A pull request template is mostly these, and they are invisible on GitHub. Left in,
-        the preview of a templated repository is the instructions rather than the description.
-        """
-        assert as_prose("<!-- tell us why -->real text<!-- and how -->") == "real text"
-
-    def test_a_comment_spanning_lines_goes_too(self) -> None:
-        assert as_prose("<!--\nmulti\nline\n-->kept") == "kept"
-
-    def test_an_unterminated_comment_is_left_alone(self) -> None:
-        """A greedy match would eat the rest of the description instead."""
-        assert as_prose("<!-- never closed\nand the rest") == "<!-- never closed\nand the rest"
-
-    def test_windows_line_endings_are_folded(self) -> None:
-        """GitHub's web form submits CRLF, and every rule here is anchored to a line. It also
-        costs a blank line two characters against the preview limit rather than one.
-        """
-        assert as_prose("## One\r\n\r\n\r\n\r\n- two") == "One\n\n• two"
-
-    def test_a_run_of_blank_lines_collapses(self) -> None:
-        assert as_prose("one\n\n\n\n\ntwo") == "one\n\ntwo"
-
-    @pytest.mark.parametrize("body", ["", "   ", "\n\n\n", "## ", "<!-- only a comment -->"])
-    def test_a_body_that_says_nothing_flattens_to_nothing(self, body: str) -> None:
-        """What the block reads to decide there is no description to show. A body of markers is
-        not empty and has nothing in it, which is why the block asks about the rendered text.
-        """
-        assert as_prose(body) == ""
-
-    def test_it_never_makes_text_unsafe(self) -> None:
-        """It runs before the escaping and never instead of it, and removing a comment joins
-        whatever sat either side. So the thing worth proving is that the escaping still catches
-        everything once this has had its turn.
-        """
-        hostile = "# <@1234567890>\n- @every<!-- -->one\n* **SHIPPED**\n<!-- -->`` <!-- -->`x"
-
-        escaped = as_plain_text(as_prose(hostile))
-
-        for live in ("<@1234567890>", "@everyone", "**SHIPPED", "```"):
-            assert live not in escaped, f"{live!r} survived"
+    @pytest.mark.parametrize("body", ["", "   ", "\n\n", None])
+    def test_nothing_but_whitespace_cuts_to_nothing(self, body: str | None) -> None:
+        assert cut(body, limit=40) == ""

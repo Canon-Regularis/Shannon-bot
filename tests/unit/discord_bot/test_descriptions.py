@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import pytest
 
 from shannon.discord_bot.formatting import format_issue, format_pull_request
-from shannon.discord_bot.panels import PANEL_BUDGET
+from shannon.discord_bot.panels import PANEL_BUDGET, BlockKind
 from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import (
@@ -82,14 +82,22 @@ class TestWhenThereIsSomethingToShow:
     def test_an_issue_gets_one_too(self) -> None:
         assert LABEL in block("why this exists", ISSUE)
 
-    def test_markdown_reads_as_prose_rather_than_backslashes(self) -> None:
-        """The whole reason the flattening exists. Discord's escaper puts a backslash in front of
-        a line-leading hash and a line-leading dash, so an ordinary description arrived as a wall
-        of them with a stray one on a line of its own."""
+    def test_a_heading_goes_and_a_list_stays_a_list(self) -> None:
+        """Issue #125. A list used to be rewritten to a bullet Discord would not escape back,
+        because everything after it escaped a line-leading dash. Nothing escapes a description
+        now, so a dash is what it was on GitHub. A heading still goes: a card built out of labels
+        has one voice already.
+        """
         rendered = block("## Summary\n\n- one\n- two")
 
-        assert f"{LABEL}\nSummary\n\n• one\n• two" in rendered
+        assert f"{LABEL}\nSummary\n\n- one\n- two" in rendered
         assert "\\" not in rendered.split(LABEL)[1]
+
+    def test_a_plus_becomes_a_dash_because_discord_reads_one_and_not_the_other(self) -> None:
+        assert f"{LABEL}\n- one\n- two" in block("+ one\n+ two")
+
+    def test_a_quote_is_a_quote(self) -> None:
+        assert f"{LABEL}\n> said this" in block("> said this")
 
 
 class TestWhenThereIsNothingToShow:
@@ -114,14 +122,29 @@ class TestNothingUntrustedGetsThrough:
     block is rewritten on every delivery, and a mention is an event rather than a standing field.
     """
 
-    @pytest.mark.parametrize(
-        "written", ["<@1234567890>", "<@&999>", "@everyone", "@here", "**SHIPPED BY ADMIN**"]
-    )
-    def test_it_cannot_ping_or_restyle(self, written: str) -> None:
+    @pytest.mark.parametrize("written", ["<@1234567890>", "<@&999>", "@everyone", "@here"])
+    def test_it_cannot_ping(self, written: str) -> None:
         rendered = block(f"please look {written} now")
 
         assert written not in rendered
         assert "now" in rendered
+
+    def test_bold_is_shown_as_bold(self) -> None:
+        """Issue #125, as a test. This used to be in the list above, because everything a
+        description carried was escaped. What made that necessary was the description sitting in
+        the same message as the field rows, and since issue #116 it does not.
+        """
+        assert "**SHIPPED BY ADMIN**" in block("please look **SHIPPED BY ADMIN** now")
+
+    def test_a_subtext_marker_cannot_speak_in_the_bots_own_voice(self) -> None:
+        """`-#` renders small and grey, which is how every footnote this bot writes is written.
+        It was dead before issue #125 only by accident: the escaping put a backslash in front of a
+        line-leading dash, and nothing escapes a description now.
+        """
+        rendered = block("-# posted by the maintainers")
+
+        assert "-# posted by the maintainers" not in rendered
+        assert "posted by the maintainers" in rendered
 
     def test_a_linked_name_is_still_only_text(self) -> None:
         """A name in a comment resolves. A name here does not, because this line is rewritten
@@ -134,17 +157,36 @@ class TestNothingUntrustedGetsThrough:
 
         assert "<@4242>" not in rendered.text.split(LABEL)[1]
 
-    def test_it_cannot_forge_a_field(self) -> None:
-        """The block is read by eye as `**Label:** value` rows, and a description sits inside it."""
-        rendered = block("**Status:** DONE")
+    def test_it_cannot_forge_a_row_among_the_fields(self) -> None:
+        """A forged row can be written, and it cannot be written WHERE it would be read as one.
 
-        assert rendered.count("**Status:** DONE") == 0
-        assert "**Status:** NOT_REVIEWED" in rendered
+        This test used to assert the string could not appear at all, on the grounds that the block
+        is read by eye as `**Label:** value` rows and a description sat inside it. That stopped
+        being true at issue #116: the rows are one component and the description is another, with
+        a rule between them and its own label above it. So what must stay impossible is a forged
+        row landing AMONG the rows, which is now structural rather than a matter of escaping.
+        """
+        card = format_pull_request(
+            replace(PULL_REQUEST, body="**Status:** DONE"),
+            status=Status.NOT_REVIEWED,
+            priority=Priority.UNSET,
+        )
+        fields = next(part for part in card.blocks if part.kind is BlockKind.FIELDS)
+        described = next(part for part in card.blocks if part.kind is BlockKind.BODY)
+
+        assert "**Status:** DONE" not in fields.text
+        assert "**Status:** NOT_REVIEWED" in fields.text
+        assert "**Status:** DONE" in described.text
 
     def test_the_bold_markers_stay_balanced(self) -> None:
         """A block built of matched pairs with an odd number in it restyles every line below."""
         for written in ("**", "*", "***unclosed", "a ** b"):
             assert block(written).count("**") % 2 == 0, written
+
+    def test_an_open_fence_is_closed(self) -> None:
+        """The marker that swallows every line after it rather than restyling one."""
+        for written in ("```", "```py\ncode", "a ``` b"):
+            assert block(written).count("```") % 2 == 0, written
 
 
 class TestWhenThereIsTooMuch:

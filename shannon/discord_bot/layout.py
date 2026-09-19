@@ -9,8 +9,8 @@ modules neither type checker looks at.
 **The law this module exists to keep:**
 
     The text displays in the view it builds are exactly the panel's block texts, in the panel's
-    order. Grouping, rules, the accent bar, the picture and the button add structure and never
-    words.
+    order. Grouping, rules, the accent bar, the picture, the gallery and the button add
+    structure and never words.
 
 That is what makes `Panel.text` a projection rather than a second renderer, and `Panel.text` is
 what lets the thread fake keep recording a readable string while production sends components. A
@@ -27,7 +27,7 @@ from __future__ import annotations
 import discord
 from discord import ui
 
-from shannon.discord_bot.panels import BlockKind, Panel, PanelLink
+from shannon.discord_bot.panels import BlockKind, Panel, PanelImage, PanelLink
 
 # Every component is generic in the view it belongs to, and a bare `ui.TextDisplay("x")` leaves
 # that parameter unsolved, which both type checkers refuse. Pinned once here so that nothing below
@@ -39,6 +39,11 @@ Group = ui.Section[ui.LayoutView]
 Box = ui.Container[ui.LayoutView]
 Picture = ui.Thumbnail[ui.LayoutView]
 Row = ui.ActionRow[ui.LayoutView]
+Gallery = ui.MediaGallery[ui.LayoutView]
+# Not generic and not exported from `discord.ui`, because a gallery item is a value
+# rather than an `Item`. That is also why a gallery costs one component however many
+# pictures it holds: nothing walks into it.
+Shown = discord.MediaGalleryItem
 
 # What a thumbnail is described as for somebody using a screen reader. Generic because the picture
 # is whoever the panel is about and this module does not know who that is.
@@ -113,9 +118,31 @@ def _parts(panel: Panel) -> list[Part]:
         parts.extend(_opening(block.text, under, picture))
         picture = None
 
+    if panel.images:
+        parts.append(_gallery(panel.images))
     if panel.link is not None:
         parts.append(Row(_button(panel.link)))
     return parts
+
+
+def _gallery(images: tuple[PanelImage, ...]) -> Part:
+    """The pictures a description was written around, in the one component Discord draws
+    them in.
+
+    Under the blocks and above the button. They belong to the description they were lifted
+    out of, and the button is the last thing in every card this project builds. No rule
+    above them: a gallery is already visibly its own thing, and a card carrying a
+    description has a large rule two components up saying where the prose began.
+
+    One component however many pictures, and no text display among them. So this adds
+    nothing to what the view SAYS and nothing to what it COSTS, which is the law this
+    module keeps, said about a part that draws rather than speaks.
+
+    No guard on the count. Discord takes ten and `rich_text.IMAGES_SHOWN` is four, which
+    is proved by a test rather than checked here, for the reason the widest-panel test
+    gives: a branch nothing can take and a coverage floor of a hundred per cent do not mix.
+    """
+    return Gallery(*(Shown(image.url, description=image.alt) for image in images))
 
 
 def _before(kind: BlockKind, *, started: bool) -> list[Part]:
