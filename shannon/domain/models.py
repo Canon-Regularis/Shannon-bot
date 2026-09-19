@@ -27,6 +27,14 @@ class Actor:
 
     login: str
     github_user_id: int | None = None
+    # The picture GitHub shows for this account, where it sent one. Carried for the thumbnail on a
+    # panel and read nowhere else, so an account without one costs a panel its picture and nothing
+    # else. Issue #116.
+    #
+    # Accepted only as an `https://` URL. Discord fetches a thumbnail itself and answers the whole
+    # message with a 400 if it cannot, so a malformed one here does not lose a picture, it loses
+    # the block that carried it.
+    avatar_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

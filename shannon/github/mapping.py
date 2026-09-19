@@ -79,8 +79,21 @@ def actor(payload: object) -> Actor | None:
         return None
     github_user_id = payload.get("id")
     return Actor(
-        login=login, github_user_id=github_user_id if isinstance(github_user_id, int) else None
+        login=login,
+        github_user_id=github_user_id if isinstance(github_user_id, int) else None,
+        avatar_url=_avatar(payload.get("avatar_url")),
     )
+
+
+def _avatar(value: object) -> str | None:
+    """The account's picture, or None for anything this would not hand to Discord.
+
+    `https://` and nothing else. Discord fetches a thumbnail's media itself and refuses the WHOLE
+    message when it cannot, so a value that is merely odd rather than usable does not cost a panel
+    its picture, it costs the item its block. Checked here because this is where untrusted GitHub
+    JSON stops being untrusted.
+    """
+    return value if isinstance(value, str) and value.startswith("https://") else None
 
 
 def actors(payloads: object) -> tuple[Actor, ...]:
