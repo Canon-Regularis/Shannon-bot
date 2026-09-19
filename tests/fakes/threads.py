@@ -59,6 +59,11 @@ class FakeThreadGateway:
         # Set by a test that needs the next thread creation to fail the way a Discord outage
         # would, so what happens to everything queued behind it can be observed.
         self.fail_next_create = False
+        # And for posting into a thread. Its own switch because issue #103 makes a refused
+        # post mean something no other one does: `/log_conversation` announces itself before
+        # it arms anything, so a thread that will not take the notice is a conversation that
+        # must not be captured.
+        self.post_error: Exception | None = None
         # The same for shutting, which is a separate permission on Discord's side: a server can
         # let this bot open and edit threads and not let it close one.
         self.fail_next_shut = False
@@ -186,6 +191,8 @@ class FakeThreadGateway:
         return None if thread is None else thread.channel_id
 
     async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None:
+        if self.post_error is not None:
+            raise self.post_error
         thread = self._wake(thread_id)
         message_id = self._allocate()
         thread.messages[message_id] = content
