@@ -106,7 +106,7 @@ this is deployed plus `/webhooks/github`, the content type is `application/json`
 the same string as `SHANNON_GITHUB_WEBHOOK_SECRET`. An unset secret answers 500 to every delivery
 rather than waving them through, so a mismatch shows up at once rather than quietly.
 
-Choose individual events, and choose these five:
+Choose individual events, and choose these six:
 
 ```text
 Pull requests
@@ -114,6 +114,7 @@ Issues
 Issue comments
 Pull request reviews
 Pull request review comments
+Check suites
 ```
 
 Anything else is answered `ignored` without a row, so subscribing to more costs nothing but noise.
@@ -121,10 +122,19 @@ GitHub's Recent Deliveries page is the first place to look when nothing appears 
 a wrong secret, 500 is an unset one, and a 200 answering `ignored` means the event arrived and this
 bot does not act on it.
 
-**The Discord bot.** No privileged intent is needed, so there is nothing to turn on under Bot in
-the Developer Portal and nothing for Discord to approve. Pinging somebody works from the account
-map `/link` builds, and reading somebody's roles works from what Discord sends with the command
-itself. Invite it with the `bot` and `applications.commands` scopes and these permissions:
+**What the App may read.** `Issues: Read and write` covers labels, assignees and comments,
+`Pull requests: Read and write` covers reviewers, and `Checks: Read` covers the CI results issue
+#112 puts in a thread. That last one is worth knowing about before you add it: granting a new
+permission to an installed App suspends its event delivery until somebody accepts the change, and
+until they do no check suite arrives at all and the feature looks broken rather than pending. The
+log says so on the first one that does arrive.
+
+**The Discord bot.** No privileged intent is needed unless `SHANNON_CAPTURE_DISCORD_MESSAGES` is
+on, in which case Message Content must be ticked under Bot first; see `/log_conversation` below.
+Otherwise there is nothing to turn on there and nothing for Discord to approve.
+Pinging somebody works from the account map `/link` builds, and reading somebody's roles works
+from what Discord sends with the command itself. Invite it with the `bot` and
+`applications.commands` scopes and these permissions:
 
 ```text
 View Channels

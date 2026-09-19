@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 OWNER = "Canon-Regularis"
 REPO = "Shannon-bot"
 REPO_ID = 1255504909
+# The commit a pull request currently points at, and so the one a check suite reports on. Its
+# own constant rather than either push SHA, because those two say where the branch moved FROM
+# and TO and this says where it IS.
+CHECKED_SHA = "c" * 40
+CHECK_SUITE_ID = 95896524045
 PR_ID = 4661345307
 
 # A pull request carries a different id on the issues endpoint than on the pulls endpoint, and
@@ -52,6 +58,11 @@ def pull_request(**overrides: Any) -> dict[str, Any]:
         "labels": [{"name": "backend", "color": "0e8a16"}],
         "updated_at": "2026-08-10T12:00:00Z",
         "base": {"ref": "main", "repo": repository()},
+        # Both carried because GitHub sends both and issue #112 reads both: the head to tell a CI
+        # result about this commit from one about a commit the branch has moved off, and the draft
+        # flag to decide whether reviewers are rung at all.
+        "head": {"ref": "feature", "sha": CHECKED_SHA},
+        "draft": False,
     }
     payload.update(overrides)
     return payload
@@ -237,4 +248,57 @@ def pull_request_review_comment_event(
         "pull_request": pull_request(),
         "repository": repository(),
         "sender": user("monalisa", 200),
+    }
+
+
+def check_run(**overrides: Any) -> dict[str, Any]:
+    """One job inside a check suite, shaped the way the check-runs endpoint sends it."""
+    payload: dict[str, Any] = {
+        "id": 105762136252,
+        "name": "Lint, format and types",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": (
+            f"https://github.com/{OWNER}/{REPO}/actions/runs/35395138860/job/105762136252"
+        ),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def check_runs_page(*runs: dict[str, Any]) -> dict[str, Any]:
+    """A page of the check-runs endpoint, which answers an OBJECT rather than an array.
+
+    Kept here rather than built inline in each test, because getting that wrapper wrong is the
+    mistake the reader was written to avoid and a fixture that shared the mistake would hide it.
+    """
+    return {"total_count": len(runs), "check_runs": list(runs)}
+
+
+def check_suite_event(
+    action: str = "completed",
+    *,
+    head_sha: str = CHECKED_SHA,
+    numbers: Sequence[int] = (7,),
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A `check_suite` body: CI has finished with a commit.
+
+    `pull_requests` is what ties it to a thread, and it is the only thing that can: nothing in
+    this project turns a bare SHA into a tracked item. GitHub leaves it empty for a fork and for a
+    commit on the default branch, which `numbers=()` is how a test says.
+    """
+    suite: dict[str, Any] = {
+        "id": CHECK_SUITE_ID,
+        "head_sha": head_sha,
+        "status": "completed",
+        "conclusion": "success",
+        "pull_requests": [{"number": number} for number in numbers],
+    }
+    suite.update(overrides)
+    return {
+        "action": action,
+        "check_suite": suite,
+        "repository": repository(),
+        "sender": user("octocat", 583231),
     }

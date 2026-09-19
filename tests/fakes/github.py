@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any, TypeVar
 
 from shannon.domain.models import (
+    CheckRun,
     CommitRange,
     CommitStats,
     IssueSnapshot,
@@ -113,6 +114,11 @@ class FakeGitHubClient:
         self.assignable_calls: list[tuple[str, str]] = []
         # Every comment written, as (owner/name, number, body). Issue #103.
         self.comments: list[tuple[str, int, str]] = []
+        # Checks on a commit, keyed by sha. Issue #112. A key holding None means GitHub has
+        # collected the commit, which is a different answer from a missing key: that one means
+        # the test forgot to stock the fake, and it comes back empty so the test says so.
+        self.check_runs: dict[str, Sequence[CheckRun] | None] = {}
+        self.check_run_calls: list[tuple[str, str]] = []
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -213,6 +219,12 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return list(self.repo_labels.get(key, []))
+
+    async def list_check_runs(self, owner: str, name: str, sha: str) -> Sequence[CheckRun] | None:
+        self.check_run_calls.append((f"{owner}/{name}".lower(), sha))
+        if self.error is not None:
+            raise self.error
+        return self.check_runs.get(sha, [])
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
         # Refused before it is recorded, unlike the label writes below. `comments` is read as

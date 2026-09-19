@@ -84,6 +84,18 @@ class DeliveryClient:
             )
         return str(status).lower() if status is not None else "not queued"
 
+    async def attempts_of(self, delivery: str) -> int:
+        """How many times the worker has tried a delivery.
+
+        The difference between a handler that answered "nothing to do" and one that raised so the
+        delivery would come back. Both leave nothing in Discord, and only this tells them apart.
+        """
+        async with self._sessionmaker() as session:
+            attempts = await session.scalar(
+                select(WebhookEvent.attempts).where(WebhookEvent.github_delivery_id == delivery)
+            )
+        return int(attempts) if attempts is not None else 0
+
 
 @asynccontextmanager
 async def registered_stack(

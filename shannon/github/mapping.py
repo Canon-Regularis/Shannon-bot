@@ -7,6 +7,7 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.json import JsonObject, is_json_array, is_json_list, is_json_object
 from shannon.domain.models import (
     Actor,
+    CheckRun,
     CommentSnapshot,
     CommitRange,
     CommitRef,
@@ -236,7 +237,23 @@ def pull_request(
         # A closed pull request that was merged says so either way round, depending on which
         # endpoint or event it came from.
         merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
+        head_sha=_head_sha(payload),
+        # `isinstance` rather than `bool(...)`, for the reason `repository` reads `private` that
+        # way: a string is truthy, so `"false"` would come back as a draft.
+        draft=payload.get("draft") is True,
     )
+
+
+def _head_sha(payload: Payload) -> str:
+    """The commit a pull request currently points at, or empty where it does not say.
+
+    Absent from the ISSUES shape of a pull request, which carries no head at all. Empty rather
+    than guessed, so a caller comparing against it is asking a question with no answer rather
+    than being told the wrong one.
+    """
+    head = payload.get("head")
+    sha = head.get("sha") if is_json_object(head) else None
+    return sha if isinstance(sha, str) else ""
 
 
 def _shared_fields(
@@ -451,3 +468,51 @@ def commit_stats(payload: object) -> CommitStats | None:
         deletions=deletions,
         changed_files=len(files) if is_json_list(files) else 0,
     )
+
+
+def check_run(payload: object) -> CheckRun | None:
+    """One CI job off the check-runs endpoint, or None for a row that cannot be rendered.
+
+    A name is the whole of what a reader gets, so a run without one is dropped rather than shown
+    as a blank line. The conclusion is allowed to be missing: GitHub leaves it null on a run it
+    has not finished with, and the caller refuses the whole set on that before it reaches here.
+    An empty conclusion falls in the third bucket either way, which is the safe direction.
+    """
+    if not is_json_object(payload):
+        return None
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+
+    check_run_id = payload.get("id")
+    if not isinstance(check_run_id, int):
+        return None
+
+    status = payload.get("status")
+    conclusion = payload.get("conclusion")
+    html_url = payload.get("html_url")
+    return CheckRun(
+        check_run_id=check_run_id,
+        name=name,
+        # Empty where GitHub did not say, which reads as "not completed" and holds the whole
+        # announcement back. The safe direction: a result said late is better than one said wrong.
+        status=status if isinstance(status, str) else "",
+        conclusion=conclusion if isinstance(conclusion, str) else "",
+        html_url=html_url if isinstance(html_url, str) else "",
+    )
+
+
+def check_runs(payload: object) -> list[CheckRun]:
+    """The usable runs on one page of the check-runs endpoint.
+
+    That endpoint answers an OBJECT with the list under `check_runs`, unlike the labels list
+    beside it in the client, which pages through an array directly. Copying the label reader is
+    the easy mistake here and it yields nothing at all rather than failing.
+    """
+    if not is_json_object(payload):
+        return []
+    rows = payload.get("check_runs")
+    if not is_json_list(rows):
+        return []
+    return [found for found in (check_run(row) for row in rows) if found is not None]

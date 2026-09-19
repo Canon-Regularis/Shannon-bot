@@ -152,6 +152,19 @@ class PullRequestSnapshot(ItemSnapshot):
 
     merged: bool = False
 
+    # The commit the pull request currently points at. Issue #112 needs it to tell a CI result
+    # about this pull request from one about a commit it has since moved off: a new push cancels
+    # the run before it, and that run completes as `cancelled` looking like a failure.
+    #
+    # Empty where it was not read, which is every snapshot built from the ISSUES shape of a pull
+    # request. That shape carries no head at all, and a caller comparing against an empty string
+    # is asking a question it has no answer to rather than being told the wrong one.
+    head_sha: str = ""
+    # Whether it is still being written. GitHub runs CI on a draft like any other pull request,
+    # and ringing reviewers about work nobody has asked them to look at yet is the wrong end of
+    # the feature.
+    draft: bool = False
+
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
 
     @property
@@ -380,6 +393,99 @@ class Commit:
         """Everything under the subject. Empty for a commit written as one line, which is most."""
         _, _, rest = self.message.partition("\n")
         return rest.strip()
+
+
+# What GitHub calls a job that worked, and what it calls one that broke. Everything else it can
+# say is neither: `skipped`, `cancelled`, `neutral`, `stale`, and a run carrying no conclusion at
+# all. Issue #112 asked for two lists and gets three, because this repository's own `Publish` job
+# comes back `skipped` on every pull request, and folding that in with the failures would report a
+# broken build on every green one and ring the author instead of the reviewers.
+#
+# `stale` is in the third list rather than among the failures on purpose: it means GitHub gave up
+# on the run, which says nothing about the code.
+SUCCEEDED = frozenset({"success"})
+BROKEN = frozenset({"failure", "timed_out", "action_required"})
+
+
+@dataclass(frozen=True, slots=True)
+class CheckRun:
+    """One CI job on one commit, as the checks endpoint describes it."""
+
+    check_run_id: int
+    name: str
+    # Whether GitHub has finished with this run. Kept as the word rather than a flag, so the
+    # caller can test it against `completed` rather than against a list of the pending words it
+    # happened to know about when it was written.
+    status: str
+    # GitHub's own word, kept as the word rather than reduced to a flag. There are eight of them
+    # and which bucket each falls in is the two frozensets above, written down once.
+    conclusion: str
+    # The job's log page. The one thing somebody wants from a failure, which is why only failures
+    # are rendered with it.
+    html_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class CheckReport:
+    """Every check on one commit, once they have all finished.
+
+    The whole commit rather than one suite. A suite is per app, so a repository running GitHub
+    Actions beside anything else has several, each completing separately, and reporting one of
+    them would be reporting part of the answer.
+    """
+
+    sha: str
+    runs: tuple[CheckRun, ...]
+
+    @property
+    def succeeded(self) -> tuple[CheckRun, ...]:
+        return tuple(run for run in self.runs if run.conclusion in SUCCEEDED)
+
+    @property
+    def broken(self) -> tuple[CheckRun, ...]:
+        return tuple(run for run in self.runs if run.conclusion in BROKEN)
+
+    @property
+    def other(self) -> tuple[CheckRun, ...]:
+        """Everything that neither worked nor broke, which is mostly jobs that never ran."""
+        return tuple(run for run in self.runs if run.conclusion not in SUCCEEDED | BROKEN)
+
+    @property
+    def total(self) -> int:
+        return len(self.runs)
+
+    @property
+    def passed(self) -> bool:
+        """Whether this is worth telling the reviewers about.
+
+        Not `succeeded == total`. A job that did not run cannot have failed, and on a repository
+        with a job that is always skipped that reading is never true, so the reviewers would never
+        be told anything. One success is still required, or a suite where every job skipped would
+        read as a pass.
+        """
+        return not self.broken and bool(self.succeeded)
+
+    @property
+    def worth_saying(self) -> bool:
+        """Whether anything actually ran. Nothing did on a docs-only push through a path filter,
+        and a message saying so is noise in a thread nobody asked to have narrated."""
+        return bool(self.succeeded or self.broken)
+
+    @property
+    def note_key(self) -> str:
+        """Keyed on the set of runs, which is what makes a re-run say so and a retry not.
+
+        Two parts, and the second is the one that is not obvious. The largest id alone would be
+        enough for one checks app: re-running rotates the ids, so the key moves and the new result
+        is announced. It is a second app that breaks it. Run ids are handed out when a run is
+        CREATED, so a provider whose runs were created earlier and finish later leaves the largest
+        id exactly where it was, finds the claim taken, and its results are never announced at all.
+        The count moves when the largest id does not.
+
+        Both ends of the claim read the same set, so a retried delivery computes the same key and
+        is turned away, which is the whole point of claiming.
+        """
+        return f"checks:{len(self.runs)}:{max((run.check_run_id for run in self.runs), default=0)}"
 
 
 @runtime_checkable
