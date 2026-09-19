@@ -27,9 +27,8 @@ from enum import IntEnum, StrEnum
 from shannon.discord_bot.safe_text import fit
 
 # Discord allows four thousand display characters across a view, against the two thousand a plain
-# message gets. The budget is under the ceiling because `content_length` counts text displays and
-# nothing else, and a button's label may or may not count against Discord's own accounting.
-VIEW_LIMIT = 4000
+# message gets. The budget sits under that ceiling because `content_length` counts text displays
+# and nothing else, and a button's label may or may not count against Discord's own accounting.
 PANEL_BUDGET = 3900
 
 
