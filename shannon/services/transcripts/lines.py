@@ -12,14 +12,14 @@ problem: every other command writes to GitHub and relies on the echo to say what
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
 from shannon.domain.time import as_utc
-from shannon.github.safe_text import as_inline_text, fit_body, one_message
+from shannon.github.mentions import MENTION_LIMIT, is_login
+from shannon.github.safe_text import as_a_tag, as_inline_text, fit_body, one_message
 
 # What every body this feature posts opens with, and what the suppressor looks for. An HTML
 # comment because GitHub renders it as nothing and hands it back verbatim on the webhook, which
@@ -29,11 +29,22 @@ MARKER = "<!-- shannon-transcript -->"
 
 HEADING = "### From the Discord thread"
 
-# GitHub's own rule for a login: alphanumerics and single hyphens, 39 characters at most. Checked
-# before one is put in a URL rather than trusted, because a login that does not match would break
-# out of the link and take the rest of the line with it. A row that fails this renders as the
-# plain display name, which is what an unlinked person gets anyway.
-_LOGIN = re.compile(r"\A[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\Z")
+# GitHub's own rule for a login lives in `github.mentions` and is imported rather than spelled
+# twice. Checked before one is put in a URL or an `@` rather than trusted, because a login that
+# does not match would break out of the link and take the rest of the line with it. One that
+# fails renders as the plain display name, which is what an unlinked person gets anyway.
+
+
+@dataclass(frozen=True, slots=True)
+class Tagged:
+    """Somebody a captured message tagged, and whatever is known about them."""
+
+    display_name: str
+    # The account `/link` knows them by. Rendered as a live `@login`, unlike the
+    # author's below, and the difference is the whole of issue #121: being recorded as
+    # having spoken is not a request to be notified, and tagging somebody is nothing
+    # else. Two different questions, so two different answers.
+    login: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +58,9 @@ class TranscriptLine:
     # rather than an `@login`, so reading a transcript does not subscribe everybody named in it
     # to the item.
     login: str | None = None
+    # Who this message tagged, by Discord id, because that is what the `<@123>` in the
+    # content points at and a display name is not an identity.
+    tagged: Mapping[int, Tagged] = field(default_factory=dict[int, Tagged])
 
 
 def looks_like_ours(body: str) -> bool:
@@ -90,7 +104,7 @@ def not_a_transcript(note: HasABody) -> bool:
 
 def _said_by(line: TranscriptLine) -> str:
     name = f"**{as_inline_text(line.author_display_name)}**"
-    if line.login is not None and _LOGIN.match(line.login):
+    if line.login is not None and is_login(line.login):
         # The bare login as the link text, never `@login`. GitHub's mention parser reads the raw
         # markdown, so an `@` inside the brackets notifies that account even though the rendered
         # link shows no mention at all.
@@ -103,7 +117,39 @@ def render(lines: Sequence[TranscriptLine]) -> str:
 
     A blank line between the attribution and what was said, rather than a trailing double space.
     A message can begin with a list or a fence, and either of those needs the line to itself.
+
+    One budget for the whole comment rather than one per message, threaded through as `live`.
     """
+    live: set[str] = set()
     blocks = [MARKER, HEADING]
-    blocks.extend(f"{_said_by(line)}\n\n{one_message(line.content)}" for line in lines)
+    blocks.extend(
+        f"{_said_by(line)}\n\n{one_message(line.content, _tags(line, live))}" for line in lines
+    )
     return fit_body("\n\n".join(blocks))
+
+
+def _tags(line: TranscriptLine, live: set[str]) -> dict[int, str]:
+    """How each person this message tagged is spelled, by Discord id.
+
+    Built OUTSIDE the text and handed to the swap by id, which is the rule `formatting._note`
+    spells out in the other direction: assembling the text first and then searching it for a name
+    lets what somebody typed be read as a name. Nothing here ever looks at the content.
+
+    The budget is counted across the whole comment rather than per message, because the comment is
+    what GitHub notifies from: a name written in ten messages is one notification, and counting per
+    message would let forty messages spend ten each. Past it people are named and ring nobody,
+    which is what somebody who never ran `/link` already gets and what `mentions.rewrite` does
+    coming the other way.
+
+    No cap on the unlinked spelling. That is a size question rather than a ping question, and
+    `fit_body` is what answers size.
+    """
+    spelled: dict[int, str] = {}
+    for discord_user_id, person in line.tagged.items():
+        login = person.login
+        if login is not None and is_login(login) and (login in live or len(live) < MENTION_LIMIT):
+            live.add(login)
+            spelled[discord_user_id] = f"@{login}"
+        else:
+            spelled[discord_user_id] = as_a_tag(person.display_name)
+    return spelled

@@ -26,7 +26,10 @@ from dataclasses import dataclass
 # What the caller does with a name: the text to put in its place, or None to leave it as written.
 Render = Callable[[str], str | None]
 
-# How many distinct names in one body are worth answering.
+# How many distinct names in one body are worth answering, in either direction. Reading them
+# out of a GitHub comment is where this started; since issue #121 it also caps how many
+# accounts a published transcript may tag, because the sentence below is about what a body
+# does to the people in it and does not care which way the body was built.
 #
 # Without a limit this is a broadcast weapon. The preview is capped at seven hundred characters,
 # which holds about a hundred and thirty names, and a message trimmed to Discord's limit still
@@ -47,8 +50,11 @@ LOGIN = r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}"
 # and full stops that an account name never would, and it can be longer.
 TEAM_SLUG = r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})"
 
-_IS_LOGIN = re.compile(rf"^{LOGIN}$")
-_IS_TEAM_SLUG = re.compile(rf"^{TEAM_SLUG}$")
+# `\A` and `\Z` rather than `^` and `$`, which is not pedantry: `$` also matches before a
+# trailing newline, so `^...$` called `alice\n` a login. That is what `/link` validates what
+# somebody types with, and what the transcript checks before putting one in a URL.
+_IS_LOGIN = re.compile(rf"\A{LOGIN}\Z")
+_IS_TEAM_SLUG = re.compile(rf"\A{TEAM_SLUG}\Z")
 
 # A slug, in either shape it can be in. `_` is the one character of a slug that
 # `escape_markdown` touches, and it comes out as a backslash and an underscore, so both forms are

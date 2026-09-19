@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,6 +98,40 @@ class UserLinkStore:
         # Narrowed rather than handed straight back, the way `permission_for` narrows its answer.
         # A scalar off a column comes back untyped, and a login is the one thing this may promise.
         return found if isinstance(found, str) else None
+
+    async def logins_for(
+        self, *, guild_id: int, discord_user_ids: Collection[int]
+    ) -> dict[int, str]:
+        """Which GitHub account each of these Discord members claimed here.
+
+        `login_for` for a whole batch, and it gives the same answer for the same reason: asked
+        about a Discord member there is no second id to hold the stored one against, so it answers
+        with the claim as it was made. `resolve_many` above is the other direction and is stricter,
+        because an item's payload carries an account id the row can be checked against. There is no
+        payload on this path, so a login somebody freed and a stranger took is answered with the
+        stranger. That is not an oversight; it is the same bargain every write built on `/link`
+        already makes, and the only thing that could close it is an id this path never sees.
+
+        Keyed by Discord id and answered by login, which is the way round the caller wants: a
+        transcript has ids off its captured rows and needs names for them.
+
+        One row per id at most, and no ordering needed to prove it. `uq_user_links_guild_discord`
+        is unique on exactly this pair and its index is what serves the `IN`. An id nobody linked
+        is simply absent, the same answer `login_for` gives as None.
+        """
+        wanted = set(discord_user_ids)
+        if not wanted:
+            return {}
+
+        rows = (
+            await self._session.execute(
+                select(UserLink.discord_user_id, UserLink.github_username).where(
+                    UserLink.discord_guild_id == guild_id,
+                    UserLink.discord_user_id.in_(wanted),
+                )
+            )
+        ).all()
+        return {discord_user_id: login for discord_user_id, login in rows}
 
     async def link(
         self,

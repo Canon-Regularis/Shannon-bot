@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from sqlalchemy import delete, select
@@ -10,6 +10,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import LoggedMessage
+
+
+def mentioned_in(message: LoggedMessage) -> dict[int, str]:
+    """Who this message tagged, by Discord id.
+
+    The column holds a JSON object and JSON has no integer keys, so the ids go in as
+    decimal strings and come back here. A key that is not one is skipped rather than
+    raised on: capture is the only writer, so any other shape could only be a hand edit,
+    and a whole transcript refusing to publish over one is the worse failure.
+    """
+    return {int(who): name for who, name in message.mentions.items() if who.isdigit()}
 
 
 class LoggedMessageStore:
@@ -27,6 +38,7 @@ class LoggedMessageStore:
         author_display_name: str,
         content: str,
         said_at: datetime,
+        mentions: Mapping[int, str],
     ) -> None:
         """Keep one message until it is published.
 
@@ -44,6 +56,7 @@ class LoggedMessageStore:
                 author_display_name=author_display_name,
                 content=content,
                 said_at=said_at,
+                mentions={str(who): name for who, name in mentions.items()},
             )
             .on_conflict_do_nothing(constraint="uq_logged_messages_conversation_message")
         )

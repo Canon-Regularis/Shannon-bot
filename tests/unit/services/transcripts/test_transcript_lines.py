@@ -14,9 +14,11 @@ from typing import Any
 
 import pytest
 
+from shannon.github.mentions import MENTION_LIMIT
 from shannon.services.transcripts.lines import (
     HEADING,
     MARKER,
+    Tagged,
     TranscriptLine,
     looks_like_ours,
     not_a_transcript,
@@ -28,6 +30,10 @@ pytestmark = pytest.mark.unit
 AT = datetime(2026, 9, 18, 14, 2, tzinfo=UTC)
 ZWSP = "​"
 
+# Snowflakes, which is what a `<@id>` token carries.
+ALICE = 111111111111111111
+BOB = 222222222222222222
+
 
 def line(**changes: Any) -> TranscriptLine:
     fields: dict[str, Any] = {
@@ -35,6 +41,7 @@ def line(**changes: Any) -> TranscriptLine:
         "said_at": AT,
         "content": "got the repro",
         "login": None,
+        "tagged": {},
     }
     fields.update(changes)
     return TranscriptLine(**fields)
@@ -135,3 +142,120 @@ class TestTellingOneOfOursApart:
 
     def test_and_declines_one_of_ours(self) -> None:
         assert not_a_transcript(FakeNote(body=render([line()]))) is False
+
+
+class TestWhoWasTagged:
+    """Issue #121. Tagging somebody in the thread has to reach their GitHub account.
+
+    The author's own login is a link and never an `@`, and somebody tagged is the opposite. The
+    two are different questions: being recorded as having spoken is not a request to be notified,
+    and tagging somebody is nothing else.
+    """
+
+    def test_a_linked_person_is_a_live_mention(self) -> None:
+        said = render(
+            [
+                line(
+                    content=f"hey <@{ALICE}> look",
+                    tagged={ALICE: Tagged(display_name="Alice", login="alice-gh")},
+                )
+            ]
+        )
+
+        assert "@alice-gh" in said
+
+    def test_somebody_nobody_linked_is_named_and_rings_nobody(self) -> None:
+        said = render(
+            [line(content=f"hey <@{ALICE}>", tagged={ALICE: Tagged(display_name="Alice")})]
+        )
+
+        assert "@" + ZWSP + "Alice" in said
+        assert "@Alice" not in said
+
+    def test_a_login_github_could_not_issue_falls_back_to_the_name(self) -> None:
+        """Checked before it goes in an `@` rather than trusted, the same way it is checked
+        before it goes in a URL."""
+        said = render(
+            [
+                line(
+                    content=f"hey <@{ALICE}>",
+                    tagged={ALICE: Tagged(display_name="Alice", login="not a login")},
+                )
+            ]
+        )
+
+        assert "@not a login" not in said
+        assert "@" + ZWSP + "Alice" in said
+
+    def test_the_author_is_still_a_link_in_a_comment_that_carries_mentions(self) -> None:
+        """The rule at the top of this file, restated where it could now be lost. A body that
+        legitimately carries an `@` must not make the attribution line grow one."""
+        said = render(
+            [
+                line(
+                    login="alice-gh",
+                    content=f"hey <@{BOB}>",
+                    tagged={BOB: Tagged(display_name="Bob", login="bob-gh")},
+                )
+            ]
+        )
+
+        assert "[alice-gh](https://github.com/alice-gh)" in said
+        assert "[@" not in said
+        assert "@bob-gh" in said
+
+    def test_what_somebody_typed_is_still_defused_beside_a_live_one(self) -> None:
+        said = render(
+            [
+                line(
+                    content=f"<@{ALICE}> is @octocat upstream?",
+                    tagged={ALICE: Tagged(display_name="Alice", login="alice-gh")},
+                )
+            ]
+        )
+
+        assert "@alice-gh" in said
+        assert "@" + ZWSP + "octocat" in said
+
+
+class TestHowManyOneCommentMayTag:
+    """The same limit the comment mirror uses, for the same reason: without one a thread could
+    email every linked member of the server, over and over."""
+
+    def test_it_stops_at_the_limit(self) -> None:
+        said = render(
+            [
+                line(
+                    content=f"<@{who}>",
+                    tagged={who: Tagged(display_name=f"p{who}", login=f"p{who}-gh")},
+                )
+                for who in range(ALICE, ALICE + MENTION_LIMIT + 4)
+            ]
+        )
+
+        live = [f"p{who}-gh" for who in range(ALICE, ALICE + MENTION_LIMIT + 4)]
+        assert sum(f"@{login}" in said for login in live) == MENTION_LIMIT
+
+    def test_the_ones_past_it_are_still_named(self) -> None:
+        """Named and not rung, which is what somebody who never ran `/link` already gets."""
+        beyond = ALICE + MENTION_LIMIT
+        said = render(
+            [
+                line(
+                    content=f"<@{who}>",
+                    tagged={who: Tagged(display_name=f"p{who}", login=f"p{who}-gh")},
+                )
+                for who in range(ALICE, beyond + 1)
+            ]
+        )
+
+        assert f"p{beyond}" in said
+        assert f"@p{beyond}-gh" not in said
+
+    def test_one_person_across_many_messages_costs_one_place(self) -> None:
+        """The budget counts distinct accounts, because a comment is what GitHub notifies from and
+        a name written ten times is one notification."""
+        tagged = {ALICE: Tagged(display_name="Alice", login="alice-gh")}
+        said = render([line(content=f"<@{ALICE}>", tagged=tagged) for _ in range(12)])
+
+        assert said.count("@alice-gh") == 12

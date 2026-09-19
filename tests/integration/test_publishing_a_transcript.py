@@ -10,13 +10,14 @@ keeping the rows at all.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import LoggedConversation, LoggedMessage, Repository
+from shannon.db.models import LoggedConversation, LoggedMessage, Repository, UserLink
 from shannon.db.stores.conversations import ConversationStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.capture import CapturedMessage
@@ -37,6 +38,9 @@ pytestmark = pytest.mark.integration
 
 WHO = 4242
 ALICE = 77
+# Somebody else in the thread, who gets tagged rather than doing the talking. A real snowflake,
+# because the token the render looks for insists on fifteen to twenty digits.
+BOB = 222222222222222222
 AT = datetime(2026, 9, 18, 14, 0, tzinfo=UTC)
 QUIET = timedelta(seconds=60)
 FULL_NAME = f"{payloads.OWNER}/{payloads.REPO}".lower()
@@ -89,7 +93,13 @@ async def logging_thread(log: ConversationLog, thread_id: int) -> int:
     return thread_id
 
 
-async def say(log: ConversationLog, thread_id: int, *what: str, minute: int = 0) -> None:
+async def say(
+    log: ConversationLog,
+    thread_id: int,
+    *what: str,
+    minute: int = 0,
+    mentions: Mapping[int, str] | None = None,
+) -> None:
     for offset, content in enumerate(what):
         await log.capture(
             CapturedMessage(
@@ -99,6 +109,7 @@ async def say(log: ConversationLog, thread_id: int, *what: str, minute: int = 0)
                 author_display_name="alice",
                 content=content,
                 said_at=AT + timedelta(minutes=minute),
+                mentions=mentions or {},
             )
         )
 
@@ -222,6 +233,7 @@ class TestTheOrdinaryPath:
                     author_display_name="alice",
                     content="second",
                     said_at=AT + timedelta(minutes=5),
+                    mentions={},
                 )
             )
             await published(found, lines)
@@ -724,3 +736,111 @@ async def test_a_thread_that_will_not_take_the_give_up_notice(
     assert "could not say in thread" in caplog.text
     db_session.expire_all()
     assert await waiting(db_session) == 0
+
+
+class TestWhoWasTagged:
+    """Issue #121, end to end. Tagging somebody in the thread has to reach their GitHub account."""
+
+    async def test_a_tagged_member_link_knows_is_a_live_mention(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+        registered: Repository,
+        clock: list[datetime],
+    ) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=registered.discord_guild_id,
+            discord_user_id=BOB,
+            github_username="bob-gh",
+            github_user_id=2,
+        )
+        await db_session.commit()
+        await say(log, logging_thread, f"hey <@{BOB}> look", mentions={BOB: "Bob"})
+        clock[0] = AT + QUIET
+
+        await flusher.flush_once()
+
+        assert "@bob-gh" in github.comments[0][2]
+
+    async def test_a_tagged_member_it_does_not_know_rings_nobody(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        clock: list[datetime],
+    ) -> None:
+        """The live bug closed coming the other way: a display name that happens to match a login
+        used to reach GitHub intact and subscribe a stranger to the item."""
+        await say(log, logging_thread, f"hey <@{BOB}> look", mentions={BOB: "torvalds"})
+        clock[0] = AT + QUIET
+
+        await flusher.flush_once()
+
+        body = github.comments[0][2]
+        assert "torvalds" in body
+        assert "@torvalds" not in body
+
+    async def test_what_somebody_typed_is_still_defused_beside_a_live_one(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+        registered: Repository,
+        clock: list[datetime],
+    ) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=registered.discord_guild_id,
+            discord_user_id=BOB,
+            github_username="bob-gh",
+            github_user_id=2,
+        )
+        await db_session.commit()
+        await say(
+            log,
+            logging_thread,
+            f"<@{BOB}> is @octocat upstream?",
+            mentions={BOB: "Bob"},
+        )
+        clock[0] = AT + QUIET
+
+        await flusher.flush_once()
+
+        body = github.comments[0][2]
+        assert "@bob-gh" in body
+        assert "@octocat" not in body
+
+    async def test_a_link_that_went_away_falls_back_to_the_name(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+        registered: Repository,
+        clock: list[datetime],
+    ) -> None:
+        """The flush answers from the link table at publish time rather than at capture, so the
+        failure direction is towards naming somebody rather than towards ringing the wrong one."""
+        await UserLinkStore(db_session).link(
+            guild_id=registered.discord_guild_id,
+            discord_user_id=BOB,
+            github_username="bob-gh",
+            github_user_id=2,
+        )
+        await db_session.commit()
+        await say(log, logging_thread, f"hey <@{BOB}>", mentions={BOB: "Bob"})
+        await db_session.execute(delete(UserLink).where(UserLink.discord_user_id == BOB))
+        await db_session.commit()
+        clock[0] = AT + QUIET
+
+        await flusher.flush_once()
+
+        body = github.comments[0][2]
+        assert "@bob-gh" not in body
+        assert "Bob" in body

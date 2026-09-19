@@ -92,16 +92,55 @@ class FakeChannel:
 
 
 @dataclass
+class FakeMentioned:
+    """Somebody a message tagged, as `capture` reads them off `message.mentions`. Issue #121."""
+
+    id: int = 111111111111111111
+    display_name: str = "Alice"
+
+
+@dataclass
+class FakeNamed:
+    """A role or a channel, which capture asks the guild for by id and reads the name of."""
+
+    id: int
+    name: str
+
+
+@dataclass
+class FakeGuild:
+    """The two lookups capture makes for a role and a channel mention.
+
+    Positional-only, because discord.py declares both that way and a stand-in that took them by
+    keyword would accept calls the real thing refuses.
+    """
+
+    roles: dict[int, FakeNamed] = field(default_factory=dict)
+    channels: dict[int, FakeNamed] = field(default_factory=dict)
+
+    def get_role(self, role_id: int, /) -> FakeNamed | None:
+        return self.roles.get(role_id)
+
+    def get_channel_or_thread(self, channel_id: int, /) -> FakeNamed | None:
+        return self.channels.get(channel_id)
+
+
+@dataclass
 class FakeMessage:
     """Enough of discord.Message for the capture rules to run without a gateway.
 
-    `clean_content` rather than `content`, because that is what capture reads: discord.py resolves
-    `<@123>` into a display name from the event payload, and the raw form would put ids into a
-    GitHub comment.
+    `content` rather than `clean_content` since issue #121. Capture does discord.py's own
+    substitution itself now, because `clean_content` turns `<@123>` into a display name and throws
+    away the id, which is the only thing `/link` knows anybody by.
+
+    `mentions` is what makes a tag a tag. Capture treats it as the authority and the text as a
+    pointer into it, so a `<@id>` here that is not in this list is not a mention.
     """
 
     id: int = 501
-    clean_content: str = "hello"
+    content: str = "hello"
+    mentions: list[FakeMentioned] = field(default_factory=list)
+    guild: FakeGuild | None = field(default_factory=FakeGuild)
     author: FakeAuthor = field(default_factory=FakeAuthor)
     channel: FakeChannel = field(default_factory=FakeChannel)
     webhook_id: int | None = None

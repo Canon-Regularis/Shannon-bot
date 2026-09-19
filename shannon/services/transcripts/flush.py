@@ -20,12 +20,12 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.conversations import ConversationStore, PendingBatch
-from shannon.db.stores.logged_messages import LoggedMessageStore
+from shannon.db.stores.logged_messages import LoggedMessageStore, mentioned_in
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.errors import ShannonError
-from shannon.services.transcripts.lines import TranscriptLine
+from shannon.services.transcripts.lines import Tagged, TranscriptLine
 from shannon.services.transcripts.publish import TranscriptPublisher
 from shannon.services.workflow import NotAnItemThreadError, locate
 
@@ -242,20 +242,37 @@ class TranscriptFlusher:
     async def _lines(
         self, guild_id: int, conversation_id: int, through: int
     ) -> Sequence[TranscriptLine]:
-        """The claimed messages, each with the GitHub account `/link` knows its author by."""
+        """The claimed messages, with the GitHub account `/link` knows each named person by.
+
+        One query for every login the batch needs, rather than one per line. It was one per line
+        for the authors alone, and issue #121 adds everybody each of them tagged, so the old shape
+        would have turned forty queries into several hundred.
+
+        Authors and tags are looked up together on purpose. They are the same question asked of the
+        same table in the same server, and what differs is only what the answer is rendered as: an
+        author gets a link, because being recorded as having spoken is not a request to be
+        notified, and somebody tagged gets a mention, because that is what tagging is.
+        """
         async with self._sessionmaker() as session:
             held = await LoggedMessageStore(session).through(conversation_id, through)
-            links = UserLinkStore(session)
+            tagged = [mentioned_in(message) for message in held]
+            wanted = {message.discord_author_id for message in held}
+            wanted.update(person for named in tagged for person in named)
+            logins = await UserLinkStore(session).logins_for(
+                guild_id=guild_id, discord_user_ids=wanted
+            )
             return [
                 TranscriptLine(
                     author_display_name=message.author_display_name,
                     said_at=message.said_at,
                     content=message.content,
-                    login=await links.login_for(
-                        guild_id=guild_id, discord_user_id=message.discord_author_id
-                    ),
+                    login=logins.get(message.discord_author_id),
+                    tagged={
+                        person: Tagged(display_name=name, login=logins.get(person))
+                        for person, name in named.items()
+                    },
                 )
-                for message in held
+                for message, named in zip(held, tagged, strict=True)
             ]
 
     async def _done(self, batch: PendingBatch, through: int) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from datetime import UTC, datetime
 
 from hypothesis import given, settings
@@ -29,6 +30,7 @@ from shannon.domain.priority import parse_priority
 from shannon.domain.time import as_utc
 from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
+from shannon.github.safe_text import one_message
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.issues import parse_issue_event
@@ -316,3 +318,42 @@ class TestParsersAgainstArbitraryPayloads:
         mapping.issue(value, REPO)
         mapping.pull_request(value, REPO)
         mapping.review_comment(value, REPO, item_number=1)
+
+
+class TestNothingTypedBecomesAMention:
+    """Issue #121. A published transcript may mention the accounts it was handed and no others.
+
+    The strongest test in the set, and the one the whole design rests on. `one_message` neutralises
+    what somebody typed in fragments and drops the caller's spellings between them, so no `defuse`
+    ever sees a mention this bot built and no fragment can be turned into one. Asserted over
+    generated text rather than over the handful of cases anybody thought of, because the thing being
+    ruled out is precisely the case nobody thought of.
+    """
+
+    @given(
+        st.text(max_size=400),
+        st.dictionaries(
+            st.integers(min_value=10**14, max_value=10**19),
+            st.from_regex(r"\A[a-z][a-z0-9-]{0,20}\Z"),
+            max_size=5,
+        ),
+    )
+    @settings(max_examples=300)
+    def test_every_live_at_is_one_it_was_given(self, said: str, people: dict[int, str]) -> None:
+        spelled = {who: f"@{login}" for who, login in people.items()}
+
+        published = one_message(said, spelled)
+
+        live = {
+            match.group(1)
+            for match in re.finditer(r"(?<![\w/])@([A-Za-z0-9][A-Za-z0-9-]*)", published)
+        }
+        assert live <= set(people.values()), "text that was typed came out as a live mention"
+
+    @given(st.text(max_size=400))
+    @settings(max_examples=300)
+    def test_with_nothing_given_nothing_is_live(self, said: str) -> None:
+        """The same claim with the map empty, which is every message nobody tagged anybody in."""
+        published = one_message(said)
+
+        assert not re.search(r"(?<![\w/])@[A-Za-z0-9]", published)

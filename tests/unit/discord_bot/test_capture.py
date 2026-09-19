@@ -11,9 +11,21 @@ from discord import MessageType
 
 from shannon.db.models import DISPLAY_NAME_WIDTH, TRANSCRIPT_LINE_WIDTH
 from shannon.discord_bot.capture import captured, from_a_person, has_words
-from tests.fakes.discord_objects import FakeAuthor, a_message
+from tests.fakes.discord_objects import (
+    FakeAuthor,
+    FakeGuild,
+    FakeMentioned,
+    FakeNamed,
+    a_message,
+)
 
 pytestmark = pytest.mark.unit
+
+# Snowflakes, which are fifteen to twenty digits and are what the pattern matches on.
+ALICE = 111111111111111111
+BOB = 222222222222222222
+ROLE = 333333333333333333
+CHANNEL = 444444444444444444
 
 
 class TestWhoSaidIt:
@@ -46,13 +58,13 @@ class TestWhoSaidIt:
 
 class TestWhetherThereIsAnythingToWriteDown:
     def test_words(self) -> None:
-        assert has_words(a_message(clean_content="hello")) is True
+        assert has_words(a_message(content="hello")) is True
 
     @pytest.mark.parametrize("said", ["", "   ", "\n\t"])
     def test_nothing(self, said: str) -> None:
         """An attachment on its own, a sticker on its own and a poll all arrive like this. So does
         a message content intent granted in name only, which is why the caller says so once."""
-        assert has_words(a_message(clean_content=said)) is False
+        assert has_words(a_message(content=said)) is False
 
 
 class TestWhatIsKept:
@@ -71,10 +83,10 @@ class TestWhatIsKept:
         assert captured(said).said_at == said.created_at
 
     def test_surrounding_whitespace_goes(self) -> None:
-        assert captured(a_message(clean_content="  hello  ")).content == "hello"
+        assert captured(a_message(content="  hello  ")).content == "hello"
 
     def test_a_long_message_is_cut_to_what_the_column_holds(self) -> None:
-        said = captured(a_message(clean_content="x" * (TRANSCRIPT_LINE_WIDTH + 50)))
+        said = captured(a_message(content="x" * (TRANSCRIPT_LINE_WIDTH + 50)))
 
         assert len(said.content) == TRANSCRIPT_LINE_WIDTH
 
@@ -82,3 +94,115 @@ class TestWhatIsKept:
         long = FakeAuthor(display_name="n" * (DISPLAY_NAME_WIDTH + 50))
 
         assert len(captured(a_message(author=long)).author_display_name) == DISPLAY_NAME_WIDTH
+
+
+class TestWhatSomebodyTagged:
+    """Issue #121. A tag has to survive with its id, because the id is the only thing `/link`
+    knows anybody by and `clean_content` threw it away.
+
+    `message.mentions` is the authority and the text is only a pointer into it. Most of these are
+    about that being true rather than nearly true.
+    """
+
+    def test_a_tag_keeps_the_id_and_says_who_it_is(self) -> None:
+        said = captured(
+            a_message(
+                content=f"hey <@{ALICE}> look",
+                mentions=[FakeMentioned(id=ALICE, display_name="Alice")],
+            )
+        )
+
+        assert said.content == f"hey <@{ALICE}> look"
+        assert said.mentions == {ALICE: "Alice"}
+
+    def test_the_nickname_form_is_normalised_to_one_shape(self) -> None:
+        """Discord writes both and the render should have one token to look for."""
+        said = captured(
+            a_message(
+                content=f"<@!{ALICE}> and <@{ALICE}>",
+                mentions=[FakeMentioned(id=ALICE, display_name="Alice")],
+            )
+        )
+
+        assert said.content == f"<@{ALICE}> and <@{ALICE}>"
+        assert said.mentions == {ALICE: "Alice"}
+
+    def test_an_id_discord_did_not_read_as_a_mention_is_nobody(self) -> None:
+        """The forgery gate. Typing `<@id>` in Discord IS mentioning that person, so it turns up
+        in `message.mentions` and there is nothing to be had by typing it rather than clicking a
+        name. An id that is NOT in that list was never a mention, and is not made into one here.
+        """
+        said = captured(a_message(content=f"hey <@{BOB}> look", mentions=[]))
+
+        assert said.content == "hey @deleted-user look"
+        assert said.mentions == {}
+
+    def test_a_reply_does_not_tag_the_person_it_answers(self) -> None:
+        """Discord puts the replied-to author in `message.mentions` with no token anywhere in the
+        text. Taking that list whole would tag somebody on GitHub for every reply in a thread, so
+        the map is built from the substitutions actually made.
+        """
+        said = captured(
+            a_message(content="agreed", mentions=[FakeMentioned(id=ALICE, display_name="Alice")])
+        )
+
+        assert said.content == "agreed"
+        assert said.mentions == {}
+
+    def test_two_tags_of_one_person_are_one_entry(self) -> None:
+        said = captured(
+            a_message(
+                content=f"<@{ALICE}> and <@{ALICE}>",
+                mentions=[FakeMentioned(id=ALICE, display_name="Alice")],
+            )
+        )
+
+        assert said.mentions == {ALICE: "Alice"}
+
+    def test_a_long_display_name_is_cut_to_what_the_column_holds(self) -> None:
+        said = captured(
+            a_message(
+                content=f"<@{ALICE}>",
+                mentions=[FakeMentioned(id=ALICE, display_name="n" * (DISPLAY_NAME_WIDTH + 50))],
+            )
+        )
+
+        assert len(said.mentions[ALICE]) == DISPLAY_NAME_WIDTH
+
+
+class TestWhatIsNotAboutPeople:
+    """Roles and channels resolve as they always did. Issue #121 is about people, and this is the
+    one place reimplementing discord.py's transform could have regressed something out of scope."""
+
+    def test_a_role_is_still_its_name(self) -> None:
+        guild = FakeGuild(roles={ROLE: FakeNamed(id=ROLE, name="backend")})
+
+        said = captured(a_message(content=f"ask <@&{ROLE}>", guild=guild))
+
+        assert said.content == "ask @backend"
+        assert said.mentions == {}
+
+    def test_a_role_nobody_knows_reads_the_way_discord_py_writes_it(self) -> None:
+        assert captured(a_message(content=f"ask <@&{ROLE}>")).content == "ask @deleted-role"
+
+    def test_a_channel_is_still_its_name(self) -> None:
+        guild = FakeGuild(channels={CHANNEL: FakeNamed(id=CHANNEL, name="general")})
+
+        said = captured(a_message(content=f"see <#{CHANNEL}>", guild=guild))
+
+        assert said.content == "see #general"
+
+    def test_a_channel_nobody_knows_reads_the_way_discord_py_writes_it(self) -> None:
+        assert captured(a_message(content=f"see <#{CHANNEL}>")).content == "see #deleted-channel"
+
+    def test_outside_a_server_neither_resolves(self) -> None:
+        """The type says a message can have no guild. A transcript is not worth raising over in
+        the handler that runs for every message in every server, so it answers instead."""
+        said = captured(a_message(content=f"<@&{ROLE}> in <#{CHANNEL}>", guild=None))
+
+        assert said.content == "@deleted-role in #deleted-channel"
+
+    def test_a_mass_mention_is_left_for_the_github_side_to_defuse(self) -> None:
+        """discord.py's `clean_content` ends by defusing these for Discord. Nothing sends this
+        text back to Discord, and `github.safe_text` covers the one way it travels."""
+        assert captured(a_message(content="@everyone look")).content == "@everyone look"
