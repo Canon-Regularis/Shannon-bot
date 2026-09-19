@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Protocol
 
 import discord
 from discord import app_commands
 
+from shannon.discord_bot.capture import CapturedMessage, captured, from_a_person, has_words
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.slash import SlashCommand
 
@@ -23,8 +25,30 @@ ThreadGone = Callable[[int], Awaitable[None]]
 ChannelGone = Callable[[int], Awaitable[None]]
 
 
-def build_intents() -> discord.Intents:
-    """What this bot needs off the gateway, which is nothing privileged.
+class CapturesMessages(Protocol):
+    """What reading a thread needs of the thing that owns the transcripts. Issue #103.
+
+    Named here rather than imported for the reason the two callables above are injected: which
+    table holds a thread id is not this package's business.
+
+    `is_logging` is synchronous, and that is the whole design. `on_message` fires for every message
+    in every channel of every server this bot is in, so it is the first thing asked and it has to
+    cost a set lookup. An async answer would allocate a coroutine and a task step for every message
+    in the server, and a database answer would be a scan of a column that carries no index on
+    purpose.
+    """
+
+    def is_logging(self, thread_id: int) -> bool: ...
+
+    def nothing_to_capture(self, thread_id: int) -> None: ...
+
+    async def capture(self, message: CapturedMessage) -> None: ...
+
+    async def forget(self, message_ids: Sequence[int]) -> None: ...
+
+
+def build_intents(*, capture_messages: bool = False) -> discord.Intents:
+    """What this bot needs off the gateway, which is one privileged thing at most.
 
     It used to ask for `members`, on the stated grounds that turning a GitHub login into
     somebody this server can ping needed it. It does not. A mention is a `<@id>` string built
@@ -39,8 +63,21 @@ def build_intents() -> discord.Intents:
     `chunk_guilds_at_startup` on, so the whole member list of every server is pulled over the
     gateway before READY fires and then kept in memory, and READY is what the worker waits for
     before it will deliver anything.
+
+    `message_content` is the one thing here that is ever asked for privileged, and the cost is
+    paid knowingly. Issue #103 publishes what is said in a thread to the item's GitHub comments,
+    and without this every message arrives with `content` empty, so there is no way round it.
+
+    Two halves of that cost, and only one of them applies. It is the same Developer Portal toggle
+    with the same Discord approval past a hundred servers, which is why it is behind a setting: an
+    operator ticks the box, then turns the setting on, and a missed box never reaches a running
+    process. It does NOT set `chunk_guilds_at_startup`, which is what made `members` expensive
+    rather than merely privileged, so READY arrives exactly as quickly and the delivery worker's
+    wait on it is unchanged.
     """
-    return discord.Intents.default()
+    intents = discord.Intents.default()
+    intents.message_content = capture_messages
+    return intents
 
 
 class ShannonBot(discord.Client):
@@ -52,7 +89,11 @@ class ShannonBot(discord.Client):
     """
 
     def __init__(
-        self, *, explain_error: ExplainError, thread_gone: ThreadGone | None = None
+        self,
+        *,
+        explain_error: ExplainError,
+        thread_gone: ThreadGone | None = None,
+        capture_messages: bool = False,
     ) -> None:
         # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
         # otherwise ping the whole server.
@@ -72,7 +113,7 @@ class ShannonBot(discord.Client):
         # the keyword below would not fail: it would quietly let @everyone through every message
         # that carries an allow-list, which is most of them.
         super().__init__(
-            intents=build_intents(),
+            intents=build_intents(capture_messages=capture_messages),
             allowed_mentions=discord.AllowedMentions(
                 everyone=False, roles=True, users=True, replied_user=False
             ),
@@ -96,6 +137,12 @@ class ShannonBot(discord.Client):
         # of finding out, and taking an hour over a channel nobody is using any more costs that
         # item nothing.
         self._letting_go = asyncio.Semaphore(2)
+        self._capturing: CapturesMessages | None = None
+        # Its own limit rather than the one above, which is sized at two for housekeeping that
+        # must never delay a delivery. Capture is not housekeeping and must not queue behind a
+        # channel deletion cascading nine hundred threads, but it is still a write per message in
+        # an armed thread, so it is bounded rather than unbounded.
+        self._transcribing = asyncio.Semaphore(8)
         self._pending: list[SlashCommand] = []
         # Whether the websocket is up right now, kept from the events discord.py already sends.
         # `is_ready` cannot answer it: it reports whether the cache has ever been filled, is set
@@ -130,6 +177,15 @@ class ShannonBot(discord.Client):
         cached.
         """
         self._channel_gone = gone
+
+    def tell_when_a_message_arrives(self, capturing: CapturesMessages) -> None:
+        """Wire up the message listener, for the same reason as the two below.
+
+        Left unwired the handlers below return at once, which is what every deployment that has
+        not turned capture on gets. Wiring it does not on its own make the gateway send anything:
+        without the message content intent every message arrives with no text at all.
+        """
+        self._capturing = capturing
 
     def tell_when_a_thread_goes(self, gone: ThreadGone) -> None:
         """Wire up the thread-delete listener, once the thing that owns the rows exists.
@@ -187,6 +243,80 @@ class ShannonBot(discord.Client):
         period and retries are for.
         """
         return self._connected and self.is_ready()
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Somebody said something. Keep it if this thread is being published to GitHub.
+
+        Issue #103, and the hottest handler in the process by a long way: Discord sends one of
+        these for every message in every channel of every server this bot is in, most of which are
+        nobody's business here. So the order of the checks below is the design, and the set lookup
+        is second because it is the one that rules out almost everything. A message in a thread
+        nobody armed reaches no coroutine, no database and no lock.
+
+        Not behind `contextlib.suppress`, unlike the two handlers below it. Those suppress because
+        the item they are about heals itself: the next webhook rebuilds a thread that has gone. A
+        transcript line dropped here is gone, nothing rebuilds it, and nothing anywhere else would
+        say so. Logged loudly instead, and the message is lost either way, which is the honest
+        outcome rather than a hidden one.
+        """
+        if self._capturing is None:
+            return
+        if not self._capturing.is_logging(message.channel.id):
+            return
+        if not from_a_person(message):
+            return
+        if not has_words(message):
+            self._capturing.nothing_to_capture(message.channel.id)
+            return
+
+        async with self._transcribing:
+            try:
+                await self._capturing.capture(captured(message))
+            except Exception:
+                logger.exception(
+                    "could not keep a message from thread %s, so it will not be published",
+                    message.channel.id,
+                )
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        """Somebody took a message back before it was published. Honour that.
+
+        Deletion is honoured and editing is not, which is worth saying is deliberate rather than an
+        oversight. An edit reflected only while the message is still pending would land or not
+        depending on whether the quiet gap happened to elapse first, which is timing nobody can
+        see. Deleting something before it goes out is a rule somebody can hold in their head and
+        act on, and getting it wrong costs more than a typo does.
+
+        The raw event rather than `on_message_delete`, which discord.py dispatches only for a
+        message it still has cached. Nothing here is cached, and the id is all this needs.
+
+        Gated on the same cheap test as the handler above, so a deletion anywhere else in the
+        server costs a set lookup.
+        """
+        await self._forget(payload.channel_id, [payload.message_id])
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        """The same, for a moderator clearing a stretch of a thread at once.
+
+        Its own event because Discord treats it as one: a bulk delete sends this and no per-message
+        deletion, so without it a purge would leave every message in it still queued to publish.
+        """
+        await self._forget(payload.channel_id, sorted(payload.message_ids))
+
+    async def _forget(self, channel_id: int, message_ids: Sequence[int]) -> None:
+        """Drop captured messages that have been deleted, if this channel is being captured."""
+        if self._capturing is None:
+            return
+        if not self._capturing.is_logging(channel_id):
+            return
+        async with self._transcribing:
+            try:
+                await self._capturing.forget(message_ids)
+            except Exception:
+                logger.exception(
+                    "could not drop deleted messages from thread %s, so they may still publish",
+                    channel_id,
+                )
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         """A whole channel has gone, and with it every thread that was in it.
