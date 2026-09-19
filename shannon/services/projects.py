@@ -244,7 +244,7 @@ class ProjectPoller:
         moved = 0
         for item in wrapped:
             try:
-                moved += await self._move_one(board, item, state, readable)
+                moved += await self._move_one(item, state, readable)
             except GitHubRateLimitError:
                 # The one failure that is about the pass rather than about the card. Waiting is
                 # the only thing that helps and `run_forever` is where the waiting is done.
@@ -258,7 +258,6 @@ class ProjectPoller:
 
     async def _move_one(
         self,
-        board: _Board,
         item: BoardItem,
         state: Mapping[tuple[ObjectType, int], BoardRow],
         readable: bool,

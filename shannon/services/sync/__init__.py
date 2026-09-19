@@ -9,12 +9,3 @@ before sending it, `one_at_a_time` holds one item to one writer across its Disco
 `announcements` is the seam for everything a delivery has to say out loud, because a rewritten
 block is silent in Discord. `label_lines` and `state_lines` are the two that use it.
 """
-
-from shannon.services.sync.items import (
-    ItemSyncService,
-    SyncOutcome,
-    SyncResult,
-    build_item_handler,
-)
-
-__all__ = ["ItemSyncService", "SyncOutcome", "SyncResult", "build_item_handler"]
