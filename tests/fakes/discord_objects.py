@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import discord
+from discord import Message, MessageType
 
 
 class FakeResponse:
@@ -52,6 +54,48 @@ class FakeMember:
 
     def __str__(self) -> str:
         return self.name
+
+
+@dataclass
+class FakeAuthor:
+    """Who said something, as `capture` reads it. Issue #103."""
+
+    id: int = 77
+    display_name: str = "alice"
+    bot: bool = False
+
+
+@dataclass
+class FakeChannel:
+    id: int = 9001
+
+
+@dataclass
+class FakeMessage:
+    """Enough of discord.Message for the capture rules to run without a gateway.
+
+    `clean_content` rather than `content`, because that is what capture reads: discord.py resolves
+    `<@123>` into a display name from the event payload, and the raw form would put ids into a
+    GitHub comment.
+    """
+
+    id: int = 501
+    clean_content: str = "hello"
+    author: FakeAuthor = field(default_factory=FakeAuthor)
+    channel: FakeChannel = field(default_factory=FakeChannel)
+    webhook_id: int | None = None
+    type: MessageType = MessageType.default
+    created_at: datetime = datetime(2026, 9, 18, 14, 2, tzinfo=UTC)
+
+
+def a_message(**changes: Any) -> Message:
+    """A `FakeMessage` handed over as the `discord.Message` the capture rules are typed against.
+
+    One cast, here, rather than one at every call site. A real `Message` cannot be built without a
+    live connection state, so the stand-in is structural and this is where that is admitted. The
+    test that holds every stand-in against what it replaces is what stops the shape drifting.
+    """
+    return cast(Message, FakeMessage(**changes))  # pyright: ignore[reportArgumentType]
 
 
 class FakeInteraction:

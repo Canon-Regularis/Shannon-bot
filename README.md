@@ -332,6 +332,9 @@ at the door.
 | `SHANNON_WORKER_DELIVERY_TIMEOUT_SECONDS` | `60.0` | Deadline on one delivery |
 | `SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS` | `5.0` | |
 | `SHANNON_DELIVERY_RETENTION_DAYS` | `7` | How long finished deliveries and their payloads are kept |
+| `SHANNON_CAPTURE_DISCORD_MESSAGES` | `false` | Whether `/log_conversation` works. Needs the message content intent ticked in the Developer Portal first; see below |
+| `SHANNON_CONVERSATION_QUIET_SECONDS` | `60.0` | How long a logged thread goes quiet before what was said in it is published |
+| `SHANNON_CONVERSATION_FLUSH_TICK_SECONDS` | `5.0` | How often the publisher looks for a conversation that is ready |
 
 A project board is read on a timer rather than delivered. GitHub sends `projects_v2` webhooks
 for organisation projects only and none at all for a personal account's, and the `project_card`
@@ -382,6 +385,8 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring. With no argument it says which way round you are |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and point at the `/set_*` command that owns them |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
+| `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
+| `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
 
@@ -403,6 +408,26 @@ never asked, so anybody could take any login and receive every mention meant for
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single
 valued: setting one takes the previous one off, in whatever spelling the repository was using.
+
+`/log_conversation` is the only thing here that reads Discord rather than writing to it, and it
+needs setting up in two places before it works at all. Message content is a privileged intent, so
+it is a checkbox under Bot in the Discord Developer Portal, and Discord asks an application in over
+a hundred servers to apply for it. Tick the box first, then set
+`SHANNON_CAPTURE_DISCORD_MESSAGES=true`, in that order: a process asked for an intent it has not
+been granted does not start at all, and it takes the webhook mirror, the delivery worker and the
+board poller down with it. Until both are done the command refuses with a sentence saying which
+half is missing, and nothing else is affected.
+
+What gets published is what people typed. Bot messages are skipped, which is also what stops
+comments mirrored in from GitHub being sent straight back to it; so are attachments, stickers and
+the lines Discord writes itself. Editing a message afterwards changes nothing, because a transcript
+is a record of what was said when it was said, and deleting one before the batch goes out keeps it
+out. Names, issue references and anything else that would notify an account or touch another item
+are neutralised on the way, with one deliberate exception: a full GitHub URL somebody pasted stays
+a working link, and GitHub does cross-reference those.
+
+There is no way for one person in a thread to opt out of being transcribed. That is why the notice
+is posted before anything is captured rather than after.
 
 ## Architecture
 
@@ -453,17 +478,19 @@ rather than abandoning the rest.
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and can always be asked, so a missing row costs one request |
 | `identity_verifications` | Outstanding one-time links from `/unregister`. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
+| `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
+| `logged_messages` | What has been said in a logged thread and not yet reached GitHub. Deleted as soon as the comment carrying it lands, because these rows hold what people said |
 
 Enums are `VARCHAR`, not native PostgreSQL types, so adding a status needs no `ALTER TYPE`. Worth
 knowing that they are unconstrained in the database: the mapping asks for a `CHECK` and SQLAlchemy
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0021`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0022`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
-`webhook_events` and `identity_verifications` are pruned. `mirrored_notes` grows by one row per
+`logged_messages` is emptied by publishing, and `webhook_events` and `identity_verifications` are pruned. `mirrored_notes` grows by one row per
 comment and review and has no cleanup path, and `github_installations` holds one row per account
 for as long as the App is installed on it.
 
