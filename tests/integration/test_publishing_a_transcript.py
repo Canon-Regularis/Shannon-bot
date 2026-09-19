@@ -10,7 +10,7 @@ keeping the rows at all.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -558,8 +558,7 @@ class TestTheLoop:
         clock[0] = AT + QUIET
 
         running = asyncio.create_task(flusher.run_forever())
-        while not github.comments:
-            await asyncio.sleep(0)
+        await _until(lambda: bool(github.comments))
         flusher.stop()
         await asyncio.wait_for(running, timeout=5)
 
@@ -621,8 +620,7 @@ class TestTheLoop:
 
         with caplog.at_level("ERROR", logger="shannon.services.transcripts.flush"):
             running = asyncio.create_task(flusher.run_forever())
-            while len(passes) < 2:
-                await asyncio.sleep(0)
+            await _until(lambda: len(passes) >= 2)
             flusher.stop()
             await asyncio.wait_for(running, timeout=5)
 
@@ -844,3 +842,16 @@ class TestWhoWasTagged:
         body = github.comments[0][2]
         assert "@bob-gh" not in body
         assert "Bob" in body
+
+
+async def _until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Wait for something the flusher does on its own schedule, rather than guessing at a sleep.
+
+    Bounded, and on a real interval rather than `asyncio.sleep(0)`. A bare yield reschedules at
+    once and never lets the loop block, so waiting out a tick that way costs the whole tick at
+    full CPU on every run, and a condition that never arrives costs the job its ceiling with no
+    test named. `test_delivery_worker` and `test_project_polling` each spell out the same helper.
+    """
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)

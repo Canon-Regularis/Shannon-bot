@@ -51,7 +51,12 @@ jobs:
       should_skip: ${{ steps.check.outputs.should_skip }}
     steps:
       - id: check
-        uses: fkirc/skip-duplicate-actions@v5
+        # A commit rather than a tag. This is somebody else's code, it holds `github.token`, it
+        # stands in front of five of the six jobs here and it is inside the required check's
+        # `needs`, so a tag repointed overnight is a tag repointed in the one place nothing else
+        # is watching. The version it names is the same thing a reader wants from `@v5`, without
+        # `@v5` being free to mean something else tomorrow.
+        uses: fkirc/skip-duplicate-actions@b974a9395958c231af965b70070979a577efa578  # v5.3.2
         with:
           github_token: ${{ github.token }}
           skip_after_successful_duplicate: "true"
@@ -65,6 +70,11 @@ jobs:
           # waiting to read the result, and the work this fixes is duplicated after the merge
           # rather than before it. `workflow_dispatch` staying on the list is the escape hatch: a
           # manual run always runs everything, and publishes nothing.
+          #
+          # `schedule` and `merge_group` are carried over from that default list and neither is a
+          # trigger of this workflow, so both are inert. Left in rather than trimmed, because the
+          # day somebody turns a merge queue on for main, `merge_group:` has to be added to `on:`
+          # above or `CI` never reports and the queue waits on a check that cannot arrive.
           do_not_skip: '["workflow_dispatch", "schedule", "merge_group", "pull_request"]'
 
       - name: Say why
@@ -96,6 +106,8 @@ jobs:
       # says it supports.
       - uses: astral-sh/setup-uv@v7
         with:
+          # Pinned for the reason the matrix job below gives at length.
+          version: "0.12.0"
           enable-cache: true
           cache-dependency-glob: uv.lock
           python-version: "3.12"
@@ -252,7 +264,14 @@ jobs:
 
       - name: Wait for it to report healthy
         run: |
-          for _ in $(seq 1 30); do
+          # Long enough for Docker to reach a verdict, rather than long enough for the loop to
+          # run out. `HEALTHCHECK` in the Dockerfile is --start-period=20s --interval=15s
+          # --retries=5, so the earliest a sick container can SAY it is unhealthy is about
+          # ninety-five seconds. At sixty the break below was unreachable: every dead container
+          # ran the loop out and was reported as one that never answered, which is a different
+          # fault from one that answered no. A healthy container replies on the first probe at
+          # around fifteen seconds either way.
+          for _ in $(seq 1 60); do
             status=$(docker inspect --format='{{.State.Health.Status}}' shannon)
             [ "$status" = "healthy" ] && exit 0
             [ "$status" = "unhealthy" ] && break
@@ -309,6 +328,9 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
+          # Pinned for the reason the matrix job gives. It matters most here: this is the one job
+          # that runs whatever else was skipped, so it is the one whose red nobody can dismiss.
+          version: "0.12.0"
           enable-cache: true
           cache-dependency-glob: uv.lock
 
@@ -316,11 +338,16 @@ jobs:
         run: |
           uv export --frozen --no-dev --no-emit-project \
             --format requirements-txt -o requirements.audit.txt
-          uvx pip-audit --strict --requirement requirements.audit.txt
+          # The tool is pinned and the advisory database is not, which is the whole point: the
+          # question this asks has to be about today, but a pip-audit release that changes its
+          # CLI must not be able to turn the only unconditional job red on its own.
+          uvx pip-audit@2.10.1 --strict --requirement requirements.audit.txt
 
       - name: Committed secrets
         run: |
-          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
+          # Same rule as pip-audit above: `latest` here means the secret scan can start failing,
+          # or quietly start passing, on a day nobody pushed anything.
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1 \
             detect --source=. --redact --verbose --no-banner
 
   ci:
@@ -346,15 +373,22 @@ jobs:
     # for ever because there is no `sha-<commit>` in the registry, and the hourly drift issue
     # would report CI green and send somebody to run that deploy.
     #
-    # It is the same question the required check above asks, so the image is published exactly
-    # when `CI` is green. It rests on at least one of these four running unconditionally, and
-    # `audit` is that job: gating it would re-open this silently.
+    # That question is the one `CI` already asks, so this asks `CI` rather than asking it again
+    # over a list of its own. The two lists were not the same list. This one never held
+    # `duplicate`, and the gate fails open on purpose, so a gate that BROKE left the other jobs
+    # running and passing, `CI` red on the gate itself, and an image published from a red run by
+    # a job looking at the four that went green. Depending on the required check directly is the
+    # only version of "published exactly when `CI` is green" that a job added to the matrix
+    # tomorrow cannot quietly undo.
+    #
+    # It still rests on at least one job above `CI` running unconditionally, and `audit` is that
+    # job: gating it would leave a run in which everything skipped concluding success, and this
+    # would publish out of it.
     name: Publish
-    needs: [quality, test, image, audit]
+    needs: [ci]
     if: >-
       !cancelled() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled') &&
+      needs.ci.result == 'success' &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     permissions:

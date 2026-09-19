@@ -32,6 +32,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.14.0",
 ]
 
@@ -49,6 +50,18 @@ packages = ["shannon"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Nothing here is allowed to wait for ever. A good many tests poll for something a background
+# task does on its own schedule, and the honest ones are bounded by `asyncio.timeout`. An
+# unbounded one runs to the job's fifteen minute ceiling and is killed by the runner, which
+# reports a cancelled job and no test name at all. This reports the test name.
+#
+# Sixty seconds against a slowest test of about eight, measured under coverage on the slowest
+# machine to hand, so it is far enough above the real spread to say nothing about a loaded
+# runner. It is also a fifteenth of `timeout-minutes`, so a stuck test costs a minute of CI
+# rather than the whole job. `timeout_method` is left alone deliberately: the default picks
+# `signal` where there is one, which prints the stack of the test that hung, and falls back to
+# a thread on Windows.
+timeout = 60
 markers = [
     "integration: requires a live PostgreSQL instance (SHANNON_TEST_DATABASE_URL)",
 ]
