@@ -44,6 +44,8 @@ class ProcessParts(Protocol):
     engine: AsyncEngine
     worker: RunsDeliveries
     poller: PollsABoard
+    conversations: ReloadsConversations
+    flusher: FlushesTranscripts
 
     async def aclose(self) -> None: ...
 
@@ -65,6 +67,28 @@ class PollsABoard(Protocol):
     """
 
     enabled: bool
+
+    async def run_forever(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class ReloadsConversations(Protocol):
+    """Filling the set of threads being captured, which has to happen before the gateway is up.
+
+    Named here rather than importing the service, for the same reason as the two above.
+    """
+
+    async def reload(self) -> None: ...
+
+
+class FlushesTranscripts(Protocol):
+    """The flusher as the lifespan sees it, which is the worker's shape without the `enabled`.
+
+    A board is opt-in, so the poller carries a flag and the lifespan branches on it. Publishing a
+    conversation is available in every deployment: the flag would be a constant, and the branch
+    would be one nothing could ever take the other way.
+    """
 
     async def run_forever(self) -> None: ...
 
@@ -152,6 +176,7 @@ class _Running:
     worker_task: asyncio.Task[None]
     bot_task: asyncio.Task[None] | None
     poller_task: asyncio.Task[None] | None = None
+    flusher_task: asyncio.Task[None] | None = None
 
 
 async def _start(
@@ -175,6 +200,12 @@ async def _start(
     bot_task: asyncio.Task[None] | None = None
     ready: ReadyCheck | None = None
 
+    # Before the gateway, not after. A message cannot arrive before the connection is up, so this
+    # is the last moment at which the set can be filled without a race, and the database has
+    # already been proved to answer. A conversation left out here is one armed in the database and
+    # captured by nothing, and the only sign would be a transcript that stopped at the last deploy.
+    await container.conversations.reload()
+
     token = settings.discord_token.get_secret_value()
     if token:
         bot_task = asyncio.create_task(bot.start(token))
@@ -192,6 +223,12 @@ async def _start(
     worker_task = asyncio.create_task(container.worker.run_forever(ready))
     worker_task.add_done_callback(report_exit("delivery worker", shutdown, halt))
 
+    # No `halt`, for the poller's reason below: a process with no flusher still mirrors
+    # everything the webhooks bring it, and still accepts what people say into a logged thread.
+    # What is captured waits in the table until a process with a working flusher picks it up.
+    flusher_task = asyncio.create_task(container.flusher.run_forever())
+    flusher_task.add_done_callback(report_exit("transcript flusher", shutdown))
+
     # Only when a board was configured. Starting a task that returns at once would have the done
     # callback report the poller as having stopped, on every boot, for everybody not using one.
     poller_task: asyncio.Task[None] | None = None
@@ -204,12 +241,17 @@ async def _start(
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
     liveness.poller_task = poller_task
+    liveness.flusher_task = flusher_task
     # Asked only when there is a bot. Safe at any point in a client's life: it reads a flag the
     # client keeps from its own connect and disconnect events, and `is_ready` behind it checks
     # the sentinel before the event.
     liveness.gateway_is_ready = bot.gateway_is_up if bot_task is not None else None
     return _Running(
-        shutdown=shutdown, worker_task=worker_task, bot_task=bot_task, poller_task=poller_task
+        shutdown=shutdown,
+        worker_task=worker_task,
+        bot_task=bot_task,
+        poller_task=poller_task,
+        flusher_task=flusher_task,
     )
 
 
@@ -226,6 +268,7 @@ async def _close(
     # replacement process polls an empty one.
     container.worker.stop()
     container.poller.stop()
+    container.flusher.stop()
     await safely(
         "stop the worker",
         stop(running.worker_task, grace=settings.worker_shutdown_grace_seconds),
@@ -233,6 +276,12 @@ async def _close(
     await safely(
         "stop the project poller",
         stop(running.poller_task, grace=settings.worker_shutdown_grace_seconds),
+    )
+    # Asked rather than cancelled, like the two above: a comment half sent is one that may land
+    # with nothing recording that it did, and the batch would then publish twice.
+    await safely(
+        "stop the transcript flusher",
+        stop(running.flusher_task, grace=settings.worker_shutdown_grace_seconds),
     )
     if running.bot_task is not None:
         await safely("close the Discord client", bot.close())

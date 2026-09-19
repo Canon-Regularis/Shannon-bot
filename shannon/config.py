@@ -114,6 +114,24 @@ class Settings(BaseSettings):
     # sit around indefinitely.
     delivery_retention_days: int = Field(default=7, gt=0)
 
+    # Whether `/log_conversation` works at all, and whether the gateway is asked for the message
+    # content intent. Issue #103.
+    #
+    # Off by default, and the default is the point rather than caution. That intent is privileged,
+    # which means a checkbox in the Discord Developer Portal: miss it and Discord closes the
+    # identify with 4014, discord.py raises `PrivilegedIntentsRequired`, the bot task ends, and the
+    # process halts. The webhook mirror, the delivery worker and the poller all go with it. A
+    # deployment whose rollback depends on somebody having ticked a box in a web UI is a bad
+    # deployment, so this is the order: tick the box, then set this. Until both are done the
+    # command refuses with a sentence saying so, and everything else carries on.
+    capture_discord_messages: bool = False
+    # How long a logged thread has to go quiet before what was said in it is published. Long
+    # enough that a conversation arrives as a conversation, short enough that nobody wonders
+    # whether it worked.
+    conversation_quiet_seconds: float = Field(default=60.0, gt=0)
+    # How often the flusher looks. Cheap: most passes are one grouped query that finds nothing.
+    conversation_flush_tick_seconds: float = Field(default=5.0, gt=0)
+
     @field_validator("log_level")
     @classmethod
     def _upper(cls, value: str) -> str:

@@ -11,11 +11,13 @@ class FakeLiveness:
         worker: bool = True,
         bot: bool = True,
         poller: bool = True,
+        flusher: bool = True,
     ) -> None:
         self.database = database
         self.worker = worker
         self.bot = bot
         self.poller = poller
+        self.flusher = flusher
 
     async def database_reachable(self) -> bool:
         return self.database
@@ -28,3 +30,6 @@ class FakeLiveness:
 
     def poller_running(self) -> bool:
         return self.poller
+
+    def flusher_running(self) -> bool:
+        return self.flusher

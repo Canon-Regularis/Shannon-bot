@@ -28,6 +28,7 @@ class ProcessLiveness:
     # None means no board was configured, which is the default. Otherwise a finished task means
     # the board is no longer being read.
     poller_task: asyncio.Task[None] | None = None
+    flusher_task: asyncio.Task[None] | None = None
     # Whether the client has actually reached the gateway, which the task being alive does not
     # say. None when there is no bot to ask.
     gateway_is_ready: Callable[[], bool] | None = None
@@ -90,6 +91,22 @@ class ProcessLiveness:
         stopped.
         """
         return self.poller_task is None or not self.poller_task.done()
+
+    def flusher_running(self) -> bool:
+        """Whether captured conversations are still being published. Issue #103.
+
+        Reported without being part of the verdict, for the poller's reason above and
+        with the same shape: nothing halts the process when this task dies, so without
+        this it goes with one line in the log and everything afterwards answers that all
+        is well, while what people said piles up in a table and reaches GitHub never.
+
+        Not counted, because the rest of the process is unharmed: webhooks arrive,
+        threads are written, and capture itself carries on into the table. What is held
+        there is published by the next process with a working flusher, so restarting
+        over this would throw away a working worker's batch to fix something that is
+        already waiting patiently.
+        """
+        return self.flusher_task is None or not self.flusher_task.done()
 
     def bot_connected(self) -> bool:
         """Whether the gateway is still there, if this deployment has one at all.

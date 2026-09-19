@@ -152,6 +152,27 @@ class TestWhetherTheBackgroundWorkIsAlive:
 
         assert ProcessLiveness(FakeEngine(), poller_task=task).poller_running() is False
 
+    async def test_a_process_with_no_flusher_is_not_something_stopped(self) -> None:
+        """Which is what the route-level tests and anything not running the whole process get.
+        Issue #103."""
+        assert ProcessLiveness(FakeEngine()).flusher_running() is True
+
+    async def test_transcripts_still_being_published_is_running(self) -> None:
+        task = asyncio.create_task(forever())
+        try:
+            assert ProcessLiveness(FakeEngine(), flusher_task=task).flusher_running() is True
+        finally:
+            task.cancel()
+
+    async def test_a_flusher_that_died_is_reported(self) -> None:
+        """The second task with nothing wired to halt the process when it goes, so without this it
+        dies with one line in the log while what people said in a logged thread piles up in a table
+        and reaches GitHub never."""
+        task = asyncio.create_task(fails())
+        await asyncio.wait({task})
+
+        assert ProcessLiveness(FakeEngine(), flusher_task=task).flusher_running() is False
+
     async def test_no_bot_configured_counts_as_connected(self) -> None:
         """Running without a token is deliberate, not a failure."""
         assert ProcessLiveness(FakeEngine()).bot_connected() is True

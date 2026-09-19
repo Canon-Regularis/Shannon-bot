@@ -22,6 +22,8 @@ class Liveness(Protocol):
 
     def poller_running(self) -> bool: ...
 
+    def flusher_running(self) -> bool: ...
+
 
 class HealthResponse(BaseModel):
     healthy: bool
@@ -29,6 +31,7 @@ class HealthResponse(BaseModel):
     worker: bool
     bot: bool
     poller: bool
+    flusher: bool
     # Which commit is answering. Everything else here is whether the process works; this is
     # whether it is the process somebody thinks they deployed, and from outside the two look
     # identical. A change that was merged and never pulled reads exactly like a change that
@@ -55,13 +58,20 @@ async def health(request: Request, response: Response) -> HealthResponse:
         # Nothing was wired in, which is how the route-level tests run. Listening is all that
         # can honestly be claimed.
         return HealthResponse(
-            healthy=True, database=True, worker=True, bot=True, poller=True, version=build
+            healthy=True,
+            database=True,
+            worker=True,
+            bot=True,
+            poller=True,
+            flusher=True,
+            version=build,
         )
 
     database = await liveness.database_reachable()
     worker = liveness.worker_running()
     bot = liveness.bot_connected()
     poller = liveness.poller_running()
+    flusher = liveness.flusher_running()
 
     # The board is the one thing reported without being counted. This process is still doing its
     # job without it: webhooks arrive, threads are written, and only board movement stops. Failing
@@ -77,11 +87,20 @@ async def health(request: Request, response: Response) -> HealthResponse:
     elif not poller:
         logger.warning("the board is no longer being read, though everything else is working")
 
+    # Its own line rather than folded into the one above, so a log says which of the two
+    # uncounted tasks went. They fail for unrelated reasons and mean unrelated things.
+    if healthy and not flusher:
+        logger.warning(
+            "captured conversations are no longer being published, though everything else "
+            "is working"
+        )
+
     return HealthResponse(
         healthy=healthy,
         database=database,
         worker=worker,
         bot=bot,
         poller=poller,
+        flusher=flusher,
         version=build,
     )

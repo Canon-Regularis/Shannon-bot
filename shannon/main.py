@@ -31,13 +31,16 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     """
     settings = settings or get_settings()
 
-    bot = ShannonBot(explain_error=reply_for)
+    # The one privileged thing this bot ever asks the gateway for, and only when a deployment has
+    # said so. `build_intents` says what that costs and why the setting exists.
+    bot = ShannonBot(explain_error=reply_for, capture_messages=settings.capture_discord_messages)
     container = build_container(threads=DiscordThreadGateway(bot), settings=settings)
     bot.install(*container.commands)
-    # Both of these are a second step for the same reason: the gateway has to exist before the
-    # container that needs it, so neither can be handed to the constructor.
+    # All three of these are a second step for the same reason: the gateway has to exist before
+    # the container that needs it, so none of them can be handed to the constructor.
     bot.tell_when_a_thread_goes(container.forget_thread)
     bot.tell_when_a_channel_goes(container.forget_channel)
+    bot.tell_when_a_message_arrives(container.conversations)
 
     return create_app(
         settings=settings,
