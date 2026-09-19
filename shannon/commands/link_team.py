@@ -62,14 +62,14 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
                 interaction,
                 done(
                     f"Reviews asked of the {linked} team will now ping <@&{role.id}>."
-                    f"{_a_ping_nobody_will_get(interaction, role)}"
+                    f"{_unmentionable_role_warning(interaction, role)}"
                 ),
             )
 
     return link_team
 
 
-def _a_ping_nobody_will_get(interaction: discord.Interaction, role: discord.Role) -> str:
+def _unmentionable_role_warning(interaction: discord.Interaction, role: discord.Role) -> str:
     """Warn when the mention this command promises will reach nobody, or say nothing.
 
     Discord notifies a role's members only if the role is mentionable or the sender holds Mention

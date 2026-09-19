@@ -175,7 +175,7 @@ class ItemWorkflow:
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._fetch(found)
-        self._refuse_a_status_that_will_not_hold(found, snapshot, status)
+        self._refuse_conflicting_status(found, snapshot, status)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -212,7 +212,7 @@ class ItemWorkflow:
                     # Touching the lock anyway is not a stale write that rights itself. Locking
                     # shuts a thread against a state the row no longer holds, and for a pull
                     # request nothing lifts one: `PullRequestPolicy.locked` answers None on every
-                    # sync and `shut_by_the_row` wants a DONE the row has moved off, so no
+                    # sync and `shut_for_state` wants a DONE the row has moved off, so no
                     # webhook, sync or `/pr` reopens it. Unlocking is no safer, because the
                     # writer that moved it may have shut the thread on purpose a moment ago.
                     #
@@ -432,7 +432,7 @@ class ItemWorkflow:
                 "GitHub labels to set. Move its card on the board instead."
             )
 
-    def _refuse_a_status_that_will_not_hold(
+    def _refuse_conflicting_status(
         self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
     ) -> None:
         """Refuse, rather than write a status that something else is going to overwrite.

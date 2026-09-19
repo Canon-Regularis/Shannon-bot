@@ -140,7 +140,7 @@ class ThreadPointerStore:
             .execution_options(synchronize_session=False)
         )
 
-    async def note_what_the_block_showed(
+    async def note_shown_labels(
         self, tracked_item_id: int, *, thread_id: int, shown: Sequence[str]
     ) -> None:
         """Record the label names a block that was POSTED put in front of a reader.
@@ -162,7 +162,7 @@ class ThreadPointerStore:
             .execution_options(synchronize_session=False)
         )
 
-    async def note_a_label_was_said(
+    async def note_label_announced(
         self, tracked_item_id: int, *, thread_id: int, name: str, on_it: bool
     ) -> None:
         """Keep the shown set in step with a tag line that was actually posted.

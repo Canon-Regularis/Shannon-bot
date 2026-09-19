@@ -96,10 +96,10 @@ def why_threads_will_not_open(channel: object) -> str | None:
             "That forum requires a tag on every post, and this bot does not set one. "
             "Turn off Require Tags in the channel's settings, or pick another channel."
         )
-    return _what_this_bot_cannot_do_there(channel)
+    return _missing_thread_permission(channel)
 
 
-def _what_this_bot_cannot_do_there(channel: discord.abc.GuildChannel) -> str | None:
+def _missing_thread_permission(channel: discord.abc.GuildChannel) -> str | None:
     """Which of the permissions needed to open a thread here this bot has not been given.
 
     The same reasoning as the checks above, for the thing that actually goes wrong most often. A

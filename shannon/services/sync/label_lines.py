@@ -94,7 +94,7 @@ class LabelLine:
         # Only once the line has actually landed. A refused post hands its claim back, and the
         # retry has to be able to say the same thing.
         async with self._sessionmaker() as session, session.begin():
-            await ThreadPointerStore(session).note_a_label_was_said(
+            await ThreadPointerStore(session).note_label_announced(
                 arrival.tracked_item_id,
                 thread_id=arrival.thread_id,
                 name=move.name,

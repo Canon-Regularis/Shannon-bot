@@ -259,7 +259,7 @@ class ThreadRelocation:
         """
         mirror = self._mirrors.get(candidate.object_type)
         if mirror is None:
-            await self._let_the_poller_rebuild_it(candidate, channel_id)
+            await self._release_for_the_poller(candidate, channel_id)
             return
 
         snapshot = await mirror.fetch(owner, name, candidate.number)
@@ -272,7 +272,7 @@ class ThreadRelocation:
 
         await self._say_where_it_went(result.displaced, format_thread_moved(result.thread_id))
 
-    async def _let_the_poller_rebuild_it(self, candidate: StrandedThread, channel_id: int) -> None:
+    async def _release_for_the_poller(self, candidate: StrandedThread, channel_id: int) -> None:
         """A board card, which has no GitHub endpoint to rebuild it from.
 
         So the order inverts: let go of the pointer first and let the poller open the replacement

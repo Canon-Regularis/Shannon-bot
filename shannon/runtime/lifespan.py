@@ -120,7 +120,7 @@ class Gateway(Protocol):
     async def close(self) -> None: ...
 
 
-async def require_a_working_database(engine: AsyncEngine) -> None:
+async def require_database(engine: AsyncEngine) -> None:
     """Prove the database answers and has been migrated before the port opens.
 
     Building an engine connects to nothing, so without this a wrong password or a database that
@@ -298,7 +298,7 @@ def build_lifespan(
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
-            await require_a_working_database(container.engine)
+            await require_database(container.engine)
         except Exception as error:
             logger.error(
                 "cannot reach the database, or it has never been migrated: %s. "

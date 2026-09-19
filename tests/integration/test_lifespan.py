@@ -184,9 +184,7 @@ class TestStartingUp:
         # time is the assertion: `wait_for` raises the same TimeoutError and proves nothing.
         started = asyncio.get_running_loop().time()
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(
-                lifespan_module.require_a_working_database(NeverAnswers()), timeout=5
-            )
+            await asyncio.wait_for(lifespan_module.require_database(NeverAnswers()), timeout=5)
 
         assert asyncio.get_running_loop().time() - started < 1, "it waited on the outer bound"
 

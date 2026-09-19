@@ -105,13 +105,13 @@ class CheckSuiteAnnouncer:
 
     async def announce(self, event: CheckSuiteEvent) -> bool:
         """Report this suite on every pull request it heads. True if anything was said."""
-        self._note_that_checks_are_arriving()
+        self._note_first_suite()
         said = False
         for number in event.numbers:
             said = await self._one(event, number) or said
         return said
 
-    def _note_that_checks_are_arriving(self) -> None:
+    def _note_first_suite(self) -> None:
         """Say once that a check suite reached this process at all.
 
         `Checks: Read` is a permission added to an App that is already installed, and granting one

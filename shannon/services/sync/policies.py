@@ -70,7 +70,7 @@ class SyncPolicy(Protocol):
         """
         ...
 
-    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+    def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """Whether an item in this state belongs in a thread that is shut, from the row alone.
 
         Asked where there is no payload to ask instead. A delivery turned away as superseded is
@@ -154,7 +154,7 @@ class PullRequestPolicy:
             return None
         return False
 
-    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+    def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """`/set_done` writes the status, and closing or merging writes the state."""
         return status is Status.DONE or github_state != "open"
 
@@ -209,7 +209,7 @@ class IssuePolicy:
         the command sends you to close it on GitHub instead, so the payload is the whole story."""
         return snapshot.closed
 
-    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+    def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """The same answer `shut` gives, read from the column the payload writes into rather
         than from the payload. Not the status: `/set_done` can put an open issue at DONE, and an
         open issue's thread is one people are still meant to be talking in."""
@@ -266,7 +266,7 @@ class TicketPolicy:
         open it again."""
         return None
 
-    def shut_by_the_row(self, *, status: Status, github_state: str) -> bool:
+    def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """Never, for the reason above. A card in Done is a card somebody can drag back out."""
         return False
 

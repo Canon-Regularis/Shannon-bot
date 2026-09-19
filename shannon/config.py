@@ -153,7 +153,7 @@ class Settings(BaseSettings):
         return SecretStr(raw.replace("\\n", "\n")) if "\\n" in raw else value
 
     @model_validator(mode="after")
-    def _lease_covers_a_whole_batch(self) -> Settings:
+    def _lease_fits_a_batch(self) -> Settings:
         """Refuse a lease shorter than the batch it has to cover.
 
         A batch is leased all at once and worked one delivery at a time. If the lease lapses
