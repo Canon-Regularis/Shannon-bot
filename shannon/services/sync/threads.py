@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import ThreadNotFoundError, ThreadStartedEmptyError
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import Notify, OpensThreads, ThreadHandle
 from shannon.domain.errors import ItemNotReadyError
 
@@ -91,11 +92,11 @@ class ItemThreads:
         target: ThreadTarget,
         *,
         name: str,
-        content: str,
-        replacement: str | None = None,
+        panel: Panel,
+        replacement: Panel | None = None,
         notify: Notify = None,
     ) -> ThreadWrite:
-        """Put `content` in the item's thread, opening or rebuilding one where needed.
+        """Put `panel` in the item's thread, opening or rebuilding one where needed.
 
         A thread opened to REPLACE one gets `replacement`, which is the same block with the
         people on it named in plain text. Opening a thread POSTS its block and a posted message
@@ -110,10 +111,10 @@ class ItemThreads:
         went on passing on the other, which is the argument the wiring already makes about this
         exact write.
         """
-        instead = content if replacement is None else replacement
+        instead = panel if replacement is None else replacement
         if target.thread_id is None:
             return ThreadWrite(
-                await self._open(target, name=name, content=content, notify=notify), created=True
+                await self._open(target, name=name, panel=panel, notify=notify), created=True
             )
 
         if self._relocates and target.is_stranded:
@@ -128,7 +129,7 @@ class ItemThreads:
                 target.thread_channel_id,
                 target.channel_id,
             )
-            handle = await self._open(target, name=name, content=instead, notify=notify)
+            handle = await self._open(target, name=name, panel=instead, notify=notify)
             # Unconditional, and it has to be. After a successful swap the id that comes back is
             # never the old one, and after a lost race it is the winner's, so the old thread is
             # displaced either way and is worth saying so about either way.
@@ -139,7 +140,7 @@ class ItemThreads:
                 thread_id=target.thread_id,
                 message_id=target.message_id,
                 name=name,
-                content=content,
+                panel=panel,
                 notify=notify,
             )
         except ThreadNotFoundError:
@@ -152,14 +153,14 @@ class ItemThreads:
                 target.tracked_item_id,
             )
             return ThreadWrite(
-                await self._open(target, name=name, content=instead, notify=notify), created=True
+                await self._open(target, name=name, panel=instead, notify=notify), created=True
             )
 
         await self._remember(target.tracked_item_id, handle)
         return ThreadWrite(handle, created=False)
 
     async def _open(
-        self, target: ThreadTarget, *, name: str, content: str, notify: Notify = None
+        self, target: ThreadTarget, *, name: str, panel: Panel, notify: Notify = None
     ) -> ThreadHandle:
         """Open a thread and attach it, out of reach of the caller's cancellation.
 
@@ -173,7 +174,7 @@ class ItemThreads:
         The wait is bounded so a gateway that has stopped answering cannot hold the process open.
         """
         claiming = asyncio.ensure_future(
-            self._create_and_claim(target, name=name, content=content, notify=notify)
+            self._create_and_claim(target, name=name, panel=panel, notify=notify)
         )
         try:
             await asyncio.wait({claiming})
@@ -195,11 +196,14 @@ class ItemThreads:
             raise
 
     async def _create_and_claim(
-        self, target: ThreadTarget, *, name: str, content: str, notify: Notify = None
+        self, target: ThreadTarget, *, name: str, panel: Panel, notify: Notify = None
     ) -> ThreadHandle:
         try:
             handle = await self._threads.create(
-                channel_id=target.channel_id, name=name, content=content, notify=notify
+                channel_id=target.channel_id,
+                name=name,
+                panel=panel,
+                notify=notify,
             )
         except ThreadStartedEmptyError as error:
             # The thread is real even though its first message never landed. Recording it here

@@ -29,7 +29,6 @@ from shannon.discord_bot.safe_text import (
     clipped,
     code_span,
     fit,
-    quote,
 )
 
 # Discord's own limit on the content of a message, from its documentation rather than from the
@@ -177,33 +176,37 @@ class TestFittingAMessage:
             assert len(fit("\n".join("w" * 40 for _ in range(length // 41)))) <= MESSAGE_LIMIT
 
 
-class TestQuotingABody:
-    """What somebody wrote on GitHub, made safe and made short."""
+class TestCuttingABody:
+    """What somebody wrote on GitHub, made safe and made short.
 
-    def test_a_body_at_the_preview_limit_is_quoted_whole(self) -> None:
+    It stopped being a blockquote in issue #113, so what is left is the cut and the escaping.
+    The order of those two is the whole of it and is checked below either side of the limit.
+    """
+
+    def test_a_body_at_the_preview_limit_is_kept_whole(self) -> None:
         body = "a" * COMMENT_PREVIEW_LIMIT
 
-        quoted = quote(body)
+        cut = clipped(body, limit=COMMENT_PREVIEW_LIMIT)
 
-        assert "…" not in quoted
-        assert quoted == f"> {body}"
+        assert "…" not in cut
+        assert cut == body
 
     def test_one_character_over_is_cut_and_marked(self) -> None:
-        quoted = quote("a" * (COMMENT_PREVIEW_LIMIT + 1))
+        cut = clipped("a" * (COMMENT_PREVIEW_LIMIT + 1), limit=COMMENT_PREVIEW_LIMIT)
 
-        assert quoted.endswith("…")
-        assert len(quoted.removeprefix("> ").removesuffix("…")) == COMMENT_PREVIEW_LIMIT
+        assert cut.endswith("…")
+        assert len(cut.removesuffix("…")) == COMMENT_PREVIEW_LIMIT
 
-    def test_every_line_of_a_body_is_quoted(self) -> None:
-        """A body whose second line escaped the block would render as ordinary message text."""
-        quoted = quote("first\nsecond\n\nfourth")
+    def test_the_lines_of_a_body_are_left_as_written(self) -> None:
+        """Nothing is put on the front of them any more, blank ones included."""
+        cut = clipped("first\nsecond\n\nfourth", limit=COMMENT_PREVIEW_LIMIT)
 
-        assert quoted.split("\n") == ["> first", "> second", ">", "> fourth"]
+        assert cut.split("\n") == ["first", "second", "", "fourth"]
 
     @pytest.mark.parametrize("body", ["", "   ", "\n\n", None])
-    def test_a_body_with_nothing_in_it_quotes_to_nothing(self, body: str | None) -> None:
-        """An empty block is a header with a stray `>` under it, which reads as a mistake."""
-        assert quote(body) == ""
+    def test_a_body_with_nothing_in_it_cuts_to_nothing(self, body: str | None) -> None:
+        """An empty block is a heading with a blank under it, which reads as a mistake."""
+        assert clipped(body, limit=COMMENT_PREVIEW_LIMIT) == ""
 
     def test_the_cut_happens_before_the_escaping_and_not_after(self) -> None:
         """Escaping only adds characters, so cutting after it would cut inside a backslash pair.
@@ -213,10 +216,10 @@ class TestQuotingABody:
         """
         body = "*" * (COMMENT_PREVIEW_LIMIT + 100)
 
-        quoted = quote(body)
+        cut = clipped(body, limit=COMMENT_PREVIEW_LIMIT)
 
-        assert "\\*" in quoted, "the body reached Discord unescaped"
-        assert quoted.count("*") == COMMENT_PREVIEW_LIMIT, "it cut after escaping, not before"
+        assert "\\*" in cut, "the body reached Discord unescaped"
+        assert cut.count("*") == COMMENT_PREVIEW_LIMIT, "it cut after escaping, not before"
 
 
 class TestTheOtherTwoThingsThisModuleDecides:
@@ -254,18 +257,14 @@ class TestTheDescriptionLimit:
         block it goes under has ten fields of its own. A limit that fits on its own and not in a
         block would be a description that silently disappears from a busy item.
         """
-        worst = quote(as_prose("*" * DESCRIPTION_PREVIEW_LIMIT), limit=DESCRIPTION_PREVIEW_LIMIT)
+        worst = clipped(as_prose("*" * DESCRIPTION_PREVIEW_LIMIT), limit=DESCRIPTION_PREVIEW_LIMIT)
 
         assert len(worst) < MESSAGE_LIMIT
 
     def test_a_description_is_cut_at_its_own_limit_and_not_the_comment_one(self) -> None:
-        quoted = quote("a" * 900, limit=DESCRIPTION_PREVIEW_LIMIT)
+        cut = clipped("a" * 900, limit=DESCRIPTION_PREVIEW_LIMIT)
 
-        assert len(quoted.removeprefix("> ").removesuffix("…")) == DESCRIPTION_PREVIEW_LIMIT
-
-    def test_a_comment_still_gets_the_comment_limit_without_being_asked(self) -> None:
-        """The limit is a keyword with a default, so every existing caller keeps what it had."""
-        assert len(quote("a" * 900).removeprefix("> ").removesuffix("…")) == COMMENT_PREVIEW_LIMIT
+        assert len(cut.removesuffix("…")) == DESCRIPTION_PREVIEW_LIMIT
 
 
 class TestFlatteningMarkdownToProse:
@@ -302,7 +301,8 @@ class TestFlatteningMarkdownToProse:
         """
         assert as_prose("intro\n\n- one\n- two") == "intro\n\n• one\n• two"
 
-    def test_quote_markers_are_dropped_because_it_is_all_going_into_a_quote(self) -> None:
+    def test_quote_markers_are_dropped_because_they_are_what_113_objected_to(self) -> None:
+        """A surviving marker renders as exactly the blockquote the issue asked to be rid of."""
         assert as_prose("> said this\n>> and this") == "said this\nand this"
 
     def test_html_comments_go(self) -> None:

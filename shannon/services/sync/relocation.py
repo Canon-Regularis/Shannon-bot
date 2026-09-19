@@ -27,6 +27,7 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import StrandedThread, TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_thread_moved, format_thread_moving
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import FindsThreads, PostsToThread, ShutsThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, ShannonError
@@ -287,7 +288,7 @@ class ThreadRelocation:
 
     async def _say_where_it_went(self, thread_id: int, line: str) -> None:
         try:
-            await self._threads.post(thread_id=thread_id, content=line)
+            await self._threads.post(thread_id=thread_id, panel=Panel.of_text(line))
             await self._threads.set_shut(thread_id=thread_id, shut=True)
         except DiscordGatewayError as refusal:
             # One arm for all of them. The item has already moved, so what is lost is the line and

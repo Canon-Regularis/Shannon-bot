@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 
@@ -60,8 +60,10 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
         else:
             await reply(
                 interaction,
-                f"Reviews asked of the {linked} team will now ping <@&{role.id}>."
-                f"{_a_ping_nobody_will_get(interaction, role)}",
+                done(
+                    f"Reviews asked of the {linked} team will now ping <@&{role.id}>."
+                    f"{_a_ping_nobody_will_get(interaction, role)}"
+                ),
             )
 
     return link_team

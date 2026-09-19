@@ -16,7 +16,8 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
-from shannon.discord_bot.safe_text import quote
+from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread
 from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.json import JsonObject
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # The note, who it may mention, and which roles it may mention. Two mappings rather than one,
 # because a team slug that happens to match a login is not that person and Discord writes the
 # two with different syntax.
-Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], str]
+Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], Panel]
 # Getting an item's thread built again, for the one case this path can detect and not mend.
 # A callable rather than a service, because what it needs is the item read from GitHub and
 # put through the ordinary sync, and this module has no business knowing either of those.
@@ -187,7 +188,7 @@ class ItemNoteMirror:
             # preview is cut before the escaping with the cut landing mid-word, so reading the
             # raw body would ask about `monalisa` where the renderer is handed `mona`. Handing
             # both halves one string makes them agree by construction instead of by argument.
-            named = names_in(quote(snapshot.body))
+            named = names_in(clipped(snapshot.body, limit=COMMENT_PREVIEW_LIMIT))
 
             # The author last, which is load-bearing. `resolve_many` lowercases into a fresh
             # mapping, so the last entry for a name wins, and the author's is the one carrying a
@@ -238,7 +239,7 @@ class ItemNoteMirror:
         try:
             await self._threads.post(
                 thread_id=target.thread_id,
-                content=self._render(snapshot, target.mentions, target.roles),
+                panel=self._render(snapshot, target.mentions, target.roles),
                 notify=target.notify,
             )
         except ThreadNotFoundError as error:

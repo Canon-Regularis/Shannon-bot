@@ -12,7 +12,8 @@ from shannon.discord_bot.formatting import (
     format_pull_request,
     thread_name,
 )
-from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, MESSAGE_LIMIT
+from shannon.discord_bot.panels import PANEL_BUDGET
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT
 from shannon.discord_bot.threads import THREAD_NAME_LIMIT, truncate_thread_name
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import UnparseableLinkError
@@ -152,10 +153,12 @@ class TestRendering:
 
     @given(metadata, st.sampled_from(list(Status)), st.sampled_from(list(Priority)))
     @settings(max_examples=200)
-    def test_an_issue_block_always_fits_discord(
+    def test_an_issue_block_always_fits_a_card(
         self, snapshot: IssueSnapshot, status: Status, priority: Priority
     ) -> None:
-        assert len(format_issue(snapshot, status=status, priority=priority)) <= MESSAGE_LIMIT
+        card = format_issue(snapshot, status=status, priority=priority).trimmed()
+
+        assert card.length() <= PANEL_BUDGET
 
     @given(metadata, st.sampled_from(list(Status)))
     @settings(max_examples=200)
@@ -163,14 +166,15 @@ class TestRendering:
         self, snapshot: IssueSnapshot, status: Status
     ) -> None:
         """Truncation must not silently drop the fields at the bottom of the block."""
-        rendered = format_issue(snapshot, status=status)
+        rendered = format_issue(snapshot, status=status).trimmed().text
 
-        if len(rendered) < MESSAGE_LIMIT:
+        if len(rendered) < PANEL_BUDGET:
             for field in ("Issue Name", "Type", "State", "Status", "Priority", "Last Updated"):
                 assert f"**{field}:**" in rendered
 
         # The description is the one part of the block that is several lines, so it is the one
-        # part a trim can leave half of. A label with nothing under it reads as a broken bot.
+        # part a trim could leave half of. Its label goes with it now, because the two are one
+        # block, and a label with nothing under it reads as a broken bot.
         assert not rendered.rstrip("…\n").endswith("**Description:**")
 
     @given(
@@ -188,14 +192,14 @@ class TestRendering:
         ),
         st.sampled_from(list(Status)),
     )
-    def test_a_pull_request_block_always_fits_discord(
+    def test_a_pull_request_block_always_fits_a_card(
         self, snapshot: PullRequestSnapshot, status: Status
     ) -> None:
-        assert len(format_pull_request(snapshot, status=status)) <= MESSAGE_LIMIT
+        assert format_pull_request(snapshot, status=status).trimmed().length() <= PANEL_BUDGET
 
     @given(st.text(max_size=4000), st.one_of(st.none(), aware))
     @settings(max_examples=200)
-    def test_a_comment_always_fits_discord(self, body: str, when: datetime | None) -> None:
+    def test_a_comment_always_fits_a_card(self, body: str, when: datetime | None) -> None:
         snapshot = CommentSnapshot(
             repository=REPO,
             item_number=1,
@@ -208,8 +212,9 @@ class TestRendering:
         )
 
         rendered = format_comment(snapshot)
-        assert len(rendered) <= MESSAGE_LIMIT
-        assert "**octocat** commented" in rendered
+
+        assert rendered.length() <= PANEL_BUDGET
+        assert "**octocat** commented" in rendered.blocks[0].text
 
     @given(st.text(min_size=COMMENT_PREVIEW_LIMIT + 1, max_size=4000))
     def test_a_long_comment_body_is_always_cut(self, body: str) -> None:
@@ -223,7 +228,7 @@ class TestRendering:
             author=Actor("octocat"),
         )
 
-        assert len(format_comment(snapshot)) <= MESSAGE_LIMIT
+        assert format_comment(snapshot).length() <= PANEL_BUDGET
 
 
 class TestThreadNames:

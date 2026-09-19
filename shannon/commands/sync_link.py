@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.manual import ManualSyncOutcome
@@ -47,7 +47,10 @@ async def run_sync_link(
         verb = "Opened" if outcome.created else "Updated"
         await reply(
             interaction,
-            f"{verb} the thread for {outcome.full_name}#{outcome.number}: <#{outcome.thread_id}>",
+            done(
+                f"{verb} the thread for {outcome.full_name}#{outcome.number}: "
+                f"<#{outcome.thread_id}>"
+            ),
         )
 
 

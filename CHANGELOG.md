@@ -5678,3 +5678,77 @@ to set the project number will find it.
 - Known and not fixed: if two providers' deliveries both read the checks before the other's
   completion is visible, neither announces and nobody is told. A silent miss rather than a double
   post, and the skip logs the commit and what was still running so it can be seen.
+
+## What the bot looks like
+
+- **Every message this bot sends is now a Discord component rather than a markdown string.**
+  A coloured bar down the side, the author's avatar beside the top of the block, a rule where a
+  blockquote used to be, and a button to GitHub. Closes #116 and #113.
+- **A panel, and the view it becomes.** `shannon/discord_bot/panels.py` holds a `Panel`: an
+  ordered tuple of blocks of text, plus an accent, a picture and a link. It imports no discord.
+  `shannon/discord_bot/layout.py` is the only module in the project that imports `discord.ui`,
+  and it turns one into a `LayoutView`. That split is what keeps the seventeen renderers pure and
+  testable with no UI library behind them, which is what they were when they returned strings.
+- **The law the whole migration rests on.** The text displays in the view `layout` builds are
+  exactly the panel's block texts, in the panel's order; grouping, rules, the bar, the picture and
+  the button add structure and never words. That is what makes `Panel.text` a projection rather
+  than a second renderer, and `Panel.text` is what kept roughly seven hundred content-string
+  assertions alive through the move. A Hypothesis property asserts it over generated panels, and
+  it caught a real bug on its first run: a panel with two headings rendered the first one twice.
+- **The thread fake runs the real adapter on every call.** Recording `panel.text` and nothing else
+  would have left the riskiest new code in the project unexecuted by three thousand tests. Instead
+  `create`, `update` and `post` build the view for real, check the budget and the component count,
+  assert the law, throw the view away and record the words. It costs nothing, because the adapter
+  is pure and offline, and it turns the existing suite into an adapter fuzzer.
+- **A view holds four thousand display characters against the two thousand a message gets**, so
+  `PANEL_BUDGET` is 3900 and `Panel.trimmed()` drops whole blocks from the end before trimming
+  the survivor. That is `fit`'s line rule one level up, and it replaces `_with_the_description`'s
+  whole-or-nothing arithmetic: the description and the footnote sit after the fields, so the
+  fields are structurally the last thing to give way rather than by a length calculation.
+- **`quote()` is gone and `> ` with it.** That is issue #113 exactly. Descriptions, comment
+  bodies, review bodies and commit messages are `clipped` and put in a block of their own under a
+  separator, which is what the markers were doing badly. Nothing about safety changed: the cut is
+  still taken before the escaping, `as_prose` still flattens GitHub markdown, `as_plain_text`
+  still neutralises all four of its cases and `defuse_mentions` still runs. The escaping was
+  always what stopped a comment restyling a thread; the markers were decoration.
+- **The accent is optional and `None` is load-bearing.** It does not mean "no colour picked", it
+  means this is not a card and goes out as ordinary text. Four things stay that way deliberately:
+  the two relocation signposts, the note about commits that were not announced, and the line
+  saying a transcript could not be published. Each is quieter than the heading beside it on
+  purpose, and a coloured card there shouts over the thing it is pointing at.
+- **The colours are GitHub's own, in Primer's dark-mode values**, because Discord draws that bar
+  on a dark background for most readers. Open green, draft grey, merged purple, closed red, CI
+  pass green, CI fail red, priority red/amber/green, somebody-said blue. A closed issue is red
+  whether or not it was closed as completed: GitHub draws "not planned" grey and `IssueSnapshot`
+  does not carry `state_reason`, so the distinction cannot be made here.
+- **The picture hangs off whatever a panel opens with**, not off its heading. The item block
+  has no heading, because its eleven rows are one block so that they read as a table rather
+  than as eleven rules, and a rule against kind would have dropped the author's face from the
+  one message that has one.
+- **One text display per block, never one per line.** The widest panel this project can build is
+  under twenty components against Discord's ceiling of forty, which makes the ceiling structurally
+  unreachable. Proved by a test rather than guarded at runtime, because a branch nothing can take
+  and a coverage floor of a hundred per cent do not mix.
+- **`Actor` gained `avatar_url`**, accepted only when it is a string starting `https://`. Not
+  fussiness: Discord refuses the WHOLE message over a media URL it cannot parse, so an item whose
+  avatar arrived malformed would have no block at all rather than a block with no picture. The
+  button's URL is guarded the same way, and the `**GitHub Link:**` row carries the address either
+  way.
+- **Command replies say how it went before they are read.** A refusal is a card with a bar:
+  amber for the ones that come right on their own, red for the ones somebody has to act on. The
+  words are unchanged and no call site moved. The answers with more than one part to them are
+  green. The one-sentence replies stay plain strings, because a bar drawn round one sentence is
+  louder than the sentence and says nothing more.
+- **Commit 5 of this work is the only irreversible one in the project.** Once Discord has seen a
+  message with the components flag, that flag can never be taken off it. Reverting the item block
+  would leave the old writer sending `content` to a V2 message, Discord answering 400, the worker
+  retrying for two hours and giving up, and every mirrored item's block frozen for ever while its
+  thread carried on receiving lines. **Rollback here is roll-forward only.**
+- **Link previews stop.** A components message carries no embeds, so the automatic preview that
+  used to appear under a bare GitHub URL is gone. Probably an improvement and still a visible
+  change nobody asked for, which is why it is written down.
+- **Three things to check in a real server rather than assume.** Whether `allowed_mentions` gates
+  a mention written inside a text display. The documentation does not say, the whole muting
+  feature rests on it, and if it does not then a muted member gets rung while every test still
+  passes. Whether a forum channel's list preview survives a components starter message, which is
+  drawn from content the message no longer has. And what the block looks like on a phone.

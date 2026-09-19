@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import LabelMove
 from shannon.github.webhooks.labels import parse_label_move
@@ -17,7 +18,7 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
-Renderer = Callable[[LabelMove], str]
+Renderer = Callable[[LabelMove], Panel]
 
 
 class LabelLine:
@@ -88,7 +89,7 @@ class LabelLine:
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"label:{arrival.arrived}",
-            content=self._render(move),
+            panel=self._render(move),
         )
         # Only once the line has actually landed. A refused post hands its claim back, and the
         # retry has to be able to say the same thing.

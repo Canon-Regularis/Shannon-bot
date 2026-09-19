@@ -8,6 +8,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import StateChange
 from shannon.domain.state_changes import state_change_of
@@ -26,7 +27,7 @@ class Renderer(Protocol):
     the delivery and comes back every time it is retried.
     """
 
-    def __call__(self, change: StateChange, *, shut: bool, refused: bool = False) -> str: ...
+    def __call__(self, change: StateChange, *, shut: bool, refused: bool = False) -> Panel: ...
 
 
 class StateLine:
@@ -103,7 +104,7 @@ class StateLine:
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"state:{arrival.arrived}",
-            content=self._render(
+            panel=self._render(
                 change,
                 shut=item.discord_thread_locked is True,
                 refused=arrival.shut_refused,

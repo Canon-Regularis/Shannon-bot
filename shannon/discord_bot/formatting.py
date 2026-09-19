@@ -9,14 +9,15 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
+from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel, PanelLink
 from shannon.discord_bot.safe_text import (
+    COMMENT_PREVIEW_LIMIT,
     COMMIT_MESSAGE_LIMIT,
     COMMIT_TITLE_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
     JOB_NAME_LIMIT,
     JOB_NAME_LIMIT_JOINED,
-    MESSAGE_LIMIT,
     as_plain_text,
     as_prose,
     clipped,
@@ -24,8 +25,6 @@ from shannon.discord_bot.safe_text import (
     clipped_path,
     code_span,
     defuse_mentions,
-    fit,
-    quote,
 )
 from shannon.domain.enums import Priority, StateChange, Status
 from shannon.domain.models import (
@@ -90,7 +89,7 @@ def format_pull_request(
     status: Status,
     priority: Priority = Priority.UNSET,
     mentions: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """Render the metadata block that lives at the top of a pull request thread.
 
     `mentions` maps a lowercased GitHub login to a Discord user ID. Anyone missing from it is
@@ -102,9 +101,26 @@ def format_pull_request(
         status=status,
         priority=priority,
         mentions=mentions,
+        accent=_pull_request_accent(snapshot),
         reviewers=snapshot.reviewers,
         teams=snapshot.reviewer_teams,
     )
+
+
+def _pull_request_accent(snapshot: PullRequestSnapshot) -> Accent:
+    """GitHub's own colour for the state this one is in.
+
+    Worked out here rather than inside `_metadata`, which takes the snapshot protocol: that has
+    no `draft`, because nothing else in the project has one.
+
+    Draft is grey rather than a paler green. It is the one state that says "not yet", and a
+    reader scanning a channel wants it to read as quieter than the open ones beside it.
+    """
+    if snapshot.merged:
+        return Accent.MERGED
+    if snapshot.closed:
+        return Accent.CLOSED
+    return Accent.DRAFT if snapshot.draft else Accent.OPEN
 
 
 def format_issue(
@@ -113,16 +129,27 @@ def format_issue(
     status: Status,
     priority: Priority = Priority.UNSET,
     mentions: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """Render the metadata block at the top of an issue thread.
 
     No reviewers line: GitHub issues have no reviewers, and an always-empty field would be
     noise.
+
+    A closed issue is red whether or not it was closed as completed. GitHub draws "not planned"
+    in grey and this snapshot does not carry `state_reason`, so the distinction cannot be made
+    here rather than being one somebody decided against.
     """
-    return _metadata(snapshot, noun="Issue", status=status, priority=priority, mentions=mentions)
+    return _metadata(
+        snapshot,
+        noun="Issue",
+        status=status,
+        priority=priority,
+        mentions=mentions,
+        accent=Accent.CLOSED if snapshot.closed else Accent.OPEN,
+    )
 
 
-def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> str:
+def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> Panel:
     """Render the block at the top of a ticket's thread.
 
     Three lines, which is what the requirements ask for and all a draft item has to say. The
@@ -137,10 +164,16 @@ def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> s
         f"**GitHub Link:** {snapshot.html_url}",
         f"**Status:** {status.value}",
     ]
-    return fit("\n".join(lines))
+    # Grey, because a draft on a board has no state of its own to colour by. It is also the
+    # only block with no author, so it is the only one that never carries a picture.
+    return Panel(
+        blocks=(Block(BlockKind.FIELDS, "\n".join(lines)),),
+        accent=Accent.DRAFT,
+        link=_opens_github(snapshot.html_url),
+    )
 
 
-def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
+def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> Panel:
     """Announce newly requested reviewers.
 
     Anyone without a Discord link is still named, so the thread records who GitHub asked for
@@ -149,7 +182,7 @@ def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
     return _ping("Review requested from", logins, mentions)
 
 
-def format_team_ping(teams: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
+def format_team_ping(teams: Iterable[str], mentions: Mapping[str, int] | None = None) -> Panel:
     """Announce a review asked of a team, as a role mention where the server has linked one.
 
     A separate renderer rather than a flag on the reviewer one, because Discord writes the two
@@ -157,7 +190,9 @@ def format_team_ping(teams: Iterable[str], mentions: Mapping[str, int] | None = 
     nobody and renders as a broken mention rather than as an error.
     """
     rendered = ", ".join(_role(name, mentions) for name in teams)
-    return f"Review requested from {rendered}." if rendered else ""
+    if not rendered:
+        return Panel()
+    return _line(f"Review requested from {rendered}.", Accent.SAID)
 
 
 def _role(team: str, mentions: Mapping[str, int] | None) -> str:
@@ -170,7 +205,7 @@ def _role(team: str, mentions: Mapping[str, int] | None) -> str:
     return f"<@&{discord_role_id}>" if discord_role_id else team
 
 
-def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> str:
+def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> Panel:
     """Announce newly assigned people, on the same terms as the reviewer ping."""
     return _ping("Assigned to", logins, mentions)
 
@@ -180,13 +215,20 @@ def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
 # channel and the words alone do not carry that far: a colour says how urgent an item is before
 # anybody has read which label moved.
 _PRIORITY_MARKS = {Priority.HIGH: "🔴", Priority.MEDIUM: "🟠", Priority.LOW: "🟢"}
+# The same three levels as a bar down the side of the card, so urgency reads before
+# anything has been read at all.
+_PRIORITY_ACCENTS = {
+    Priority.HIGH: Accent.HIGH,
+    Priority.MEDIUM: Accent.MEDIUM,
+    Priority.LOW: Accent.LOW,
+}
 # A priority coming off leaves no level behind, so it has no colour to carry.
 _PRIORITY_GONE = "⚪"
 _STATUS_MARK = "📋"
 _TAG_MARK = "🏷️"
 
 
-def format_label_change(move: LabelMove) -> str:
+def format_label_change(move: LabelMove) -> Panel:
     """Announce one label going on or coming off, in the words its group calls for.
 
     The metadata block above already says which labels an item has, and it is rewritten on every
@@ -220,20 +262,40 @@ def format_label_change(move: LabelMove) -> str:
 
     if move.priority is not Priority.UNSET:
         if not move.added:
-            return f"{_PRIORITY_GONE} **Priority cleared:** {named}"
+            return _line(f"{_PRIORITY_GONE} **Priority cleared:** {named}", Accent.NEUTRAL)
         # UNSET is the only priority with no mark and the test above excluded it, so this
         # lookup cannot miss.
-        return f"{_PRIORITY_MARKS[move.priority]} **Priority set:** {named}"
+        return _line(
+            f"{_PRIORITY_MARKS[move.priority]} **Priority set:** {named}",
+            _PRIORITY_ACCENTS[move.priority],
+        )
 
     if move.status is not None:
-        return f"{_STATUS_MARK} **Status {'set' if move.added else 'cleared'}:** {named}"
+        return _line(
+            f"{_STATUS_MARK} **Status {'set' if move.added else 'cleared'}:** {named}", Accent.SAID
+        )
 
-    return f"{_TAG_MARK} Tag {named} {'added' if move.added else 'removed'}."
+    return _line(f"{_TAG_MARK} Tag {named} {'added' if move.added else 'removed'}.", Accent.NEUTRAL)
+
+
+def _line(said: str, accent: Accent) -> Panel:
+    """One line, in a card of its own.
+
+    The marks are kept beside the colour rather than replaced by it. A bar is drawn where the
+    message is; a mark survives into a notification, a search result and a channel preview, which
+    is where several of these lines are actually read.
+    """
+    return Panel(blocks=(Block(BlockKind.HEADING, said),), accent=accent)
 
 
 # Discord renders `###` as a heading and `-#` as small grey subtext in the content of an ordinary
 # message, which is what these are. A heading because a thread closing is the one event in it
 # worth finding by scrolling, and the tag lines above are deliberately quieter than this.
+_STATE_ACCENTS = {
+    StateChange.CLOSED: Accent.CLOSED,
+    StateChange.MERGED: Accent.MERGED,
+    StateChange.REOPENED: Accent.OPEN,
+}
 _STATE_HEADINGS = {
     StateChange.CLOSED: "### 🔒 Closed",
     StateChange.MERGED: "### 🟣 Merged",
@@ -290,7 +352,7 @@ def format_thread_moving(channel_id: int) -> str:
     return _MOVING.format(f"<#{channel_id}>")
 
 
-def format_state_change(change: StateChange, *, shut: bool, refused: bool = False) -> str:
+def format_state_change(change: StateChange, *, shut: bool, refused: bool = False) -> Panel:
     """Announce an item closing, merging or reopening, and say what became of the thread.
 
     The same silence the tag line answers, one step louder. Closing an issue rewrites the block
@@ -315,24 +377,33 @@ def format_state_change(change: StateChange, *, shut: bool, refused: bool = Fals
     symmetry with the block either; two short lines cannot approach the limit.
     """
     heading = _STATE_HEADINGS[change]
+    accent = _STATE_ACCENTS[change]
 
     if change is StateChange.REOPENED:
         if shut:
-            return heading
-        return f"{heading}\n{_OPEN_AGAIN}"
+            return _headed(heading, "", accent)
+        return _headed(heading, _OPEN_AGAIN, accent)
 
     if not shut:
-        return f"{heading}\n{_WOULD_NOT_SHUT}" if refused else heading
+        return _headed(heading, _WOULD_NOT_SHUT if refused else "", accent)
     if change is StateChange.MERGED:
-        return f"{heading}\n{_SHUT}"
-    return f"{heading}\n{_SHUT_UNTIL_REOPENED}"
+        return _headed(heading, _SHUT, accent)
+    return _headed(heading, _SHUT_UNTIL_REOPENED, accent)
+
+
+def _headed(heading: str, under: str, accent: Accent) -> Panel:
+    """A heading and the small line under it, where there is one."""
+    blocks = [Block(BlockKind.HEADING, heading)]
+    if under:
+        blocks.append(Block(BlockKind.SUBHEADING, under))
+    return Panel(blocks=tuple(blocks), accent=accent)
 
 
 def format_comment(
     snapshot: CommentSnapshot,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """Render a GitHub comment for its Discord thread."""
     return _note(snapshot, "commented", mentions, roles)
 
@@ -341,7 +412,7 @@ def format_review(
     snapshot: ReviewSnapshot,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """Render a submitted review for its Discord thread.
 
     A review with an empty body is normal: approving without comment is the common case, and
@@ -354,7 +425,7 @@ def format_review_comment(
     snapshot: ReviewCommentSnapshot,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """Render one inline review comment for its Discord thread.
 
     A message of its own rather than folded into the review carrying it, because GitHub delivers
@@ -404,10 +475,16 @@ def _metadata(
     status: Status,
     priority: Priority,
     mentions: Mapping[str, int] | None,
+    accent: Accent,
     reviewers: Iterable[Actor] | None = None,
     teams: Iterable[Actor] = (),
-) -> str:
-    """The block both kinds of item share; only the noun and the reviewers line differ."""
+) -> Panel:
+    """The block both kinds of item share; only the noun and the reviewers line differ.
+
+    The eleven rows are ONE block rather than one each. Discord allows forty components in a
+    view and a row apiece would spend a quarter of them on a single message, and the rows are
+    read as a table anyway: a rule between every two of them is worse than none at all.
+    """
     lines = [
         f"**{noun} Name:** {_title(snapshot)}",
         f"**Type:** {noun}",
@@ -428,31 +505,49 @@ def _metadata(
         f"**Tags:** {_tags(snapshot.label_names)}",
         f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
     ]
-    return _with_the_description(fit("\n".join(lines)), snapshot.body)
+    # Not `fit`, which cut this to a MESSAGE and is the wrong budget twice over: a card
+    # holds twice a message, and the description under this block is what should give way
+    # first. `Panel.trimmed` does both, at the send, over the blocks it can see.
+    blocks = [Block(BlockKind.FIELDS, "\n".join(lines))]
+    blocks += _the_description(snapshot.body)
+    return Panel(
+        blocks=tuple(blocks),
+        accent=accent,
+        thumbnail_url=snapshot.author.avatar_url if snapshot.author else None,
+        link=_opens_github(snapshot.html_url),
+    )
 
 
-def _with_the_description(block: str, body: str) -> str:
-    """The description under the block, where there is one and where the whole of it fits.
+def _the_description(body: str) -> list[Block]:
+    """The description under the fields, where there is one.
 
     Last, because it is the one part of the block that is prose rather than a field, and because
-    everything above it is what a reader scanning a channel is looking for.
+    everything above it is what a reader scanning a channel is looking for. Being last is also
+    what makes it the first thing a panel over budget drops, and the whole block goes with its
+    label, which is what the old whole-or-nothing rule was written to arrange by arithmetic.
 
     Asked about the rendered text and never about the body, which is the same trap `_title`
     fell into: a body of nothing but whitespace is truthy, and so is one of nothing but markdown
-    markers, and either would put a `**Description:**` label over an empty quote and read as the
+    markers, and either would put a `**Description:**` label over nothing at all and read as the
     bot having broken.
 
-    Whole or not at all, and that is not caution. `fit` drops lines from the end, so on a block
-    with room for the label and not for the quote under it, the label is what survives and the
-    description is what goes: a message ending `**Description:**` and a truncation marker. The
-    fields are the point of the block and this is the nicety, so the nicety is what gives way.
+    Unquoted since issue #113. What separates it from the fields is the rule above it, which is
+    what the `> ` markers were doing badly.
     """
-    described = quote(as_prose(body), limit=DESCRIPTION_PREVIEW_LIMIT)
+    described = clipped(as_prose(body), limit=DESCRIPTION_PREVIEW_LIMIT)
     if not described:
-        return block
+        return []
+    return [Block(BlockKind.BODY, f"**Description:**\n{described}")]
 
-    whole = f"{block}\n**Description:**\n{described}"
-    return whole if len(whole) <= MESSAGE_LIMIT else block
+
+def _opens_github(url: str) -> PanelLink | None:
+    """The button under the block, for a URL Discord will accept.
+
+    Guarded for the same reason the avatar is: Discord refuses the WHOLE message over a link it
+    cannot parse, so an item whose URL arrived malformed would have no block at all rather than
+    a block with no button. The `**GitHub Link:**` row carries the address either way.
+    """
+    return PanelLink(OPEN_ON_GITHUB, url) if url.startswith("https://") else None
 
 
 def _note(
@@ -460,7 +555,7 @@ def _note(
     verb: str,
     mentions: Mapping[str, int] | None,
     roles: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """A comment or a review, posted under the metadata block.
 
     `roles` is kept apart from `mentions` rather than folded in with it, because a team slug that
@@ -475,13 +570,16 @@ def _note(
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
-    lines = [f"**{author}** {verb} {_timestamp(snapshot.created_at)}"]
-    body = _named_in(quote(snapshot.body), mentions, roles)
+    said = f"**{author}** {verb} {_timestamp(snapshot.created_at)}"
+    blocks = [Block(BlockKind.HEADING, said)]
+    # Unquoted since issue #113: the rule above it separates the comment from the line
+    # naming its author, which is what the `> ` markers were there to do.
+    body = _named_in(clipped(snapshot.body, limit=COMMENT_PREVIEW_LIMIT), mentions, roles)
     if body:
-        lines.append(body)
+        blocks.append(Block(BlockKind.BODY, body))
     if snapshot.html_url:
-        lines.append(f"<{snapshot.html_url}>")
-    return fit("\n".join(lines))
+        blocks.append(Block(BlockKind.FOOTNOTE, f"<{snapshot.html_url}>"))
+    return Panel(blocks=tuple(blocks), accent=Accent.SAID)
 
 
 def _named_in(
@@ -509,9 +607,17 @@ def _mention(name: str, known: Mapping[str, int] | None, shape: str) -> str | No
     return shape.format(found) if found else None
 
 
-def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) -> str:
+def _ping(lead: str, logins: Iterable[str], mentions: Mapping[str, int] | None) -> Panel:
+    """A ping, or a panel with nothing in it where there is nobody to name.
+
+    An empty panel rather than an empty string, which is the same answer in the new vocabulary:
+    callers ask whether there are blocks exactly where they used to ask whether the string was
+    empty, and a panel with no blocks is a message Discord would refuse to send.
+    """
     rendered = ", ".join(_person(Actor(login), mentions) for login in logins)
-    return f"{lead} {rendered}." if rendered else ""
+    if not rendered:
+        return Panel()
+    return _line(f"{lead} {rendered}.", Accent.SAID)
 
 
 def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
@@ -555,6 +661,10 @@ _CHECKS_FAILED = "### ❌"
 # Both exist because `fit` decides what to drop when a message is too long, and what it drops is
 # whatever sorted last. A matrix build of fifty jobs would otherwise let that decide which
 # failures a reader gets to see.
+# This project's own words rather than GitHub's. A button label is one of the few
+# places untrusted text could not be escaped into being safe, so none goes there.
+OPEN_ON_GITHUB = "Open on GitHub"
+
 JOBS_LISTED = 8
 JOBS_NAMED = 15
 
@@ -566,13 +676,13 @@ def format_check_results(
     teams: Sequence[Actor] = (),
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
-) -> str:
+) -> Panel:
     """What CI made of a commit, and whoever is being rung about it.
 
-    The order of these lines is the design rather than taste. `fit` drops whole lines from the
-    end, and an allow-list only PERMITS a notification: the `<@id>` text is what delivers one. So
-    the people go on line two, above every list, because a message trimmed down to its headline
-    must still ring the people it was sent to ring.
+    The order of these blocks is the design rather than taste. A panel over budget drops blocks
+    from the end, and an allow-list only PERMITS a notification: the `<@id>` text is what
+    delivers one. So the people go second, above every list, because a panel trimmed down to its
+    heading must still ring the people it was sent to ring.
 
     Failures carry their link and successes do not. A link line runs about a hundred and eighty
     characters, so thirty successes would be five thousand against a budget of two thousand, and
@@ -581,14 +691,20 @@ def format_check_results(
     broken, succeeded, other = report.broken, report.succeeded, report.other
     mark = _CHECKS_FAILED if broken else _CHECKS_PASSED
     jobs, have = ("job", "has") if report.total == 1 else ("jobs", "have")
-    lines = [
-        f"{mark} {len(succeeded)} / {report.total} {jobs} {have} succeeded.",
-        _told(broken, people, teams, mentions, roles),
-        _broken_jobs(broken),
-        _named_jobs("Successful Jobs", succeeded),
-        _sat_out(other),
+    written = [
+        (
+            BlockKind.HEADING,
+            f"{mark} {len(succeeded)} / {report.total} {jobs} {have} succeeded.",
+        ),
+        (BlockKind.SUBHEADING, _told(broken, people, teams, mentions, roles)),
+        (BlockKind.FIELDS, _broken_jobs(broken)),
+        (BlockKind.FIELDS, _named_jobs("Successful Jobs", succeeded)),
+        (BlockKind.FOOTNOTE, _sat_out(other)),
     ]
-    return fit("\n".join(line for line in lines if line))
+    return Panel(
+        blocks=tuple(Block(kind, said) for kind, said in written if said),
+        accent=Accent.FAILED if broken else Accent.PASSED,
+    )
 
 
 def _told(
@@ -660,7 +776,7 @@ def _sat_out(other: Sequence[CheckRun]) -> str:
     return f"-# {len(other)} other {jobs} neither passed nor failed."
 
 
-def format_commit(commit: Commit) -> str:
+def format_commit(commit: Commit) -> Panel:
     """One commit that landed on a pull request, as its own message in the thread.
 
     **No mentions argument, and that is the requirement rather than an oversight.** `_person` is
@@ -678,11 +794,18 @@ def format_commit(commit: Commit) -> str:
     which is most of them.
     """
     said = f"{_COMMIT_MARK} **{_committer(commit.author)}** has committed {_subject(commit)}"
-    body = quote(commit.description, limit=COMMIT_MESSAGE_LIMIT)
-    return fit("\n".join(line for line in (said, body, _changes(commit.stats)) if line))
+    # Unquoted since issue #113. The rule above it does the separating the `> ` markers were
+    # doing, and doing badly.
+    body = clipped(commit.description, limit=COMMIT_MESSAGE_LIMIT)
+
+    blocks = [Block(BlockKind.HEADING, said)]
+    if body:
+        blocks.append(Block(BlockKind.BODY, body))
+    blocks.append(Block(BlockKind.FOOTNOTE, _changes(commit.stats)))
+    return Panel(blocks=tuple(blocks), accent=Accent.NEUTRAL)
 
 
-def format_force_push(pusher: Actor | None) -> str:
+def format_force_push(pusher: Actor | None) -> Panel:
     """Said once when a branch was rewritten, instead of the commits it now holds.
 
     The commits after a rewrite have new SHAs and would all be announced as new work, which is
@@ -690,13 +813,14 @@ def format_force_push(pusher: Actor | None) -> str:
     what happened is the honest version of that, and it also covers the rollback, where GitHub
     reports nothing ahead at all and silence would be the alternative.
     """
-    return (
+    return _line(
         f"{_FORCE_PUSH_MARK} **{_committer(pusher)}** force-pushed this branch, so the commits it "
-        "replaced are not announced."
+        "replaced are not announced.",
+        Accent.NEUTRAL,
     )
 
 
-def format_commits_left(count: int) -> str:
+def format_commits_left(count: int) -> Panel:
     """The tail of a push that was not announced line by line.
 
     Small text, because it is a footnote about what is missing rather than a thing that happened.
@@ -704,7 +828,9 @@ def format_commits_left(count: int) -> str:
     whoever is reading, which is that GitHub has the rest.
     """
     were = "commit in this push was" if count == 1 else "commits in this push were"
-    return f"-# {count} earlier {were} not announced."
+    # Plain, and that is the decision. A bar down the side would make a footnote about what was
+    # left out louder than the commits it is a footnote to.
+    return Panel.of_text(f"-# {count} earlier {were} not announced.")
 
 
 def _committer(actor: Actor | None) -> str:

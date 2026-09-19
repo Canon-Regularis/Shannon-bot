@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
@@ -98,7 +98,7 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
             logger.warning("/refresh could not finish: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
-            await reply(interaction, _said(outcome, _KINDS[scope]))
+            await reply(interaction, done(_said(outcome, _KINDS[scope])))
 
     return refresh
 

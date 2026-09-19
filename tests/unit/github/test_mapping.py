@@ -447,3 +447,50 @@ class TestAPageOfCheckRuns:
         found = mapping.check_runs({"check_runs": [{"id": 1}, {"id": 2, "name": "CI"}, None]})
 
         assert [run.name for run in found] == ["CI"]
+
+
+class TestAnAccountsPicture:
+    """Issue #116. The guard is not about tidiness: Discord fetches a thumbnail's media itself and
+    refuses the WHOLE message when it cannot, so a value that is merely odd rather than usable
+    costs the item its block rather than costing a panel its picture."""
+
+    def test_a_usable_avatar_is_carried(self) -> None:
+        found = mapping.actor({"login": "octocat", "avatar_url": "https://example.invalid/u/1"})
+
+        assert found is not None
+        assert found.avatar_url == "https://example.invalid/u/1"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            12,
+            ["https://example.invalid/u/1"],
+            "http://example.invalid/u/1",
+            "//example.invalid/u/1",
+            "example.invalid/u/1",
+            "javascript:alert(1)",
+        ],
+    )
+    def test_anything_else_is_dropped(self, value: object) -> None:
+        found = mapping.actor({"login": "octocat", "avatar_url": value})
+
+        assert found is not None
+        assert found.avatar_url is None
+
+    def test_an_account_that_sent_none_is_still_an_account(self) -> None:
+        """The picture is the only thing lost. A panel without one is a panel without a
+        thumbnail, which is a different component tree and not a failure."""
+        found = mapping.actor({"login": "octocat", "id": 7})
+
+        assert found is not None
+        assert (found.login, found.github_user_id, found.avatar_url) == ("octocat", 7, None)
+
+    def test_a_team_never_has_one(self) -> None:
+        """A team is carried as an Actor so one review request means one thing all the way
+        through, but a review-request payload gives a team no picture."""
+        found = mapping.team({"slug": "platform", "name": "Platform"})
+
+        assert found is not None
+        assert found.avatar_url is None

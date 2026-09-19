@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, quote
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
 from shannon.github import mentions
 from shannon.github.mentions import MENTION_LIMIT, Mentioned, names_in, rewrite
 
@@ -22,6 +22,16 @@ pytestmark = pytest.mark.unit
 
 PEOPLE = {"john": 111, "octo-cat": 222, "canon": 333}
 TEAMS = {"backend": 900, "back_end": 901}
+
+
+def previewed(body: str) -> str:
+    """A body as the renderer cuts it, which is what the swap is handed.
+
+    Named here rather than spelled out at each call, because the point of half this file is
+    that the reader and the swap see the SAME text. Two spellings of the same cut is how
+    they drift apart.
+    """
+    return clipped(body, limit=COMMENT_PREVIEW_LIMIT)
 
 
 def swapped(text: str) -> str:
@@ -67,15 +77,15 @@ class TestWhatIsAName:
         a literal one, and the single-backslash version also compiles and also matches: it stops
         the slug at the first underscore, so this would quietly ping a team called `back`.
         """
-        escaped = quote("cc @canon/back_end")
+        escaped = previewed("cc @canon/back_end")
 
         assert "back\\_end" in escaped, "the escaping stopped doing the thing this is about"
-        assert swapped(escaped) == "> cc <@&901>"
+        assert swapped(escaped) == "cc <@&901>"
 
     def test_a_plain_underscore_is_read_the_same_way(self) -> None:
         """The reader is handed the raw body and the swap is handed the escaped one, so the same
         slug has to be found in both shapes or the two disagree about what was named."""
-        assert names_in("cc @canon/back_end") == names_in(quote("cc @canon/back_end"))
+        assert names_in("cc @canon/back_end") == names_in(previewed("cc @canon/back_end"))
 
     def test_a_name_nobody_answers_for_is_left_as_written(self) -> None:
         assert swapped("hi @nobody and @canon/nothing") == "hi @nobody and @canon/nothing"
@@ -128,7 +138,7 @@ class TestANameThePreviewCutInHalf:
     def test_a_login_cut_short_is_not_a_name(self) -> None:
         # A space before the `@`, or the character in front of it would refuse the name on its
         # own and this would pass without the cut marker doing anything.
-        cut = quote("x" * (COMMENT_PREVIEW_LIMIT - 6) + " @monalisa")
+        cut = previewed("x" * (COMMENT_PREVIEW_LIMIT - 6) + " @monalisa")
 
         assert cut.endswith(" @mona…"), "the preview stopped cutting where this expects"
         assert names_in(cut) == Mentioned(people=(), teams=())
@@ -150,19 +160,19 @@ class TestNothingAlreadyDefusedIsPutBack:
     turns it away rather than the lookup happening to miss."""
 
     def test_a_mass_mention_cannot_come_back(self) -> None:
-        text = quote("@everyone @here look")
+        text = previewed("@everyone @here look")
 
         assert rewrite(text, person=lambda name: "<@66>", team=lambda name: "<@&66>") == text, (
             "a defused mass mention was read as a login"
         )
 
     def test_a_user_mention_written_by_hand_cannot_come_back(self) -> None:
-        text = quote("ping <@1234567> please")
+        text = previewed("ping <@1234567> please")
 
         assert rewrite(text, person=lambda name: "<@66>", team=lambda name: "<@&66>") == text
 
     def test_a_role_mention_written_by_hand_cannot_come_back(self) -> None:
-        text = quote("ping <@&1234567> please")
+        text = previewed("ping <@&1234567> please")
 
         assert rewrite(text, person=lambda name: "<@66>", team=lambda name: "<@&66>") == text
 
@@ -229,7 +239,7 @@ class TestTheReaderCoversTheSwap:
         read = names_in(body.strip()[:COMMENT_PREVIEW_LIMIT])
         covered = {(False, name) for name in read.people} | {(True, name) for name in read.teams}
 
-        assert asked_about(quote(body)) <= covered
+        assert asked_about(previewed(body)) <= covered
 
 
 class TestTheShapesThisAlsoOwns:

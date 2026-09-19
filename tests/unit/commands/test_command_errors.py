@@ -6,16 +6,17 @@ import discord
 import pytest
 from discord import app_commands
 
-from shannon.commands._replies import UNEXPECTED, reply_for
+from shannon.commands._replies import UNEXPECTED, reply_for, words_for
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
     DiscordPermissionError,
 )
+from shannon.discord_bot.panels import Accent
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
-from shannon.domain.errors import NotInstalledError, NotRegisteredError
+from shannon.domain.errors import ItemNotReadyError, NotInstalledError, NotRegisteredError
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
@@ -32,22 +33,22 @@ def wrapped(error: Exception) -> app_commands.CommandInvokeError:
 
 class TestReadingAnError:
     def test_a_known_error_gets_its_own_message(self) -> None:
-        assert reply_for(NotRegisteredError("Run /register first.")) == "Run /register first."
+        assert words_for(NotRegisteredError("Run /register first.")) == "Run /register first."
 
     def test_the_kind_of_item_is_named(self) -> None:
-        assert reply_for(GitHubNotFoundError("gone"), noun="issue") == (
+        assert words_for(GitHubNotFoundError("gone"), noun="issue") == (
             "GitHub could not find that issue."
         )
 
     def test_the_most_specific_match_wins(self) -> None:
         """GitHubNotFoundError is a GitHubError, and only one of the two answers is useful."""
-        assert "could not find" in reply_for(GitHubNotFoundError("gone"))
-        assert "could not be reached" in reply_for(GitHubUnavailableError("timed out"))
+        assert "could not find" in words_for(GitHubNotFoundError("gone"))
+        assert "could not be reached" in words_for(GitHubUnavailableError("timed out"))
 
     def test_a_spent_quota_says_when_to_come_back_rather_than_that_github_is_down(self) -> None:
         """GitHub answered. It said no, and it said when to ask again, and the client already
         works that out. Reporting it as unreachable told the person nothing they could use."""
-        answer = reply_for(GitHubRateLimitError("slow down", retry_after=1800))
+        answer = words_for(GitHubRateLimitError("slow down", retry_after=1800))
 
         assert "rate limit" in answer
         assert "about 30 minutes" in answer
@@ -65,37 +66,37 @@ class TestReadingAnError:
     def test_the_wait_is_rounded_up_and_read_in_minutes(self, seconds: int, expected: str) -> None:
         """Rounded up, because telling somebody to wait less than the truth earns a second
         refusal, and a single minute reads differently from several."""
-        assert reply_for(GitHubRateLimitError("slow down", retry_after=seconds)).endswith(expected)
+        assert words_for(GitHubRateLimitError("slow down", retry_after=seconds)).endswith(expected)
 
     def test_a_quota_with_no_stated_wait_still_says_something_useful(self) -> None:
-        assert reply_for(GitHubRateLimitError("slow down")) == (
+        assert words_for(GitHubRateLimitError("slow down")) == (
             "GitHub's rate limit is spent. Try again shortly."
         )
 
     def test_a_refused_token_points_at_the_admin_rather_than_at_the_network(self) -> None:
         """Nobody running a command can fix this one, so the message has to say whose it is."""
-        answer = reply_for(GitHubAuthError("GitHub refused the request for /repos/a/b (403)"))
+        answer = words_for(GitHubAuthError("GitHub refused the request for /repos/a/b (403)"))
 
         assert "admin" in answer
         assert "could not be reached" not in answer
         assert "/repos/a/b" not in answer, "the API path is no use to a person in Discord"
 
     def test_something_unrecognised_gets_the_catch_all(self) -> None:
-        assert reply_for(RuntimeError("connection pool exhausted")) == UNEXPECTED
+        assert words_for(RuntimeError("connection pool exhausted")) == UNEXPECTED
 
     def test_an_error_discord_wrapped_is_still_recognised(self) -> None:
         """Without unwrapping, everything reaching the tree handler reads as the catch-all."""
-        assert reply_for(wrapped(NotRegisteredError("Run /register first."))) == (
+        assert words_for(wrapped(NotRegisteredError("Run /register first."))) == (
             "Run /register first."
         )
 
     def test_a_wrapped_gateway_failure_is_recognised_too(self) -> None:
-        assert "Discord refused the update" in reply_for(wrapped(DiscordGatewayError("no")))
+        assert "Discord refused the update" in words_for(wrapped(DiscordGatewayError("no")))
 
     def test_a_missing_permission_says_it_is_a_permission(self) -> None:
         """The likeliest thing to go wrong on a new server, and nobody in the thread can wait it
         out. It used to read as a refusal, with discord.py's error code echoed after it."""
-        answer = reply_for(
+        answer = words_for(
             DiscordPermissionError("403 Forbidden (error code: 50013): Missing Permissions")
         )
 
@@ -104,19 +105,50 @@ class TestReadingAnError:
         assert "50013" not in answer, "a Discord error code is no use to a person in Discord"
 
     def test_a_channel_that_has_gone_names_the_command_that_fixes_it(self) -> None:
-        answer = reply_for(ChannelNotFoundError("Channel 12345 is not there"), noun="issue")
+        answer = words_for(ChannelNotFoundError("Channel 12345 is not there"), noun="issue")
 
         assert "/set_channel" in answer
         assert "12345" not in answer, "a snowflake is no use to a person in Discord"
 
     def test_an_ordinary_refusal_is_still_an_ordinary_refusal(self) -> None:
         """Both of the rows above are a gateway error, so the order of the three decides this."""
-        answer = reply_for(DiscordGatewayError("Discord refused to update the thread: 503"))
+        answer = words_for(DiscordGatewayError("Discord refused to update the thread: 503"))
 
         assert answer == "Discord refused the update. Discord refused to update the thread: 503"
 
     def test_a_wrapped_unknown_still_gets_the_catch_all(self) -> None:
-        assert reply_for(wrapped(RuntimeError("boom"))) == UNEXPECTED
+        assert words_for(wrapped(RuntimeError("boom"))) == UNEXPECTED
+
+
+class TestTheColourOfARefusal:
+    """A bar that says what KIND of no this is before the sentence under it has been read."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubRateLimitError("slow down", retry_after=60),
+            ItemNotReadyError("still being set up"),
+        ],
+    )
+    def test_one_that_comes_right_on_its_own_is_amber(self, error: Exception) -> None:
+        assert reply_for(error).accent == Accent.MEDIUM
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubAuthError("refused"),
+            NotRegisteredError("Run /register first."),
+            RuntimeError("boom"),
+        ],
+    )
+    def test_one_somebody_has_to_put_right_is_red(self, error: Exception) -> None:
+        assert reply_for(error).accent == Accent.FAILED
+
+    def test_the_words_are_the_ones_the_table_gives_and_nothing_else(self) -> None:
+        """The bar is the whole of what the card adds, which is why no call site moved."""
+        error = NotRegisteredError("Run /register first.")
+
+        assert reply_for(error).text == words_for(error)
 
 
 class TestTheBackstop:
@@ -188,7 +220,7 @@ def test_a_repository_the_app_cannot_see_says_so_instead_of_saying_it_is_missing
     and the person went and checked a link that was perfectly correct. This row sits above the 404
     row in the table, and the table is ordered most specific first.
     """
-    said = reply_for(
+    said = words_for(
         NotInstalledError("This bot cannot see acme/secret. Install the GitHub App on it."),
         noun="repository",
     )

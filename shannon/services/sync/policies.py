@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from shannon.discord_bot import formatting
+from shannon.discord_bot.panels import Panel
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.domain.models import (
@@ -45,7 +46,7 @@ class SyncPolicy(Protocol):
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
-    ) -> str: ...
+    ) -> Panel: ...
 
     def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]: ...
 
@@ -106,7 +107,7 @@ class PullRequestPolicy:
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
-    ) -> str:
+    ) -> Panel:
         return formatting.format_pull_request(
             snapshot, status=status, priority=priority, mentions=mentions
         )
@@ -175,7 +176,7 @@ class IssuePolicy:
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
-    ) -> str:
+    ) -> Panel:
         return formatting.format_issue(
             snapshot, status=status, priority=priority, mentions=mentions
         )
@@ -240,7 +241,7 @@ class TicketPolicy:
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
-    ) -> str:
+    ) -> Panel:
         return formatting.format_ticket(snapshot, status=status)
 
     def assignments(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:

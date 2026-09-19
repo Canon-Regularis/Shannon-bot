@@ -83,4 +83,4 @@ def test_a_rendered_timestamp_does_not_depend_on_the_host_timezone() -> None:
     )
 
     assert format_comment(naive) == format_comment(aware)
-    assert f"<t:{int(NOON_UTC.timestamp())}:f>" in format_comment(naive)
+    assert f"<t:{int(NOON_UTC.timestamp())}:f>" in format_comment(naive).text

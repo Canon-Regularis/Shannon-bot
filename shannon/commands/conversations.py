@@ -21,7 +21,7 @@ from discord import app_commands
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 
@@ -108,7 +108,7 @@ async def _act(
         logger.warning("/%s could not finish: %s", command, error.message)
         await reply(interaction, reply_for(error))
     else:
-        await reply(interaction, _said(full_name, number, starting=starting))
+        await reply(interaction, done(_said(full_name, number, starting=starting)))
 
 
 def _said(full_name: str, number: int, *, starting: bool) -> str:

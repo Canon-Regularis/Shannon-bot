@@ -55,8 +55,11 @@ REVIEW = ReviewSnapshot(
 )
 
 
-def said(body: str, mentions: dict[str, int] | None = None, roles: dict[str, int] | None = None):
-    return format_comment(replace(COMMENT, body=body), mentions, roles)
+def said(
+    body: str, mentions: dict[str, int] | None = None, roles: dict[str, int] | None = None
+) -> str:
+    """The words of the card, which is what the swap either did or did not reach."""
+    return format_comment(replace(COMMENT, body=body), mentions, roles).text
 
 
 class TestANameTheServerKnows:
@@ -74,7 +77,7 @@ class TestANameTheServerKnows:
     def test_a_review_body_carries_them_too(self) -> None:
         """The two renderers share `_note`, so testing only one would leave the other resting on
         an implementation detail rather than on a test."""
-        assert "<@111>" in format_review(replace(REVIEW, body="nice one @john"), {"john": 111})
+        assert "<@111>" in format_review(replace(REVIEW, body="nice one @john"), {"john": 111}).text
 
     def test_a_name_nobody_linked_is_still_readable(self) -> None:
         line = said("can you look, @nobody?", {"john": 111})

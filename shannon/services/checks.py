@@ -29,6 +29,7 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import ItemNotReadyError
@@ -78,7 +79,7 @@ class Renders(Protocol):
         teams: Sequence[Actor],
         mentions: Mapping[str, int] | None,
         roles: Mapping[str, int] | None,
-    ) -> str: ...
+    ) -> Panel: ...
 
 
 Parses = Callable[[str, JsonObject], CheckSuiteEvent | None]
@@ -241,9 +242,7 @@ class CheckSuiteAnnouncer:
             tracked_item_id=tracked_item_id,
             thread_id=thread_id,
             note_key=report.note_key,
-            content=self._render(
-                report, people=people, teams=teams, mentions=mentions, roles=roles
-            ),
+            panel=self._render(report, people=people, teams=teams, mentions=mentions, roles=roles),
             notify=notify,
         )
         logger.info(

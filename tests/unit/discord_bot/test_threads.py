@@ -12,6 +12,7 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import (
     ARCHIVE_AFTER_MINUTES,
     THREAD_NAME_LIMIT,
@@ -175,11 +176,11 @@ async def test_text_channel_thread_is_created_with_its_metadata_message() -> Non
     channel = text_channel(created)
     gateway = DiscordThreadGateway(client_with(channel))
 
-    handle = await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+    handle = await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
     channel.create_thread.assert_awaited_once()
     assert channel.create_thread.await_args.kwargs["name"] == "#7 Title"
-    created.send.assert_awaited_once_with("metadata")
+    created.send.assert_awaited_once_with(content="metadata")
     assert handle.thread_id == 500
     assert handle.message_id == 900
 
@@ -189,7 +190,7 @@ async def test_forum_channel_thread_carries_its_content_in_the_starter_post() ->
     channel = forum_channel(created, message(901))
     gateway = DiscordThreadGateway(client_with(channel))
 
-    handle = await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+    handle = await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
     assert channel.create_thread.await_args.kwargs["content"] == "metadata"
     assert handle == type(handle)(thread_id=500, message_id=901)
@@ -199,7 +200,7 @@ async def test_creating_in_a_voice_channel_is_refused() -> None:
     gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.VoiceChannel)))
 
     with pytest.raises(ChannelNotFoundError, match="cannot hold threads"):
-        await gateway.create(channel_id=10, name="x", content="y")
+        await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
 
 async def test_an_unreachable_channel_is_reported() -> None:
@@ -209,7 +210,7 @@ async def test_an_unreachable_channel_is_reported() -> None:
     gateway = DiscordThreadGateway(client)
 
     with pytest.raises(ChannelNotFoundError):
-        await gateway.create(channel_id=10, name="x", content="y")
+        await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
 
 async def test_update_edits_the_existing_metadata_message() -> None:
@@ -219,10 +220,12 @@ async def test_update_edits_the_existing_metadata_message() -> None:
     gateway = DiscordThreadGateway(client_with(existing))
 
     handle = await gateway.update(
-        thread_id=500, message_id=600, name=existing.name, content="new metadata"
+        thread_id=500, message_id=600, name=existing.name, panel=Panel.of_text("new metadata")
     )
 
-    edited.edit.assert_awaited_once_with(content="new metadata")
+    edited.edit.assert_awaited_once_with(
+        content="new metadata", embed=None, attachments=[], view=None
+    )
     existing.send.assert_not_awaited()
     assert handle.message_id == 600
 
@@ -231,10 +234,14 @@ async def test_update_renames_only_when_the_title_changed() -> None:
     existing = thread(name="#7 Old title")
     gateway = DiscordThreadGateway(client_with(existing))
 
-    await gateway.update(thread_id=500, message_id=600, name="#7 Old title", content="x")
+    await gateway.update(
+        thread_id=500, message_id=600, name="#7 Old title", panel=Panel.of_text("x")
+    )
     existing.edit.assert_not_awaited()
 
-    await gateway.update(thread_id=500, message_id=600, name="#7 New title", content="x")
+    await gateway.update(
+        thread_id=500, message_id=600, name="#7 New title", panel=Panel.of_text("x")
+    )
     existing.edit.assert_awaited_once_with(name="#7 New title")
 
 
@@ -244,10 +251,10 @@ async def test_update_posts_a_replacement_when_the_message_was_deleted() -> None
     gateway = DiscordThreadGateway(client_with(existing))
 
     handle = await gateway.update(
-        thread_id=500, message_id=600, name=existing.name, content="metadata"
+        thread_id=500, message_id=600, name=existing.name, panel=Panel.of_text("metadata")
     )
 
-    existing.send.assert_awaited_once_with("metadata")
+    existing.send.assert_awaited_once_with(content="metadata")
     assert handle.message_id == 900
 
 
@@ -256,11 +263,11 @@ async def test_update_posts_a_first_message_when_none_was_stored() -> None:
     gateway = DiscordThreadGateway(client_with(existing))
 
     handle = await gateway.update(
-        thread_id=500, message_id=None, name=existing.name, content="metadata"
+        thread_id=500, message_id=None, name=existing.name, panel=Panel.of_text("metadata")
     )
 
     existing.fetch_message.assert_not_awaited()
-    existing.send.assert_awaited_once_with("metadata")
+    existing.send.assert_awaited_once_with(content="metadata")
     assert handle.message_id == 900
 
 
@@ -268,7 +275,7 @@ async def test_update_never_creates_a_second_thread() -> None:
     existing = thread()
     gateway = DiscordThreadGateway(client_with(existing))
 
-    await gateway.update(thread_id=500, message_id=600, name="#7 Renamed", content="x")
+    await gateway.update(thread_id=500, message_id=600, name="#7 Renamed", panel=Panel.of_text("x"))
 
     assert not hasattr(existing, "create_thread") or not existing.create_thread.await_count
 
@@ -280,23 +287,23 @@ async def test_a_missing_thread_is_reported() -> None:
     gateway = DiscordThreadGateway(client)
 
     with pytest.raises(ThreadNotFoundError):
-        await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+        await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
 
 async def test_a_channel_that_is_not_a_thread_is_refused() -> None:
     gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.TextChannel)))
 
     with pytest.raises(ThreadNotFoundError, match="is not a thread"):
-        await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+        await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
 
 async def test_post_sends_into_the_thread() -> None:
     existing = thread()
     gateway = DiscordThreadGateway(client_with(existing))
 
-    message_id = await gateway.post(thread_id=500, content="<@1> you are on this one")
+    message_id = await gateway.post(thread_id=500, panel=Panel.of_text("<@1> you are on this one"))
 
-    existing.send.assert_awaited_once_with("<@1> you are on this one")
+    existing.send.assert_awaited_once_with(content="<@1> you are on this one")
     assert message_id == 900
 
 
@@ -306,7 +313,7 @@ async def test_a_discord_failure_surfaces_as_a_gateway_error() -> None:
     gateway = DiscordThreadGateway(client_with(existing))
 
     with pytest.raises(DiscordGatewayError):
-        await gateway.post(thread_id=500, content="x")
+        await gateway.post(thread_id=500, panel=Panel.of_text("x"))
 
 
 def test_long_thread_names_are_truncated() -> None:
@@ -332,7 +339,7 @@ class TestArchivedThreads:
         channel = text_channel(created)
         gateway = DiscordThreadGateway(client_with(channel))
 
-        await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+        await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
         kwargs = channel.create_thread.await_args.kwargs
         assert kwargs["auto_archive_duration"] == ARCHIVE_AFTER_MINUTES
@@ -341,7 +348,7 @@ class TestArchivedThreads:
         channel = forum_channel(thread(), message(901))
         gateway = DiscordThreadGateway(client_with(channel))
 
-        await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+        await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
         assert channel.create_thread.await_args.kwargs["auto_archive_duration"] == (
             ARCHIVE_AFTER_MINUTES
@@ -351,7 +358,9 @@ class TestArchivedThreads:
         existing = thread(archived=True)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.update(thread_id=500, message_id=600, name=existing.name, content="new")
+        await gateway.update(
+            thread_id=500, message_id=600, name=existing.name, panel=Panel.of_text("new")
+        )
 
         assert existing.edit.await_args_list[0].kwargs == {"archived": False}
 
@@ -359,16 +368,16 @@ class TestArchivedThreads:
         existing = thread(archived=True)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.post(thread_id=500, content="a comment")
+        await gateway.post(thread_id=500, panel=Panel.of_text("a comment"))
 
         existing.edit.assert_awaited_once_with(archived=False)
-        existing.send.assert_awaited_once_with("a comment")
+        existing.send.assert_awaited_once_with(content="a comment")
 
     async def test_an_open_thread_is_not_edited_just_to_reopen_it(self) -> None:
         existing = thread(archived=False)
         gateway = DiscordThreadGateway(client_with(existing))
 
-        await gateway.post(thread_id=500, content="a comment")
+        await gateway.post(thread_id=500, panel=Panel.of_text("a comment"))
 
         existing.edit.assert_not_awaited()
 
@@ -485,7 +494,7 @@ class TestPartialCreation:
         gateway = DiscordThreadGateway(client_with(text_channel(created)))
 
         with pytest.raises(ThreadStartedEmptyError) as raised:
-            await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+            await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
         assert raised.value.thread_id == 500
 
@@ -495,7 +504,7 @@ class TestPartialCreation:
         gateway = DiscordThreadGateway(client_with(text_channel(created)))
 
         with pytest.raises(ThreadStartedEmptyError) as raised:
-            await gateway.create(channel_id=10, name="#7 Title", content="metadata")
+            await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
         assert isinstance(raised.value.__cause__, DiscordPermissionError)
 
@@ -507,7 +516,7 @@ class TestPartialCreation:
         gateway = DiscordThreadGateway(client_with(channel))
 
         with pytest.raises(DiscordPermissionError):
-            await gateway.create(channel_id=10, name="x", content="y")
+            await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
     async def test_a_permission_error_is_permanent(self) -> None:
         """The worker gives up on these at once rather than retrying for two hours."""
@@ -587,7 +596,7 @@ class TestDiscordFailingOnTheLookupItself:
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(DiscordGatewayError, match=r"503|unavailable"):
-            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+            await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
     async def test_discord_being_down_is_a_gateway_error_too(self) -> None:
         """Raised by discord.py once its own five retries are spent, so it means it."""
@@ -595,14 +604,14 @@ class TestDiscordFailingOnTheLookupItself:
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(DiscordGatewayError):
-            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+            await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
     async def test_a_channel_lookup_that_fails_is_a_gateway_error(self) -> None:
         client = self._client_failing(discord.HTTPException(MagicMock(status=503), "unavailable"))
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(DiscordGatewayError):
-            await gateway.create(channel_id=10, name="x", content="y")
+            await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
     async def test_the_stranded_thread_it_cannot_look_up_is_still_not_worth_raising_over(
         self,
@@ -619,7 +628,7 @@ class TestDiscordFailingOnTheLookupItself:
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(DiscordPermissionError):
-            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+            await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
 
 class TestRefusedIsNotGone:
@@ -640,13 +649,13 @@ class TestRefusedIsNotGone:
         gateway = DiscordThreadGateway(self._client_refusing())
 
         with pytest.raises(DiscordPermissionError):
-            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+            await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
     async def test_a_refused_channel_is_a_permission_error(self) -> None:
         gateway = DiscordThreadGateway(self._client_refusing())
 
         with pytest.raises(DiscordPermissionError):
-            await gateway.create(channel_id=10, name="x", content="y")
+            await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
     async def test_a_missing_thread_is_still_reported_as_missing(self) -> None:
         client = MagicMock(spec=discord.Client)
@@ -655,7 +664,7 @@ class TestRefusedIsNotGone:
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(ThreadNotFoundError):
-            await gateway.update(thread_id=500, message_id=None, name="x", content="y")
+            await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
 
     async def test_a_channel_that_is_gone_is_permanent(self) -> None:
         """Both a deleted channel and one that cannot hold threads need /set_channel."""
@@ -680,9 +689,12 @@ class TestBeforeTheGatewayIsConnected:
     @pytest.mark.parametrize(
         ("what", "call"),
         [
-            ("create", lambda g: g.create(channel_id=10, name="n", content="c")),
-            ("update", lambda g: g.update(thread_id=1, message_id=2, name="n", content="c")),
-            ("post", lambda g: g.post(thread_id=1, content="c")),
+            ("create", lambda g: g.create(channel_id=10, name="n", panel=Panel.of_text("c"))),
+            (
+                "update",
+                lambda g: g.update(thread_id=1, message_id=2, name="n", panel=Panel.of_text("c")),
+            ),
+            ("post", lambda g: g.post(thread_id=1, panel=Panel.of_text("c"))),
             ("set_shut", lambda g: g.set_shut(thread_id=1, shut=True)),
             ("channel_of", lambda g: g.channel_of(thread_id=1)),
         ],
@@ -699,7 +711,7 @@ class TestBeforeTheGatewayIsConnected:
         gateway = DiscordThreadGateway(client_with(thread(), ready=False))
 
         with pytest.raises(DiscordGatewayError) as caught:
-            await gateway.post(thread_id=1, content="c")
+            await gateway.post(thread_id=1, panel=Panel.of_text("c"))
 
         assert not isinstance(caught.value, PermanentError)
 
@@ -717,7 +729,7 @@ class TestBeforeTheGatewayIsConnected:
         client = client_with(thread(), ready=False)
 
         with pytest.raises(DiscordGatewayError):
-            await gateway_for(client).create(channel_id=10, name="n", content="c")
+            await gateway_for(client).create(channel_id=10, name="n", panel=Panel.of_text("c"))
 
         client.get_channel.assert_not_called()
         client.fetch_channel.assert_not_awaited()
@@ -785,7 +797,7 @@ async def test_a_thread_opened_in_a_forum_carries_the_allow_list() -> None:
     channel = forum_channel(created, first)
     gateway = DiscordThreadGateway(client_with(channel))
 
-    await gateway.create(channel_id=10, name="#7 Title", content="<@1>", notify=[1])
+    await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("<@1>"), notify=[1])
 
     allowed = channel.create_thread.await_args.kwargs["allowed_mentions"]
     assert allowed.to_dict()["users"] == [1]
@@ -798,7 +810,7 @@ async def test_a_thread_opened_in_a_text_channel_carries_it_on_the_first_message
     channel = text_channel(created)
     gateway = DiscordThreadGateway(client_with(channel))
 
-    await gateway.create(channel_id=10, name="#7 Title", content="<@1>", notify=[1])
+    await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("<@1>"), notify=[1])
 
     assert "allowed_mentions" not in channel.create_thread.await_args.kwargs
     assert created.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == [1]
@@ -808,7 +820,7 @@ async def test_a_post_carries_the_allow_list() -> None:
     existing = thread()
     gateway = DiscordThreadGateway(client_with(existing))
 
-    await gateway.post(thread_id=500, content="<@1>", notify=())
+    await gateway.post(thread_id=500, panel=Panel.of_text("<@1>"), notify=())
 
     assert existing.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == []
 
@@ -821,6 +833,8 @@ async def test_a_replacement_for_a_deleted_metadata_message_carries_it() -> None
     existing.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
     gateway = DiscordThreadGateway(client_with(existing))
 
-    await gateway.update(thread_id=500, message_id=600, name="#7 T", content="<@1>", notify=())
+    await gateway.update(
+        thread_id=500, message_id=600, name="#7 T", panel=Panel.of_text("<@1>"), notify=()
+    )
 
     assert existing.send.await_args.kwargs["allowed_mentions"].to_dict()["users"] == []

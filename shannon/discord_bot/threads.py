@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import discord
+from discord import ui
 
 from shannon.discord_bot.errors import (
     ChannelNotFoundError,
@@ -15,6 +16,8 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
+from shannon.discord_bot.layout import as_message
+from shannon.discord_bot.panels import Panel
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,16 @@ THREAD_NAME_LIMIT = 100
 # Threads can only be opened in these. Any other channel type has to be refused where somebody
 # is still watching, because by the time the sync path reaches it there is nobody to tell.
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
+
+
+def _said(content: str | None, view: ui.LayoutView | None) -> dict[str, object]:
+    """The one of the two a message may carry, as the keyword to pass.
+
+    Discord refuses a message holding components beside content, so exactly one of these is ever
+    set. Built as a splat for the same reason `_may_notify` is: the alternative is every send site
+    branching on panel shape, and there are nine of them.
+    """
+    return {"content": content} if view is None else {"view": view}
 
 
 def _may_notify(notify: Notify) -> dict[str, discord.AllowedMentions]:
@@ -161,7 +174,7 @@ class OpensThreads(Protocol):
     """
 
     async def create(
-        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+        self, *, channel_id: int, name: str, panel: Panel, notify: Notify = None
     ) -> ThreadHandle: ...
 
     async def update(
@@ -170,7 +183,7 @@ class OpensThreads(Protocol):
         thread_id: int,
         message_id: int | None,
         name: str,
-        content: str,
+        panel: Panel,
         notify: Notify = None,
     ) -> ThreadHandle: ...
 
@@ -180,7 +193,7 @@ class OpensThreads(Protocol):
 class PostsToThread(Protocol):
     """Adding a message to a thread that already exists."""
 
-    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None: ...
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None: ...
 
 
 class ShutsThread(Protocol):
@@ -265,17 +278,18 @@ class DiscordThreadGateway:
         self._client = client
 
     async def create(
-        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+        self, *, channel_id: int, name: str, panel: Panel, notify: Notify = None
     ) -> ThreadHandle:
         channel = await self._channel(channel_id)
         name = truncate_thread_name(name)
+        content, view = as_message(panel)
 
         if isinstance(channel, discord.ForumChannel):
             with _translated("create a thread"):
                 created = await channel.create_thread(
                     name=name,
-                    content=content,
                     auto_archive_duration=ARCHIVE_AFTER_MINUTES,
+                    **_said(content, view),
                     **_may_notify(notify),
                 )
             return ThreadHandle(thread_id=created.thread.id, message_id=created.message.id)
@@ -297,7 +311,7 @@ class DiscordThreadGateway:
                     # look for it: `TextChannel.create_thread` takes neither the content nor an
                     # allow-list, because it opens an empty thread and the first message is a
                     # separate call. A forum channel does both at once.
-                    message = await thread.send(content, **_may_notify(notify))
+                    message = await thread.send(**_said(content, view), **_may_notify(notify))
             except DiscordGatewayError as error:
                 raise ThreadStartedEmptyError(str(error), thread_id=thread.id) from error
             return ThreadHandle(thread_id=thread.id, message_id=message.id)
@@ -312,7 +326,7 @@ class DiscordThreadGateway:
         thread_id: int,
         message_id: int | None,
         name: str,
-        content: str,
+        panel: Panel,
         notify: Notify = None,
     ) -> ThreadHandle:
         thread = await self._thread(thread_id)
@@ -323,15 +337,16 @@ class DiscordThreadGateway:
             # Renames are rate limited hard, so only spend one when the title actually moved.
             if thread.name != name:
                 await thread.edit(name=name)
-            resolved_message_id = await self._edit_or_post(thread, message_id, content, notify)
+            resolved_message_id = await self._edit_or_post(thread, message_id, panel, notify)
 
         return ThreadHandle(thread_id=thread.id, message_id=resolved_message_id)
 
-    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None:
+        content, view = as_message(panel)
         thread = await self._thread(thread_id)
         with _translated("post to the thread"):
             await self._wake(thread)
-            message = await thread.send(content, **_may_notify(notify))
+            message = await thread.send(**_said(content, view), **_may_notify(notify))
         return message.id
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
@@ -416,8 +431,9 @@ class DiscordThreadGateway:
             await thread.edit(archived=False)
 
     async def _edit_or_post(
-        self, thread: discord.Thread, message_id: int | None, content: str, notify: Notify = None
+        self, thread: discord.Thread, message_id: int | None, panel: Panel, notify: Notify = None
     ) -> int:
+        content, view = as_message(panel)
         if message_id is not None:
             try:
                 message = await thread.fetch_message(message_id)
@@ -428,13 +444,20 @@ class DiscordThreadGateway:
                 # An edit notifies nobody whatever it says, so the allow-list changes nothing
                 # here. Carried anyway so this method has one rule rather than two, and so the
                 # day Discord changes its mind about edits there is nothing to go back and add.
-                await message.edit(content=content, **_may_notify(notify))
+                #
+                # `embed` and `attachments` are nulled explicitly because that is what discord.py
+                # requires to attach a view to a message that did not have one, and a block
+                # carrying a bare GitHub URL has picked up an auto-generated link preview. Left
+                # in, it would refuse the edit.
+                await message.edit(
+                    content=content, embed=None, attachments=[], view=view, **_may_notify(notify)
+                )
                 return message.id
 
         # This one is a new message and does notify, which is the whole reason `update` takes an
         # allow-list at all. A block nobody can edit any more is reposted, and reposting it is
         # indistinguishable from opening the thread as far as everybody it names is concerned.
-        replacement = await thread.send(content, **_may_notify(notify))
+        replacement = await thread.send(**_said(content, view), **_may_notify(notify))
         return replacement.id
 
     def _require_a_connection(self) -> None:

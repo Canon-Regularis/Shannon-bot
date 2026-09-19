@@ -10,12 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.enums import ActorRole
 
 logger = logging.getLogger(__name__)
 
-Renderer = Callable[[Sequence[str], Mapping[str, int]], str]
+Renderer = Callable[[Sequence[str], Mapping[str, int]], Panel]
 
 
 class ResolvesMentions(Protocol):
@@ -143,7 +144,9 @@ class ActorNotifier:
             # record that somebody was put on an item after its thread already existed, and a
             # muted person asked not to be rung rather than to be left out of the thread.
             await self._threads.post(
-                thread_id=thread_id, content=self._render(logins, mentions), notify=notify
+                thread_id=thread_id,
+                panel=self._render(logins, mentions),
+                notify=notify,
             )
         except BaseException:
             # Nothing was said, so the ping is owed again; late beats twice or never.

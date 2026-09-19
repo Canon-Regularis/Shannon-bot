@@ -22,6 +22,7 @@ from shannon.container import _relocation
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.user_links import UserLinkStore
+from shannon.discord_bot.panels import Panel
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.domain.models import (
@@ -611,7 +612,9 @@ class TestABoardCard:
         threads: FakeThreadGateway,
         channel_id: int,
     ) -> int:
-        handle = await threads.create(channel_id=channel_id, name="A card", content="block")
+        handle = await threads.create(
+            channel_id=channel_id, name="A card", panel=Panel.of_text("block")
+        )
         session.add(
             TrackedItem(
                 repository_id=repository.id,

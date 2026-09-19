@@ -8,6 +8,8 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
+from shannon.discord_bot.layout import as_message, parts_in, words
+from shannon.discord_bot.panels import PANEL_BUDGET, Panel
 from shannon.discord_bot.threads import Notify, ThreadHandle, truncate_thread_name
 
 
@@ -33,6 +35,9 @@ class FakeThreadGateway:
         self.threads: dict[int, FakeThread] = {}
         self.created: list[FakeThread] = []
         self.posts: list[tuple[int, str]] = []
+        # Every panel handed to this gateway, for a test that wants the structure rather than
+        # the words: the colour of a card, whether it carries a picture, what the blocks are.
+        self.panels: list[Panel] = []
         # What each write said it was allowed to notify, beside what it wrote. Kept apart from
         # `posts` above, which around fifty tests read as (thread, content) and which is not worth
         # churning for this.
@@ -92,13 +97,41 @@ class FakeThreadGateway:
         self.fail_next_first_message = False
         self._next_id = 1000
 
+    def _drawn(self, panel: Panel) -> str:
+        """Build the panel for real, check what came out, and answer with what a reader reads.
+
+        The building is the point and it is not free ceremony. Every recorded write in this suite
+        is a string, so without this the adapter that turns a panel into components would be the
+        riskiest code in the project and three thousand tests would run without once executing it,
+        covered only by its own unit tests and never by the shapes the renderers actually build.
+
+        So the fake does strictly MORE than production: it builds the view, holds it against the
+        limits Discord enforces, throws it away, and records the text. That is the only direction
+        a stand-in may differ in, and it turns the whole suite into a fuzzer for the adapter.
+
+        What is recorded is `panel.text`, which is a reading order rather than a wire format. An
+        assertion spanning two blocks is asserting on something nothing produces.
+        """
+        content, view = as_message(panel)
+        if view is not None:
+            assert view.content_length() <= PANEL_BUDGET, "a panel too long for Discord"
+            assert parts_in(view) <= 40, "more components than Discord will take"
+            assert words(view) == [block.text for block in panel.trimmed().blocks], (
+                "the view and the panel disagree about what was said"
+            )
+            content = panel.trimmed().text
+        self.panels.append(panel)
+        assert content is not None
+        return content
+
     def _allocate(self) -> int:
         self._next_id += 1
         return self._next_id
 
     async def create(
-        self, *, channel_id: int, name: str, content: str, notify: Notify = None
+        self, *, channel_id: int, name: str, panel: Panel, notify: Notify = None
     ) -> ThreadHandle:
+        content = self._drawn(panel)
         if self.fail_next_create:
             self.fail_next_create = False
             raise DiscordGatewayError("Discord refused to create a thread")
@@ -128,9 +161,10 @@ class FakeThreadGateway:
         thread_id: int,
         message_id: int | None,
         name: str,
-        content: str,
+        panel: Panel,
         notify: Notify = None,
     ) -> ThreadHandle:
+        content = self._drawn(panel)
         if self.refuses_every_update:
             raise DiscordPermissionError("Discord will not let the bot write in that channel")
         if self.fail_next_update:
@@ -190,7 +224,8 @@ class FakeThreadGateway:
         thread = self.threads.get(thread_id)
         return None if thread is None else thread.channel_id
 
-    async def post(self, *, thread_id: int, content: str, notify: Notify = None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None:
+        content = self._drawn(panel)
         if self.post_error is not None:
             raise self.post_error
         thread = self._wake(thread_id)

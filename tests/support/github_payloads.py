@@ -26,7 +26,18 @@ REVIEW_COMMENT_ID = 2211334456
 
 
 def user(login: str, user_id: int = 1) -> dict[str, Any]:
-    return {"login": login, "id": user_id, "type": "User"}
+    """An account, the way GitHub sends one.
+
+    `avatar_url` is carried because every real user object has one and issue #116 reads it for the
+    thumbnail on a panel. Without it here the refresh and board-poll paths, which build snapshots
+    from REST through the same mapping, would quietly have no pictures and no test would notice.
+    """
+    return {
+        "login": login,
+        "id": user_id,
+        "type": "User",
+        "avatar_url": f"https://avatars.githubusercontent.com/u/{user_id}?v=4",
+    }
 
 
 def repository(**overrides: Any) -> dict[str, Any]:
