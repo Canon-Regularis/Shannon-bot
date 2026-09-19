@@ -46,6 +46,17 @@ COMMIT_TITLE_LIMIT = 120
 # link to GitHub both go with it.
 REVIEW_PATH_LIMIT = 120
 
+# A CI job's name on a line of its own, beside a link to its log. Issue #112.
+#
+# Here rather than left to `fit` for the reason the two above give, and with the same failure in
+# mind: `fit` drops WHOLE LINES from the end, so a job name long enough to carry its line past the
+# limit takes the link to the log with it, which is the only part of a failure worth clicking.
+JOB_NAME_LIMIT = 80
+
+# And the same name where several are joined onto one line. Tighter, because that line holds
+# fifteen of them and any one of them could otherwise be the whole of it.
+JOB_NAME_LIMIT_JOINED = 40
+
 
 def clipped(body: str, *, limit: int) -> str:
     """GitHub-authored text, cut to length and made safe, with nothing wrapped round it.
@@ -79,6 +90,22 @@ def clipped_path(path: str) -> str:
     if len(path) <= REVIEW_PATH_LIMIT:
         return path
     return "…" + path[-(REVIEW_PATH_LIMIT - 1) :]
+
+
+def clipped_job(name: str, *, limit: int) -> str:
+    """A CI job's name cut to length, and deliberately not escaped.
+
+    Not `clipped`, which escapes markdown: this goes inside a code span, where an escape is shown
+    rather than applied, so every backslash would arrive doubled and visible.
+
+    The FRONT is what goes, as it does for a path and for a sharper reason. A matrix names its
+    jobs `Tests (Python 3.12)` and `Tests (Python 3.13)`, so everything that tells them apart is
+    at the end, and cutting the other way would render a dozen failures as the same line.
+    """
+    name = name.strip()
+    if len(name) <= limit:
+        return name
+    return "…" + name[-(limit - 1) :]
 
 
 def quote(body: str, *, limit: int = COMMENT_PREVIEW_LIMIT) -> str:

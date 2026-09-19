@@ -6,7 +6,7 @@ what a reader sees and in what order.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
 from shannon.discord_bot.safe_text import (
@@ -14,10 +14,13 @@ from shannon.discord_bot.safe_text import (
     COMMIT_TITLE_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
     EMPTY,
+    JOB_NAME_LIMIT,
+    JOB_NAME_LIMIT_JOINED,
     MESSAGE_LIMIT,
     as_plain_text,
     as_prose,
     clipped,
+    clipped_job,
     clipped_path,
     code_span,
     defuse_mentions,
@@ -27,6 +30,8 @@ from shannon.discord_bot.safe_text import (
 from shannon.domain.enums import Priority, StateChange, Status
 from shannon.domain.models import (
     Actor,
+    CheckReport,
+    CheckRun,
     CommentSnapshot,
     Commit,
     CommitStats,
@@ -540,6 +545,119 @@ def _timestamp(value: datetime | None) -> str:
 
 _COMMIT_MARK = "📝"
 _FORCE_PUSH_MARK = "🔁"
+
+# Issue #112. A heading, like the state changes above and for the same reason: a broken build is
+# something somebody scrolls a thread looking for.
+_CHECKS_PASSED = "### ✅"
+_CHECKS_FAILED = "### ❌"
+
+# How many failures are listed one per line, and how many names are joined onto the success line.
+# Both exist because `fit` decides what to drop when a message is too long, and what it drops is
+# whatever sorted last. A matrix build of fifty jobs would otherwise let that decide which
+# failures a reader gets to see.
+JOBS_LISTED = 8
+JOBS_NAMED = 15
+
+
+def format_check_results(
+    report: CheckReport,
+    *,
+    people: Sequence[Actor] = (),
+    teams: Sequence[Actor] = (),
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> str:
+    """What CI made of a commit, and whoever is being rung about it.
+
+    The order of these lines is the design rather than taste. `fit` drops whole lines from the
+    end, and an allow-list only PERMITS a notification: the `<@id>` text is what delivers one. So
+    the people go on line two, above every list, because a message trimmed down to its headline
+    must still ring the people it was sent to ring.
+
+    Failures carry their link and successes do not. A link line runs about a hundred and eighty
+    characters, so thirty successes would be five thousand against a budget of two thousand, and
+    the thing `fit` threw away to make room would be the failures.
+    """
+    broken, succeeded, other = report.broken, report.succeeded, report.other
+    mark = _CHECKS_FAILED if broken else _CHECKS_PASSED
+    jobs, have = ("job", "has") if report.total == 1 else ("jobs", "have")
+    lines = [
+        f"{mark} {len(succeeded)} / {report.total} {jobs} {have} succeeded.",
+        _told(broken, people, teams, mentions, roles),
+        _broken_jobs(broken),
+        _named_jobs("Successful Jobs", succeeded),
+        _sat_out(other),
+    ]
+    return fit("\n".join(line for line in lines if line))
+
+
+def _told(
+    broken: Sequence[CheckRun],
+    people: Sequence[Actor],
+    teams: Sequence[Actor],
+    mentions: Mapping[str, int] | None,
+    roles: Mapping[str, int] | None,
+) -> str:
+    """Who is being rung, and what about.
+
+    The sentence is said whether or not anybody is named, because a draft pull request reports its
+    results and rings nobody, and a line reading only the verdict is what that looks like.
+    """
+    named = " ".join(
+        [
+            *(_person(person, mentions) for person in people),
+            *(_role(team.login, roles) for team in teams),
+        ]
+    )
+    said = "One or more jobs did not pass." if broken else "Everything that ran passed."
+    return f"{named} {said}".strip()
+
+
+def _broken_jobs(broken: Sequence[CheckRun]) -> str:
+    """The failures, one per line with a link to the log, which is the point of the message."""
+    if not broken:
+        return ""
+    lines = ["**Unsuccessful Jobs:**"]
+    lines.extend(_job_line(run) for run in broken[:JOBS_LISTED])
+    left = len(broken) - JOBS_LISTED
+    if left > 0:
+        lines.append(f"-# and {left} more that did not pass.")
+    return "\n".join(lines)
+
+
+def _job_line(run: CheckRun) -> str:
+    """One failure. Clipped, defused, fenced, then a bare link.
+
+    Never `[name](url)`. `as_plain_text` breaks `](` apart on purpose so that GitHub-authored text
+    cannot build a link, and a job name carrying a `]` would close the label early and leave the
+    rest of the line rendering as whatever came next.
+    """
+    named = code_span(defuse_mentions(clipped_job(run.name, limit=JOB_NAME_LIMIT)))
+    return f"- {named} <{run.html_url}>" if run.html_url else f"- {named}"
+
+
+def _named_jobs(lead: str, runs: Sequence[CheckRun]) -> str:
+    """A list of job names on one line, which either survives `fit` whole or goes whole."""
+    if not runs:
+        return ""
+    named = ", ".join(
+        code_span(defuse_mentions(clipped_job(run.name, limit=JOB_NAME_LIMIT_JOINED)))
+        for run in runs[:JOBS_NAMED]
+    )
+    left = len(runs) - JOBS_NAMED
+    return f"**{lead}:** {named}" + (f", and {left} more" if left > 0 else "")
+
+
+def _sat_out(other: Sequence[CheckRun]) -> str:
+    """The jobs that neither worked nor broke, counted rather than named.
+
+    Subtext, and last, so it is the first thing `fit` sheds. Mostly it is a job a path filter
+    skipped, which is worth knowing the shape of and not worth a line each.
+    """
+    if not other:
+        return ""
+    jobs = "job" if len(other) == 1 else "jobs"
+    return f"-# {len(other)} other {jobs} neither passed nor failed."
 
 
 def format_commit(commit: Commit) -> str:
