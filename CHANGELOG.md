@@ -5605,3 +5605,76 @@ to set the project number will find it.
   against the old thread until that thread is deleted. Both are in the README.
 - **No new App permission.** `Issues: Read and write` already covers posting a comment, and it is
   what the label and assignee writes have always relied on.
+
+## What CI made of it, and who gets rung
+
+- **A pull request's thread now says what CI did, and rings somebody about it.** Reviewers when it
+  passes, the author and the assignees when it does not. Closes #112.
+- **A new webhook event, which is a sixteen-step path in this project.** `check_suite.completed`
+  had to reach `SUPPORTED_EVENTS` before `EventRouter.register` would accept a handler for it, and
+  until it did the endpoint answered every one of them 200 `ignored` without writing a row. The
+  second largest increase in queue volume after `synchronize`, and larger in one respect: it fires
+  for a push to any branch running CI, not only one with a pull request open.
+- **Three lists where the issue asked for two, and this repository's own CI is the evidence.**
+  `Publish` comes back `skipped` on every pull request. Folded in with the failures it would report
+  a broken build on every green one and ring the author instead of the reviewers. So `success` is a
+  pass, `failure`/`timed_out`/`action_required` is a break, and everything else is counted without
+  being either.
+- **That same fact decides what "all jobs are successful" means.** Read strictly it is
+  `succeeded == total`, which here is never true, so the green half of the feature would never have
+  fired once. A job that did not run cannot have failed, so a suite with no failures passes; one
+  success is still required, or a suite where everything skipped would read as a pass.
+- **The suite is the trigger and the commit is the subject.** A check suite belongs to one app, so
+  a repository running GitHub Actions beside anything else has several finishing at different
+  moments. Each completion re-reads every check on the commit and says nothing unless they have all
+  finished, so what gets reported is the whole answer rather than one app's share of it.
+- **Nothing here touches `item_assignments.notified_at`, and that is what avoids a migration.**
+  That column answers whether somebody has been told they are ON an item, once, for the life of the
+  row. A CI ping recurs. Worse, `PullRequestPolicy.assignments` has written an `AUTHOR` row for
+  every pull request since it shipped and nothing has ever claimed one, so switching a notifier on
+  over that backlog is exactly the incident migration `0021` was written for. The claim in
+  `mirrored_notes` carries the idempotency instead, and no table or column changed.
+- **The claim key is the number of runs and the largest run id.** The largest alone is enough for
+  one provider, because re-running rotates the ids. It is a second provider that breaks it: run ids
+  are handed out when a run is CREATED, so one whose runs were made earlier and finish later leaves
+  the largest exactly where it was, finds the claim taken, and is never announced at all. The count
+  moves when the largest does not. There is a test that fails without it.
+- **A superseded run is not a broken one, and neither obvious guard works.** `cancel-in-progress`
+  stops the previous run on a new push and it completes as `cancelled` with its finished jobs still
+  reading `success`, so "every run was cancelled" never fires. The suite's own conclusion is worse
+  than useless: GitHub takes the worst of its runs and `cancelled` outranks `failure`, so that test
+  would swallow a real break. The guard is exact instead, comparing the suite's commit against the
+  pull request's current head, which needed `head_sha` on the snapshot.
+- **Pull requests from forks are not supported, and the obvious fix would have been a bug.** A
+  fork's suite carries no pull request, and so does every push to the default branch. The tempting
+  fallback is `GET /commits/{sha}/pulls`, and against the live API that endpoint answers with the
+  pull request the commit was MERGED by. CI runs on every push to `main` here, so every merge would
+  have resolved to the pull request just merged, posted into its archived thread, reopened it, and
+  rung everybody who reviewed it.
+- **Links on failures only, which the issue asked for on both.** A link line runs about a hundred
+  and eighty characters against a budget of two thousand, so thirty successful jobs would be five
+  thousand and `fit` would be choosing which failures a reader sees. Failures get a line and a log
+  link each; successes are names on one line that survives or goes whole.
+- **The people go on line two, above every list.** An allow-list permits a notification and the
+  `<@id>` text delivers one, and `fit` drops whole lines from the end, so a message trimmed to its
+  headline has to still carry the people it was sent to ring. There is a test that makes the lists
+  enormous and checks the mention survives.
+- **`ClaimedLine` gained an allow-list.** It is the first claimed line that has to ring anybody.
+  The default leaves every existing caller unchanged, and it does not let one ping by accident:
+  `_person` is still the only thing that builds a mention and still needs a map to look one up in,
+  so a renderer handed none cannot name anybody whatever the allow-list permits.
+- **A draft posts its results and rings nobody.** GitHub runs CI on one like any other pull
+  request. Both halves are said: no mentions map, so no mention can be built, and an empty
+  allow-list, so nothing could ring even if one were.
+- **A new App permission, and granting one is not free.** `Checks: Read`. Adding a permission to an
+  installed App suspends its event delivery until somebody accepts the change, and until they do no
+  suite arrives at all and the feature is indistinguishable from a broken one. The README says so,
+  and the first suite that does land logs a line, so "did the permission go through" has an answer.
+- **The README's webhook event list is now checked against the code.** It had been uncovered prose
+  since it was written, it is the list an operator ticks boxes from, and a stale one is a feature
+  that silently never fires.
+- **Also fixed:** the README still claimed no privileged intent was needed, which #103 made untrue
+  for a deployment that turns message capture on.
+- Known and not fixed: if two providers' deliveries both read the checks before the other's
+  completion is visible, neither announces and nobody is told. A silent miss rather than a double
+  post, and the skip logs the commit and what was still running so it can be seen.
