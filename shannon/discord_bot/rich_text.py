@@ -241,9 +241,11 @@ def _named(host: str) -> str:
 
     Punycode, because the point of naming a host is that somebody can read it and tell. A host
     spelled with a Cyrillic small letter i renders as `github.com` and is not, and `xn--` in front
-    of it is visibly not the thing it is imitating. An ASCII host encodes to itself. A host `idna`
-    refuses outright, such as one carrying an underscore, is shown as written: it is being read
-    rather than followed, and showing it wrong is worse than showing it oddly.
+    of it is visibly not the thing it is imitating. An ASCII host encodes to itself, including one
+    nobody could register: the codec waves through any ASCII label of sixty-three characters or
+    fewer rather than applying the rules that would refuse an underscore. A host it does refuse,
+    such as one carrying a longer label than that, is shown as written: it is being read rather
+    than followed, and showing it wrong is worse than showing it oddly.
     """
     try:
         return host.encode("idna").decode("ascii")

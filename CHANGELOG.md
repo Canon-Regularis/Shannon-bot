@@ -5892,7 +5892,10 @@ to set the project number will find it.
   the characters are shown as typed. `github.com.evil.example` is not GitHub, which is why the rule
   matches the whole host or a dot and the whole host rather than a suffix.
 - **The host is shown in punycode.** One spelled with a Cyrillic letter renders as `github.com` and
-  is not. Naming a host is only worth doing if a reader can trust their eyes about it.
+  is not. Naming a host is only worth doing if a reader can trust their eyes about it. One `idna`
+  refuses is shown as written instead, which is a narrower case than it sounds: the codec waves
+  through any ASCII label that fits in sixty-three characters without applying the rules that
+  would refuse an underscore, so it takes a longer label than that to get there.
 - **Pictures are shown as pictures.** Closes #126. Discord renders no inline image anywhere, so
   `![a screenshot](...)` left a line of URL where a reader expected a picture. Up to four now come
   out of the text and into a real media gallery under the description, and the alt text stays where

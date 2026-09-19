@@ -163,9 +163,24 @@ class TestWhereALinkGoes:
 
         assert "xn--" in said(f"[a](https://gith{cyrillic_u}b.com/x)")
 
-    def test_a_host_idna_refuses_is_shown_as_written(self) -> None:
-        """Being read rather than followed, so showing it wrong is worse than showing it oddly."""
+    def test_a_host_that_merely_looks_wrong_is_encoded_to_itself(self) -> None:
+        """An underscore is not something `idna` objects to, which is easy to assume it is.
+
+        The codec waves through any ASCII label that fits in sixty-three characters without
+        applying the rules that would refuse this one, so a host nobody could register comes
+        back exactly as it went in, down the ordinary path rather than the one below.
+        """
         assert said("[a](https://a_b.example/x)") == "a (a_b.example)"
+
+    def test_a_host_idna_refuses_is_shown_as_written(self) -> None:
+        """Being read rather than followed, so showing it wrong is worse than showing it oddly.
+
+        A label over sixty-three characters is what the codec refuses outright, and it is built
+        rather than typed for the reason the homograph test above gives.
+        """
+        too_long = "n" * 70
+
+        assert said(f"[a](https://{too_long}.example/x)") == f"a ({too_long}.example)"
 
     @pytest.mark.parametrize(
         "url", ["javascript:alert(1)", "http://plain.example/x", "/relative/path"]
