@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 
 from shannon.discord_bot.capture import CapturedMessage, captured, from_a_person, has_words
+from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.slash import SlashCommand
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Turns whatever a command raised into something worth showing the person who ran it. Injected
 # because the mapping knows the service errors, and nothing in this package should.
-ExplainError = Callable[[BaseException], str]
+ExplainError = Callable[[BaseException], Panel]
 
 # Told that a thread has gone, so whatever was pointing at it can stop. Injected for the same
 # reason: which table holds a thread id is not this package's business.

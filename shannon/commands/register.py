@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.errors import ShannonError
@@ -63,8 +63,10 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
         else:
             await reply(
                 interaction,
-                f"Registered {result.full_name}. Pull request threads will appear in "
-                f"<#{result.pr_channel_id}>.",
+                done(
+                    f"Registered {result.full_name}. Pull request threads will appear "
+                    f"in <#{result.pr_channel_id}>."
+                ),
             )
 
     return register

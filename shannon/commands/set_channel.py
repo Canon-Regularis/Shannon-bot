@@ -7,9 +7,9 @@ import discord
 from discord import app_commands
 
 from shannon.commands._permissions import REGISTER_ROLES
-from shannon.commands._replies import reply_for
+from shannon.commands._replies import words_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.enums import ObjectType
@@ -101,10 +101,10 @@ def build_set_channel_command(
             await reply(
                 interaction,
                 f"{head} The threads already open were left where they are. "
-                f"{reply_for(error, noun='repository')}",
+                f"{words_for(error, noun='repository')}",
             )
         else:
-            await reply(interaction, f"{head}{_said(outcome)}")
+            await reply(interaction, done(f"{head}{_said(outcome)}"))
 
     return set_channel
 

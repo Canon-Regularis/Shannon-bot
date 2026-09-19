@@ -8,6 +8,7 @@ from shannon.discord_bot.errors import (
     DiscordGatewayError,
     DiscordPermissionError,
 )
+from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
 from shannon.domain.errors import (
     DuplicateRegistrationError,
     ItemNotReadyError,
@@ -126,7 +127,24 @@ def _wait_for(seconds: object) -> str:
     return f"Try again in about {minutes} minutes."
 
 
-def reply_for(error: Exception, *, noun: str = "item") -> str:
+# Which refusals come right on their own. Amber for those and red for the rest, so
+# "wait a minute" and "somebody has to put this right" are told apart before either
+# sentence has been read.
+_COMES_RIGHT: tuple[type[ShannonError], ...] = (GitHubRateLimitError, ItemNotReadyError)
+
+
+def reply_for(error: Exception, *, noun: str = "item") -> Panel:
+    """The refusal for an error, or the catch-all if it is not one we know about.
+
+    A card rather than a sentence since issue #116, and the words are unchanged. The
+    bar is the only thing added, which is why every call site kept the line it had.
+    """
+    said = words_for(error, noun=noun)
+    tone = Accent.MEDIUM if isinstance(error, _COMES_RIGHT) else Accent.FAILED
+    return Panel(blocks=(Block(BlockKind.HEADING, said),), accent=tone)
+
+
+def words_for(error: Exception, *, noun: str = "item") -> str:
     """The message for an error, or the catch-all if it is not one we know about."""
     # discord.py hands its error handler whatever a command raised wrapped in a
     # CommandInvokeError. Looking through that is what lets the table match at all when the

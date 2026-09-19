@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import discord
 import pytest
 
-from shannon.commands._replies import reply_for
+from shannon.commands._replies import words_for
 from shannon.commands.register import build_register_command
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError
@@ -138,7 +138,7 @@ async def test_github_trouble_is_reported_rather_than_raised(error: Exception) -
 
     interaction = await run(service, project_manager())
 
-    assert interaction.reply == reply_for(error)
+    assert interaction.reply == words_for(error)
     assert "GitHub" in interaction.reply
 
 

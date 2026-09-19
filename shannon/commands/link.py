@@ -8,7 +8,7 @@ from discord import app_commands
 
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.services.linking import InvalidGitHubUsernameError
 
@@ -61,6 +61,6 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         except InvalidGitHubUsernameError as error:
             await reply(interaction, error.message)
         else:
-            await reply(interaction, f"Linked GitHub user {username} to <@{target.id}>.")
+            await reply(interaction, done(f"Linked GitHub user {username} to <@{target.id}>."))
 
     return link

@@ -19,7 +19,7 @@ from discord import app_commands
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.sync.regenerate import RegenerateOutcome
@@ -65,7 +65,7 @@ def build_regenerate_command(service: RedrawsAnItem, gate: PermissionGate) -> Sl
             # takes no link and does not know which kind it is in until it has looked.
             await reply(interaction, reply_for(error))
         else:
-            await reply(interaction, _said(outcome))
+            await reply(interaction, done(_said(outcome)))
 
     return regenerate
 

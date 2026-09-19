@@ -16,7 +16,7 @@ from discord import app_commands
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 from shannon.services.unregistration import UnregisterOutcome
@@ -96,7 +96,7 @@ def build_unregister_command(
             logger.warning("unregister failed: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
-            await reply(interaction, _said(outcome))
+            await reply(interaction, done(_said(outcome)))
 
     return unregister
 

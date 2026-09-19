@@ -6,7 +6,26 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import discord
-from discord import Message, MessageType
+from discord import Message, MessageType, ui
+
+from shannon.discord_bot import layout
+
+
+def _said(content: str | None, view: object) -> str:
+    """What the person in front of the bot reads, whichever shape it arrived in.
+
+    A reply is either a string or a card, and a card is components with no content at all. The
+    words are the same either way, which is the law `layout` is written to keep, so this reads
+    them back out of the view rather than making every existing assertion know which it got.
+
+    It walks the real view rather than trusting it, which is the same bargain the thread fake
+    makes: the adapter is the riskiest new code in the project and a stand-in that skipped it
+    would leave it unexecuted by the whole command tier.
+    """
+    if view is None:
+        return content or ""
+    assert content is None, "a message cannot carry both components and content"
+    return "\n".join(layout.words(cast(ui.LayoutView, view)))
 
 
 class FakeResponse:
@@ -20,16 +39,18 @@ class FakeResponse:
     async def defer(self, **_: Any) -> None:
         self.deferred = True
 
-    async def send_message(self, content: str, **_: Any) -> None:
-        self.messages.append(content)
+    async def send_message(
+        self, content: str | None = None, *, view: object = None, **_: Any
+    ) -> None:
+        self.messages.append(_said(content, view))
 
 
 class FakeFollowup:
     def __init__(self) -> None:
         self.messages: list[str] = []
 
-    async def send(self, content: str, **_: Any) -> None:
-        self.messages.append(content)
+    async def send(self, content: str | None = None, *, view: object = None, **_: Any) -> None:
+        self.messages.append(_said(content, view))
 
 
 @dataclass
