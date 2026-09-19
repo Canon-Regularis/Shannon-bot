@@ -95,17 +95,3 @@ class InstallationStore:
             delete(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id)
         )
         return bool(result.rowcount)
-
-    async def set_suspended(self, installation_id: int, *, suspended: bool) -> None:
-        """Record that an installation was paused or resumed.
-
-        Kept rather than deleted on suspension, because the two are different answers. A suspended
-        installation still exists and its account is still bound; what has happened is that
-        somebody turned the App off and can turn it back on, and a token mint will fail until they
-        do. Deleting the row would report that as never having been installed.
-        """
-        found = await self._session.scalar(
-            select(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id)
-        )
-        if found is not None:
-            found.suspended = suspended

@@ -121,7 +121,7 @@ class TestWhichInstallationCoversAnOwner:
         store = InstallationStore(db_session)
         await store.remember(installation_id=42, account_login="octocat")
 
-        await store.set_suspended(42, suspended=True)
+        await store.remember(installation_id=42, account_login="octocat", suspended=True)
 
         found = await store.for_owner("octocat")
         assert found is not None
@@ -131,18 +131,25 @@ class TestWhichInstallationCoversAnOwner:
         store = InstallationStore(db_session)
         await store.remember(installation_id=42, account_login="octocat", suspended=True)
 
-        await store.set_suspended(42, suspended=False)
+        await store.remember(installation_id=42, account_login="octocat", suspended=False)
 
         found = await store.for_owner("octocat")
         assert found is not None
         assert found.suspended is False
 
-    async def test_suspending_something_that_is_not_there_is_not_an_error(
+    async def test_suspending_something_that_is_not_there_writes_the_row(
         self, db_session: AsyncSession
     ) -> None:
         """A suspend for an installation this bot never recorded is ordinary: the App may have
-        been installed while the process was down. There is nothing to do and nothing to fail."""
-        await InstallationStore(db_session).set_suspended(999, suspended=True)
+        been installed while the process was down. The row is written rather than skipped, so the
+        next lookup says the App is off instead of never installed."""
+        store = InstallationStore(db_session)
+
+        await store.remember(installation_id=999, account_login="octocat", suspended=True)
+
+        found = await store.for_owner("octocat")
+        assert found is not None
+        assert found.suspended is True
 
 
 class TestTheOneTimeLink:
