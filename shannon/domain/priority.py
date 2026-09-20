@@ -5,8 +5,7 @@ from collections.abc import Iterable
 
 from shannon.domain.enums import Priority
 
-# Teams label priority in whatever style their repository already uses, so all of these are
-# accepted rather than forcing one spelling on them.
+# Teams label priority in whatever style their repository already uses, so all are accepted.
 _SEPARATORS = re.compile(r"[\s_\-:/]+")
 _PREFIXES = ("priority", "prio", "p")
 _SUFFIX = "priority"
@@ -27,11 +26,7 @@ _RANK = {Priority.HIGH: 3, Priority.MEDIUM: 2, Priority.LOW: 1, Priority.UNSET: 
 
 
 def parse_priority(label_names: Iterable[str]) -> Priority:
-    """Work out an item's priority from its GitHub labels.
-
-    Returns UNSET when no label says anything about priority. When several do, the highest
-    wins.
-    """
+    """Work out an item's priority from its GitHub labels."""
     found = [priority for name in label_names if (priority := _from_label(name)) is not None]
     if not found:
         return Priority.UNSET
@@ -47,9 +42,8 @@ def _from_label(name: str) -> Priority | None:
     if len(parts) == 1:
         return _WORDS.get(parts[0])
 
-    # "priority: high", the same shortened to "p: high" or "p-high", and "HIGH_PRIORITY"
-    # suffixes. Numbered schemes like "P1" are deliberately not read: which number means
-    # urgent is a convention that differs between teams, and guessing it wrong buries work.
+    # "priority: high", "p: high", "p-high" and "HIGH_PRIORITY". Numbered schemes like "P1" are
+    # not read: which number means urgent differs between teams, and guessing wrong buries work.
     if parts[0] in _PREFIXES:
         return _WORDS.get(parts[1])
     if parts[-1] == _SUFFIX:
