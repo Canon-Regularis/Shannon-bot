@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -20,6 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shannon.db.base import Base, TimestampMixin, varchar_enum
 from shannon.domain.enums import ActorRole, DeliveryStatus, ObjectType, Priority, Status
+from shannon.domain.json import JsonObject
 
 _LIVE_STATUSES = ", ".join(f"'{status.value}'" for status in DeliveryStatus.live())
 
@@ -295,7 +295,7 @@ class WebhookEvent(Base):
     # requires a body, so rows written before this existed are never picked up. none_as_null is
     # what makes that hold: without it SQLAlchemy stores Python None as the JSON value `null`,
     # which IS NOT NULL happily matches.
-    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    payload: Mapped[JsonObject | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     attempts: Mapped[int] = mapped_column(nullable=False, server_default="0", default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Held by whichever worker is on this row. A worker that dies leaves the lease to expire

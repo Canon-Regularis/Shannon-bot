@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel
@@ -14,6 +13,7 @@ from shannon.api.dependencies import (
     EventRouterDep,
     SettingsDep,
 )
+from shannon.domain.json import JsonObject, is_json_object
 from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.signature import SignatureResult, verify_any
 from shannon.services.delivery.queue import DeliveryInbox
@@ -85,7 +85,7 @@ async def _accept(
     event: str,
     delivery_id: str,
     action: str | None,
-    payload: dict[str, Any],
+    payload: JsonObject,
 ) -> WebhookOutcome:
     """Write the delivery down and answer. The work happens in the worker.
 
@@ -183,15 +183,21 @@ def _require_valid_signature(body: bytes, secrets: Sequence[str], header_value: 
     )
 
 
-def _decode(body: bytes) -> dict[str, Any]:
+def _decode(body: bytes) -> JsonObject:
+    """The body as something checked, which is what `domain.json` exists to hand back.
+
+    `is_json_object` rather than `isinstance(payload, dict)`: for what `json.loads` produces the
+    two accept the same values, but only the guard carries the key type onwards, and carrying it
+    is the whole point of narrowing here rather than further down.
+    """
     try:
-        payload = json.loads(body)
+        payload: object = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Body is not valid JSON"
         ) from exc
 
-    if not isinstance(payload, dict):
+    if not is_json_object(payload):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be a JSON object"
         )

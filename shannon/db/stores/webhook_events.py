@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -11,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.base import interval, rows_changed
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
+from shannon.domain.json import JsonObject
 
 
 class WebhookEventStore:
@@ -25,7 +25,7 @@ class WebhookEventStore:
         delivery_id: str,
         event_type: str,
         payload_hash: str,
-        payload: dict[str, Any],
+        payload: JsonObject,
     ) -> bool:
         """Write a delivery down, returning False if it was already here.
 
@@ -50,7 +50,7 @@ class WebhookEventStore:
 
         return await self._revive(delivery_id, payload)
 
-    async def _revive(self, delivery_id: str, payload: dict[str, Any]) -> bool:
+    async def _revive(self, delivery_id: str, payload: JsonObject) -> bool:
         """Put a delivery that was given up on back on the queue, reporting whether it moved.
 
         GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery just

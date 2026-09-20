@@ -6,12 +6,13 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.webhook_events import WebhookEventStore
 from shannon.domain.enums import DeliveryStatus
+from shannon.domain.json import JsonObject, is_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Delivery:
     id: int
     delivery_id: str
     event_type: str
-    payload: dict[str, Any]
+    payload: JsonObject
     attempts: int
 
     @property
@@ -40,13 +41,14 @@ class Delivery:
         or which item to go and look at, and the row is gone once it ages out.
         """
         repository = self.payload.get("repository")
-        name = repository.get("full_name") if isinstance(repository, dict) else None
+        full_name = repository.get("full_name") if is_json_object(repository) else None
+        name = full_name if isinstance(full_name, str) else None
 
-        number = None
+        number: int | None = None
         for key in ("pull_request", "issue"):
             item = self.payload.get(key)
-            if isinstance(item, dict) and isinstance(item.get("number"), int):
-                number = item["number"]
+            if is_json_object(item) and isinstance(found := item.get("number"), int):
+                number = found
                 break
 
         where = f"{name}#{number}" if name and number else name
@@ -62,7 +64,7 @@ class DeliveryInbox(Protocol):
     after that; giving the two the same handle would only invite the boundary to be crossed.
     """
 
-    async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool: ...
+    async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool: ...
 
 
 class DeliveryQueue(Protocol):
@@ -95,7 +97,7 @@ class WebhookDeliveryQueue:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
-    async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool:
+    async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool:
         """Record a delivery, returning False if GitHub has sent it before."""
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         async with self._sessionmaker() as session, session.begin():
