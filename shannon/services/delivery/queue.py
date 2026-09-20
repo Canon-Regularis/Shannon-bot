@@ -34,12 +34,7 @@ class Delivery:
 
     @property
     def subject(self) -> str:
-        """What this delivery is about, for a log line somebody has to act on.
-
-        A delivery id identifies a row and nothing else. Told only that one cannot be handled,
-        an operator has to find the row and decode its payload before they know which repository
-        or which item to go and look at, and the row is gone once it ages out.
-        """
+        """What this delivery is about, for a log line somebody has to act on."""
         repository = self.payload.get("repository")
         full_name = repository.get("full_name") if is_json_object(repository) else None
         name = full_name if isinstance(full_name, str) else None
@@ -59,9 +54,8 @@ class Delivery:
 class DeliveryInbox(Protocol):
     """Writing a delivery down, which is all the webhook route ever does.
 
-    Kept apart from `DeliveryQueue` so the route cannot reach a delivery it has no business
-    touching. The route runs inside GitHub's ten second budget and the worker owns everything
-    after that; giving the two the same handle would only invite the boundary to be crossed.
+    Kept apart from `DeliveryQueue`: the route runs inside GitHub's ten second budget and the
+    worker owns everything after that.
     """
 
     async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool: ...
@@ -70,8 +64,7 @@ class DeliveryInbox(Protocol):
 class DeliveryQueue(Protocol):
     """Taking deliveries and seeing them through, which is all the worker ever does.
 
-    Every method here moves a delivery towards a terminal state or hands it back. `enqueue` is
-    deliberately absent: nothing that works the queue should be able to add to it.
+    `enqueue` is absent: nothing that works the queue should be able to add to it.
     """
 
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[Delivery]: ...
@@ -90,8 +83,7 @@ class DeliveryQueue(Protocol):
 class WebhookDeliveryQueue:
     """The delivery queue, backed by `webhook_events`.
 
-    Each call runs in its own session. Writing a delivery down has to be visible to a concurrent
-    delivery immediately, so it cannot ride along in whatever transaction is doing the work.
+    Each call runs in its own session, so a write is visible to a concurrent delivery at once.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -114,8 +106,8 @@ class WebhookDeliveryQueue:
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[Delivery]:
         async with self._sessionmaker() as session, session.begin():
             rows = await WebhookEventStore(session).lease(limit=limit, lease_for=lease_for)
-            # Copied out while the session is open, because the caller works on these long
-            # after the transaction that leased them has closed.
+            # Copied out while the session is open: the caller works on these long after the
+            # leasing transaction has closed.
             return [
                 Delivery(
                     id=row.id,

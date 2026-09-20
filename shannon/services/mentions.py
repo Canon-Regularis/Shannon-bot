@@ -1,13 +1,7 @@
 """Whether this bot's messages notify one person in one server.
 
-Its own module rather than a third class in `linking.py`. That one binds a GitHub identity to a
-Discord one and needs a GitHub client to check the claim; this needs neither, and it is the only
-thing in the project a member decides about themselves.
-
-The polarity flips here and nowhere else. The table records who asked to be left alone, because a
-row present is the whole of the fact and there is no third state to keep. The command asks whether
-mentions are on. Somewhere has to turn one into the other, and doing it in one place means nothing
-either side of it has to remember which way round it is.
+The polarity flips here and nowhere else: the table records who asked to be left alone, a row
+present being the whole of the fact, while the command asks whether mentions are on.
 """
 
 from __future__ import annotations
@@ -37,8 +31,7 @@ class MentionPreferences:
     async def set_mentions(self, *, guild_id: int, discord_user_id: int, wanted: bool) -> None:
         """Record what they asked for, whether or not it is what they already had.
 
-        Both halves settle a repeat themselves rather than reading first, so somebody clicking
-        twice is answered the same way as somebody clicking once.
+        Both store calls settle a repeat themselves, so clicking twice lands the same as once.
         """
         async with self._sessionmaker() as session, session.begin():
             store = MutedMemberStore(session)

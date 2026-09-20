@@ -1,9 +1,5 @@
 """Undoing the binding between a repository and a Discord server.
 
-Registering has been one way since it was written. That was survivable while the worst case was a
-public repository mirrored into the wrong channel; it is not survivable for private code, where
-the binding decides where issue titles and comment bodies are posted.
-
 What makes this safe to offer is not the Discord role. It is that the caller has proved to GitHub
 that they hold admin on the repository, which is the one thing a role cannot establish and `/link`
 cannot either.
@@ -29,17 +25,15 @@ from shannon.domain.errors import (
 logger = logging.getLogger(__name__)
 
 # The only permission that may unbind. GitHub folds `maintain` into `write` and `triage` into
-# `read` before answering, so this is the whole of the admin tier and nothing else comes close
-# enough to be worth arguing about.
+# `read` before answering, so this is the whole of the admin tier.
 ADMIN = "admin"
 
 
 class ReadsPermissions(Protocol):
     """What one GitHub account may do to one repository.
 
-    Its own protocol because it is all this service needs, and because it is the only question
-    asked of GitHub anywhere on the unregister path. A service that could destroy a binding should
-    not be holding a handle that can also write a label.
+    The only question asked of GitHub on the unregister path, so the service that can destroy a
+    binding holds no handle that can also write a label.
     """
 
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
@@ -65,13 +59,10 @@ class RepositoryUnregistrationService:
     async def unregister(self, *, guild_id: int, full_name: str, login: str) -> UnregisterOutcome:
         """Check the caller holds admin on the bound repository, then unbind it.
 
-        `full_name` is typed out by whoever ran the command and is checked against what is
-        actually registered. It is a confirmation rather than a lookup: this is irreversible and
-        it cascades, so the cheapest guard available is making somebody name the thing.
-
-        `login` must be a login GitHub itself vouched for a moment ago. Passing one out of
-        `user_links` would make the whole check theatre, because anybody with the Admin role in
-        the server can write whatever they like into that table.
+        `full_name` is a confirmation rather than a lookup: unbinding is irreversible and it
+        cascades, so whoever runs the command has to name the thing. `login` must be one GitHub
+        itself vouched for a moment ago, because anybody with the Admin role in the server can
+        write what they like into `user_links`.
         """
         async with self._sessionmaker() as session:
             stored = await RepositoryStore(session).get_by_guild(guild_id)
@@ -110,14 +101,9 @@ class RepositoryUnregistrationService:
     async def _unbind(self, repository_id: int) -> int:
         """Delete the binding, counting the threads it leaves behind.
 
-        Counted before the delete rather than after, because the rows are gone afterwards: the
-        foreign keys cascade from `repositories` through `channel_mappings` and `tracked_items`
-        and on to the assignments and mirrored notes.
-
-        The Discord threads themselves are untouched and stay in the channel. Nothing here deletes
-        them, both because that is a great deal of destruction to do on one command and because
-        the history in them is usually why somebody wants the repository unbound rather than the
-        channel emptied.
+        Counted before the delete: the foreign keys cascade from `repositories` through
+        `channel_mappings` and `tracked_items` on to the assignments and mirrored notes. The
+        Discord threads themselves are untouched and stay in the channel.
         """
         async with self._sessionmaker() as session, session.begin():
             orphaned = await session.scalar(
