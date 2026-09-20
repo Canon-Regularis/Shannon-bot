@@ -37,7 +37,7 @@ from shannon.domain.time import as_utc
 from shannon.github.errors import GitHubAuthError, GitHubRateLimitError
 from shannon.github.projects import BoardItem
 from shannon.services.sync.items import SyncOutcome, SyncsItems
-from shannon.services.workflow import WorkflowRefusedError
+from shannon.services.workflow import WorkflowOutcome, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class MovesStatus(Protocol):
     and the block in Discord start disagreeing.
     """
 
-    async def set_status(self, *, thread_id: int, status: Status) -> object: ...
+    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome: ...
 
 
 class ProjectPoller:
