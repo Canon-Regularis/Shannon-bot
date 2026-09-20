@@ -62,9 +62,11 @@ class HasABody(Protocol):
     """The one field the suppressor reads.
 
     Narrower than the `ItemNote` the mirror passes, which is all `worth_posting` requires.
+    Read-only, for the reason `ItemNote` itself gives.
     """
 
-    body: str
+    @property
+    def body(self) -> str: ...
 
 
 def not_a_transcript(note: HasABody) -> bool:

@@ -136,7 +136,6 @@ warn_return_any = false
 module = [
     "shannon.container",
     "shannon.discord_bot.threads",
-    "shannon.services.projects",
     "shannon.services.sync.items",
     "shannon.services.workflow",
     "tests.fakes.github",
@@ -241,9 +240,7 @@ ignore = [
     "tests/unit/commands/test_label_commands.py",
     "tests/unit/commands/test_conversation_commands.py",
     "shannon/container.py",
-    "shannon/discord_bot/formatting.py",
     "shannon/discord_bot/threads.py",
-    "shannon/services/projects.py",
     "shannon/services/sync/items.py",
     "shannon/services/workflow.py",
     "tests/fakes/github.py",

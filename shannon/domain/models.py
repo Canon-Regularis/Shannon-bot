@@ -393,15 +393,27 @@ class CheckReport:
 
 @runtime_checkable
 class ItemNote(Protocol):
-    """Something posted into a tracked item's thread that is not its metadata."""
+    """Something posted into a tracked item's thread that is not its metadata.
 
-    repository: RepositorySnapshot
-    item_number: int
-    author: Actor | None
-    object_type: ObjectType
-    body: str
-    html_url: str
-    created_at: datetime | None
+    Properties rather than plain attributes, for the reason `TrackedSnapshot` below gives: a
+    plain attribute is writable, a frozen dataclass cannot offer one, and all three notes this
+    describes are frozen dataclasses. Declared the other way, nothing satisfied it at all.
+    """
+
+    @property
+    def repository(self) -> RepositorySnapshot: ...
+    @property
+    def item_number(self) -> int: ...
+    @property
+    def author(self) -> Actor | None: ...
+    @property
+    def object_type(self) -> ObjectType: ...
+    @property
+    def body(self) -> str: ...
+    @property
+    def html_url(self) -> str: ...
+    @property
+    def created_at(self) -> datetime | None: ...
 
     @property
     def note_key(self) -> str:
