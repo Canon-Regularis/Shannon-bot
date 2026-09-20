@@ -10,6 +10,8 @@ import re
 
 import discord
 
+from shannon.domain.text import lines_within
+
 EMPTY = "None"
 
 MESSAGE_LIMIT = 2000
@@ -210,17 +212,7 @@ def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
         return message
 
     budget = limit - len(TRUNCATED)
-    kept: list[str] = []
-    used = 0
-    # No ordinary exit, so the branch coverage floor is told not to look for one: this is only
-    # reached above the limit, the per-line costs sum to exactly the length of the message, and
-    # the budget is smaller than that, so a line always crosses it.
-    for line in message.split("\n"):  # pragma: no branch
-        cost = len(line) + (1 if kept else 0)
-        if used + cost > budget:
-            break
-        kept.append(line)
-        used += cost
+    kept = lines_within(message, budget)
 
     # A single line longer than the whole limit has no boundary to cut on.
     if not kept:

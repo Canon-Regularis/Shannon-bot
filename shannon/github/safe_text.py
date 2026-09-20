@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from shannon.domain.text import lines_within
+
 # GitHub refuses a comment body over this with a 422. The transcript budget below is what the
 # flush actually aims at, so this is the backstop for a single message that is already enormous.
 GITHUB_BODY_LIMIT = 65536
@@ -176,17 +178,10 @@ def fit_body(body: str) -> str:
         return body
 
     budget = GITHUB_BODY_LIMIT - len(TRUNCATED)
-    kept: list[str] = []
-    used = 0
-    # No ordinary exit, for the reason its Discord counterpart says: this runs only above the
-    # limit, the per-line costs sum to the length of the body, and the budget is smaller.
-    for line in body.split("\n"):  # pragma: no branch
-        cost = len(line) + (1 if kept else 0)
-        if used + cost > budget:
-            break
-        kept.append(line)
-        used += cost
+    kept = lines_within(body, budget)
 
+    # Not mended, unlike the line cut below. A prefix of one over-long line can still open a
+    # fence, so the difference is recorded here rather than relied on.
     if not kept:
         return body[:budget] + TRUNCATED
     return balanced("\n".join(kept) + TRUNCATED)
