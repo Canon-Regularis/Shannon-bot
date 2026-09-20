@@ -21,14 +21,13 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
 from shannon.domain.errors import ShannonError
-from shannon.domain.json import JsonObject, is_json_object
+from shannon.github.responses import json_object
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +182,7 @@ class GitHubIdentityVerification:
             },
             headers={"Accept": "application/json"},
         )
-        payload = _object(response)
+        payload = json_object(response)
         token = payload.get("access_token")
         if response.status_code >= 400 or payload.get("error") or not isinstance(token, str):
             # The reason GitHub gave is deliberately not echoed. It is written for a developer
@@ -199,17 +198,9 @@ class GitHubIdentityVerification:
             "https://api.github.com/user",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
         )
-        payload = _object(response)
+        payload = json_object(response)
         login = payload.get("login")
         github_user_id = payload.get("id")
         if not isinstance(login, str) or not login or not isinstance(github_user_id, int):
             raise VerificationError("GitHub would not say who signed in. Try /unregister again.")
         return login, github_user_id
-
-
-def _object(response: httpx.Response) -> JsonObject:
-    try:
-        payload: Any = response.json()
-    except ValueError:
-        return {}
-    return payload if is_json_object(payload) else {}

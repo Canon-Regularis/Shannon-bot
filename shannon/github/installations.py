@@ -21,10 +21,11 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.installations import InstallationStore
-from shannon.domain.json import JsonObject, is_json_object
+from shannon.domain.json import is_json_object
 from shannon.github.app_auth import app_jwt
 from shannon.github.errors import GitHubAuthError
 from shannon.github.mapping import parse_timestamp
+from shannon.github.responses import json_object
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class InstallationTokens:
                 f"({response.status_code}). Check the GitHub App's id and private key."
             )
 
-        payload = _body(response)
+        payload = json_object(response)
         installation = payload.get("id")
         return installation if isinstance(installation, int) else None
 
@@ -175,7 +176,7 @@ class InstallationTokens:
             logger.warning("could not read the app's own slug (%s)", response.status_code)
             return ""
 
-        slug = _body(response).get("slug")
+        slug = json_object(response).get("slug")
         self._slug = slug if isinstance(slug, str) else ""
         return self._slug
 
@@ -206,15 +207,6 @@ class InstallationTokens:
         token, expires_at = _minted(response)
         self._minted[installation] = (token, expires_at)
         return token
-
-
-def _body(response: httpx.Response) -> JsonObject:
-    """A JSON object, or an empty one. Used where a missing field is already handled below."""
-    try:
-        payload: Any = response.json()
-    except ValueError:
-        return {}
-    return payload if is_json_object(payload) else {}
 
 
 def _minted(response: httpx.Response) -> tuple[str, datetime]:
