@@ -1,11 +1,7 @@
 """Turning "which account is this call about" into a token that can see it.
 
-The second half of App authentication. `app_auth` signs the JWT that proves this process is the
-App; this trades that JWT for a token scoped to one installation, and keeps it until it expires.
-
-Two protocols rather than one class, because the two halves fail differently and are stubbed
-differently. Resolving an owner is a database read with a network fallback; minting is a network
-call with a cache in front of it.
+The second half of App authentication: `app_auth` signs the JWT that proves this process is the
+App, and this trades that JWT for a token scoped to one installation, kept until it expires.
 """
 
 from __future__ import annotations
@@ -29,10 +25,8 @@ from shannon.github.responses import json_object
 
 logger = logging.getLogger(__name__)
 
-# How long before a token expires it is thrown away and minted again. GitHub gives an hour, and a
-# request that leaves here with fifty-nine minutes on it is fine; one that leaves with two seconds
-# may arrive expired. Five minutes covers a slow request, a retry behind it and a clock that
-# disagrees, and costs one extra mint every twelve hours.
+# How long before a token expires it is thrown away and minted again. GitHub gives an hour, and
+# five minutes covers a slow request, a retry behind it and a clock that disagrees.
 REFRESH_MARGIN = timedelta(minutes=5)
 
 
@@ -45,9 +39,7 @@ class ResolvesInstallations(Protocol):
 class InstallationDirectory:
     """Owner to installation, out of the database.
 
-    No in-process cache. The token cache in front of this already absorbs the hot path, so this
-    runs about once per account per hour, and a cache with no invalidation story is worth more
-    trouble than one small query.
+    No in-process cache: the token cache in front absorbs the hot path, leaving one query an hour.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -59,8 +51,8 @@ class InstallationDirectory:
         if found is None:
             return None
         if found.suspended:
-            # Suspended is not uninstalled, and the difference matters to whoever has to fix it.
-            # Minting against it fails, so there is nothing to be gained by trying.
+            # Suspended is not uninstalled, and minting against a suspended installation
+            # fails, so there is nothing to be gained by trying.
             logger.info("the installation for %s is suspended, so nothing can be read", owner)
             return None
         return found.installation_id
@@ -69,9 +61,7 @@ class InstallationDirectory:
 class InstallationTokens:
     """Mints installation tokens and keeps each one until it is nearly stale.
 
-    One lock per installation rather than one for everything. A burst of deliveries for one
-    repository arrives together and must mint once between them; a burst across two repositories
-    has no reason to queue behind each other.
+    One lock per installation, so a burst for one repository mints once without blocking another.
     """
 
     def __init__(
@@ -90,8 +80,8 @@ class InstallationTokens:
         self._now = now
         self._minted: dict[int, tuple[str, datetime]] = {}
         self._locks: dict[int, asyncio.Lock] = {}
-        # None until asked for, "" once asked and not answered. The two are different: the second
-        # stops a failing read being retried on every `/register`.
+        # None until asked for, "" once asked and not answered: the second stops a failing
+        # read being retried on every `/register`.
         self._slug: str | None = None
 
     def app_token(self) -> str:
@@ -114,9 +104,8 @@ class InstallationTokens:
 
         lock = self._locks.setdefault(installation, asyncio.Lock())
         async with lock:
-            # Checked again inside the lock. Ten deliveries arriving together all miss the cache
-            # above, and without this they queue up and mint ten tokens, nine of which are thrown
-            # away and every one of which counts against the App's rate limit.
+            # Checked again inside the lock: without it, ten deliveries arriving together
+            # each mint a token, and every mint counts against the App's rate limit.
             held = self._minted.get(installation)
             if held is not None and held[1] - REFRESH_MARGIN > self._now():
                 return held[0]
@@ -125,16 +114,10 @@ class InstallationTokens:
     async def installed_on(self, owner: str, name: str) -> int | None:
         """Which installation covers one repository, asked of GitHub rather than of the cache.
 
-        The question `/register` needs and the directory cannot answer: a repository nobody has
-        registered yet has no row, and "no row" deliberately means "ask GitHub" rather than "not
-        installed". This is that ask.
-
-        A JWT rather than a token, because there is no token to use until this has answered.
-
-        404 is the whole point of the call. GitHub answers it both for a repository that does not
-        exist and for one the App was never installed on, and the two are the same thing from
-        here: this bot cannot see it, and somebody has to go and install the App. Saying which of
-        the two it is would also tell anybody who asked whether a private repository exists.
+        A repository nobody has registered has no row, and no row means ask GitHub rather than
+        not installed. A JWT, because there is no token until this has answered. GitHub 404s both
+        for a repository that does not exist and for one the App was never installed on, and
+        separating the two would say whether a private repository exists.
         """
         if not self.app_token():
             return None
@@ -158,9 +141,7 @@ class InstallationTokens:
     async def app_slug(self) -> str:
         """The App's own slug, for building the "install me" link, read once and kept.
 
-        Read from GitHub rather than configured. It never changes for a given App, the JWT already
-        proves which App is asking, and a setting for it would be one more thing to type wrong in
-        a way whose only symptom is a link that 404s.
+        Read from GitHub rather than configured: it never changes for a given App.
         """
         if self._slug is not None:
             return self._slug
@@ -171,8 +152,8 @@ class InstallationTokens:
             "/app", headers={"Authorization": f"Bearer {self.app_token()}"}
         )
         if response.status_code >= 400:
-            # Not raised. The slug is only ever used to make a message more helpful, and failing
-            # `/register` because the link could not be prettified would be the wrong trade.
+            # Not raised: the slug only makes a message more helpful, and `/register` should
+            # not fail because the link could not be prettified.
             logger.warning("could not read the app's own slug (%s)", response.status_code)
             return ""
 
@@ -184,11 +165,8 @@ class InstallationTokens:
         """Ask GitHub for a token, or answer "" for an installation that has gone.
 
         A 404 means the installation was removed between the directory read and this call, which
-        is uninstalling: permanent, and the same outcome as never having been installed. The row
-        is dropped so the next call does not pay for the round trip again.
-
-        Everything else raises. A 401 is a key GitHub will not accept, and reporting that as "no
-        installation" would send somebody looking at the wrong thing entirely.
+        is permanent and the same outcome as never having been installed. Everything else raises:
+        a 401 is a key GitHub will not accept, and calling that "no installation" misdirects.
         """
         response = await self._http.post(
             f"/app/installations/{installation}/access_tokens",
@@ -212,10 +190,8 @@ class InstallationTokens:
 def _minted(response: httpx.Response) -> tuple[str, datetime]:
     """The token and its expiry, refusing a body that is missing either.
 
-    Refused rather than defaulted, because both plausible defaults are wrong in a way that lasts.
-    An assumed expiry an hour out caches a token that may already be dead; an assumed expiry of
-    now mints on every single request. A body this shape means GitHub changed something, and that
-    is worth a loud failure rather than a quiet limp.
+    Neither default is safe: an assumed hour caches a token that may already be dead, and an
+    assumed expiry of now mints on every request. A body this shape means GitHub changed something.
     """
     try:
         payload: Any = response.json()

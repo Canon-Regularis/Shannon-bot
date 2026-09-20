@@ -11,11 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_review_event(action: str, payload: JsonObject) -> ReviewSnapshot | None:
-    """Turn a `pull_request_review` webhook body into a snapshot.
-
-    The pull request is identified by number, matching how comments are looked up, so both
-    reach a tracked item the same way.
-    """
+    """Turn a `pull_request_review` webhook body into a snapshot."""
     if action not in REVIEW_ACTIONS:
         return None
 

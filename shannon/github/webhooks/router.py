@@ -1,9 +1,7 @@
 """Which handler owns which GitHub event.
 
-Apart from `events`, which states what this bot has an opinion about. That list is product
-policy and changes when the mirrored behaviour changes; this is the plumbing that carries the
-decision out, and changes when registration or dispatch does. Almost everything that answers a
-webhook imports `events` to name an outcome, and none of it wants the registry.
+Separate from `events`, which states what this bot has an opinion about: that list is product
+policy, and this is the plumbing that carries the decision out.
 """
 
 from __future__ import annotations
@@ -24,8 +22,7 @@ logger = logging.getLogger(__name__)
 class EventRouter:
     """Maps a GitHub event type to the handler that owns it.
 
-    Handlers register themselves at startup, which keeps the HTTP route free of any knowledge
-    about what a pull request is.
+    Handlers register themselves at startup, so the HTTP route knows nothing about pull requests.
     """
 
     def __init__(self) -> None:
@@ -42,9 +39,9 @@ class EventRouter:
     def will_act_on(self, event: str, action: str | None) -> bool:
         """Whether dispatching this could actually do anything.
 
-        The route asks before recording a delivery. A repository sends pushes, stars and forks
-        constantly, and logging every one of them would grow the delivery table without ever
-        protecting anything.
+        The route asks before recording a delivery, because a repository sends pushes, stars and
+        forks constantly and logging every one would grow the delivery table without protecting
+        anything.
         """
         return is_supported(event, action) and event in self._handlers
 

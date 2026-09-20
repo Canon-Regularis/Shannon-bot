@@ -1,19 +1,7 @@
 """Reading a GitHub project board over REST.
 
-Projects v2 was GraphQL only until GitHub shipped REST for it in September 2025, and REST is what
-this uses: the rest of this bot speaks REST, and a second transport for one feature would be a
-second set of failure modes to understand. The endpoints are the user-owned ones, because a
-personal account is what this runs against, and organisation boards answer the same shape under a
-different prefix.
-
-Two calls per read, plus a page. A board's items come back carrying only their Title unless the
-request names which fields it wants, and the names are integer ids that have to be looked up
-first. The ids are per board and change only when somebody edits its columns, so they are fetched
-once and kept.
-
-Everything here checks the shape it was given rather than trusting it. That is the house style
-for foreign JSON, and it earns its keep on an API that was in preview last year: a field that
-arrives in a shape nobody expected leaves one card unread instead of ending the poll.
+REST rather than GraphQL, to keep one transport. The paths are the user-owned ones; organisation
+boards answer the same shape under a different prefix.
 """
 
 from __future__ import annotations
@@ -32,17 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 # The board column lives in the single-select field GitHub's own templates call Status. A board
-# that renamed it is a board this cannot read, which is worth saying out loud rather than
-# guessing at whichever single-select field happens to come first.
+# that renamed it cannot be read.
 STATUS_FIELD = "Status"
 TITLE_FIELD = "Title"
 
-# GitHub's maximum. A board is read whole every time, so round trips are the thing to minimise.
+# GitHub's maximum.
 PAGE_SIZE = 100
 
-# What GitHub calls the thing a card wraps, mapped to what this bot calls it. A draft is a
-# ticket; the other two are already mirrored from their own webhooks and are looked up rather
-# than created.
+# What GitHub calls the thing a card wraps, mapped to what this bot calls it. Issues and pull
+# requests are already mirrored from their own webhooks, so a card is looked up, not created.
 CONTENT_TYPES: dict[str, ObjectType] = {
     "DraftIssue": ObjectType.TICKET,
     "Issue": ObjectType.ISSUE,
@@ -52,11 +38,7 @@ CONTENT_TYPES: dict[str, ObjectType] = {
 
 @dataclass(frozen=True, slots=True)
 class BoardItem:
-    """One card on a board, as this service needs it.
-
-    Not GitHub's response shape. The client turns whatever GitHub sends into this, so a change
-    to their JSON is a change to one parser rather than to any of the logic below.
-    """
+    """One card on a board, as this service needs it."""
 
     item_id: int
     title: str
@@ -74,11 +56,7 @@ class BoardItem:
 
 
 class ReadsJson(Protocol):
-    """Fetching JSON, one body or a page at a time.
-
-    Declared here rather than importing the GitHub client, so that reading a board depends on
-    something that answers with JSON rather than on everything that talks to GitHub.
-    """
+    """Fetching JSON, one body or a page at a time."""
 
     async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
 
@@ -95,10 +73,10 @@ class HttpProjectBoards:
         self._fields: dict[tuple[str, int], tuple[int, ...]] = {}
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
-        """Every card on the board, as far as this bot is concerned.
+        """Every card on the board, archived ones dropped.
 
-        Archived cards are dropped. Archiving is how somebody takes a card off the board without
-        deleting it, so mirroring one would put back a thread for work already put away.
+        Archiving is how a card is taken off the board without deleting it, so mirroring one
+        would put back a thread for work already put away.
         """
         wanted = await self._field_ids(owner, project_number)
         params: dict[str, str | int] = {"per_page": PAGE_SIZE}
@@ -118,13 +96,9 @@ class HttpProjectBoards:
     async def _field_ids(self, owner: str, project_number: int) -> tuple[int, ...]:
         """The ids of the Title and Status fields, looked up once per board.
 
-        An answer with no Status in it is not remembered, whatever else it carried. Without
-        that id the request does not ask for the field, GitHub does not send it, and every card
-        comes back with no column at all. It used to be remembered as long as Title was there,
-        so a board whose Status somebody renamed was read that way for the life of the process
-        rather than for one poll. The answer is a board somebody has to fix or a response that
-        arrived wrong, the next read may well get right, and there is no telling the two apart
-        from here.
+        Items come back carrying only their Title unless the request names the field ids it
+        wants. An answer with no Status in it is not remembered: without that id every card
+        reads as having no column, and the next read may get an answer that has it.
         """
         key = (owner, project_number)
         if key in self._fields:
@@ -157,9 +131,8 @@ class HttpProjectBoards:
 def parse_item(payload: object, project_number: int) -> BoardItem | None:
     """One card, or None for one this bot cannot make sense of.
 
-    Every kind of card is read, not only drafts. A card wrapping an issue or a pull request is
-    what "mirror project board movement" mostly means in practice, and the poller uses the
-    content id to find the thread that issue already has rather than opening a second one.
+    The poller uses a card's content id to find the thread its issue or pull request already
+    has, rather than opening a second one.
     """
     if not is_json_object(payload):
         return None
@@ -193,13 +166,10 @@ def parse_item(payload: object, project_number: int) -> BoardItem | None:
         kind=kind,
         title=title,
         column=_text(_option_name(_field_value(fields, STATUS_FIELD))),
-        # A draft has no page of its own, so the board is the nearest true link. An issue or a
-        # pull request has one, and its own thread already shows it.
+        # A draft has no page of its own, so the board is the nearest true link.
         html_url=_text(content.get("html_url"))
         or f"https://github.com/users/{_owner_of(payload)}/projects/{project_number}",
         updated_at=mapping.parse_timestamp(payload.get("updated_at")),
-        # What the card wraps, by GitHub's id for it, which is the same id the tracked item was
-        # stored under when its own webhook arrived. None for a draft, which wraps nothing.
         content_id=content_id if isinstance(content_id, int) else None,
     )
 
@@ -214,12 +184,9 @@ def _field_value(fields: list[object], name: str) -> object:
 def _option_name(value: object) -> object:
     """A single-select field's chosen option.
 
-    `value.name` is an object rather than a string here, unlike every other name in this API,
-    which is the kind of thing that reads fine and silently gives every card no column at all.
-
-    A value that is already a bare string is taken as the option itself. The OpenAPI description
-    leaves a field value untyped, so the nesting is documented by one example, and refusing the
-    flat form would turn a shape nobody promised against us into a board with no columns.
+    The value arrives as an object carrying `name`, unlike every other name in this API. The
+    OpenAPI description leaves a field value untyped, so a bare string is taken as the option
+    itself rather than refused.
     """
     if is_json_object(value):
         return value.get("name")
@@ -227,12 +194,7 @@ def _option_name(value: object) -> object:
 
 
 def _text(value: object) -> str | None:
-    """The plain form of one of GitHub's `{raw, html}` pairs, or a bare string if it is one.
-
-    Both, because the OpenAPI description leaves a field's value untyped, so the nesting is
-    documented by example only. Taking either shape costs one branch and removes the one way
-    this could read every card as blank.
-    """
+    """The plain form of one of GitHub's `{raw, html}` pairs, or a bare string if it is one."""
     if isinstance(value, str):
         return value.strip() or None
     if is_json_object(value):

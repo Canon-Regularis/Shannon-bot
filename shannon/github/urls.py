@@ -15,7 +15,7 @@ _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 # Both pass _REPO and neither is a name GitHub will issue. The name goes straight into an API
 # path signed with the bot's token, and the HTTP client collapses `/repos/{owner}/../pulls/{n}`
-# before sending, so the request on the wire is not the one built here.
+# before sending it.
 _NOT_REPOSITORIES = frozenset({".", ".."})
 
 _PULL_SEGMENT = "pull"
@@ -26,11 +26,7 @@ _KINDS = {_PULL_SEGMENT: "a pull request", _ISSUE_SEGMENT: "an issue"}
 
 
 def parse_repository_url(link: str) -> RepositoryRef:
-    """Pull owner and repository out of a GitHub link.
-
-    Deeper links are accepted and trimmed back to the repository, so `/register` works whether
-    someone pastes the repository root or whatever page they happened to be on.
-    """
+    """Pull owner and repository out of a GitHub link, trimming any deeper path away."""
     owner, repo, _ = _split_repository_path(link)
     return RepositoryRef(owner=owner, name=repo)
 
@@ -38,19 +34,13 @@ def parse_repository_url(link: str) -> RepositoryRef:
 def parse_pull_request_url(link: str) -> RepositoryRef:
     """Pull owner, repository and PR number out of a GitHub pull request link.
 
-    Accepts the deep links people actually paste, such as `/pull/7/files` and
-    `/pull/7#discussion_r1`. Issue links are rejected by name rather than as generic junk,
-    because pasting one into `/pr` is a normal mistake.
+    Deep links such as `/pull/7/files` and `/pull/7#discussion_r1` are accepted.
     """
     return _parse_object_url(link, _PULL_SEGMENT)
 
 
 def parse_issue_url(link: str) -> RepositoryRef:
-    """Pull owner, repository and issue number out of a GitHub issue link.
-
-    The mirror of the pull request parser, and it rejects pull request links by name for the
-    same reason.
-    """
+    """Pull owner, repository and issue number out of a GitHub issue link."""
     return _parse_object_url(link, _ISSUE_SEGMENT)
 
 
@@ -83,9 +73,8 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
         parsed = urlparse(raw)
         host = parsed.hostname or ""
     except ValueError as exc:
-        # An unbalanced square bracket looks like a malformed IPv6 host and urlparse raises
-        # rather than returning anything. Someone typing `/pr [` deserves the same reply as any
-        # other bad link, not a command that falls over.
+        # An unbalanced square bracket looks like a malformed IPv6 host, and urlparse raises
+        # rather than returning anything.
         raise UnparseableLinkError(f"{link!r} is not a usable link") from exc
 
     if parsed.scheme not in {"http", "https"}:
@@ -110,9 +99,8 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
 def _parse_number(segment: str, link: str) -> int:
     """The item number out of a link, or a refusal.
 
-    ASCII digits only. `str.isdigit` is true for a great deal more than that: Arabic-Indic
-    digits convert silently, so a link ending in a number nobody typed would sync a different
-    item, and superscripts and circled digits pass the check and then raise on conversion.
+    ASCII digits only. `str.isdigit` is also true of Arabic-Indic digits, which convert silently
+    into a number nobody typed, and of superscripts and circled digits, which raise on conversion.
     """
     if not (segment.isascii() and segment.isdigit()):
         raise UnparseableLinkError(f"{link!r} has no valid number")

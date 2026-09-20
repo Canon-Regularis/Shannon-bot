@@ -1,7 +1,6 @@
 """Reading a JSON body off an HTTP response.
 
-Its own module rather than `domain.json`, which knows about decoded values and deliberately not
-about httpx.
+Its own module because `domain.json` knows about decoded values and deliberately not httpx.
 """
 
 from __future__ import annotations
