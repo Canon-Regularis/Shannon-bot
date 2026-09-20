@@ -18,6 +18,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -86,14 +87,8 @@ async def _act(
     capturing: bool,
 ) -> None:
     """The half both commands share: check, defer, call, answer."""
-    if interaction.guild_id is None:
-        await reply(interaction, "Run this inside a server channel.")
-        return
-    if not gate.allows(interaction.user, SYNC_ROLES):
-        await reply(interaction, gate.denial(command, SYNC_ROLES))
-        return
-    if interaction.channel_id is None:
-        await reply(interaction, "Run this inside the item's thread.")
+    where = await in_a_thread(interaction, command, gate, SYNC_ROLES)
+    if where is None:
         return
     if not capturing:
         await reply(interaction, NOT_CAPTURING)
@@ -103,7 +98,7 @@ async def _act(
     await defer(interaction)
     try:
         act = service.start if starting else service.stop
-        full_name, number = await act(thread_id=interaction.channel_id, by=interaction.user.id)
+        full_name, number = await act(thread_id=where.channel_id, by=interaction.user.id)
     except ShannonError as error:
         logger.warning("/%s could not finish: %s", command, error.message)
         await reply(interaction, reply_for(error))

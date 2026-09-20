@@ -5,6 +5,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import NOT_IN_A_SERVER
 from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.slash import SlashCommand
 
@@ -67,7 +68,7 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
         interaction: discord.Interaction, state: app_commands.Choice[str] | None = None
     ) -> None:
         if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
+            await reply(interaction, NOT_IN_A_SERVER)
             return
 
         await defer(interaction)

@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import NOT_IN_A_SERVER
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -34,7 +35,7 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
     @app_commands.guild_only()
     async def register(interaction: discord.Interaction, github_repo_link: str) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
-            await reply(interaction, "Run this inside a server channel.")
+            await reply(interaction, NOT_IN_A_SERVER)
             return
         if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, gate.denial("register", REGISTER_ROLES))

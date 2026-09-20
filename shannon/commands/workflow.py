@@ -16,6 +16,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import WORKFLOW_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -105,19 +106,13 @@ def _priority_command(
 
 async def _act(interaction, name: str, gate: PermissionGate, call, *, said: str) -> None:
     """The half every one of the eight shares: check, defer, call, answer."""
-    if interaction.guild_id is None:
-        await reply(interaction, "Run this inside a server channel.")
-        return
-    if not gate.allows(interaction.user, WORKFLOW_ROLES):
-        await reply(interaction, gate.denial(name, WORKFLOW_ROLES))
-        return
-    if interaction.channel_id is None:
-        await reply(interaction, "Run this inside the item's thread.")
+    where = await in_a_thread(interaction, name, gate, WORKFLOW_ROLES)
+    if where is None:
         return
 
     await defer(interaction)
     try:
-        outcome = await call(interaction.channel_id)
+        outcome = await call(where.channel_id)
     except ShannonError as error:
         logger.warning("/%s could not finish: %s", name, error.message)
         await reply(interaction, reply_for(error))

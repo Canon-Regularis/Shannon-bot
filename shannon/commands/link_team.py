@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -32,14 +33,11 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
     async def link_team(
         interaction: discord.Interaction, github_team: str, role: discord.Role
     ) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
         # Nobody speaks for a team the way they speak for themselves, so unlike /link there is no
         # anybody-may-claim-their-own case: this points a whole role at a name, which is the same
         # kind of decision as mapping a channel.
-        if not gate.allows(interaction.user, REGISTER_ROLES):
-            await reply(interaction, gate.denial("link_team", REGISTER_ROLES))
+        guild_id = await in_a_server(interaction, "link_team", gate, REGISTER_ROLES)
+        if guild_id is None:
             return
         if role.is_default():
             # `@everyone` is a role Discord gives every member, and pinging it is the thing the
@@ -50,7 +48,7 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
         await defer(interaction)
         try:
             linked = await service.link(
-                guild_id=interaction.guild_id,
+                guild_id=guild_id,
                 github_team=github_team,
                 discord_role_id=role.id,
             )

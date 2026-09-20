@@ -13,6 +13,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -56,11 +57,8 @@ def build_unregister_command(
     )
     @app_commands.guild_only()
     async def unregister(interaction: discord.Interaction, repository: str) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
-        if not gate.allows(interaction.user, REGISTER_ROLES):
-            await reply(interaction, gate.denial("unregister", REGISTER_ROLES))
+        guild_id = await in_a_server(interaction, "unregister", gate, REGISTER_ROLES)
+        if guild_id is None:
             return
         if not verification.configured:
             # Said rather than handing out a link that goes nowhere. The role check is above this
@@ -76,11 +74,11 @@ def build_unregister_command(
         await defer(interaction)
         try:
             login = await verification.already_proved(
-                guild_id=interaction.guild_id, discord_user_id=interaction.user.id
+                guild_id=guild_id, discord_user_id=interaction.user.id
             )
             if login is None:
                 link = await verification.link_for(
-                    guild_id=interaction.guild_id, discord_user_id=interaction.user.id
+                    guild_id=guild_id, discord_user_id=interaction.user.id
                 )
                 await reply(
                     interaction,
@@ -89,9 +87,7 @@ def build_unregister_command(
                 )
                 return
 
-            outcome = await service.unregister(
-                guild_id=interaction.guild_id, full_name=repository, login=login
-            )
+            outcome = await service.unregister(guild_id=guild_id, full_name=repository, login=login)
         except ShannonError as error:
             logger.warning("unregister failed: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))

@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import words_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -60,11 +61,8 @@ def build_set_channel_command(
         object_type: app_commands.Choice[str],
         channel: discord.TextChannel | discord.ForumChannel,
     ) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
-        if not gate.allows(interaction.user, REGISTER_ROLES):
-            await reply(interaction, gate.denial("set_channel", REGISTER_ROLES))
+        guild_id = await in_a_server(interaction, "set_channel", gate, REGISTER_ROLES)
+        if guild_id is None:
             return
         refusal = why_threads_will_not_open(channel)
         if refusal is not None:
@@ -74,7 +72,7 @@ def build_set_channel_command(
         await defer(interaction)
         try:
             assignment = await service.assign(
-                guild_id=interaction.guild_id,
+                guild_id=guild_id,
                 object_type=ObjectType(object_type.value),
                 channel_id=channel.id,
             )
@@ -92,7 +90,7 @@ def build_set_channel_command(
         # half that worked is how somebody runs it again and changes nothing.
         try:
             outcome = await relocation.relocate(
-                guild_id=interaction.guild_id,
+                guild_id=guild_id,
                 object_type=ObjectType(object_type.value),
                 channel_id=channel.id,
             )

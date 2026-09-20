@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
@@ -33,10 +34,6 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         github_username: str,
         member: discord.Member | None = None,
     ) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
-
         # Every link, not only the ones made on somebody else's behalf.
         #
         # Claiming your own account used to be ungated, on the reasoning that it is yours to
@@ -45,8 +42,8 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         # metadata block and in every ping. That is the same route by which somebody could have
         # become a review team before teams were given a table of their own, and the honest fix
         # is the same one, which is that a person who speaks for the server does the pointing.
-        if not gate.allows(interaction.user, REGISTER_ROLES):
-            await reply(interaction, gate.denial("link", REGISTER_ROLES))
+        guild_id = await in_a_server(interaction, "link", gate, REGISTER_ROLES)
+        if guild_id is None:
             return
 
         target = member or interaction.user
@@ -54,7 +51,7 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         await defer(interaction)
         try:
             username = await service.link(
-                guild_id=interaction.guild_id,
+                guild_id=guild_id,
                 github_username=github_username,
                 discord_user_id=target.id,
             )

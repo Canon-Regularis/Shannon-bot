@@ -22,6 +22,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -123,19 +124,13 @@ async def _act(
     call: _Change,
 ) -> None:
     """The half both commands share: check, defer, call, answer."""
-    if interaction.guild_id is None:
-        await reply(interaction, "Run this inside a server channel.")
-        return
-    if not gate.allows(interaction.user, SYNC_ROLES):
-        await reply(interaction, gate.denial(name, SYNC_ROLES))
-        return
-    if interaction.channel_id is None:
-        await reply(interaction, "Run this inside the item's thread.")
+    where = await in_a_thread(interaction, name, gate, SYNC_ROLES)
+    if where is None:
         return
 
     await defer(interaction)
     try:
-        outcome = await call(thread_id=interaction.channel_id, discord_user_id=member.id)
+        outcome = await call(thread_id=where.channel_id, discord_user_id=member.id)
     except ShannonError as error:
         logger.warning("/%s could not finish: %s", name, error.message)
         await reply(interaction, reply_for(error))

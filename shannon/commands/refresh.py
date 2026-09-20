@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -76,11 +77,8 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
     async def refresh(
         interaction: discord.Interaction, scope: app_commands.Choice[str] | None = None
     ) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
-        if not gate.allows(interaction.user, SYNC_ROLES):
-            await reply(interaction, gate.denial("refresh", SYNC_ROLES))
+        guild_id = await in_a_server(interaction, "refresh", gate, SYNC_ROLES)
+        if guild_id is None:
             return
 
         # The parameter and the scope share a name because they are one fact twice over: Discord
@@ -90,7 +88,7 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
 
         await defer(interaction)
         try:
-            outcome = await service.refresh(guild_id=interaction.guild_id, scope=scope)
+            outcome = await service.refresh(guild_id=guild_id, scope=scope)
         except ShannonError as error:
             # `repository` rather than a kind, and it reads correctly in every row of the table
             # this can reach: the failures that get here are about the repository or about GitHub,

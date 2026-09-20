@@ -16,6 +16,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -44,21 +45,15 @@ def build_regenerate_command(service: RedrawsAnItem, gate: PermissionGate) -> Sl
     )
     @app_commands.guild_only()
     async def regenerate(interaction: discord.Interaction) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, "Run this inside a server channel.")
-            return
-        if not gate.allows(interaction.user, SYNC_ROLES):
-            await reply(interaction, gate.denial("regenerate", SYNC_ROLES))
-            return
-        if interaction.channel_id is None:
-            await reply(interaction, "Run this inside the item's thread.")
+        where = await in_a_thread(interaction, "regenerate", gate, SYNC_ROLES)
+        if where is None:
             return
 
         await defer(interaction)
         try:
             # Inside a thread this is the thread's own id, which is why the command needs no
             # argument. The `/set_*` commands read it the same way.
-            outcome = await service.regenerate(thread_id=interaction.channel_id)
+            outcome = await service.regenerate(thread_id=where.channel_id)
         except ShannonError as error:
             logger.warning("/regenerate could not finish: %s", error.message)
             # No `noun`, so a 404 reads as "that item" rather than naming a kind. The command
