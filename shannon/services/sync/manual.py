@@ -52,12 +52,8 @@ class _Registered:
 class ManualSync:
     """Backs the commands that sync one item by link.
 
-    Fetching from the REST API rather than waiting for a webhook is the only difference from
-    the webhook path; the syncing itself is the same service, so a manual run and an automatic
-    run cannot produce different results.
-
-    The link parser, the fetch and the noun are injected, which is all that separates `/pr`
-    from `/issue`.
+    Fetching from the REST API rather than waiting for a webhook is the only difference from the
+    webhook path; the syncing itself is the same service.
     """
 
     def __init__(
@@ -82,14 +78,10 @@ class ManualSync:
     ) -> str:
         """Settle a link that names a different repository against the id rather than the name.
 
-        GitHub lets a repository be renamed and keeps its numeric id. The stored name only
-        catches up when a webhook arrives, so refusing on the name alone leaves both commands
-        rejecting the correct link for a repository that has only moved. This costs one API
-        call, and only on the path that was about to refuse anyway.
-
-        Returns the name GitHub is using now. The GitHub call deliberately sits between the two
-        transactions rather than inside one: the sync path refuses to hold a transaction across
-        a network call, and this has no more right to.
+        GitHub keeps a repository's numeric id across a rename, and the stored name only catches
+        up when a webhook arrives, so refusing on the name alone rejects a correct link for a
+        repository that has only moved. The GitHub call sits between the two transactions: the
+        sync path holds no transaction across a network call.
         """
         try:
             named = await self._github.get_repository(ref.owner, ref.name)
@@ -116,15 +108,13 @@ class ManualSync:
     async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome:
         """Fetch an item by link and mirror it into this guild's Discord channel.
 
-        Raises UnparseableLinkError for a link of the wrong shape, NotRegisteredError when the
-        guild has no repository, RepositoryMismatchError when the link points somewhere else,
-        and GitHubError for anything GitHub refuses.
+        Raises GitHubError for anything GitHub refuses on the fetch, as well as the errors
+        raised here.
         """
         ref = self._parse_link(link)
 
-        # Plain values out of the session, not the row itself. Reading an ORM object after its
-        # session closes is what forced the rename check to open a second session to reload the
-        # same row, and then to patch the detached copy so the outcome reported the new name.
+        # Plain values out of the session, not the row itself: reading an ORM attribute after
+        # its session has closed raises DetachedInstanceError.
         async with self._sessionmaker() as session:
             stored = await RepositoryStore(session).get_by_guild(guild_id)
             registered = _Registered.of(stored) if stored is not None else None
@@ -143,17 +133,9 @@ class ManualSync:
 
         snapshot = await self._fetch(ref.owner, ref.name, ref.number)
 
-        # Checked whichever way the name went. A matching name skips the confirmation above, and
-        # a name is not an identity: GitHub frees one the moment a repository is renamed or
-        # deleted, and the stored one goes stale by design, since nothing corrects it until an
-        # item webhook arrives and a repository renamed away sends none.
-        #
-        # So a link that reads as this server's own can fetch somebody else's item. The sync
-        # places what it is given by the payload's own repository id, not by the guild that ran
-        # the command, so unchecked it mirrored that item into whichever server had registered
-        # that repository, and answered the person who ran it with a thread they cannot open.
-        # The confirmation above already settles a genuine rename by id; this settles the case
-        # it skips, and costs no call because the snapshot already carries the id.
+        # Checked whichever way the name went: GitHub frees a repository's name as soon as it is
+        # renamed or deleted, and the sync places an item by the payload's own repository id, so
+        # a link that reads as this server's own could mirror somebody else's item elsewhere.
         if snapshot.repository.github_repo_id != registered.github_repo_id:
             raise RepositoryMismatchError(
                 f"This server is registered to {registered.full_name}, and that link now points "

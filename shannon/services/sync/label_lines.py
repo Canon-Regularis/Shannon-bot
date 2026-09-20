@@ -24,18 +24,8 @@ Renderer = Callable[[LabelMove], Panel]
 class LabelLine:
     """Posts one line into an item's thread when a label goes on or comes off.
 
-    The block above it already lists every label and is rewritten on every delivery, so this
-    tells the reader nothing new. What it does is make the change visible: Discord posts no
-    message when a message is edited, notifies nobody, and does not bump the thread, so tagging
-    an item changed the block and looked from the channel exactly like nothing happening.
-
-    Its own class rather than a branch inside the sync, because the sync is about bringing the
-    thread into line with a snapshot and this is about announcing one delivery. The sync runs
-    for every event and for `/pr` and the board; this runs for two actions and only from a
-    webhook.
-
-    It reads the delivery itself rather than being handed a move, so the item handler does not
-    have to know that labels exist. Every announcer on that seam owns its own gate.
+    The block above already lists every label, but Discord posts no message when one is edited,
+    notifies nobody and does not bump the thread, so the change is invisible from the channel.
     """
 
     def __init__(
@@ -53,31 +43,19 @@ class LabelLine:
     async def say(self, arrival: Arrival) -> None:
         """Announce the move, once, however many times this delivery is handled.
 
-        Keyed on the delivery rather than on the label, because the delivery is what repeats. The
-        same label can legitimately go on, come off and go on again, and each of those is a
-        separate thing to say; only the same delivery arriving twice is not. GitHub's Redeliver
-        button reuses the delivery id and the queue revives that same row, so a redelivery keys
-        the same and is turned away there too.
-
-        Said even where the sync turned the delivery away as superseded, which is the opposite of
-        what the state line does and is right for the opposite reason. A label going on is a fact
-        about this delivery and not a claim about the item's current shape, and a retry of a
-        delivery whose line was never posted is exactly the superseded case.
+        Keyed on the delivery, not the label: the same label may go on, come off and go on again,
+        while GitHub's Redeliver button reuses the delivery id. Said even where the sync turned
+        the delivery away as superseded, because a label going on is a fact about the delivery
+        rather than a claim about the item's current shape.
         """
         move = parse_label_move(arrival.action, arrival.payload)
         if move is None:
             return
 
         if move.added and await self._already_shown(arrival.tracked_item_id, move.name):
-            # An item opened with labels already on it is not one delivery: GitHub fires `opened`
-            # and a `labeled` for each of them together. The block that went up a moment ago
-            # listed every one, so saying they were added is telling a reader what they are
-            # looking at. Issue #81.
-            #
-            # Read AFTER the sync, which is where the handler calls this and is what makes the
-            # answer the same either way round. If the `labeled` delivery is the one that opened
-            # the thread, its own posted block recorded the name and this read sees it; if
-            # `opened` got there first, it sees the set that block wrote.
+            # GitHub fires `opened` and a `labeled` for each label an item was opened with,
+            # and the block posted a moment ago already listed every one. Read after the sync,
+            # so the answer is the same whichever of the two deliveries opened the thread.
             logger.info(
                 "the block already showed %r on tracked item %s, so nothing is said about it",
                 move.name,
@@ -91,8 +69,8 @@ class LabelLine:
             note_key=f"label:{arrival.arrived}",
             panel=self._render(move),
         )
-        # Only once the line has actually landed. A refused post hands its claim back, and the
-        # retry has to be able to say the same thing.
+        # Only once the line has landed: a refused post hands its claim back, and the retry
+        # has to be able to say the same thing.
         async with self._sessionmaker() as session, session.begin():
             await ThreadPointerStore(session).note_label_announced(
                 arrival.tracked_item_id,
