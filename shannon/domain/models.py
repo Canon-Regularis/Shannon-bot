@@ -24,17 +24,11 @@ class RepositoryRef:
 
 @dataclass(frozen=True, slots=True)
 class Actor:
-    """A GitHub account referenced by a PR or issue."""
-
     login: str
     github_user_id: int | None = None
-    # The picture GitHub shows for this account, where it sent one. Carried for the thumbnail on a
-    # panel and read nowhere else, so an account without one costs a panel its picture and nothing
-    # else. Issue #116.
-    #
-    # Accepted only as an `https://` URL. Discord fetches a thumbnail itself and answers the whole
-    # message with a 400 if it cannot, so a malformed one here does not lose a picture, it loses
-    # the block that carried it.
+    # Accepted only as an `https://` URL. Discord fetches the thumbnail itself and answers the
+    # whole message with a 400 if it cannot, so a malformed one costs the panel the block that
+    # carried it rather than just its picture.
     avatar_url: str | None = None
 
 
@@ -46,34 +40,18 @@ class Label:
 
 @dataclass(frozen=True, slots=True)
 class LabelMove:
-    """One label going on or coming off an item, which GitHub reports one at a time.
+    """One label going on or coming off, which GitHub reports one at a time.
 
-    Its own type rather than a pair of strings because both halves are needed together and
-    neither means anything alone: the name says which label, and nothing else in the delivery
-    says whether it arrived or left. Four labels applied at once are four of these, in four
-    deliveries, because that is how GitHub sends them.
-
-    What the two classifiers make of the name is carried rather than worked out again wherever
-    it is needed. Two reasons. The renderer would otherwise have to reach into `github` to find
-    out what a label means, which is a policy decision made in a module whose job is deciding
-    what a reader sees. And a classification stored once cannot come out differently from the
-    one the delivery was read with.
-
-    Two fields rather than a `kind` beside them, because a kind and a level can disagree and
-    these cannot: `priority is not UNSET` is the whole of the question "is this a priority
-    label", answered by the same parser that answers it everywhere else, and a `kind` of
-    PRIORITY beside a level of UNSET would be representable and mean nothing. A label cannot be
-    both, which `test_the_two_groups_cannot_both_claim_a_label` pins rather than assumes.
+    Four labels applied at once arrive as four deliveries. A label cannot be both a priority and a
+    status, which `test_the_two_groups_cannot_both_claim_a_label` pins.
     """
 
     name: str
     added: bool
-    # UNSET where the name says nothing about priority, which is the ordinary case. Read off the
-    # name whichever way the label is moving: `urgent` is a priority label coming off as much as
-    # going on, and the line that says so has to know which group it belongs to either way.
+    # Read off the name whichever way the label is moving: `urgent` is a priority label coming
+    # off as much as going on. UNSET where the name says nothing about priority.
     priority: Priority = Priority.UNSET
-    # None where the name is not one of the five statuses. Exact spellings only, which is the
-    # rule `status_of` already holds to and the reason it is asked rather than guessed at.
+    # None unless the name is one of the five statuses, spelled exactly as `status_of` has them.
     status: Status | None = None
 
 
@@ -83,9 +61,8 @@ class RepositorySnapshot:
     owner: str
     name: str
     html_url: str
-    # Three states rather than two, and None is the useful one: it means GitHub did not say. A
-    # webhook payload always carries the flag, but a body that has been trimmed or comes from a
-    # cache may not, and reading a missing field as public would state something nobody checked.
+    # None means GitHub did not say. A webhook payload always carries the flag, but a trimmed or
+    # cached body may not, and reading a missing field as public would state something unchecked.
     private: bool | None = None
 
     @property
@@ -97,9 +74,7 @@ class RepositorySnapshot:
 class ItemSnapshot:
     """What every GitHub object the bot mirrors has in common.
 
-    The REST client and the webhook parsers both produce these, so downstream code never
-    branches on where the data came from. Keyword-only so that a subclass can add its own
-    fields without having to care where they land in the ordering.
+    Keyword-only so a subclass can add fields without minding where they land in the ordering.
     """
 
     repository: RepositorySnapshot
@@ -113,9 +88,8 @@ class ItemSnapshot:
     labels: tuple[Label, ...] = ()
     updated_at: datetime | None = None
     action: str | None = None
-    # What somebody wrote when they opened it. Empty where they wrote nothing, which GitHub
-    # sends as a null rather than as an empty string, and which the block reads as a section to
-    # leave out rather than as one to render blank.
+    # Empty where they wrote nothing, which GitHub sends as a null rather than an empty string,
+    # and which the block reads as a section to leave out rather than one to render blank.
     body: str = ""
 
     @property
@@ -133,56 +107,40 @@ class ItemSnapshot:
 
     @property
     def priority(self) -> Priority:
-        """Priority as GitHub has it, which is a label. Same rule for every kind of item."""
         return parse_priority(self.label_names)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PullRequestSnapshot(ItemSnapshot):
     reviewers: tuple[Actor, ...] = ()
-    # Teams asked for a review, carried apart from the people asked rather than among them.
-    #
-    # Apart all the way down, and each half of that was learned the hard way. They are told in
-    # different words, because Discord writes a role mention differently from a person's and a
-    # slug rendered as a login resolves to nobody. They are looked up in a different table,
-    # because `/link` lets anybody bind a name to their own account without GitHub being asked,
-    # so a slug looked up among logins is how somebody becomes the `security` team. And they are
-    # closed by a different rule: a person's request ends when they submit a review, a team's
-    # when GitHub drops it from `requested_teams`, which deletes the row.
+    # Kept apart from the people asked. Discord writes a role mention differently from a person's;
+    # `/link` binds a login without GitHub being asked, so a slug looked up among logins is how
+    # somebody becomes the `security` team; a team's request closes when GitHub drops the slug.
     reviewer_teams: tuple[Actor, ...] = ()
 
-    # Who this very event asked, as opposed to who is on the pull request. GitHub names them at
-    # the top level of a `review_requested` payload and nowhere else, and it only sends one for a
-    # party that was not already requested, which makes it the only thing that separates "asked
-    # again" from "still asked" when the list either side is identical. Carried apart the way the
-    # two lists are, because which of them was asked decides which role's row is reopened.
+    # Who this event asked, as opposed to who is on the pull request. GitHub names them at the top
+    # level of a `review_requested` payload and only for a party not already requested, which is
+    # the only thing separating "asked again" from "still asked" when the lists either side match.
     person_asked_now: Actor | None = None
     team_asked_now: Actor | None = None
 
     merged: bool = False
 
-    # The commit the pull request currently points at. Issue #112 needs it to tell a CI result
-    # about this pull request from one about a commit it has since moved off: a new push cancels
-    # the run before it, and that run completes as `cancelled` looking like a failure.
-    #
-    # Empty where it was not read, which is every snapshot built from the ISSUES shape of a pull
-    # request. That shape carries no head at all, and a caller comparing against an empty string
-    # is asking a question it has no answer to rather than being told the wrong one.
+    # Issue #112 needs it to tell a CI result about this pull request from one about a commit it
+    # has moved off: a new push cancels the run before it, which completes as `cancelled` and
+    # looks like a failure. Empty on snapshots built from the ISSUES shape, which carries no head.
     head_sha: str = ""
-    # Whether it is still being written. GitHub runs CI on a draft like any other pull request,
-    # and ringing reviewers about work nobody has asked them to look at yet is the wrong end of
-    # the feature.
+    # GitHub runs CI on a draft like any other pull request, so the checks path has to know.
     draft: bool = False
 
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
 
     @property
     def display_state(self) -> str:
-        """Open, closed, or merged. GitHub carries merging as a flag beside the state.
+        """Open, closed, or merged; GitHub carries merging as a flag beside the state.
 
-        Do not shorten `super(PullRequestSnapshot, self)` to a bare `super()`: the `slots=True`
-        decorator rebuilds the class, and the bare form's closure cell still points at the one
-        it replaced, which raises on Python before 3.14.
+        Do not shorten to a bare `super()`: `slots=True` rebuilds the class and the bare form's
+        closure cell still points at the one it replaced, which raises before Python 3.14.
         """
         if self.merged:
             return "merged"
@@ -198,25 +156,13 @@ class IssueSnapshot(ItemSnapshot):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TicketSnapshot(ItemSnapshot):
-    """A draft item on a GitHub project board, which belongs to no repository of its own.
+    """A draft item on a GitHub project board, belonging to no repository of its own.
 
-    The requirements give it a block of three lines against the eleven a pull request gets, and
-    that is the shape of the thing rather than an omission: a draft has a title, a place on a
-    board, and nothing else worth three more lines. No author, no assignees, no labels, no
-    state, so the inherited fields keep their empty defaults and `priority` reads UNSET off an
-    empty label list.
-
-    A draft does have a description on GitHub's side, and this does not carry it. Reading one
-    would mean a field on `BoardItem` and a second read in the poller, for a block the
-    requirements fix at three lines.
-
-    `repository` is the one the guild registered, not one the ticket belongs to. It is carried
-    because resolving a Discord guild goes through a repository row and there is no other route,
-    which is a constraint of the schema rather than a claim about where the ticket lives.
+    Inherited author, assignee, label and state fields keep their empty defaults. `repository` is
+    the one the guild registered, because resolving a Discord guild goes through a repository row.
     """
 
-    # What the board says, as a column name rather than one of our own statuses. The mapping
-    # between the two is a policy decision and is made where the policies are.
+    # The board's own column name, not one of our statuses; the mapping lives with the policies.
     column: str | None = None
     project_number: int | None = None
 
@@ -227,21 +173,17 @@ class TicketSnapshot(ItemSnapshot):
 class CommentSnapshot:
     """A GitHub comment, and the number of the item it was left on.
 
-    The item is identified by number rather than by id: GitHub reports a pull request's issue
-    id in comment payloads, which never matches the pull request id stored against the tracked
-    item, while the number matches for both kinds.
-    """
+    By number rather than id: GitHub reports a pull request's issue id in comment payloads,
+    which never matches the pull request id stored against the tracked item."""
 
     repository: RepositorySnapshot
     item_number: int
     comment_id: int
     html_url: str
     body: str
-    # GitHub marks a pull request inside a comment payload, so the kind is known and worth
-    # carrying rather than being rediscovered downstream. Required, and above the fields that
-    # have defaults so that it has to be: the one place a note's kind is used is the read that
-    # finds its item, and a missing kind there does not fail, it matches nothing, which reads
-    # as an item nobody tracks and drops the comment for good.
+    # Required, and above the fields with defaults so that it has to be: the read that finds a
+    # note's item does not fail on a missing kind, it matches nothing, which reads as an item
+    # nobody tracks and drops the comment for good. GitHub marks a pull request in the payload.
     object_type: ObjectType
     author: Actor | None = None
     created_at: datetime | None = None
@@ -255,8 +197,7 @@ class CommentSnapshot:
 class ReviewSnapshot:
     """A submitted pull request review.
 
-    `state` is lowercased on the way in: webhooks send `approved`, the REST API sends
-    `APPROVED`, and nothing downstream should have to know that.
+    `state` is lowercased on the way in: webhooks send `approved`, the REST API `APPROVED`.
     """
 
     repository: RepositorySnapshot
@@ -282,17 +223,11 @@ class ReviewSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ReviewCommentSnapshot:
-    """One inline comment left on a pull request's diff.
+    """One inline comment left on a pull request's diff, numbered separately from issue comments.
 
-    Its own kind rather than a `CommentSnapshot` carrying a few more fields, because the two come
-    off different events and GitHub numbers them separately. A review comment and an issue comment
-    can share an id, and one key space would take the second for the first and drop it.
-
-    Where the comment points is carried as GitHub reports it, and nothing here tries to improve on
-    it: `line` is the end of the range as the branch stands now, `start_line` is set only on a
-    multi-line comment, and `original_line` is where it was written, which is the only one left
-    once the diff has moved under it.
-    """
+    The two can share an id and need separate key spaces. `line` is the end of the range as the
+    branch stands now, `start_line` is set only on a multi-line comment, and `original_line` is
+    where it was written, the only one left once the diff has moved under it."""
 
     repository: RepositorySnapshot
     item_number: int
@@ -308,14 +243,13 @@ class ReviewCommentSnapshot:
     author: Actor | None = None
     created_at: datetime | None = None
 
-    # Only pull requests have review comments. Fixed rather than passed in, because the rebuild
-    # that mends a deleted thread branches on this field and its other arm reads the pull request
-    # as an issue. GitHub serves that happily, and it would open a second thread for the same item.
+    # Fixed rather than passed in: the rebuild that mends a deleted thread branches on this field,
+    # and its other arm reads the pull request as an issue, which GitHub serves happily and which
+    # would open a second thread for the same item.
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
 
     @property
     def note_key(self) -> str:
-        """A key space of its own, for the reason the class docstring gives."""
         return f"review-comment:{self.comment_id}"
 
 
@@ -323,37 +257,27 @@ class ReviewCommentSnapshot:
 class CommitRef:
     """One commit as the compare endpoint describes it, which is everything but the numbers.
 
-    Carried apart from `Commit` because this is what decides whether a commit is announced at all,
-    and that decision is made before anything is spent reading it. A push that merges the default
-    branch in is filtered down to nothing off this alone, at the cost of the one call that listed
-    them.
-    """
+    Separate from `Commit` because whether a commit is announced is decided off this alone,
+    before anything is spent reading its stats."""
 
     sha: str
     message: str
-    # The GitHub ACCOUNT, which GitHub resolves from the commit's email address and which is None
-    # when no account holds it.
-    #
-    # Deliberately not the name written into the commit itself. That is free text set by
-    # `git config user.name`, so anybody who can push to the branch could put a colleague's name
-    # against their own work, and a thread is exactly where that would be believed.
+    # The GitHub ACCOUNT, resolved from the commit's email address and None when no account holds
+    # it. Deliberately not the name written into the commit: that is free text set by
+    # `git config user.name`, so anybody who can push could put a colleague's name on their work.
     author: Actor | None
-    # More than one parent is a merge. A merge is announced by nothing: the commits it brings in
-    # are each judged on their own terms, and the merge itself says only that one branch caught up
-    # with another.
+    # More than one parent. A merge itself is announced by nothing: the commits it brings in are
+    # each judged on their own terms.
     merge: bool
 
 
 @dataclass(frozen=True, slots=True)
 class CommitStats:
-    """How much one commit changed."""
-
     additions: int
     deletions: int
-    # Counted off the list of files rather than read from a field, because GitHub sends no such
-    # field on a commit. It caps that list at three hundred entries, so a commit touching more
-    # understates its file count while its additions and deletions stay exact. The two halves of
-    # this are not equally trustworthy and only one of them can be wrong.
+    # Counted off the list of files, because GitHub sends no such field on a commit. That list
+    # caps at three hundred entries, so a larger commit understates its file count while its
+    # additions and deletions stay exact.
     changed_files: int
 
 
@@ -361,21 +285,17 @@ class CommitStats:
 class CommitRange:
     """What one push did to a branch, as the compare endpoint answers it."""
 
-    # GitHub's own word: "ahead", "behind", "diverged" or "identical". Kept as the word rather
-    # than reduced to a flag, because two of the four mean the branch was rewritten and the
-    # caller is the one that says which two.
+    # GitHub's own word: "ahead", "behind", "diverged" or "identical". Kept as the word because
+    # two of the four mean the branch was rewritten and the caller is the one that says which two.
     status: str
     commits: tuple[CommitRef, ...]
     # GitHub's count, which can exceed the list beside it: the compare endpoint stops listing at
-    # two hundred and fifty commits. Kept so that a line saying how many were not announced is
-    # right on a push that large, where counting the list would understate it.
+    # two hundred and fifty commits, and counting the list would understate a push that large.
     total: int
 
 
 @dataclass(frozen=True, slots=True)
 class Commit:
-    """One commit, as a line in a thread has to say it: who, what, and how much."""
-
     sha: str
     message: str
     author: Actor | None
@@ -383,35 +303,26 @@ class Commit:
 
     @property
     def note_key(self) -> str:
-        """Keyed on the commit, which is the opposite of the two lines beside it in the thread.
+        """Keyed on the SHA rather than on the delivery that carried it.
 
-        A label going on is a fact about one delivery, so the tag line keys on the delivery. A
-        commit is a fact about a SHA, and one delivery carries several of them. Keying a push on
-        its delivery would let a delivery that posted three commits and then failed turn the other
-        two away for good on the retry, with the delivery reported handled.
+        One delivery carries several commits, so keying on it would let a delivery that posted
+        three and then failed turn the other two away for good on the retry.
         """
         return f"commit:{self.sha}"
 
     @property
     def title(self) -> str:
-        """The subject line, which is git's own convention rather than anything invented here."""
         return self.message.split("\n", 1)[0].strip()
 
     @property
     def description(self) -> str:
-        """Everything under the subject. Empty for a commit written as one line, which is most."""
         _, _, rest = self.message.partition("\n")
         return rest.strip()
 
 
-# What GitHub calls a job that worked, and what it calls one that broke. Everything else it can
-# say is neither: `skipped`, `cancelled`, `neutral`, `stale`, and a run carrying no conclusion at
-# all. Issue #112 asked for two lists and gets three, because this repository's own `Publish` job
-# comes back `skipped` on every pull request, and folding that in with the failures would report a
-# broken build on every green one and ring the author instead of the reviewers.
-#
-# `stale` is in the third list rather than among the failures on purpose: it means GitHub gave up
-# on the run, which says nothing about the code.
+# Everything else GitHub can say is neither: `skipped`, `cancelled`, `neutral`, `stale`, and a run
+# with no conclusion at all. Three buckets rather than two because this repository's own `Publish`
+# job comes back `skipped` on every pull request, and `stale` means GitHub gave up, not the code.
 SUCCEEDED = frozenset({"success"})
 BROKEN = frozenset({"failure", "timed_out", "action_required"})
 
@@ -422,15 +333,12 @@ class CheckRun:
 
     check_run_id: int
     name: str
-    # Whether GitHub has finished with this run. Kept as the word rather than a flag, so the
-    # caller can test it against `completed` rather than against a list of the pending words it
-    # happened to know about when it was written.
+    # Whether GitHub has finished. Callers test against `completed`; the pending words are a list
+    # GitHub can add to.
     status: str
-    # GitHub's own word, kept as the word rather than reduced to a flag. There are eight of them
-    # and which bucket each falls in is the two frozensets above, written down once.
+    # GitHub's own word, one of eight; the two frozensets above say which bucket each falls in.
     conclusion: str
-    # The job's log page. The one thing somebody wants from a failure, which is why only failures
-    # are rendered with it.
+    # The job's log page, rendered only for failures.
     html_url: str
 
 
@@ -438,10 +346,8 @@ class CheckRun:
 class CheckReport:
     """Every check on one commit, once they have all finished.
 
-    The whole commit rather than one suite. A suite is per app, so a repository running GitHub
-    Actions beside anything else has several, each completing separately, and reporting one of
-    them would be reporting part of the answer.
-    """
+    The whole commit rather than one suite: a suite is per app, so a repository running GitHub
+    Actions beside anything else has several, each completing separately."""
 
     sha: str
     runs: tuple[CheckRun, ...]
@@ -456,7 +362,6 @@ class CheckReport:
 
     @property
     def other(self) -> tuple[CheckRun, ...]:
-        """Everything that neither worked nor broke, which is mostly jobs that never ran."""
         return tuple(run for run in self.runs if run.conclusion not in SUCCEEDED | BROKEN)
 
     @property
@@ -467,49 +372,33 @@ class CheckReport:
     def passed(self) -> bool:
         """Whether this is worth telling the reviewers about.
 
-        Not `succeeded == total`. A job that did not run cannot have failed, and on a repository
-        with a job that is always skipped that reading is never true, so the reviewers would never
-        be told anything. One success is still required, or a suite where every job skipped would
-        read as a pass.
-        """
+        Not `succeeded == total`: a repository with an always-skipped job would never read as a
+        pass. One success is still required, or a suite where every job skipped would pass."""
         return not self.broken and bool(self.succeeded)
 
     @property
     def worth_saying(self) -> bool:
-        """Whether anything actually ran. Nothing did on a docs-only push through a path filter,
-        and a message saying so is noise in a thread nobody asked to have narrated."""
+        """Whether anything ran at all. Nothing does on a docs-only push through a path filter."""
         return bool(self.succeeded or self.broken)
 
     @property
     def note_key(self) -> str:
-        """Keyed on the set of runs, which is what makes a re-run say so and a retry not.
+        """Keyed on the set of runs, so a re-run says so and a retry does not.
 
-        Two parts, and the second is the one that is not obvious. The largest id alone would be
-        enough for one checks app: re-running rotates the ids, so the key moves and the new result
-        is announced. It is a second app that breaks it. Run ids are handed out when a run is
-        CREATED, so a provider whose runs were created earlier and finish later leaves the largest
-        id exactly where it was, finds the claim taken, and its results are never announced at all.
-        The count moves when the largest id does not.
-
-        Both ends of the claim read the same set, so a retried delivery computes the same key and
-        is turned away, which is the whole point of claiming.
-        """
+        The largest id alone is not enough: ids are handed out when a run is CREATED, so a second
+        checks app whose runs were created earlier and finish later leaves the largest id where it
+        was, finds the claim taken, and is never announced. The count moves when the id does not."""
         return f"checks:{len(self.runs)}:{max((run.check_run_id for run in self.runs), default=0)}"
 
 
 @runtime_checkable
 class ItemNote(Protocol):
-    """Something posted into a tracked item's thread that is not its metadata.
-
-    Comments and reviews both satisfy this, which is what lets one mirror handle both.
-    """
+    """Something posted into a tracked item's thread that is not its metadata."""
 
     repository: RepositorySnapshot
     item_number: int
     author: Actor | None
     object_type: ObjectType
-    # What a renderer reads. Declared here so the seam that renders a note can say what it needs
-    # instead of taking Any and hoping.
     body: str
     html_url: str
     created_at: datetime | None
@@ -518,10 +407,7 @@ class ItemNote(Protocol):
     def note_key(self) -> str:
         """What identifies this note, kind included.
 
-        The kind has to be in the key. GitHub numbers comments and reviews separately, so the
-        two can collide, and a review that happened to share a number with a comment would
-        otherwise be taken for one already posted and dropped.
-        """
+        GitHub numbers comments and reviews separately, so two notes can share a number."""
         ...
 
 
@@ -529,18 +415,11 @@ class ItemNote(Protocol):
 class TrackedSnapshot(Protocol):
     """What the sync path needs from any GitHub object it mirrors.
 
-    Pull requests and issues both satisfy this, which is what lets one sync service handle
-    both. A third object type only has to satisfy it too, so this lists what the sync path reads
-    and not what an implementation happens to store. `state` and `labels` are absent for that
-    reason: nothing reads them, because everything goes through `display_state`, `label_names`
-    and `priority`, which are what the two kinds of item disagree about.
-    """
+    `state` and `labels` are absent because nothing reads them: everything goes through
+    `display_state`, `label_names` and `priority`, which are what the kinds of item disagree on."""
 
-    # Read-only, all of them, which is a statement about the implementations rather than a
-    # precaution. Every snapshot in this project is a frozen dataclass and nothing writes through
-    # this protocol. Declared as plain attributes they were writable, and a writable member is one
-    # a frozen class cannot offer, so strictly nothing satisfied this at all. Nothing noticed
-    # because nothing checked.
+    # Properties rather than plain attributes: a plain attribute is writable, and a frozen
+    # dataclass cannot offer a writable member, so nothing would satisfy this protocol at all.
     @property
     def repository(self) -> RepositorySnapshot: ...
 
