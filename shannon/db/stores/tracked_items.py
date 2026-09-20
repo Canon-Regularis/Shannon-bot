@@ -28,9 +28,7 @@ class StrandedThread:
     """One item whose thread may be in a channel nothing maps any more, out of its session.
 
     `channel_id` is None where the row does not remember, which is every thread claimed before
-    that column existed. Unknown is a candidate here rather than an exclusion, which is the whole
-    difference from `forget_channel`: reading it the other way would leave behind exactly the old
-    quiet threads this exists to move.
+    that column existed.
     """
 
     tracked_item_id: int
@@ -41,8 +39,6 @@ class StrandedThread:
 
 
 class TrackedItemStore:
-    """Data access for synced GitHub objects."""
-
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -56,15 +52,9 @@ class TrackedItemStore:
     ) -> TrackedItem | None:
         """Find one item, optionally holding it for the rest of the transaction.
 
-        `lock` is for the caller that reads the item, decides something from what it read, and
-        then writes. Two syncs of one item overlap by design, and without it both read the row
-        before either commits, so both decide against the same out-of-date answer. Postgres
-        re-reads a row once it grants the lock, so the second one in sees what the first wrote
-        and decides against that instead.
-
-        Off by default. Every other caller reads to answer a question and writes nothing, and a
-        lock held on the busiest row of the sync path for the length of those is a queue nobody
-        asked for.
+        Two syncs of one item overlap by design. `lock` makes Postgres re-read the row once it
+        grants the lock, so the second caller in decides against what the first wrote. Off by
+        default: every other caller reads to answer a question and writes nothing.
         """
         statement = select(TrackedItem).where(
             TrackedItem.repository_id == repository_id,
@@ -77,22 +67,15 @@ class TrackedItemStore:
         return found
 
     async def get_by_id(self, tracked_item_id: int, *, lock: bool = False) -> TrackedItem | None:
-        """Find one item by its own id, optionally holding it for the rest of the transaction.
-
-        `lock` is for the same caller `get`'s is: one that reads the row, decides something from
-        what it read, and then writes. Off by default, because most callers here are answering a
-        question and writing nothing.
-        """
+        """Find one item by its own id, optionally holding it for the rest of the transaction."""
         return await self._session.get(TrackedItem, tracked_item_id, with_for_update=lock)
 
     async def get_with_its_server(self, tracked_item_id: int) -> tuple[TrackedItem, int] | None:
         """One item together with the Discord server its thread lives in.
 
-        In one read rather than two, because a caller holding the item and not the server has to
-        invent an answer for a row that cannot exist: the repository is a foreign key and every
-        registered repository names exactly one server. Asked for by the one caller that has to
-        tell a refusal from a bot that has been removed apart from a permission it was never
-        given, and reaches that point with no snapshot left to carry the server down from.
+        The repository is a foreign key and names exactly one server, so one read answers both.
+        The caller that needs it tells a bot that has been removed apart from a permission it was
+        never given, and has no snapshot left to carry the server down from.
         """
         row = (
             await self._session.execute(
@@ -108,23 +91,17 @@ class TrackedItemStore:
         """Move the item's high-water mark up, and never down.
 
         Two syncs of one item overlap by design, so a comparison in Python decides against a
-        value already stale by commit time. GREATEST compares against the row as it stands at
-        write time. Nulls are ignored, covering an item that has never carried a timestamp.
-
-        Lowering the mark blinds the staleness guard to the next delivery too, and the lock step
-        reads this same field to decide whether it has been superseded.
-
-        Staged, not executed: it flushes with the item's other changes in one statement.
+        value already stale by commit time; GREATEST compares at write time and ignores nulls.
+        Lowering the mark blinds the staleness guard and the lock step, which both read it.
         """
         item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 
     async def get_by_thread(self, discord_thread_id: int) -> TrackedItem | None:
         """Find the item a Discord thread belongs to.
 
-        The workflow commands take no argument and act on the thread they are run in, because
-        the thread is the only thing the person running one is looking at. Nothing else looks
-        an item up this way, which is why the column carries no index: one row per thread and a
-        handful of commands a day is not a query worth an index to maintain on the sync path.
+        For the workflow commands, which take no argument and act on the thread they are run in.
+        Nothing else looks an item up this way, so the column carries no index: one row per
+        thread and a handful of commands a day.
         """
         found: TrackedItem | None = await self._session.scalar(
             select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)
@@ -137,13 +114,8 @@ class TrackedItemStore:
         """Find an item by its GitHub number and kind.
 
         By number because `issue_comment` payloads report the issue id even for a pull request,
-        and that never matches the pull request id stored against the tracked item. The number
-        matches for both.
-
-        The kind is required rather than optional. Issues and pull requests share one numbering
-        sequence per repository, so a number already identifies exactly one of them, and every
-        caller knows which it is asking about; leaving it out would only be a way to be handed
-        the other one.
+        and that never matches the pull request id stored against the tracked item; the number
+        matches for both. Issues and pull requests share one numbering sequence per repository.
         """
         found: TrackedItem | None = await self._session.scalar(
             select(TrackedItem)
@@ -161,14 +133,9 @@ class TrackedItemStore:
     ) -> dict[int, tuple[datetime | None, int | None]]:
         """When each item of one kind was last seen, and whether it reached Discord.
 
-        For the poller, which is handed a whole board every minute and has to work out which of
-        it moved. Three columns rather than whole rows, and one query rather than one per card:
-        the answer is compared and thrown away, and a board can be long.
-
-        The thread is here because the timestamp alone is not enough to decide. A row is written
-        and committed before the Discord call that gives it a thread, so an item can be recorded
-        as current while nobody can see it, and a poller comparing only timestamps would never
-        look at it again.
+        For the poller, which is handed a whole board every minute and works out which of it
+        moved. The thread is here because a row is committed before the Discord call that gives
+        it a thread, so an item can be recorded as current while nobody can see it.
         """
         rows = await self._session.execute(
             select(
@@ -185,13 +152,8 @@ class TrackedItemStore:
     async def board_state(self, *, repository_id: int) -> dict[tuple[ObjectType, int], BoardRow]:
         """What the poller needs of every item a board card could wrap, in one query.
 
-        The draft half of a poll already reads its state this way. The wrapped half asked per
-        card, which is a session and a query each, once a minute, for every card on the board
-        whether or not it had moved. A board is read whole every time, so the number of questions
-        should be a function of the number of boards and not of the number of cards.
-
-        Keyed by the pair a card is matched on, because issues and pull requests number
-        separately and a board holds both.
+        One query per board rather than one per card, because a board is read whole every minute
+        whether or not any card moved.
         """
         rows = await self._session.execute(
             select(
@@ -210,16 +172,10 @@ class TrackedItemStore:
     ) -> list[StrandedThread]:
         """Items of these kinds whose thread is not known to be in `channel_id`.
 
-        One query for the whole repository rather than one per item, the way the board reads its
-        state. What comes back is a candidate list and not an answer: a row remembering no channel
-        is included, and only asking Discord settles whether it was in the right place all along.
-
-        `kinds` is plural because the mapping a command changes is not the only one it moves.
-        Issues fall back to the pull request channel, so pointing pull requests somewhere new
-        moves where issue threads go too, on a server that never mapped issues.
-
-        Ordered by what moved most recently, because a run is capped and the order decides which
-        half of a backlog goes today. The items people are reading should go first.
+        A candidate list, not an answer: a row remembering no channel is included, and only
+        asking Discord settles where the thread is. `kinds` is plural because issues fall back to
+        the pull request channel, so moving pull requests moves issue threads too. Ordered by
+        what moved most recently, because a run is capped.
         """
         rows = await self._session.execute(
             select(
@@ -245,9 +201,9 @@ class TrackedItemStore:
     async def remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record the board column this item was last seen in.
 
-        Written whether or not the column was acted on. What it answers is "has the board moved
-        since we looked", and that has to be true even when the move was one the item could not
-        take, or the same refusal repeats on every poll for ever.
+        Written whether or not the column was acted on: it answers "has the board moved since we
+        looked", which has to stay true for a move the item could not take, or the same refusal
+        repeats on every poll for ever.
         """
         await self._session.execute(
             update(TrackedItem)
@@ -266,18 +222,10 @@ class TrackedItemStore:
     ) -> None:
         """Put the high-water mark back, for a sync that wrote the row and then failed.
 
-        The row is committed before the Discord call that shows it, so a refused thread edit
-        leaves the item recorded as current with nothing to show for it. That is recoverable
-        for anything GitHub sends again, and drafts are the one thing it does not: a card only
-        comes back to the poller when its timestamp is newer than the stored one, and the failed
-        sync just made those equal. Lowering the mark is what puts the card back in the queue.
-
-        Deliberately not `raise_updated_at`, which exists to stop the mark moving backwards.
-        This is the one caller that means to.
-
-        `None` puts it back to never seen, which is where a card that failed on its very first
-        mirror belongs. Anything else would be a moment invented here, and the column already
-        has a word for having no answer.
+        GitHub sends most things again, and drafts are the one thing it does not: a card comes
+        back to the poller only when its timestamp is newer than the stored one, and the failed
+        sync just made those equal. `None` puts it back to never seen, for a card that failed on
+        its very first mirror.
         """
         await self._session.execute(
             update(TrackedItem)
@@ -306,15 +254,10 @@ class TrackedItemStore:
     ) -> TrackedItem:
         """Insert the item, or return the one another delivery inserted first.
 
-        GitHub fires several events at once for a newly opened item, and they carry different
-        delivery ids so the duplicate guard passes all of them through. Checking for the row
-        and then inserting it would let every one of them past the check and leave all but one
-        failing on the unique constraint, so the insert carries its own conflict handling.
-
-        The row comes back locked either way, because every caller of this writes to it. On a
-        conflict the insert has already waited on the unique index until the other caller
-        committed, and the read below would otherwise hand back a row that caller is free to
-        keep changing while this one decides things from it.
+        GitHub fires several events at once for a newly opened item, each with its own delivery
+        id, so the duplicate guard lets all of them through and check-then-insert would leave all
+        but one failing on the unique constraint. The row comes back locked because every caller
+        writes to it, and on a conflict the insert has already waited out the other transaction.
         """
         statement = (
             pg_insert(TrackedItem)

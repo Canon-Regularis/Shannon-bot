@@ -23,18 +23,16 @@ from shannon.domain.json import JsonObject
 
 _LIVE_STATUSES = ", ".join(f"'{status.value}'" for status in DeliveryStatus.live())
 
-# How much of a tracked item's text the row will hold. Named because text that came from
-# somewhere else has to be cut to fit before it is written, and a width written down twice is a
-# width that drifts. GitHub caps an issue title at 256, but a project board's draft card has no
-# cap at all, and a Status column is whatever somebody typed.
+# How much of a tracked item's text the row will hold; text from elsewhere is cut to fit
+# before it is written. GitHub caps an issue title at 256, but a project board's draft card
+# has no cap at all, and a Status column is whatever somebody typed.
 TITLE_WIDTH = 512
 URL_WIDTH = 512
 COLUMN_WIDTH = 128
 
-# One captured Discord message. Discord's own ceiling on a message is 4000 characters, so this
-# cuts only text Discord itself was unwilling to carry.
+# Discord's own ceiling on a message is 4000 characters, so this cuts nothing Discord carried.
 TRANSCRIPT_LINE_WIDTH = 4000
-# A global name and a per-server nickname are 32 characters each. This is slack, not a measurement.
+# A Discord global name and a per-server nickname are 32 characters each; the rest is slack.
 DISPLAY_NAME_WIDTH = 128
 
 
@@ -50,14 +48,9 @@ class Repository(TimestampMixin, Base):
     repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
     repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # Nullable, and read as "no evidence" rather than as public. Nothing can invent the answer for
-    # a row written before the column existed, and false would be a claim rather than a gap. It is
-    # rewritten from the repository object on every sync, so it corrects itself on the first
-    # delivery instead of needing a backfill that would have to guess.
-    #
-    # Worth recording at all because it is the one question an operator has about a deployment -
-    # is there private code in this database - and because a repository flipping public to private
-    # is a fact worth noticing rather than a GitHub call away every time somebody asks.
+    # Null reads as no evidence rather than as public: nothing can invent the answer for a row
+    # written before the column existed. Rewritten from the repository object on every sync, so
+    # it corrects itself on the next delivery rather than needing a backfill.
     private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
@@ -91,16 +84,15 @@ class ChannelMapping(TimestampMixin, Base):
 class TrackedItem(TimestampMixin, Base):
     __tablename__ = "tracked_items"
     __table_args__ = (
-        # This is what actually stops a repeated webhook creating a second Discord thread.
+        # What stops a repeated webhook creating a second Discord thread.
         UniqueConstraint(
             "repository_id",
             "github_object_type",
             "github_object_id",
             name="uq_tracked_items_repo_type_object",
         ),
-        # Comments and reviews are looked up by number. The unique constraint above leads with
-        # repository_id, so without this the planner scans every item in the repository and
-        # filters, which grows with the repository rather than staying flat.
+        # Comments and reviews are looked up by number, and the unique constraint above leads
+        # with repository_id, so without this the planner scans every item in the repository.
         Index("ix_tracked_items_repo_number", "repository_id", "github_object_number"),
     )
 
@@ -118,43 +110,21 @@ class TrackedItem(TimestampMixin, Base):
     github_state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Which channel that thread is in, recorded when the thread is claimed because that is the
-    # only moment it is known for certain. The channel mapping cannot answer it: `/set_channel`
-    # changes where new threads go and leaves the existing ones where they were.
-    #
-    # Here so that a channel being deleted can let go of the threads that were inside it. Discord
-    # reports a thread deleted with its channel only while discord.py still has it cached, and it
-    # drops one the moment it archives, so the quiet threads are reported by nothing at all.
+    # Which channel the item's thread is in; the channel mapping cannot answer it, because
+    # `/set_channel` leaves existing threads where they were. Here so a deleted channel can let
+    # go of the threads inside it, which Discord reports only while discord.py has them cached.
     discord_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Which delivery last wrote this item, by the number the queue gave it when it was written
-    # down, which is the order it reached this bot. What the staleness guard compares when two
-    # deliveries carry the same `updated_at`, which GitHub stamps to the second and so they
-    # routinely do. Null for a row written before this was kept, and for a write that came from
-    # a command or the board rather than from a delivery.
+    # Which delivery last wrote this item, in the order deliveries reached this bot. The
+    # staleness guard compares it when two deliveries carry the same `updated_at`, which GitHub
+    # stamps to the second and so they routinely do. Null for a write from a command or the board.
     last_delivery_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # The label names a reader of this thread has actually been shown, which is not the same
-    # question as which labels the item has. The block carries those and they are identical
-    # whether or not anybody has seen them; this is what has reached somebody.
-    #
-    # Written by a block that was POSTED, and maintained by a tag line that was said. An EDIT
-    # never touches it, and that is the whole of the design rather than an oversight: Discord
-    # says nothing about an edit, so a command that re-renders the block seconds before its own
-    # `labeled` webhook lands has shown the reader nothing, and the line that webhook produces is
-    # the only thing anybody but the person who ran the command ever sees.
-    #
-    # Cleared with the pointer, because a replacement thread has shown its reader nothing until
-    # its own block arrives. Null means no evidence rather than no labels: a row written before
-    # this existed announces every tag as it always did, and gains the gate from its next posted
-    # block.
+    # Which label names a reader has been shown, not which labels the item has. Written by a
+    # POSTED block and by a tag line that was said, never by an edit, because Discord tells a
+    # reader nothing about an edit. Cleared with the pointer; null means no evidence.
     shown_labels: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
-    # What this bot last made the lock on the thread it currently points at. Null means it has
-    # not set one, which is what a thread just opened is. Cleared whenever the pointer moves,
-    # because a replacement thread starts open however the one it replaced ended.
-    #
-    # Here because the lock was otherwise decided from something that lives for one delivery
-    # attempt: whether that attempt was the one that opened the thread. Anything failing after
-    # the thread was claimed onto the row and before the lock landed lost the lock for good, and
-    # asking Discord on every delivery instead would retry a refused permission for ever.
+    # The lock this bot last set on the thread it points at. Null means it has not set one, and
+    # it is cleared when the pointer moves, because a replacement thread starts open. Asking
+    # Discord on every delivery instead would retry a refused permission for ever.
     discord_thread_locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[Status] = mapped_column(
         varchar_enum(Status, "item_status"), nullable=False, default=Status.NOT_REVIEWED
@@ -165,16 +135,14 @@ class TrackedItem(TimestampMixin, Base):
     github_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # The board column as of the last poll that looked at this item. Null means never seen. The
-    # poller needs to know whether a card MOVED, and comparing its column against the stored
-    # status answers a different question: it cannot tell a card that has just been dragged from
-    # one that has sat still while somebody set the status from Discord.
+    # The board column as of the last poll, null if never seen. The poller compares against
+    # this rather than `status`, which cannot tell a card that has just been dragged from one
+    # that sat still while somebody set the status from Discord.
     project_column: Mapped[str | None] = mapped_column(String(COLUMN_WIDTH), nullable=True)
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
     # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a
-    # time. `raise` keeps the mapping for the cascade while turning any accidental use into an
-    # error instead of a quiet extra query on the hottest path there is.
+    # time. `raise` keeps the mapping for the cascade and turns accidental use into an error.
     assignments: Mapped[list[ItemAssignment]] = relationship(
         back_populates="tracked_item",
         cascade="all, delete-orphan",
@@ -199,25 +167,21 @@ class ItemAssignment(TimestampMixin, Base):
         ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
     )
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Its own copy rather than a read through `user_links`, because the two answer different
-    # questions: this records who GitHub said was asked whether or not anybody has linked them,
-    # and the ping path resolves from this row long after the payload that made it has gone.
+    # Its own copy rather than a read through `user_links`: this records who GitHub said was
+    # asked, whether or not anybody has linked them, and the ping path resolves from it long
+    # after the payload that made it has gone.
     github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     role_type: Mapped[ActorRole] = mapped_column(
         varchar_enum(ActorRole, "actor_role"), nullable=False
     )
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # When GitHub says the request this row represents was made. The other two stamps are on our
-    # clock and say what we did about the row; this one is on GitHub's and says what the row is,
-    # which is the only thing that can tell a request made again from the same request arriving
-    # twice, or stop a review closing a request that came after it. Null on rows written before
-    # it existed, and read as no evidence rather than as an answer.
+    # When GitHub says the request was made, on GitHub's clock rather than ours. It is the only
+    # thing that can tell a request made again from the same request arriving twice, or stop a
+    # review closing a request that came after it. Null reads as no evidence.
     requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # When the review this row asked for was submitted, in GitHub's clock rather than ours.
-    # The row is kept rather than removed so a delivery captured before the review, and retried
-    # after it, cannot resurrect the request and ping somebody to review what they just approved.
-    # Cleared again by a request that is genuinely newer than the review, which is what a person
-    # clicking re-request looks like.
+    # When the review was submitted, on GitHub's clock. The row is kept rather than removed so a
+    # delivery captured before the review and retried after it cannot resurrect the request and
+    # ping somebody to review what they just approved. Cleared by a request newer than the review.
     fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tracked_item: Mapped[TrackedItem] = relationship(back_populates="assignments")
@@ -226,12 +190,9 @@ class ItemAssignment(TimestampMixin, Base):
 class MirroredNote(TimestampMixin, Base):
     """A comment or review already posted into an item's thread.
 
-    The queue is at-least-once on purpose: a delivery whose status could not be written stays
-    leased and is handled again once the lease expires. Every other handler is idempotent under
-    that on its own; posting a note is not, so this table carries the idempotency for it.
-
-    The claim goes in before the post, never after. Recording afterwards moves the gap one step
-    along instead of closing it.
+    The queue is at-least-once: a delivery whose status could not be written is handled again
+    once its lease expires. Every other handler is idempotent under that on its own; posting a
+    note is not, so the claim goes in before the post, never after.
     """
 
     __tablename__ = "mirrored_notes"
@@ -251,31 +212,23 @@ class MirroredNote(TimestampMixin, Base):
 class WebhookEvent(Base):
     """A delivery GitHub handed us, and how far we have got with it.
 
-    This is a queue rather than a log. GitHub never redelivers a failed webhook and gives up on
-    one that takes more than ten seconds, so the body is kept here and the work happens behind
-    the response. Without that, a slow Discord call loses the event outright.
+    A queue rather than a log: GitHub never redelivers a failed webhook and gives up on one that
+    takes more than ten seconds, so the body is kept here and the work happens behind the
+    response.
     """
 
     __tablename__ = "webhook_events"
     __table_args__ = (
         UniqueConstraint("github_delivery_id", name="uq_webhook_events_github_delivery_id"),
         # The lease reads `next_attempt_at IS NULL OR next_attempt_at <= now()`, which no index
-        # can answer as a condition, so an index leading on status only ever contributed its
-        # first column and the planner abandoned it for a full table scan as soon as a few
-        # hundred deliveries were backing off. This is what the predicate can actually prove,
-        # and it covers only the live rows so it stays small however long deliveries are kept.
+        # can answer as a condition: an index leading on status fell back to a full table scan
+        # once a few hundred deliveries were backing off. Partial, so it stays small.
         Index(
             "ix_webhook_events_live",
             "id",
-            # Built from the enum so a sixth state cannot leave the index behind, and
-            # `live()` returns an ordered tuple so the string comes out the same every time.
-            #
-            # Not checked by the schema diff in test_migrations, whatever this used to say:
-            # alembic's PostgreSQL comparison ignores an index's WHERE clause, so widening this
-            # predicate, narrowing it or deleting it outright all leave that test answering with
-            # no differences. `test_the_live_index_covers_exactly_the_live_statuses` reads the
-            # predicate back out of pg_indexes instead, which is what actually holds the two
-            # together.
+            # Built from the enum, in `live()`'s order, so a sixth state cannot leave the
+            # index behind. Alembic ignores an index's WHERE clause, so test_migrations cannot
+            # see this; test_the_live_index_covers_exactly_the_live_statuses reads pg_indexes.
             postgresql_where=text(f"status IN ({_LIVE_STATUSES})"),
         ),
         # Pruning has to find the slice past the retention window without reading the rest.
@@ -289,17 +242,14 @@ class WebhookEvent(Base):
     processed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    # The one enum column that was typed as the string it holds. `varchar_enum` renders the
-    # same VARCHAR(32) and emits no CHECK, so the schema is unchanged; what changes is that
-    # reading it back gives a `DeliveryStatus` rather than a `str` that happens to match.
+    # `varchar_enum` renders a plain VARCHAR(32) and emits no CHECK constraint.
     status: Mapped[DeliveryStatus] = mapped_column(
         varchar_enum(DeliveryStatus, "delivery_status"), nullable=False
     )
 
     # Nullable so the migration applies to a live table with nothing to backfill; the lease
-    # requires a body, so rows written before this existed are never picked up. none_as_null is
-    # what makes that hold: without it SQLAlchemy stores Python None as the JSON value `null`,
-    # which IS NOT NULL happily matches.
+    # requires a body, so older rows are never picked up. Without none_as_null SQLAlchemy stores
+    # Python None as the JSON value `null`, which IS NOT NULL happily matches.
     payload: Mapped[JsonObject | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     attempts: Mapped[int] = mapped_column(nullable=False, server_default="0", default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -312,8 +262,8 @@ class WebhookEvent(Base):
 class UserLink(TimestampMixin, Base):
     """Maps a GitHub login to a Discord account within one guild.
 
-    Not in the original requirements table list. Added because reviewer pinging needs somewhere
-    to read `discord_user_id` from before an assignment row exists.
+    Reviewer pinging needs somewhere to read `discord_user_id` from before an assignment row
+    exists.
     """
 
     __tablename__ = "user_links"
@@ -327,8 +277,7 @@ class UserLink(TimestampMixin, Base):
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
     # Who that login belonged to when it was linked. GitHub frees a name the moment it is
     # renamed or deleted and lets anybody take it, so the name alone points at whoever holds it
-    # now rather than at the person somebody meant. Null on rows written before this existed,
-    # and read as no evidence rather than as an answer.
+    # now. Null reads as no evidence rather than as an answer.
     github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -336,26 +285,10 @@ class UserLink(TimestampMixin, Base):
 class MutedMember(TimestampMixin, Base):
     """One member of one server who asked this bot not to notify them.
 
-    The row IS the fact. There is no column saying yes or no, because there is no third state to
-    record: somebody has asked to be left alone or they have not, and a member who never runs
-    `/mentions` wants exactly what every member got before this existed. So no backfill, and an
-    absent row reads as pinged. `mirrored_notes` is the same shape for the same reason.
-
-    Not a column on `user_links`, and that is the constraint that decided it rather than a
-    preference. `UserLinkStore.link` clears both halves of that row and inserts a fresh one,
-    because either half may be held by a different row and both are unique within a guild. So
-    re-running `/link` writes a new row with defaults, and the changed-hands warning in
-    `resolve_many` tells people to do exactly that. A preference kept there would be silently
-    forgotten by the one action the bot asks for by name.
-
-    Keyed on the Discord account rather than on a link, so the order of `/link` and `/mentions`
-    does not matter and somebody who has never linked still has a preference on record for when
-    they do.
-
-    Muted, not quiet, and the difference is worth saying because `quiet_metadata` lives two files
-    away and means the opposite thing: that one takes the mention OUT and leaves a plain name,
-    which is what a backlog mirror and a replacement thread want. This one keeps the mention, so
-    the thread still records who is on the item, and takes away only the notification.
+    The row is the fact: an absent row reads as pinged, so there is nothing to backfill. Its own
+    table because `UserLinkStore.link` deletes and rewrites the `user_links` row, which would
+    silently forget a preference kept there. Muting keeps the mention in the thread and takes
+    away only the notification, unlike `quiet_metadata`, which strips the mention itself.
     """
 
     __tablename__ = "muted_members"
@@ -373,15 +306,8 @@ class MutedMember(TimestampMixin, Base):
 class TeamLink(TimestampMixin, Base):
     """Maps a GitHub team to a Discord role within one guild.
 
-    The sibling of `user_links`, and separate from it because the two halves are different kinds
-    of thing: a login belongs to one person and a slug belongs to a group, and Discord mentions
-    them with different syntax. Folding them into one table would mean a column that is a user id
-    on some rows and a role id on others, which is the shape that makes a query have to ask which
-    kind of row it is looking at.
-
-    Only one uniqueness rule, unlike `user_links`. A slug maps to one role, but two GitHub teams
-    pointing at one Discord role is a reasonable thing to want: a server may have a single
-    `@reviewers` role that several teams should reach.
+    One uniqueness rule, unlike `user_links`: a slug maps to one role, but several teams may
+    point at the same Discord role.
     """
 
     __tablename__ = "team_links"
@@ -398,24 +324,10 @@ class TeamLink(TimestampMixin, Base):
 class GitHubInstallation(TimestampMixin, Base):
     """Which App installation covers one GitHub account.
 
-    A GitHub App holds no standing credential. It signs a short-lived JWT with its private key and
-    trades that for a token scoped to one installation, and an installation is on an ACCOUNT rather
-    than on a repository: install it on `octocat` and it covers whichever of that account's
-    repositories were granted. So this is keyed on the account, and the route from a Discord server
-    to a token is guild, then repository, then owner, then here.
-
-    Deliberately not keyed on the guild as well. That would make one account's installation belong
-    to one server, which is wrong the moment two servers mirror two repositories under the same
-    owner, and the current schema handles that case perfectly well.
-
-    A fast path rather than the source of truth. GitHub is authoritative, every App delivery
-    carries the installation id in its payload, and the resolver falls back to asking GitHub
-    directly, so a row that is missing or stale costs one request rather than a broken mirror.
-
-    `account_id` is nullable for the reason `user_links.github_user_id` is: a row written from a
-    payload that carried no account block has no evidence of the id, and inventing one would be
-    worse than admitting it is not known. A login is not an identity - GitHub frees one the moment
-    it is renamed and lets anybody take it - so the id is what a rename is noticed by.
+    An installation is on an ACCOUNT rather than on a repository: install it on `octocat` and it
+    covers whichever of that account's repositories were granted, so the route from a Discord
+    server to a token is guild, then repository, then owner, then here. A fast path rather than
+    the source of truth: the resolver falls back to asking GitHub, so a stale row costs a request.
     """
 
     __tablename__ = "github_installations"
@@ -426,31 +338,22 @@ class GitHubInstallation(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # Stored lowercased, because GitHub echoes back whatever case a payload was written with and
-    # a lookup that respected case would miss its own row half the time.
+    # Stored lowercased: GitHub echoes back whatever case a payload was written with, so a
+    # case-sensitive lookup would miss its own row.
     account_login: Mapped[str] = mapped_column(String(255), nullable=False)
     account_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # GitHub suspends an installation rather than deleting it when somebody pauses the App. The
-    # token mint fails while it is suspended, so the state is worth holding: it is the difference
-    # between "this bot was never installed here" and "somebody turned it off on purpose".
+    # GitHub suspends an installation rather than deleting it when somebody pauses the App, and
+    # the token mint fails while it is suspended.
     suspended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 class IdentityVerification(TimestampMixin, Base):
     """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
 
-    `/unregister` destroys a binding and everything mirrored under it, so it may not be run on the
-    strength of a Discord role alone. `/link` cannot help: it checks only that a login EXISTS, so
-    any guild administrator can claim to be anybody, and a check built on it would be theatre.
-
-    The callback that GitHub redirects to is unauthenticated - it is a browser arriving with a
-    code - so this row is the whole of what connects it to the person who ran the command. That
-    makes `state` a CSRF token and a session identifier at once, which is the ordinary OAuth
-    pattern and the right one here.
-
-    Single use, and consumed by an UPDATE that filters on `consumed_at IS NULL` so two clicks on
-    the same link race in the database rather than in Python. Short lived, because an unused one
-    is a standing invitation to unbind somebody's repository if it ever leaks.
+    `/unregister` destroys a binding and everything mirrored under it, and `/link` checks only
+    that a login EXISTS, so a Discord role alone cannot authorise it. The callback GitHub
+    redirects to is unauthenticated, so `state` is CSRF token and session identifier at once.
+    Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the database.
     """
 
     __tablename__ = "identity_verifications"
@@ -471,19 +374,9 @@ class IdentityVerification(TimestampMixin, Base):
 class VerifiedIdentity(TimestampMixin, Base):
     """Who a Discord account proved they are on GitHub, and when they proved it.
 
-    The result of the round trip above. Kept rather than re-proved on every command because the
-    proof costs a browser visit, and asking somebody to do that twice inside a minute to answer
-    one question is how a safety check gets worked around instead of used.
-
-    Kept only briefly, though, and the freshness rule lives with the service rather than here: a
-    proof that somebody held an account an hour ago says little about now, and this is the row
-    that permits an irreversible command.
-
-    Its own table rather than columns on `user_links`, for exactly the reason `muted_members` is
-    its own table: `UserLinkStore.link` deletes and rewrites that row, so anything kept there is
-    silently destroyed by the one command the bot tells people to run. It is also a different kind
-    of fact. A link is a claim somebody made about themselves; this is something GitHub vouched
-    for.
+    Kept rather than re-proved on every command, because the proof costs a browser visit, and the
+    freshness rule lives with the service rather than here. Its own table for the reason
+    `muted_members` is: `UserLinkStore.link` rewrites the `user_links` row from scratch.
     """
 
     __tablename__ = "verified_identities"
@@ -499,30 +392,24 @@ class VerifiedIdentity(TimestampMixin, Base):
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     github_login: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Not nullable here, unlike the installation above. This row only ever comes from `GET /user`
-    # answering about the account that just authorised, which always carries an id.
+    # Not nullable here, unlike the installation above: this row only ever comes from
+    # `GET /user` answering about the account that just authorised, which always carries an id.
     github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class LoggedConversation(TimestampMixin, Base):
-    """One Discord thread whose messages are being published to its GitHub item. Issue #103.
+    """One Discord thread whose messages are being published to its GitHub item.
 
-    A row is kept after it stops rather than deleted. Publishing what people said into a public
-    repository is worth being able to say afterwards who turned it on and when, and the rows are
-    a handful per item. That is why uniqueness is partial: one OPEN conversation per item, and
-    any number of finished ones behind it.
-
-    `discord_thread_id` duplicates what `tracked_items` already holds, on purpose. It records
-    which thread was armed, and the item's own pointer can be replaced underneath it by a rebuild
-    or a relocation. Without it a conversation would go on capturing in a thread the item no
-    longer points at, and nothing could tell.
+    A row is kept after it stops, so who turned logging on and when stays on record.
+    `discord_thread_id` records which thread was armed, because a rebuild or a relocation can
+    replace the item's own pointer, and the conversation would otherwise go on capturing in a
+    thread the item no longer points at.
     """
 
     __tablename__ = "logged_conversations"
     __table_args__ = (
-        # Partial, so the rule is "one open conversation per item" rather than "one ever". A
-        # plain unique constraint would mean an item could never be logged a second time.
+        # Partial, so the rule is one open conversation per item rather than one ever.
         Index(
             "uq_logged_conversations_open_item",
             "tracked_item_id",
@@ -538,41 +425,35 @@ class LoggedConversation(TimestampMixin, Base):
     discord_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     started_by_discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Null means it is still running, and it is what the partial index above is built on.
+    # Null means it is still running.
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     stopped_by_discord_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    # The batch in flight, and how far along the message rows it reaches. Held on the conversation
-    # rather than stamped on every line: one row is updated per flush instead of all of them, and
-    # "one flush at a time per conversation" becomes a property of the schema rather than a rule
-    # somebody has to keep. A claim older than the retry window is taken to belong to a process
-    # that died holding it.
+    # The batch in flight, and how far along the message rows it reaches. Held here so that one
+    # flush at a time per conversation is a property of the schema rather than a rule somebody
+    # keeps. A claim older than the retry window belongs to a process that died holding it.
     flush_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     flush_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     flush_through_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Consecutive failures, to bound a conversation GitHub will never accept. Reset by a flush
-    # that lands, so an outage costs nothing once it is over.
+    # that lands.
     failed_flushes: Mapped[int] = mapped_column(nullable=False, server_default=text("0"), default=0)
 
 
 class LoggedMessage(TimestampMixin, Base):
-    """One captured Discord message, waiting to be published. Issue #103.
+    """One captured Discord message, waiting to be published.
 
-    Deleted once the comment carrying it lands, and kept no longer. These rows hold what people
-    said, which is reason enough not to keep them past the job they exist for.
-
-    Buffered in a table rather than in memory because GitHub can be down. An in-memory buffer
-    facing a failed write either grows without bound or drops the batch, and dropping it loses
-    part of a conversation with nothing anywhere saying so.
+    Deleted once the comment carrying it lands: these rows hold what people said. Buffered in a
+    table rather than in memory because GitHub can be down, and an in-memory buffer facing a
+    failed write either grows without bound or drops part of a conversation silently.
     """
 
     __tablename__ = "logged_messages"
     __table_args__ = (
-        # Capture is idempotent on this. Its index leads with `conversation_id`, which is also
-        # the ordered read the flush does and the delete that follows, so a second index on that
-        # column alone would be this one again.
+        # Capture is idempotent on this, and its index leads with `conversation_id`, which the
+        # flush's ordered read and the delete that follows also use.
         UniqueConstraint(
             "conversation_id", "discord_message_id", name="uq_logged_messages_conversation_message"
         ),
@@ -586,19 +467,13 @@ class LoggedMessage(TimestampMixin, Base):
     discord_author_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     author_display_name: Mapped[str] = mapped_column(String(DISPLAY_NAME_WIDTH), nullable=False)
     content: Mapped[str] = mapped_column(String(TRANSCRIPT_LINE_WIDTH), nullable=False)
-    # Who this message tagged, by Discord id, with the name each had when it was said.
-    # Issue #121. The content carries `<@123>` where somebody was tagged and this says
-    # who 123 is; without it the flush could turn a linked person into an `@login` and
-    # would have nothing left to call anybody else.
-    #
-    # A column rather than a table because it has no life of its own: written once with
-    # the row, read once with it, deleted with it, and never queried by the ids in it.
-    # JSON has no integer keys, so the ids go in as decimal strings, and `mentioned_in`
-    # is the only thing that reads them back.
+    # Who this message tagged, by Discord id, with the name each had when it was said. The
+    # content carries `<@123>` and this says who 123 is; without it the flush could name a
+    # linked person and nobody else. JSON has no integer keys, so the ids are decimal strings.
     mentions: Mapped[dict[str, str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
-    # Discord's clock rather than ours. It is what the rendered line is stamped with, and what the
-    # quiet gap is measured against, so a flush held up by an outage does not read as a thread
-    # that went quiet and publish a batch the moment the outage ends.
+    # Discord's clock rather than ours. The rendered line is stamped with it and the quiet gap is
+    # measured against it, so a flush held up by an outage does not read as a thread that went
+    # quiet and publish the moment the outage ends.
     said_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
