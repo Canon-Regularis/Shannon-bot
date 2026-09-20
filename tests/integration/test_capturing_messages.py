@@ -14,10 +14,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import LoggedMessage, Repository
+from shannon.db.models import LoggedMessage
 from shannon.db.stores.logged_messages import mentioned_in
 from shannon.discord_bot.capture import CapturedMessage
-from shannon.services.sync.items import ItemSyncService
 from shannon.services.transcripts.log import ConversationLog
 from tests.fakes.threads import FakeThreadGateway
 
@@ -32,13 +31,6 @@ def log(
     db_sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
 ) -> ConversationLog:
     return ConversationLog(db_sessionmaker, threads)
-
-
-@pytest.fixture
-async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
-    result = await sync_service.sync(pr_event("opened"))
-    assert result.thread_id is not None
-    return result.thread_id
 
 
 @pytest.fixture

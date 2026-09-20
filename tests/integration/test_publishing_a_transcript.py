@@ -10,7 +10,7 @@ keeping the rows at all.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -22,7 +22,6 @@ from shannon.db.stores.conversations import ConversationStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.capture import CapturedMessage
 from shannon.github.errors import GitHubRateLimitError
-from shannon.services.sync.items import ItemSyncService
 from shannon.services.transcripts.flush import (
     FLUSH_RETRY_AFTER,
     MOST_ATTEMPTS,
@@ -33,6 +32,7 @@ from shannon.services.transcripts.publish import TranscriptPublisher
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
@@ -78,13 +78,6 @@ def flusher(
         tick=timedelta(seconds=5),
         now=lambda: clock[0],
     )
-
-
-@pytest.fixture
-async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
-    result = await sync_service.sync(pr_event("opened"))
-    assert result.thread_id is not None
-    return result.thread_id
 
 
 @pytest.fixture
@@ -558,7 +551,7 @@ class TestTheLoop:
         clock[0] = AT + QUIET
 
         running = asyncio.create_task(flusher.run_forever())
-        await _until(lambda: bool(github.comments))
+        await until(lambda: bool(github.comments))
         flusher.stop()
         await asyncio.wait_for(running, timeout=5)
 
@@ -620,7 +613,7 @@ class TestTheLoop:
 
         with caplog.at_level("ERROR", logger="shannon.services.transcripts.flush"):
             running = asyncio.create_task(flusher.run_forever())
-            await _until(lambda: len(passes) >= 2)
+            await until(lambda: len(passes) >= 2)
             flusher.stop()
             await asyncio.wait_for(running, timeout=5)
 
@@ -842,16 +835,3 @@ class TestWhoWasTagged:
         body = github.comments[0][2]
         assert "@bob-gh" not in body
         assert "Bob" in body
-
-
-async def _until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
-    """Wait for something the flusher does on its own schedule, rather than guessing at a sleep.
-
-    Bounded, and on a real interval rather than `asyncio.sleep(0)`. A bare yield reschedules at
-    once and never lets the loop block, so waiting out a tick that way costs the whole tick at
-    full CPU on every run, and a condition that never arrives costs the job its ceiling with no
-    test named. `test_delivery_worker` and `test_project_polling` each spell out the same helper.
-    """
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.01)

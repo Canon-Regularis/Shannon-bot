@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import LoggedConversation, Repository, TrackedItem
 from shannon.db.stores.conversations import ConversationStore
 from shannon.domain.enums import ObjectType
-from shannon.services.sync.items import ItemSyncService
 from shannon.services.transcripts.log import (
     AlreadyLoggingError,
     CannotLogError,
@@ -54,13 +53,6 @@ def log(
     clock: list[datetime],
 ) -> ConversationLog:
     return ConversationLog(db_sessionmaker, threads, now=lambda: clock[0])
-
-
-@pytest.fixture
-async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
-    result = await sync_service.sync(pr_event("opened"))
-    assert result.thread_id is not None
-    return result.thread_id
 
 
 def notices(threads: FakeThreadGateway, thread_id: int) -> list[str]:

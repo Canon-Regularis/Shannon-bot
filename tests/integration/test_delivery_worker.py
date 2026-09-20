@@ -22,6 +22,7 @@ from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
 from tests.support.stack import DeliveryClient, deliver, registered_stack
+from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
@@ -448,7 +449,7 @@ class TestWaitingForDiscord:
         assert (await stored(db_session, "delivery-a")).status == DeliveryStatus.PENDING
 
         connected.set()
-        await _until(lambda: handler.calls == 1)
+        await until(lambda: handler.calls == 1)
         worker.stop()
         await running
 
@@ -506,7 +507,7 @@ class TestWaitingForDiscord:
 
         with caplog.at_level("ERROR"):
             running = asyncio.create_task(worker.run_forever(never_answers))
-            await _until(lambda: handler.calls == 1)
+            await until(lambda: handler.calls == 1)
             worker.stop()
             await asyncio.wait_for(running, timeout=5)
 
@@ -525,7 +526,7 @@ class TestWaitingForDiscord:
 
         with caplog.at_level("ERROR"):
             running = asyncio.create_task(worker.run_forever(_connected))
-            await _until(lambda: handler.calls == 1)
+            await until(lambda: handler.calls == 1)
             worker.stop()
             await running
 
@@ -538,7 +539,7 @@ class TestWaitingForDiscord:
         await enqueue(queue, "delivery-a")
 
         running = asyncio.create_task(worker.run_forever())
-        await _until(lambda: handler.calls == 1)
+        await until(lambda: handler.calls == 1)
         worker.stop()
         await running
 
@@ -569,13 +570,6 @@ async def _connected() -> None:
     return
 
 
-async def _until(condition, timeout: float = 10.0) -> None:
-    """Wait for something the worker does on its own schedule, rather than guessing at a sleep."""
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.01)
-
-
 class TestDrainingABacklog:
     """A full batch means there is more waiting, so the loop goes straight back round.
 
@@ -597,7 +591,7 @@ class TestDrainingABacklog:
 
         running = asyncio.create_task(worker.run_forever())
         try:
-            await _until(lambda: handler.calls == 4, timeout=5)
+            await until(lambda: handler.calls == 4, timeout=5)
         finally:
             worker.stop()
             running.cancel()
@@ -617,7 +611,7 @@ class TestDrainingABacklog:
 
         running = asyncio.create_task(worker.run_forever())
         try:
-            await _until(lambda: handler.calls == 1, timeout=5)
+            await until(lambda: handler.calls == 1, timeout=5)
             await enqueue(queue, "b")
             await asyncio.sleep(0.5)
 
@@ -678,7 +672,7 @@ class TestPruning:
         assert (await stored(db_session, "old")).status == DeliveryStatus.PROCESSED
 
         running = asyncio.create_task(worker.run_forever())
-        await _until(lambda: True)
+        await until(lambda: True)
         await asyncio.sleep(0.2)
         worker.stop()
         await running
