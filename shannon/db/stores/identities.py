@@ -17,7 +17,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shannon.db.base import interval
+from shannon.db.base import interval, rows_changed
 from shannon.db.models import IdentityVerification, VerifiedIdentity
 
 
@@ -84,12 +84,13 @@ class IdentityVerificationStore:
         state worth not keeping. Whatever is still live is left alone however old the row is,
         which is the same rule the delivery queue's own pruning follows.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             delete(IdentityVerification).where(
                 IdentityVerification.expires_at < func.now() - keep_for
-            )
+            ),
         )
-        return result.rowcount or 0
+        return changed or 0
 
 
 class VerifiedIdentityStore:
@@ -146,10 +147,11 @@ class VerifiedIdentityStore:
         The login alone rather than the row. It is the whole of what the permission check needs,
         and anything else handed out is something a caller could decide on instead.
         """
-        return await self._session.scalar(
+        found: str | None = await self._session.scalar(
             select(VerifiedIdentity.github_login).where(
                 VerifiedIdentity.discord_guild_id == guild_id,
                 VerifiedIdentity.discord_user_id == discord_user_id,
                 VerifiedIdentity.verified_at >= newer_than,
             )
         )
+        return found

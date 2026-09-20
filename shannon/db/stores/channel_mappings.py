@@ -15,12 +15,13 @@ class ChannelMappingStore:
         self._session = session
 
     async def get(self, repository_id: int, object_type: ObjectType) -> ChannelMapping | None:
-        return await self._session.scalar(
+        found: ChannelMapping | None = await self._session.scalar(
             select(ChannelMapping).where(
                 ChannelMapping.repository_id == repository_id,
                 ChannelMapping.object_type == object_type,
             )
         )
+        return found
 
     async def set(
         self, *, repository_id: int, object_type: ObjectType, discord_channel_id: int

@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shannon.db.base import interval
+from shannon.db.base import interval, rows_changed
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
 
@@ -57,7 +57,8 @@ class WebhookEventStore:
         reads as a duplicate and nothing happens. Any other state is left alone: a repeat of one
         already processed is still a duplicate.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             update(WebhookEvent)
             .where(
                 WebhookEvent.github_delivery_id == delivery_id,
@@ -71,9 +72,9 @@ class WebhookEventStore:
                 locked_until=None,
                 last_error=None,
             )
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return bool(result.rowcount)
+        return bool(changed)
 
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[WebhookEvent]:
         """Take up to `limit` deliveries to work on, in the order they arrived.
@@ -178,7 +179,8 @@ class WebhookEventStore:
         The bodies hold issue titles and comment text from private repositories, so they do not
         sit here indefinitely. Anything still pending is left alone however old it is.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             delete(WebhookEvent)
             .where(
                 WebhookEvent.status.in_(DeliveryStatus.terminal()),
@@ -187,6 +189,6 @@ class WebhookEventStore:
             # Without this the ORM cannot work out which loaded objects the DELETE hit, so it
             # asks the database to hand every deleted primary key back. Nothing here holds
             # those rows in a session, so there is nothing to synchronise.
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return result.rowcount or 0
+        return changed or 0

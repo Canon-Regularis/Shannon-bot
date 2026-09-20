@@ -76,4 +76,8 @@ class TeamLinkStore:
             .returning(TeamLink)
         )
         await self._session.flush()
+        # An upsert that updates on conflict always returns its row, which the return type
+        # of `scalar` cannot say. Asserted rather than branched on, for the reason
+        # `db.base.rows_changed` gives.
+        assert row is not None
         return row

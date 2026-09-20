@@ -18,9 +18,10 @@ class RepositoryStore:
         self._session = session
 
     async def get_by_guild(self, discord_guild_id: int) -> Repository | None:
-        return await self._session.scalar(
+        found: Repository | None = await self._session.scalar(
             select(Repository).where(Repository.discord_guild_id == discord_guild_id)
         )
+        return found
 
     async def get_by_id(self, repository_id: int) -> Repository | None:
         """The repository a row already points at.
@@ -51,9 +52,10 @@ class RepositoryStore:
         ).all()
 
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:
-        return await self._session.scalar(
+        found: Repository | None = await self._session.scalar(
             select(Repository).where(Repository.github_repo_id == github_repo_id)
         )
+        return found
 
     async def add(
         self,

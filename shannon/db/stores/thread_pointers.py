@@ -14,15 +14,33 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import Text, func, select, update
+from sqlalchemy import Text, Update, func, select, update
 from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import rows_changed
 from shannon.db.models import TrackedItem
 
 # An empty text array, for the coalesce below. A row that remembers nothing and a row that
 # remembers no labels answer the same way to "has the reader seen this name", which is no.
 _NOTHING = array((), type_=Text())
+
+
+def _guarded(tracked_item_id: int, thread_id: int) -> Update:
+    """An update that only lands while the item still points at the thread the caller saw.
+
+    A builder rather than four copies of the same `where`, so the guard is structural: an
+    unconditional write to this table now has to be written out in full to get past it, which
+    is what the module docstring above asks for.
+    """
+    return (
+        update(TrackedItem)
+        .where(
+            TrackedItem.id == tracked_item_id,
+            TrackedItem.discord_thread_id == thread_id,
+        )
+        .execution_options(synchronize_session=False)
+    )
 
 
 class ThreadPointerStore:
@@ -38,7 +56,8 @@ class ThreadPointerStore:
         have rebuilt it in the meantime, and clearing the pointer then would strand the new
         thread exactly as the old one was stranded.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             update(TrackedItem)
             .where(
                 TrackedItem.id == tracked_item_id,
@@ -53,9 +72,9 @@ class ThreadPointerStore:
                 discord_channel_id=None,
                 shown_labels=None,
             )
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return bool(result.rowcount)
+        return bool(changed)
 
     async def forget_channel(self, channel_id: int) -> Sequence[int]:
         """Let go of every thread that was in a channel, because the channel has gone.
@@ -104,13 +123,7 @@ class ThreadPointerStore:
         post in and nothing left to notice it.
         """
         await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == thread_id,
-            )
-            .values(discord_thread_locked=locked)
-            .execution_options(synchronize_session=False)
+            _guarded(tracked_item_id, thread_id).values(discord_thread_locked=locked)
         )
 
     async def remember_channel(
@@ -131,13 +144,7 @@ class ThreadPointerStore:
         since been moved off does not describe the one it is on now.
         """
         await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == thread_id,
-            )
-            .values(discord_channel_id=channel_id)
-            .execution_options(synchronize_session=False)
+            _guarded(tracked_item_id, thread_id).values(discord_channel_id=channel_id)
         )
 
     async def note_shown_labels(
@@ -153,13 +160,7 @@ class ThreadPointerStore:
         not describe the thread it is on now.
         """
         await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == thread_id,
-            )
-            .values(shown_labels=list(shown))
-            .execution_options(synchronize_session=False)
+            _guarded(tracked_item_id, thread_id).values(shown_labels=list(shown))
         )
 
     async def note_label_announced(
@@ -177,13 +178,9 @@ class ThreadPointerStore:
         """
         without = func.array_remove(func.coalesce(TrackedItem.shown_labels, _NOTHING), name)
         await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == thread_id,
+            _guarded(tracked_item_id, thread_id).values(
+                shown_labels=func.array_append(without, name) if on_it else without
             )
-            .values(shown_labels=func.array_append(without, name) if on_it else without)
-            .execution_options(synchronize_session=False)
         )
 
     async def claim_thread(

@@ -71,7 +71,10 @@ class TrackedItemStore:
             TrackedItem.github_object_type == object_type,
             TrackedItem.github_object_id == github_object_id,
         )
-        return await self._session.scalar(statement.with_for_update() if lock else statement)
+        found: TrackedItem | None = await self._session.scalar(
+            statement.with_for_update() if lock else statement
+        )
+        return found
 
     async def get_by_id(self, tracked_item_id: int, *, lock: bool = False) -> TrackedItem | None:
         """Find one item by its own id, optionally holding it for the rest of the transaction.
@@ -123,9 +126,10 @@ class TrackedItemStore:
         an item up this way, which is why the column carries no index: one row per thread and a
         handful of commands a day is not a query worth an index to maintain on the sync path.
         """
-        return await self._session.scalar(
+        found: TrackedItem | None = await self._session.scalar(
             select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)
         )
+        return found
 
     async def get_by_number(
         self, *, repository_id: int, number: int, object_type: ObjectType
@@ -141,7 +145,7 @@ class TrackedItemStore:
         caller knows which it is asking about; leaving it out would only be a way to be handed
         the other one.
         """
-        return await self._session.scalar(
+        found: TrackedItem | None = await self._session.scalar(
             select(TrackedItem)
             .where(
                 TrackedItem.repository_id == repository_id,
@@ -150,6 +154,7 @@ class TrackedItemStore:
             )
             .order_by(TrackedItem.id)
         )
+        return found
 
     async def mirrored_state(
         self, *, repository_id: int, object_type: ObjectType

@@ -15,6 +15,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import rows_changed
 from shannon.db.models import GitHubInstallation
 
 
@@ -31,11 +32,12 @@ class InstallationStore:
         certain, and treating an empty cache as a refusal would make a missed webhook look
         exactly like an App nobody ever installed.
         """
-        return await self._session.scalar(
+        found: GitHubInstallation | None = await self._session.scalar(
             select(GitHubInstallation).where(
                 GitHubInstallation.account_login == account_login.strip().lower()
             )
         )
+        return found
 
     async def remember(
         self,
@@ -72,7 +74,9 @@ class InstallationStore:
             "account_id": account_id,
             "suspended": suspended,
         }
-        settled = {"account_login": login, "suspended": suspended}
+        # Declared, because the conditional key below is an int and the literal alone
+        # would fix the value type at `str | bool`.
+        settled: dict[str, object] = {"account_login": login, "suspended": suspended}
         if account_id is not None:
             settled["account_id"] = account_id
 
@@ -91,7 +95,8 @@ class InstallationStore:
         subscriber, including one that never held a row for it, and a log line claiming to have
         removed something that was not there is a log line that wastes somebody's afternoon.
         """
-        result = await self._session.execute(
-            delete(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id)
+        changed = await rows_changed(
+            self._session,
+            delete(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id),
         )
-        return bool(result.rowcount)
+        return bool(changed)

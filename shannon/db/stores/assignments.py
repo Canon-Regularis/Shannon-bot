@@ -8,6 +8,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import rows_changed
 from shannon.db.models import ItemAssignment
 from shannon.domain.enums import ActorRole
 from shannon.domain.models import Actor
@@ -368,7 +369,8 @@ class ItemAssignmentStore:
                 and_(ItemAssignment.github_user_id.is_(None), by_name),
             )
         )
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             update(ItemAssignment)
             .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
@@ -380,9 +382,9 @@ class ItemAssignmentStore:
                 ),
             )
             .values(fulfilled_at=submitted)
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return bool(result.rowcount)
+        return bool(changed)
 
     async def reopen_request(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None

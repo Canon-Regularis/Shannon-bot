@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, Interval, MetaData, func, literal
+from sqlalchemy import CursorResult, DateTime, Enum, Interval, MetaData, func, literal
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.dml import UpdateBase
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.expression import cast
 
@@ -70,3 +72,21 @@ class TimestampMixin:
 def interval(value: timedelta) -> ColumnElement[timedelta]:
     """A timedelta as something the database can add to a timestamp."""
     return cast(literal(value), Interval)
+
+
+# `AsyncSession.execute` is annotated `Result[Any]`, where the synchronous `Session`
+# equivalent is properly overloaded. This is the one place that gap is absorbed.
+async def rows_changed(session: AsyncSession, statement: UpdateBase) -> int:
+    """How many rows an INSERT, UPDATE or DELETE touched.
+
+    Only `CursorResult` carries `rowcount`, and a DML statement always produces one, but
+    `AsyncSession.execute` promises only `Result`. Asserted rather than tested with an `if`,
+    which would be an arm no test could reach under a hundred per cent branch floor. An
+    always-true assert is a plain statement to coverage.py, which has no handler for it.
+
+    `scalar` has the same gap and no helper, because absorbing it takes a declared local and
+    that reads better at the call site, where the model's own name can be written.
+    """
+    result = await session.execute(statement)
+    assert isinstance(result, CursorResult)
+    return int(result.rowcount)
