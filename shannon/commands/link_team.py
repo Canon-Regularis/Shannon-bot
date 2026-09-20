@@ -64,7 +64,10 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
                 ),
             )
 
-    return link_team
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return link_team  # pyright: ignore[reportUnknownVariableType]
 
 
 def _unmentionable_role_warning(interaction: discord.Interaction, role: discord.Role) -> str:

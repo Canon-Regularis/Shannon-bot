@@ -60,4 +60,7 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         else:
             await reply(interaction, done(f"Linked GitHub user {username} to <@{target.id}>."))
 
-    return link
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return link  # pyright: ignore[reportUnknownVariableType]

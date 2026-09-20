@@ -88,4 +88,7 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
 
         await reply(interaction, _ON if wanted else _OFF + _ROLES_STILL_REACH_YOU)
 
-    return mentions
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return mentions  # pyright: ignore[reportUnknownVariableType]

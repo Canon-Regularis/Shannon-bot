@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
@@ -44,7 +44,7 @@ class ItemLock:
         self._sessionmaker = sessionmaker
 
     @asynccontextmanager
-    async def held(self, github_object_id: int) -> AsyncIterator[None]:
+    async def held(self, github_object_id: int) -> AsyncGenerator[None]:
         """Hold this item until the block ends.
 
         The row's own lock already orders what happens in the database, and that was never the

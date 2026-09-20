@@ -45,7 +45,9 @@ def ask_the_process_to_stop() -> None:
     signal.raise_signal(signal.SIGTERM)
 
 
-def report_exit(what: str, shutdown: Shutdown, halt: Callable[[], None] | None = None):
+def report_exit(
+    what: str, shutdown: Shutdown, halt: Callable[[], None] | None = None
+) -> Callable[[asyncio.Task[None]], None]:
     """Say why a background task stopped, when nobody asked it to.
 
     A task that dies otherwise takes its exception with it while the endpoint carries on

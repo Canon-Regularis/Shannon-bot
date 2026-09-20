@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -97,7 +98,7 @@ def _sign(signing_input: bytes, private_key_pem: str) -> bytes:
     return key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
 
 
-def _segment(payload: dict[str, object]) -> str:
+def _segment(payload: Mapping[str, object]) -> str:
     """One JWT segment: compact JSON, base64url, no padding.
 
     Separators are given explicitly because `json.dumps` puts a space after each one by default,

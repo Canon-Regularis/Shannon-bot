@@ -11,7 +11,10 @@ from shannon.services.delivery.queue import DeliveryInbox
 
 
 def get_settings_dep(request: Request) -> Settings:
-    return request.app.state.settings
+    # Starlette types `app.state` as `Any`, so the declared local is what stops it
+    # spreading into every caller.
+    found: Settings = request.app.state.settings
+    return found
 
 
 class EventIntake(Protocol):
@@ -29,11 +32,13 @@ class EventIntake(Protocol):
 
 
 def get_event_router(request: Request) -> EventIntake:
-    return request.app.state.event_router
+    found: EventIntake = request.app.state.event_router
+    return found
 
 
 def get_delivery_queue(request: Request) -> DeliveryInbox | None:
-    return request.app.state.delivery_queue
+    found: DeliveryInbox | None = request.app.state.delivery_queue
+    return found
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]

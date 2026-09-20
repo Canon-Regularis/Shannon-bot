@@ -62,7 +62,10 @@ def build_regenerate_command(service: RedrawsAnItem, gate: PermissionGate) -> Sl
         else:
             await reply(interaction, done(_said(outcome)))
 
-    return regenerate
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return regenerate  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: RegenerateOutcome) -> str:

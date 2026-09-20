@@ -94,7 +94,10 @@ def build_unregister_command(
         else:
             await reply(interaction, done(_said(outcome)))
 
-    return unregister
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return unregister  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: UnregisterOutcome) -> str:

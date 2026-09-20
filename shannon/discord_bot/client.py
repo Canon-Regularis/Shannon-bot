@@ -120,7 +120,9 @@ class ShannonBot(discord.Client):
             ),
         )
         self.tree = app_commands.CommandTree(self)
-        self.tree.on_error = self._command_failed
+        # Assignment is how discord.py documents installing this, and mypy has no way to
+        # say so. One line rather than the file, which is what the ratchet was doing.
+        self.tree.on_error = self._command_failed  # type: ignore[method-assign]
         self._explain_error = explain_error
         self._thread_gone = thread_gone
         self._channel_gone: ChannelGone | None = None

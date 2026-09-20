@@ -11,6 +11,7 @@ list and because Discord shows them in the picker as eight things a reviewer can
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 import discord
@@ -82,7 +83,10 @@ def _status_command(
             said=status.value,
         )
 
-    return run
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return run  # pyright: ignore[reportUnknownVariableType]
 
 
 def _priority_command(
@@ -101,10 +105,20 @@ def _priority_command(
             said=f"{priority.value} priority",
         )
 
-    return run
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return run  # pyright: ignore[reportUnknownVariableType]
 
 
-async def _act(interaction, name: str, gate: PermissionGate, call, *, said: str) -> None:
+async def _act(
+    interaction: discord.Interaction,
+    name: str,
+    gate: PermissionGate,
+    call: Callable[[int], Awaitable[WorkflowOutcome]],
+    *,
+    said: str,
+) -> None:
     """The half every one of the eight shares: check, defer, call, answer."""
     where = await in_a_thread(interaction, name, gate, WORKFLOW_ROLES)
     if where is None:

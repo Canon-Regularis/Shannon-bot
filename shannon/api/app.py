@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from contextlib import AbstractAsyncContextManager
 
 from fastapi import FastAPI
 
@@ -17,7 +17,7 @@ def create_app(
     settings: Settings | None = None,
     event_router: EventIntake | None = None,
     queue: DeliveryInbox | None = None,
-    lifespan: Callable[[FastAPI], Any] | None = None,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Build the ASGI app.
 

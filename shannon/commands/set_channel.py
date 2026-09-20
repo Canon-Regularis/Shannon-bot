@@ -104,7 +104,10 @@ def build_set_channel_command(
         else:
             await reply(interaction, done(f"{head}{_said(outcome)}"))
 
-    return set_channel
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return set_channel  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: RelocationOutcome) -> str:

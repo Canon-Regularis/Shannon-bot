@@ -81,14 +81,13 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
         if guild_id is None:
             return
 
-        # The parameter and the scope share a name because they are one fact twice over: Discord
-        # hands across a choice object and the service wants the value inside it. A second name
-        # for the unwrapped form would be a second thing to keep straight, for one line.
-        scope = RefreshScope.EVERYTHING if scope is None else RefreshScope(scope.value)
+        # Two names, because they are two types: Discord hands across a choice object and the
+        # service wants the value inside it. Reusing the parameter hid that from both checkers.
+        wanted = RefreshScope.EVERYTHING if scope is None else RefreshScope(scope.value)
 
         await defer(interaction)
         try:
-            outcome = await service.refresh(guild_id=guild_id, scope=scope)
+            outcome = await service.refresh(guild_id=guild_id, scope=wanted)
         except ShannonError as error:
             # `repository` rather than a kind, and it reads correctly in every row of the table
             # this can reach: the failures that get here are about the repository or about GitHub,
@@ -96,9 +95,12 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
             logger.warning("/refresh could not finish: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
-            await reply(interaction, done(_said(outcome, _KINDS[scope])))
+            await reply(interaction, done(_said(outcome, _KINDS[wanted])))
 
-    return refresh
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return refresh  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: RefreshOutcome, kind: str) -> str:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -25,6 +26,7 @@ from shannon.runtime.supervision import (
     why,
 )
 from shannon.services.delivery.worker import ReadyCheck
+from shannon.services.verification import GitHubIdentityVerification
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +43,21 @@ class ProcessParts(Protocol):
     composition root or on everything it happens to hold.
     """
 
-    engine: AsyncEngine
-    worker: RunsDeliveries
-    poller: PollsABoard
-    conversations: ReloadsConversations
-    flusher: FlushesTranscripts
+    # Read-only rather than plain attributes: a mutable protocol member is invariant, so
+    # `Container.conversations: ConversationLog` would be refused where the narrow
+    # `ReloadsConversations` is asked for, though it satisfies it.
+    @property
+    def engine(self) -> AsyncEngine: ...
+    @property
+    def worker(self) -> RunsDeliveries: ...
+    @property
+    def poller(self) -> PollsABoard: ...
+    @property
+    def conversations(self) -> ReloadsConversations: ...
+    @property
+    def flusher(self) -> FlushesTranscripts: ...
+    @property
+    def verification(self) -> GitHubIdentityVerification | None: ...
 
     async def aclose(self) -> None: ...
 
@@ -66,7 +78,10 @@ class PollsABoard(Protocol):
     handler behind the queue.
     """
 
-    enabled: bool
+    # Read-only, because the poller computes it from its configured board number and the
+    # lifespan only ever asks.
+    @property
+    def enabled(self) -> bool: ...
 
     async def run_forever(self) -> None: ...
 
@@ -294,9 +309,9 @@ def build_lifespan(
     container: ProcessParts,
     settings: Settings,
     halt: Callable[[], None] = ask_the_process_to_stop,
-):
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @contextlib.asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         try:
             await require_database(container.engine)
         except Exception as error:

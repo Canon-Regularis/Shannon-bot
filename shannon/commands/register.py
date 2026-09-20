@@ -70,4 +70,7 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
                 ),
             )
 
-    return register
+    # `app_commands.command()` leaves the command's binding type unknown, which
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
+    # rather than the file, which is what the ratchet was doing.
+    return register  # pyright: ignore[reportUnknownVariableType]

@@ -85,7 +85,9 @@ class WorkerSettings:
         """Double the wait each time, up to the cap."""
         # 2 ** a large number is a real number here, so the cap is applied to a value that is
         # cheap to compute rather than one that grows without bound.
-        grown = self.first_backoff * 2 ** min(max(attempts, 0), 32)
+        # Declared, because `2 ** n` is `Any` to a type checker: a negative exponent
+        # would make it a float, which `min` below would then hand back untyped.
+        grown: timedelta = self.first_backoff * 2 ** min(max(attempts, 0), 32)
         return min(grown, self.max_backoff)
 
     def total_backoff(self) -> timedelta:
@@ -257,8 +259,8 @@ class DeliveryWorker:
 
         # Checked before the flag, so a gateway that failed is reported rather than being read
         # as an ordinary stop when both finish together.
-        if ready.done() and not ready.cancelled() and ready.exception() is not None:
-            raise ready.exception()
+        if ready.done() and not ready.cancelled() and (failed := ready.exception()) is not None:
+            raise failed
         return not self._stopping
 
     async def _handle(self, delivery: Delivery) -> None:

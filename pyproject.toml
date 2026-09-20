@@ -134,9 +134,6 @@ warn_return_any = false
 # which is the property that makes this worth doing before the work is finished rather than after.
 [[tool.mypy.overrides]]
 module = [
-    "shannon.api.dependencies",
-    "shannon.commands.refresh",
-    "shannon.commands.workflow",
     "shannon.container",
     "shannon.db.stores.assignments",
     "shannon.db.stores.channel_mappings",
@@ -147,20 +144,9 @@ module = [
     "shannon.db.stores.thread_pointers",
     "shannon.db.stores.tracked_items",
     "shannon.db.stores.webhook_events",
-    "shannon.discord_bot.client",
-    "shannon.discord_bot.formatting",
     "shannon.discord_bot.threads",
-    "shannon.github.app_auth",
-    "shannon.main",
-    "shannon.runtime.lifespan",
-    "shannon.runtime.supervision",
-    "shannon.services.delivery.worker",
     "shannon.services.projects",
     "shannon.services.sync.items",
-    "shannon.services.sync.manual",
-    "shannon.services.sync.policies",
-    "shannon.services.sync.refresh",
-    "shannon.services.sync.relocation",
     "shannon.services.workflow",
     "tests.fakes.github",
     "tests.integration.conftest",
@@ -176,7 +162,6 @@ module = [
     "tests.integration.test_delivery_queue",
     "tests.integration.test_delivery_worker",
     "tests.integration.test_issue_state_changes",
-    "tests.integration.test_issue_sync_service",
     "tests.integration.test_issue_webhook_create",
     "tests.integration.test_issue_webhook_update",
     "tests.integration.test_label_lines",
@@ -222,7 +207,6 @@ module = [
     "tests.unit.discord_bot.test_client",
     "tests.unit.discord_bot.test_commit_lines",
     "tests.unit.discord_bot.test_descriptions",
-    "tests.unit.discord_bot.test_issue_formatting",
     "tests.unit.discord_bot.test_responses",
     "tests.unit.discord_bot.test_review_comment_lines",
     "tests.unit.discord_bot.test_safe_text",
@@ -241,7 +225,6 @@ module = [
     "tests.unit.test_build_app",
     "tests.unit.test_config_secrecy",
     "tests.unit.test_container",
-    "tests.unit.test_properties",
     "tests.unit.test_stand_ins_match_what_they_replace",
     "tests.unit.test_the_commands_discord_will_accept",
     "tests.unit.test_the_shutdown_budget_fits_the_container",
@@ -256,25 +239,18 @@ include = ["shannon", "tests"]
 ignore = [
     # Not on this list because it is old. It is here because `FakeInteraction` cannot satisfy
     # `discord.Interaction`, which is a concrete generic class, so every command test in the
-    # project is in the same position and every one of them is listed below. The fix is the one
-    # the typing work already schedules: give the commands a narrow protocol naming what they
-    # actually read, which the fake then satisfies structurally and without a single cast.
+    # project is in the same position and every one of them is listed below.
+    #
+    # A narrow protocol naming what the commands actually read was tried and does not work.
+    # `Interaction.response` is a `CachedSlotProperty`, and while reading it resolves to
+    # `InteractionResponse`, pyright compares the descriptor itself when matching a protocol
+    # and reports `is_done` as absent. A read-only property member and a plain attribute member
+    # both fail the same way, so nothing that has to call `reply()` can be typed this way.
     "tests/unit/commands/test_people_commands.py",
     "tests/unit/commands/test_label_commands.py",
     "tests/unit/commands/test_conversation_commands.py",
     "shannon/api/routes/webhooks.py",
-    "shannon/commands/link.py",
-    "shannon/commands/link_team.py",
-    "shannon/commands/mentions.py",
-    "shannon/commands/refresh.py",
-    "shannon/commands/regenerate.py",
-    "shannon/commands/register.py",
-    "shannon/commands/set_channel.py",
-    "shannon/commands/sync_link.py",
-    "shannon/commands/unregister.py",
-    "shannon/commands/workflow.py",
     "shannon/container.py",
-    "shannon/db/base.py",
     "shannon/db/stores/assignments.py",
     "shannon/db/stores/identities.py",
     "shannon/db/stores/installations.py",
@@ -283,18 +259,9 @@ ignore = [
     "shannon/db/stores/webhook_events.py",
     "shannon/discord_bot/formatting.py",
     "shannon/discord_bot/threads.py",
-    "shannon/github/app_auth.py",
-    "shannon/main.py",
-    "shannon/runtime/lifespan.py",
     "shannon/services/delivery/queue.py",
-    "shannon/services/delivery/worker.py",
     "shannon/services/projects.py",
     "shannon/services/sync/items.py",
-    "shannon/services/sync/manual.py",
-    "shannon/services/sync/one_at_a_time.py",
-    "shannon/services/sync/policies.py",
-    "shannon/services/sync/refresh.py",
-    "shannon/services/sync/relocation.py",
     "shannon/services/workflow.py",
     "tests/fakes/github.py",
     "tests/integration/conftest.py",
@@ -310,7 +277,6 @@ ignore = [
     "tests/integration/test_delivery_queue.py",
     "tests/integration/test_delivery_worker.py",
     "tests/integration/test_issue_state_changes.py",
-    "tests/integration/test_issue_sync_service.py",
     "tests/integration/test_issue_webhook_create.py",
     "tests/integration/test_issue_webhook_update.py",
     "tests/integration/test_label_lines.py",
@@ -356,7 +322,6 @@ ignore = [
     "tests/unit/discord_bot/test_client.py",
     "tests/unit/discord_bot/test_commit_lines.py",
     "tests/unit/discord_bot/test_descriptions.py",
-    "tests/unit/discord_bot/test_issue_formatting.py",
     "tests/unit/discord_bot/test_responses.py",
     "tests/unit/discord_bot/test_review_comment_lines.py",
     "tests/unit/discord_bot/test_safe_text.py",
@@ -374,7 +339,6 @@ ignore = [
     "tests/unit/test_build_app.py",
     "tests/unit/test_config_secrecy.py",
     "tests/unit/test_container.py",
-    "tests/unit/test_properties.py",
     "tests/unit/test_stand_ins_match_what_they_replace.py",
     "tests/unit/test_the_commands_discord_will_accept.py",
     "tests/unit/test_the_shutdown_budget_fits_the_container.py",

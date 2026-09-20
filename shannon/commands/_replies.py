@@ -133,7 +133,7 @@ def _wait_for(seconds: object) -> str:
 _COMES_RIGHT: tuple[type[ShannonError], ...] = (GitHubRateLimitError, ItemNotReadyError)
 
 
-def reply_for(error: Exception, *, noun: str = "item") -> Panel:
+def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
     """The refusal for an error, or the catch-all if it is not one we know about.
 
     A card rather than a sentence since issue #116, and the words are unchanged. The
@@ -144,7 +144,7 @@ def reply_for(error: Exception, *, noun: str = "item") -> Panel:
     return Panel(blocks=(Block(BlockKind.HEADING, said),), accent=tone)
 
 
-def words_for(error: Exception, *, noun: str = "item") -> str:
+def words_for(error: BaseException, *, noun: str = "item") -> str:
     """The message for an error, or the catch-all if it is not one we know about."""
     # discord.py hands its error handler whatever a command raised wrapped in a
     # CommandInvokeError. Looking through that is what lets the table match at all when the

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy import DateTime, Enum, Interval, MetaData, func, literal
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -17,7 +18,12 @@ NAMING_CONVENTION = {
 }
 
 
-def varchar_enum(python_enum: type, name: str) -> Enum:
+def _values_of(python_enum: type[StrEnum]) -> list[str]:
+    """What SQLAlchemy writes, which is the value rather than the member name."""
+    return [member.value for member in python_enum]
+
+
+def varchar_enum(python_enum: type[StrEnum], name: str) -> Enum:
     """Store an enum as VARCHAR rather than a native PostgreSQL type.
 
     A native enum needs an ALTER TYPE migration every time a later stage adds a value, and two
@@ -41,7 +47,7 @@ def varchar_enum(python_enum: type, name: str) -> Enum:
         name=name,
         native_enum=False,
         length=32,
-        values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        values_callable=_values_of,
     )
 
 

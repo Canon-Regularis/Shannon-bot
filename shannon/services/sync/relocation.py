@@ -266,6 +266,10 @@ class ThreadRelocation:
             # there is no old thread to say anything in.
             return
 
+        # A displaced thread means the sync reached the branch that writes one, and that
+        # branch takes both from the same handle. Asserted rather than branched on, which
+        # would add an arm nothing can reach.
+        assert result.thread_id is not None
         await self._say_where_it_went(result.displaced, format_thread_moved(result.thread_id))
 
     async def _release_for_the_poller(self, candidate: StrandedThread, channel_id: int) -> None:
