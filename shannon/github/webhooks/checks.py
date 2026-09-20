@@ -21,8 +21,7 @@ from dataclasses import dataclass
 
 from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import RepositorySnapshot
-from shannon.github import mapping
-from shannon.github.webhooks.events import CHECK_SUITE_ACTIONS
+from shannon.github.webhooks.events import CHECK_SUITE_ACTIONS, repository_of
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +43,8 @@ def parse_check_suite_event(action: str, payload: JsonObject) -> CheckSuiteEvent
     if action not in CHECK_SUITE_ACTIONS:
         return None
 
-    repository = mapping.repository(payload.get("repository"))
+    repository = repository_of("check_suite", action, payload)
     if repository is None:
-        logger.warning("check_suite.%s arrived without a usable repository", action)
         return None
 
     suite = payload.get("check_suite")

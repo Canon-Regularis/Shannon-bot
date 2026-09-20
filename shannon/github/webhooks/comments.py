@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from shannon.domain.json import JsonObject, is_json_object
+from shannon.domain.json import JsonObject
 from shannon.domain.models import CommentSnapshot
 from shannon.github import mapping
-from shannon.github.webhooks.events import COMMENT_ACTIONS
+from shannon.github.webhooks.events import COMMENT_ACTIONS, repository_and_number
 
 logger = logging.getLogger(__name__)
 
@@ -19,18 +19,16 @@ def parse_comment_event(action: str, payload: JsonObject) -> CommentSnapshot | N
     if action not in COMMENT_ACTIONS:
         return None
 
-    repository = mapping.repository(payload.get("repository"))
-    if repository is None:
-        logger.warning("issue_comment.%s arrived without a usable repository", action)
+    found = repository_and_number(
+        "issue_comment", action, payload, item_key="issue", noun="an item number"
+    )
+    if found is None:
         return None
+    repository, number = found
 
-    item = payload.get("issue")
-    number = item.get("number") if is_json_object(item) else None
-    if not isinstance(number, int):
-        logger.warning("issue_comment.%s arrived without an item number", action)
-        return None
-
-    snapshot = mapping.comment(payload.get("comment"), repository, item_number=number, on=item)
+    snapshot = mapping.comment(
+        payload.get("comment"), repository, item_number=number, on=payload.get("issue")
+    )
     if snapshot is None:
         logger.warning("issue_comment.%s arrived without a usable comment", action)
     return snapshot

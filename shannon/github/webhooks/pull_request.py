@@ -6,7 +6,7 @@ from dataclasses import replace
 from shannon.domain.json import JsonObject
 from shannon.domain.models import PullRequestSnapshot
 from shannon.github import mapping
-from shannon.github.webhooks.events import PULL_REQUEST_ACTIONS
+from shannon.github.webhooks.events import PULL_REQUEST_ACTIONS, repository_of
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,8 @@ def parse_pull_request_event(action: str, payload: JsonObject) -> PullRequestSna
     if action not in PULL_REQUEST_ACTIONS:
         return None
 
-    repository = mapping.repository(payload.get("repository"))
+    repository = repository_of("pull_request", action, payload)
     if repository is None:
-        logger.warning("pull_request.%s arrived without a usable repository", action)
         return None
 
     snapshot = mapping.pull_request(payload.get("pull_request"), repository, action=action)

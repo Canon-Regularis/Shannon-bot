@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Protocol
 
-from shannon.domain.json import JsonObject
+from shannon.domain.json import JsonObject, is_json_object
+from shannon.domain.models import RepositorySnapshot
+from shannon.github import mapping
+
+logger = logging.getLogger(__name__)
 
 # Anything not listed here arrives from GitHub the moment the webhook is configured, starting
 # with the ping it sends to prove the endpoint answers, and is matched and dropped rather
@@ -130,3 +135,31 @@ def is_supported(event: str, action: str | None) -> bool:
     if actions is None:
         return False
     return action in actions
+
+
+def repository_of(event: str, action: str, payload: JsonObject) -> RepositorySnapshot | None:
+    """The repository a webhook body names, or None having said it was missing."""
+    repository = mapping.repository(payload.get("repository"))
+    if repository is None:
+        logger.warning("%s.%s arrived without a usable repository", event, action)
+    return repository
+
+
+def repository_and_number(
+    event: str, action: str, payload: JsonObject, *, item_key: str, noun: str
+) -> tuple[RepositorySnapshot, int] | None:
+    """The repository and item number a note event names, or None having said what was missing.
+
+    `item_key` is `issue` for a comment and `pull_request` for a review, because GitHub represents
+    a pull request as an issue on the comment event and as itself on the other two.
+    """
+    repository = repository_of(event, action, payload)
+    if repository is None:
+        return None
+
+    item = payload.get(item_key)
+    number = item.get("number") if is_json_object(item) else None
+    if not isinstance(number, int):
+        logger.warning("%s.%s arrived without %s", event, action, noun)
+        return None
+    return repository, number
