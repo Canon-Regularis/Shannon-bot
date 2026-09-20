@@ -12,12 +12,8 @@ from shannon.db.models import TeamLink
 class TeamLinkStore:
     """Data access for the GitHub team to Discord role mapping, scoped to one guild.
 
-    Slugs are stored lowercased, as logins are next door: GitHub normalises a team slug to
-    lowercase itself, and matching case sensitively would only make a hand-typed `Backend-Team`
-    fail to find the row it just wrote.
-
-    Answers with `resolve_many` under the same name the user store uses, so whatever renders a
-    ping can take either without knowing which it has.
+    Slugs are stored lowercased, because GitHub normalises a team slug to lowercase itself.
+    `resolve_many` is named as the user store names it, so a caller can take either.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -28,14 +24,9 @@ class TeamLinkStore:
     ) -> dict[str, int]:
         """Which of these teams this server has a role for.
 
-        The parameter is named for people because the caller cannot tell the two apart and
-        should not have to: it holds the names that were asked for a review, and this answers
-        for the ones it recognises.
-
-        The ids beside them are for the account store, which uses them to tell a login that has
-        changed hands from the person somebody linked. A team has no id in that space: GitHub
-        numbers teams separately, and `mapping.team` carries a slug and nothing else. So they are
-        taken and ignored here, and the slug is the only thing this can match on.
+        The mapping holds the names asked for a review, people and teams together, and the ids
+        beside them are for the account store. GitHub numbers teams separately, so a team has no
+        id there and the slug is the only thing this can match on.
         """
         wanted = {name.lower() for name in people}
         if not wanted:
@@ -54,9 +45,8 @@ class TeamLinkStore:
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> TeamLink:
         """Point a team at a role, replacing whatever that team pointed at before.
 
-        Simpler than linking a person, because only one half is unique. A team maps to one role
-        and the insert settles its own conflict on that; two teams sharing a role is allowed and
-        needs no clearing, so there is nothing here to race on and no advisory lock to take.
+        Only the team half is unique: two teams sharing a role is allowed, so there is nothing to
+        race on and no advisory lock to take, unlike linking a person.
         """
         slug = github_team.strip().lstrip("@").lower()
         row = await self._session.scalar(
@@ -68,16 +58,14 @@ class TeamLinkStore:
             )
             .on_conflict_do_update(
                 constraint="uq_team_links_guild_team",
-                # `updated_at` by hand. `TimestampMixin` carries an `onupdate`, and SQLAlchemy
-                # fires that for an UPDATE it built, not for the `set_` of an upsert, so without
-                # this a team pointed at a new role keeps the timestamp of the first one.
+                # `updated_at` by hand: SQLAlchemy fires `TimestampMixin`'s `onupdate` for
+                # an UPDATE it built, not for the `set_` of an upsert.
                 set_={"discord_role_id": discord_role_id, "updated_at": func.now()},
             )
             .returning(TeamLink)
         )
         await self._session.flush()
-        # An upsert that updates on conflict always returns its row, which the return type
-        # of `scalar` cannot say. Asserted rather than branched on, for the reason
-        # `db.base.rows_changed` gives.
+        # An upsert that updates on conflict always returns its row, which `scalar`'s return
+        # type cannot say. Asserted rather than branched on, as `db.base.rows_changed` explains.
         assert row is not None
         return row

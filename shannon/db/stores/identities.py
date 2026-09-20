@@ -1,12 +1,9 @@
 """Proving that a Discord account belongs to a particular GitHub one.
 
-Two halves of one round trip. `IdentityVerificationStore` holds the outstanding links and is the
-only thread back from an unauthenticated callback to the person who asked for it;
-`VerifiedIdentityStore` holds what GitHub said once they followed one.
-
-Only `/unregister` reads any of this, and it is here rather than beside `user_links` because the
-two are different kinds of claim. A link is what somebody typed about themselves. This is what
-GitHub answered when asked.
+Two halves of one round trip: `IdentityVerificationStore` holds the outstanding links and is the
+only thread back from an unauthenticated callback to the person who asked for it,
+`VerifiedIdentityStore` holds what GitHub said once they followed one. Only `/unregister` reads
+any of it. Separate from `user_links`, which records what somebody typed about themselves.
 """
 
 from __future__ import annotations
@@ -32,11 +29,8 @@ class IdentityVerificationStore:
     ) -> None:
         """Hand out a link that expires a fixed time from now.
 
-        A lifetime rather than a moment, and the moment is computed by the database. `consume`
-        expires a row against `now()`, so a row stamped by the application would be compared
-        against a different clock: the two disagree by however far the process and the database
-        have drifted, and a link would then live slightly longer or slightly less long than it
-        says. Both sides come from one place instead.
+        The moment is computed by the database, because `consume` expires a row against `now()`
+        and a row stamped by the application would be compared against a different clock.
         """
         await self._session.execute(
             pg_insert(IdentityVerification).values(
@@ -50,19 +44,10 @@ class IdentityVerificationStore:
     async def consume(self, state: str) -> tuple[int, int] | None:
         """Spend a link, answering whose it was, or None if it cannot be spent.
 
-        One statement, and that is the whole design. The filter, the stamp and the answer happen
-        together, so two clicks on the same link race in Postgres and exactly one of them wins.
-        Reading the row and then updating it would leave a window between the two in which both
-        clicks see an unconsumed row, and the losing one would unbind a repository on the strength
-        of a link that had already been used.
-
-        One answer for expired, already used and never existed. They are the same thing to whoever
-        is looking at the page, and telling them apart out loud would confirm to somebody guessing
-        states that a particular one was real.
-
-        `func.now()` rather than a clock passed in, because both sides of the comparison have to
-        come from the same place. A row stamped by the application and expired against the
-        database would drift apart by however far the two clocks disagree.
+        Filter, stamp and answer in one statement, so two clicks on the same link race in
+        Postgres and exactly one of them wins. One answer for expired, already used and never
+        existed: telling them apart would confirm to somebody guessing states that a particular
+        one was real.
         """
         spent = await self._session.execute(
             update(IdentityVerification)
@@ -78,12 +63,7 @@ class IdentityVerificationStore:
         return (found[0], found[1]) if found is not None else None
 
     async def prune(self, *, keep_for: timedelta) -> int:
-        """Drop links that are long past being usable.
-
-        Spent and expired alike: neither can be redeemed again, and a state nobody can use is a
-        state worth not keeping. Whatever is still live is left alone however old the row is,
-        which is the same rule the delivery queue's own pruning follows.
-        """
+        """Drop links that are long past being usable."""
         changed = await rows_changed(
             self._session,
             delete(IdentityVerification).where(
@@ -108,12 +88,7 @@ class VerifiedIdentityStore:
         github_user_id: int,
         verified_at: datetime,
     ) -> None:
-        """Record a proof, replacing any earlier one for that person in that server.
-
-        Replaced rather than appended, because only the most recent one can permit anything and a
-        history of who somebody used to be is not this table's business. Somebody legitimately
-        moving between GitHub accounts overwrites cleanly.
-        """
+        """Record a proof, replacing any earlier one for that person in that server."""
         login = github_login.strip()
         await self._session.execute(
             pg_insert(VerifiedIdentity)
@@ -139,13 +114,8 @@ class VerifiedIdentityStore:
     ) -> str | None:
         """The login this person proved recently, or None if they have not proved one lately.
 
-        The cutoff is the caller's, because how recent is recent enough is a policy question and
-        this is a table. Filtered here rather than returned for the caller to check, because a
-        method handing back a stale row relies on every caller remembering to look at the date,
-        and the one that forgets is the one that unbinds a repository on a year-old proof.
-
-        The login alone rather than the row. It is the whole of what the permission check needs,
-        and anything else handed out is something a caller could decide on instead.
+        How recent counts as recent is the caller's policy. Filtering here rather than handing
+        back a stale row stops a caller unbinding a repository on a year-old proof.
         """
         found: str | None = await self._session.scalar(
             select(VerifiedIdentity.github_login).where(

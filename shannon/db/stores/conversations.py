@@ -1,4 +1,4 @@
-"""Which threads are being published to GitHub, and which batch is in flight. Issue #103."""
+"""Which threads are being published to GitHub, and which batch is in flight."""
 
 from __future__ import annotations
 
@@ -15,11 +15,7 @@ from shannon.db.models import LoggedConversation, LoggedMessage
 
 @dataclass(frozen=True, slots=True)
 class PendingBatch:
-    """One conversation with something waiting, and everything the flush decision needs.
-
-    Read in one grouped query rather than a row per conversation followed by a count each,
-    because the tick runs every few seconds and most ticks find nothing to do.
-    """
+    """One conversation with something waiting, and everything the flush decision needs."""
 
     conversation_id: int
     tracked_item_id: int
@@ -47,8 +43,8 @@ class ConversationStore:
     ) -> int | None:
         """Begin logging this item, reporting the new row's id, or None if one is already open.
 
-        The insert settles that rather than a read first, because the partial unique index is
-        already the rule and asking twice would let two commands run together both find nothing.
+        A partial unique index over open conversations settles it, so two commands running
+        together cannot both read nothing and both insert.
         """
         found: int | None = await self._session.scalar(
             pg_insert(LoggedConversation)
@@ -69,9 +65,8 @@ class ConversationStore:
     async def stop(self, *, tracked_item_id: int, stopped_by: int, now: datetime) -> int | None:
         """End logging, reporting the thread that was being captured, or None if none was.
 
-        What is pending is deliberately left alone. The flusher reads a stopped conversation as a
-        reason to publish at once, so ending the logging is what gets the tail of it onto GitHub
-        rather than what throws it away.
+        Pending messages are left alone: the flusher reads a stopped conversation as a reason to
+        publish at once, so this sends the tail of it to GitHub rather than dropping it.
         """
         found: int | None = await self._session.scalar(
             update(LoggedConversation)
@@ -95,11 +90,7 @@ class ConversationStore:
         return found
 
     async def live_threads(self) -> Sequence[int]:
-        """Every thread currently being captured, for a process that has just started.
-
-        What the in-memory set is filled from. Without it a restart would leave every conversation
-        armed in the database and captured by nothing, silently.
-        """
+        """Every thread currently being captured; a restart refills the in-memory set from this."""
         found = await self._session.scalars(
             select(LoggedConversation.discord_thread_id).where(
                 LoggedConversation.stopped_at.is_(None)
@@ -125,9 +116,8 @@ class ConversationStore:
     ) -> Sequence[int]:
         """The same, for items that let go of their threads when a whole channel was deleted.
 
-        By item rather than by thread because that is what the caller has: deleting a channel
-        deletes every thread in it, and the store that clears the pointers answers with the items
-        it cleared. The threads it stopped come back, so the in-memory set can drop them too.
+        By item because that is what the caller has: the store that clears the pointers answers
+        with the items it cleared. The stopped threads come back for the in-memory set.
         """
         if not tracked_item_ids:
             return ()
@@ -145,9 +135,7 @@ class ConversationStore:
     async def pending(self) -> Sequence[PendingBatch]:
         """Every conversation with messages waiting, and what the flush decision asks about it.
 
-        An inner join, so a conversation with nothing pending does not appear at all. That is what
-        makes a conversation stopped and already published disappear from the tick rather than
-        being looked at for ever.
+        The join is inner, so a conversation stopped and already published drops out of the tick.
         """
         rows = await self._session.execute(
             select(
@@ -193,8 +181,7 @@ class ConversationStore:
     ) -> bool:
         """Take the batch up to `through_id`, reporting whether it was ours to take.
 
-        Guarded on there being no claim already, so a tick overlapping another cannot take a batch
-        that is in flight. False means somebody else has it.
+        False means an overlapping tick already holds the batch.
         """
         claimed = await self._session.scalar(
             update(LoggedConversation)
@@ -210,9 +197,9 @@ class ConversationStore:
     async def seize(self, conversation_id: int, *, flush_id: str, held: str, now: datetime) -> bool:
         """Take over a claim left behind by a process that died holding it.
 
-        Guarded on the abandoned claim still being the one that was read, so two ticks cannot both
-        decide it is stale and both republish. `flush_through_id` is left exactly as it was: the
-        batch to finish is the one that was claimed, not whatever has arrived since.
+        Guarded on the claim still being the one that was read, so two ticks cannot both call it
+        stale and republish. `flush_through_id` stays as it was: the batch to finish is the one
+        that was claimed, not whatever has arrived since.
         """
         seized = await self._session.scalar(
             update(LoggedConversation)
@@ -228,8 +215,7 @@ class ConversationStore:
     async def release(self, conversation_id: int) -> None:
         """Let go of the claim, and forget any failures behind it.
 
-        Run when the batch is done with, whether it was published or given up on. Clearing the
-        count means an outage costs a conversation nothing once it is over.
+        Run whether the batch was published or given up on, so an outage costs nothing once over.
         """
         await self._session.execute(
             update(LoggedConversation)
@@ -240,14 +226,10 @@ class ConversationStore:
     async def release_empty_claims(self) -> None:
         """Let go of a claim on a batch that no longer has anything in it.
 
-        Reached one way only, and it is narrow enough to be worth saying: a batch is claimed, the
-        process holding it dies, and everything in that batch is then deleted in Discord before
-        anybody picks the claim up. The conversation has a claim and no rows, so `pending` skips
-        it entirely, and without this the claim stands until the next message arrives and then
-        costs that message the whole retry window.
-
-        Safe against a batch actually in flight. Rows are deleted only in the same transaction
-        that releases the claim, so a conversation being published always still has its rows.
+        Happens when a process dies holding a claim and the batch is then deleted in Discord:
+        `pending` skips a conversation with no rows, so the claim would stand until the next
+        message arrives and cost it the whole retry window. Rows are deleted only in the same
+        transaction that releases the claim, so a batch actually in flight still has its rows.
         """
         await self._session.execute(
             update(LoggedConversation)
@@ -263,10 +245,9 @@ class ConversationStore:
     async def note_failure(self, conversation_id: int) -> int:
         """Count a flush that did not land, answering how many in a row that now is.
 
-        The claim is deliberately left standing. Releasing it would have the next tick, a few
-        seconds later, try the same batch again, which during an outage is a write a second at
-        GitHub. Held, the batch is retried once the claim reads as abandoned, which is the same
-        path a process that died holding one takes.
+        The claim is left standing: releasing it would retry the same batch on the next tick, a
+        write a second at GitHub during an outage. Held, the batch is retried once the claim
+        reads as abandoned.
         """
         failures = await self._session.scalar(
             update(LoggedConversation)

@@ -28,9 +28,8 @@ class ChannelMappingStore:
     ) -> ChannelMapping:
         """Point a type at a channel, whether or not one was mapped before.
 
-        The insert settles the conflict itself. Reading first and then writing lets two people
-        running /set_channel at once both find nothing and both insert, and the second one hits
-        the unique constraint.
+        The insert settles the conflict itself: two people running /set_channel at once would
+        both find nothing and both insert, and the second would hit the unique constraint.
         """
         statement = (
             pg_insert(ChannelMapping)
@@ -41,8 +40,7 @@ class ChannelMappingStore:
             )
             .on_conflict_do_update(
                 constraint="uq_channel_mappings_repo_type",
-                # updated_at is set here because onupdate only fires for an ORM update, and this
-                # never goes through one.
+                # onupdate only fires for an ORM update, and this never goes through one.
                 set_={"discord_channel_id": discord_channel_id, "updated_at": func.now()},
             )
             .returning(ChannelMapping)

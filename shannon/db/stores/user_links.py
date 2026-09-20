@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 class UserLinkStore:
     """Data access for the GitHub login to Discord account mapping, scoped to one guild.
 
-    Logins are stored lowercased for the same reason as in item_assignments: GitHub treats
-    them case insensitively.
+    Logins are stored lowercased because GitHub treats them case insensitively.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -24,24 +23,13 @@ class UserLinkStore:
     async def resolve_many(
         self, *, guild_id: int, people: Mapping[str, int | None]
     ) -> dict[str, int]:
-        """Which of these people this server has a Discord account for.
+        """Which of these people this server has a Discord account for, keyed by login.
 
-        Keyed by login and answered by id. A login is not an identity: GitHub frees one when it
-        is renamed or deleted and lets anybody take it, so a row matched on the name alone points
-        at whoever holds it now rather than at the person somebody linked. Left that way, a
-        stranger who took a freed name inherited the previous holder's mention everywhere a
-        mention is built, including the review ping, which notifies them for work they were never
-        asked to do.
-
-        A row whose id disagrees with the person being asked about is not that person, so it is
-        left out and they are named in plain text, which is what somebody who has never linked
-        gets. Said out loud, because the two look identical in the thread and only one of them is
-        somebody's link having gone stale.
-
-        Either side not knowing an id falls back to the name, which is what happened before. A
-        stored null is a row written before the column existed; an asked null is a payload that
-        carried no id. Neither is evidence of anything, and refusing on no evidence would take
-        away mentions that work.
+        GitHub frees a renamed or deleted login for anybody to take, so a name-only match once gave
+        a stranger the previous holder's review pings. A stored account id that disagrees with the
+        one on the item is dropped and logged, since a stale link and a member who never linked look
+        identical in the thread. A null on either side is no evidence — the row predates the column,
+        or the payload carried no id — so the name still resolves.
         """
         wanted = {name.lower(): asked for name, asked in people.items()}
         if not wanted:
@@ -75,19 +63,10 @@ class UserLinkStore:
     async def login_for(self, *, guild_id: int, discord_user_id: int) -> str | None:
         """Which GitHub account this Discord member claimed here, or None if they never did.
 
-        The other direction of `resolve_many`, and deliberately not its mirror image. That one is
-        asked about somebody an item names, and has the account id off the payload to hold the
-        stored one against, so a login that has since changed hands is caught and dropped. This one
-        is asked about a Discord member and has no second id to compare with, so it can only answer
-        with the claim as it was made.
-
-        Which is the right answer for what it is for. A GitHub write built on this names an account
-        somebody trusted enough to run `/link` pointed at, and GitHub then applies its own rules
-        about who may go on the item. A link gone stale asks the wrong person for a review; it
-        cannot put somebody on an item who had no business being there.
-
-        One row at most, and no ordering needed to prove it: `uq_user_links_guild_discord` is unique
-        on exactly this pair, and its index is what serves the lookup.
+        Unlike `resolve_many` there is no second account id to hold the stored one against, so this
+        answers with the claim as it was made; a stale link asks the wrong person for a review, and
+        GitHub still applies its own rules about who may go on an item. At most one row matches:
+        `uq_user_links_guild_discord` is unique on this pair and its index serves the lookup.
         """
         found = await self._session.scalar(
             select(UserLink.github_username).where(
@@ -95,29 +74,17 @@ class UserLinkStore:
                 UserLink.discord_user_id == discord_user_id,
             )
         )
-        # Narrowed rather than handed straight back, the way `permission_for` narrows its answer.
         # A scalar off a column comes back untyped, and a login is the one thing this may promise.
         return found if isinstance(found, str) else None
 
     async def logins_for(
         self, *, guild_id: int, discord_user_ids: Collection[int]
     ) -> dict[int, str]:
-        """Which GitHub account each of these Discord members claimed here.
+        """Which GitHub account each of these Discord members claimed here, keyed by Discord id.
 
-        `login_for` for a whole batch, and it gives the same answer for the same reason: asked
-        about a Discord member there is no second id to hold the stored one against, so it answers
-        with the claim as it was made. `resolve_many` above is the other direction and is stricter,
-        because an item's payload carries an account id the row can be checked against. There is no
-        payload on this path, so a login somebody freed and a stranger took is answered with the
-        stranger. That is not an oversight; it is the same bargain every write built on `/link`
-        already makes, and the only thing that could close it is an id this path never sees.
-
-        Keyed by Discord id and answered by login, which is the way round the caller wants: a
-        transcript has ids off its captured rows and needs names for them.
-
-        One row per id at most, and no ordering needed to prove it. `uq_user_links_guild_discord`
-        is unique on exactly this pair and its index is what serves the `IN`. An id nobody linked
-        is simply absent, the same answer `login_for` gives as None.
+        `login_for` for a batch, and as lenient: with no item payload to supply an account id, a
+        login somebody freed and a stranger took is answered with the stranger. An id nobody linked
+        is absent from the result.
         """
         wanted = set(discord_user_ids)
         if not wanted:
@@ -143,17 +110,12 @@ class UserLinkStore:
     ) -> UserLink:
         """Bind a GitHub login to a Discord account, replacing whatever either side had.
 
-        Both halves are unique within a guild and can be held by two different rows at once, so
-        editing one in place collides with the other. Clear both, then insert.
-
-        The clear and the insert have to be one step. An upsert cannot make them one: a row can
-        conflict on either constraint and `ON CONFLICT` names a single one. Nor can a retry loop,
-        since the retries collide with each other and not only with the original winner. Hence
-        the advisory lock, held to the end of the transaction and keyed per guild so servers do
-        not wait on one another. The guild id alone is a safe key because this is the only lock
-        taken in that space: the other one in the project, held over an item's Discord phase,
-        gives Postgres two integers instead of one bigint, and Postgres keeps those two spaces
-        apart however the numbers land.
+        Both halves are unique within a guild and can be held by two different rows, so editing one
+        in place collides with the other: clear both and insert, as one step. An upsert cannot do it
+        — a row can conflict on either constraint and `ON CONFLICT` names one — and nor can a retry
+        loop, since the retries collide with each other. Hence the advisory lock, keyed per guild;
+        the bare guild id is safe because the project's other lock passes Postgres two integers
+        rather than one bigint, and those spaces stay apart.
         """
         await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
 
@@ -167,10 +129,9 @@ class UserLinkStore:
             )
         )
         if existing is not None:
-            # Both halves already point at each other. The id is still worth writing: a row from
-            # before that column existed carries none, and re-running `/link` is the only way one
-            # ever gets an answer, since GitHub can say what a login is called now and not what
-            # it was called when somebody bound it.
+            # The id is still worth writing: a row from before that column carries none, and
+            # re-running `/link` is the only way one is ever filled in, since GitHub can say what a
+            # login is called now and not what it was called when somebody bound it.
             existing.github_user_id = github_user_id
             return existing
 

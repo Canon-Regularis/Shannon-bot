@@ -29,8 +29,8 @@ class WebhookEventStore:
     ) -> bool:
         """Write a delivery down, returning False if it was already here.
 
-        The insert carries its own conflict handling so two deliveries racing on the same id
-        cannot both win. A read-then-write check would let both through.
+        The insert handles the conflict itself, because a read-then-write check would let two
+        deliveries racing on the same id both through.
         """
         statement = (
             pg_insert(WebhookEvent)
@@ -53,9 +53,8 @@ class WebhookEventStore:
     async def _revive(self, delivery_id: str, payload: JsonObject) -> bool:
         """Put a delivery that was given up on back on the queue, reporting whether it moved.
 
-        GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery just
-        reads as a duplicate and nothing happens. Any other state is left alone: a repeat of one
-        already processed is still a duplicate.
+        GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery reads
+        as a duplicate and nothing happens. Any other state is left alone.
         """
         changed = await rows_changed(
             self._session,
@@ -79,12 +78,10 @@ class WebhookEventStore:
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[WebhookEvent]:
         """Take up to `limit` deliveries to work on, in the order they arrived.
 
-        `SKIP LOCKED` means a second worker picks up different rows rather than blocking, so
-        running more than one stays correct even though only one runs today.
-
-        A payload is required, which excludes rows written before this table became a queue.
-        A row still PROCESSING past its lease is taken back, which is how work belonging to a
-        worker that died gets retried instead of sitting there forever.
+        `SKIP LOCKED` means a second worker picks up different rows rather than blocking. A
+        payload is required, which excludes rows written before this table became a queue, and a
+        row still PROCESSING past its lease is taken back, so work belonging to a worker that
+        died is retried instead of sitting there forever.
         """
         now = func.now()
         eligible = (
@@ -109,9 +106,8 @@ class WebhookEventStore:
         )
 
         # Claiming in the same statement that selects, so nothing can slip between the two.
-        # Every deadline in this table is written and read against the database clock; setting
-        # one from the application clock would have a worker on a drifted host hold its lease
-        # for longer or shorter than it believes.
+        # Every deadline in this table is written and read against the database clock; one set
+        # from the application clock would drift against the lease its worker believes it holds.
         claimed = (
             await self._session.scalars(
                 update(WebhookEvent)
@@ -128,8 +124,8 @@ class WebhookEventStore:
     async def release(self, event_ids: Sequence[int]) -> None:
         """Hand leased deliveries back without counting an attempt against them.
 
-        Nothing was tried, so this is not a failure. Leaving them locked instead would keep the
-        replacement process from touching them until the lease ran out.
+        Leaving them locked would keep the replacement process from touching them until the lease
+        ran out.
         """
         if not event_ids:
             return
@@ -176,8 +172,8 @@ class WebhookEventStore:
     async def prune(self, *, keep_for: timedelta) -> int:
         """Drop finished deliveries older than `keep_for`.
 
-        The bodies hold issue titles and comment text from private repositories, so they do not
-        sit here indefinitely. Anything still pending is left alone however old it is.
+        The bodies hold issue titles and comment text from private repositories. Anything still
+        pending is left alone however old it is.
         """
         changed = await rows_changed(
             self._session,
@@ -186,9 +182,8 @@ class WebhookEventStore:
                 WebhookEvent.status.in_(DeliveryStatus.terminal()),
                 WebhookEvent.processed_at < func.now() - interval(keep_for),
             )
-            # Without this the ORM cannot work out which loaded objects the DELETE hit, so it
-            # asks the database to hand every deleted primary key back. Nothing here holds
-            # those rows in a session, so there is nothing to synchronise.
+            # Without this the ORM asks the database to hand back every deleted primary key
+            # so it can tell which loaded objects the DELETE hit. Nothing here holds those rows.
             .execution_options(synchronize_session=False),
         )
         return changed or 0
