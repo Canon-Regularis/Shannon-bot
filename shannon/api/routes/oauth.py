@@ -1,13 +1,9 @@
 """Where GitHub sends somebody back after they have proved who they are.
 
-The third public route on this service, beside `/health` and the webhook. It is reached by a
-browser rather than by GitHub's servers, and it carries no signature and no credential of its own:
-the `state` in the query string is the entire proof that this callback belongs to the person who
-ran `/unregister` a moment ago.
-
-Nothing here decides anything. It spends the state, asks GitHub who signed in, writes that down,
-and tells the person to go back to Discord. The permission check and the unbinding happen when
-they run the command again, where there is somebody to report the answer to.
+A public route reached by a browser rather than by GitHub's servers, carrying no signature and no
+credential of its own: the `state` in the query string is the entire proof that this callback
+belongs to the person who ran `/unregister` a moment ago. The permission check and the unbinding
+happen when they run the command again, where there is somebody to report the answer to.
 """
 
 from __future__ import annotations
@@ -28,11 +24,9 @@ router = APIRouter(prefix="/oauth", tags=["oauth"])
 async def github_callback(request: Request, code: str = "", state: str = "") -> PlainTextResponse:
     """Finish the round trip, in plain text.
 
-    Plain text rather than HTML because there is nothing to lay out and a template engine is a
-    dependency, an escaping question and a place for somebody's login to be rendered unescaped.
-
-    Neither `state` nor `code` is echoed back or logged. This page is on the open internet and its
-    logs are the one place a credential could come to rest.
+    Plain text rather than HTML: no template engine, and so nowhere for somebody's login to be
+    rendered unescaped. Neither `state` nor `code` is echoed back or logged, because this page is
+    on the open internet and its logs are the one place a credential could come to rest.
     """
     verification: GitHubIdentityVerification | None = getattr(
         request.app.state, "verification", None

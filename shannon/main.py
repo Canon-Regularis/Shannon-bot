@@ -26,18 +26,16 @@ def configure_logging(settings: Settings) -> None:
 def build_app(settings: Settings | None = None) -> FastAPI:
     """Assemble the whole application behind one ASGI app.
 
-    The bot and the webhook endpoint share a process. Deliveries still go through the queue;
-    sharing a process only saves them a network hop to reach Discord.
+    The bot and the webhook endpoint share a process; deliveries still go through the queue.
     """
     settings = settings or get_settings()
 
-    # The one privileged thing this bot ever asks the gateway for, and only when a deployment has
-    # said so. `build_intents` says what that costs and why the setting exists.
+    # The one privileged intent this bot asks for, and only when a deployment has said so; see
+    # `build_intents` for what it costs.
     bot = ShannonBot(explain_error=reply_for, capture_messages=settings.capture_discord_messages)
     container = build_container(threads=DiscordThreadGateway(bot), settings=settings)
     bot.install(*container.commands)
-    # All three of these are a second step for the same reason: the gateway has to exist before
-    # the container that needs it, so none of them can be handed to the constructor.
+    # A second step because the gateway has to exist before the container that needs it.
     bot.tell_when_a_thread_goes(container.forget_thread)
     bot.tell_when_a_channel_goes(container.forget_channel)
     bot.tell_when_a_message_arrives(container.conversations)

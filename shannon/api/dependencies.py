@@ -11,8 +11,7 @@ from shannon.services.delivery.queue import DeliveryInbox
 
 
 def get_settings_dep(request: Request) -> Settings:
-    # Starlette types `app.state` as `Any`, so the declared local is what stops it
-    # spreading into every caller.
+    # Starlette types `app.state` as `Any`; the declared local stops that spreading to callers.
     found: Settings = request.app.state.settings
     return found
 
@@ -20,8 +19,7 @@ def get_settings_dep(request: Request) -> Settings:
 class EventIntake(Protocol):
     """What this route needs of the router, which is a decision and a fallback.
 
-    `register` and `handles` are absent on purpose: a request handler that can add routes is a
-    request handler that can change what the process does while it is running.
+    `register` and `handles` are absent: a request handler must not change routes while running.
     """
 
     def will_act_on(self, event: str, action: str | None) -> bool: ...

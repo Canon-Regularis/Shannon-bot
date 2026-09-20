@@ -8,27 +8,21 @@ class DiscordGatewayError(ShannonError):
 
 
 class ChannelNotFoundError(PermanentError, DiscordGatewayError):
-    """The mapped channel is gone, or is a kind that cannot hold threads.
-
-    Permanent because both need somebody to run /set_channel. Retrying for half an hour only
-    delays the log line that says so.
-    """
+    """The mapped channel is gone or cannot hold threads; only /set_channel mends it."""
 
 
 class ThreadNotFoundError(DiscordGatewayError):
     """The stored thread is gone.
 
-    Callers treat this as a signal to rebuild rather than as a failure, because a thread someone
-    deleted is never coming back and retrying the same id forever would lose every later event
-    for that item.
+    Callers rebuild rather than retry: a deleted thread never comes back, and retrying the same
+    id would lose every later event for that item.
     """
 
 
 class ThreadStartedEmptyError(DiscordGatewayError):
     """The thread was created but its first message did not land.
 
-    Carries the id so the caller can record the thread before failing. Without that the id is
-    lost, and the retry opens a second thread beside the empty one.
+    Carries the id, or the retry opens a second thread beside the empty one.
     """
 
     def __init__(self, message: str, *, thread_id: int) -> None:
@@ -37,8 +31,4 @@ class ThreadStartedEmptyError(DiscordGatewayError):
 
 
 class DiscordPermissionError(PermanentError, DiscordGatewayError):
-    """The bot is missing a permission.
-
-    Separate from the rest because no amount of waiting grants a permission. Someone has to
-    change the channel settings, so this is reported once rather than retried for two hours.
-    """
+    """The bot is missing a permission; permanent, since waiting never grants one."""

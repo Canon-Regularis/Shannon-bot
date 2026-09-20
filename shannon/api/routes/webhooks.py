@@ -89,17 +89,14 @@ async def _accept(
 ) -> WebhookOutcome:
     """Write the delivery down and answer. The work happens in the worker.
 
-    GitHub gives an endpoint ten seconds and never redelivers a delivery it recorded as failed,
-    so anything slow done here risks losing the event outright. Nothing below this line talks
-    to Discord.
+    GitHub gives an endpoint ten seconds and never redelivers one it recorded as failed, so
+    nothing below this line talks to Discord.
     """
-    # Nothing to protect against a repeat of an event we would ignore anyway, and recording one
-    # would grow the queue for no reason.
+    # Recording a repeat of an event we would ignore anyway only grows the queue.
     if not event_router.will_act_on(event, action):
         return WebhookOutcome.IGNORED
 
-    # Without a queue the route has nowhere to put the work, so it does it inline. That is how
-    # the route-level tests run, with no database behind them.
+    # No queue means nowhere to put the work, so it runs inline: that is how route tests run.
     if queue is None:
         return await event_router.dispatch(event, action, payload)
 
@@ -109,8 +106,7 @@ async def _accept(
 
 
 # GitHub will not send a payload larger than this, and says so. The endpoint is open to the
-# internet and the body is read into memory before anything can be checked, because the
-# signature covers the whole of it, so the limit has to be applied during the read.
+# internet and the signature covers the whole body, so the limit is applied during the read.
 MAX_BODY_BYTES = 25 * 1024 * 1024
 
 
@@ -124,9 +120,8 @@ def _too_large() -> HTTPException:
 async def _read_within_limit(request: Request) -> bytes:
     """Read the body, giving up once it goes past what GitHub would ever send.
 
-    The running count is the real limit; Content-Length is only a free early exit. Nothing
-    obliges a client to send that header, and the signature covers the body, so an anonymous
-    caller can stream a chunked request of any size before anything can be verified.
+    Content-Length is only a free early exit: nothing obliges a client to send it, so an
+    anonymous caller can stream a chunked request of any size before anything is verified.
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
@@ -154,14 +149,8 @@ _SIGNATURE_FAILURES = {
 def _require_valid_signature(body: bytes, secrets: Sequence[str], header_value: str | None) -> None:
     """Accept a delivery signed with any secret this deployment knows.
 
-    Two rather than one, for the window in which a repository webhook configured by hand and the
-    GitHub App's own webhook are both live. Without it the changeover is a flag day: delete the
-    old webhook a moment early and deliveries are refused, a moment late and they arrive twice.
-
-    That second case is the one to get out of quickly, and nothing here can detect it: GitHub
-    gives the two copies different delivery ids, so the queue's own duplicate check cannot see
-    them and every commit line is posted twice. Delete the repository webhook as soon as the App
-    is installed.
+    Two secrets for the changeover window. GitHub gives the repository webhook and the App's own
+    different delivery ids, so nothing dedupes the two copies and every commit line posts twice.
     """
     result = verify_any(body, secrets, header_value)
     if result is SignatureResult.VALID:
@@ -186,9 +175,8 @@ def _require_valid_signature(body: bytes, secrets: Sequence[str], header_value: 
 def _decode(body: bytes) -> JsonObject:
     """The body as something checked, which is what `domain.json` exists to hand back.
 
-    `is_json_object` rather than `isinstance(payload, dict)`: for what `json.loads` produces the
-    two accept the same values, but only the guard carries the key type onwards, and carrying it
-    is the whole point of narrowing here rather than further down.
+    `is_json_object` rather than `isinstance(payload, dict)`: only the guard carries the key
+    type onwards.
     """
     try:
         payload: object = json.loads(body)
