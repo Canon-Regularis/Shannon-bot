@@ -28,62 +28,39 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
-# The note, who it may mention, and which roles it may mention. Two mappings rather than one,
-# because a team slug that happens to match a login is not that person and Discord writes the
-# two with different syntax.
+# Two mappings rather than one: a team slug that matches a login is not that person, and
+# Discord writes the two with different syntax.
 Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], Panel]
-# Getting an item's thread built again, for the one case this path can detect and not mend.
-# A callable rather than a service, because what it needs is the item read from GitHub and
-# put through the ordinary sync, and this module has no business knowing either of those.
+# Rebuilding reads the item from GitHub and puts it through the ordinary sync.
 Rebuild = Callable[[ItemNote], Awaitable[None]]
 NoteParser = Callable[[str, JsonObject], ItemNote | None]
-# Whether a note has earned a message of its own. Optional, because only one of the three
-# mirrors carries a note that can arrive meaning nothing.
+# Optional: only one of the three mirrors carries a note that can arrive meaning nothing.
 WorthPosting = Callable[[ItemNote], bool]
 Follow = Callable[[ItemNote], Awaitable[None]]
 
 
 class MirrorsNotes(Protocol):
-    """Putting one note in its thread, which is all the handler asks for.
-
-    The item handler already takes `SyncsItems` rather than the service that satisfies it; this
-    is the same seam on the other path.
-    """
-
     async def mirror(self, snapshot: ItemNote) -> bool: ...
 
 
 class PostsAndKnowsServers(PostsToThread, KnowsItsServers, Protocol):
-    """What this path needs of Discord: the post, and whether the server is still there.
-
-    The second is only ever asked about a refusal, to tell a permission this bot was never given
-    from a server it is no longer in.
-    """
+    """What this path needs of Discord: the post, and whether the server is still there."""
 
 
 @dataclass(frozen=True, slots=True)
 class _NoteTarget:
-    """The thread a note goes into, who to mention in it, and the server it is all in."""
-
     tracked_item_id: int
     thread_id: int
     mentions: Mapping[str, int]
     roles: Mapping[str, int]
-    # Which of the accounts in `mentions` this bot may actually notify. People only: a role
-    # mention reaches everybody holding the role and Discord offers no way to leave one person
-    # out of one, so `roles` never comes near this.
+    # People only: a role mention reaches everybody holding the role, and Discord offers no way
+    # to leave one person out of one.
     notify: tuple[int, ...]
-    # Carried rather than read again at the point of the refusal, because it is already in hand:
-    # the same repository row that answers where the thread is answers which server it is in.
     guild_id: int
 
 
 class ItemNoteMirror:
-    """Posts comments and reviews into the thread of whatever they were left on.
-
-    Finding the thread is the same work for both, and for pull requests and issues alike, so
-    only the rendering is injected.
-    """
+    """Posts comments and reviews into the thread of whatever they were left on."""
 
     def __init__(
         self,
@@ -105,14 +82,8 @@ class ItemNoteMirror:
     async def mirror(self, snapshot: ItemNote) -> bool:
         """Post the note, returning whether it belonged to anything mirrored here.
 
-        False is the answer for a note on an item nobody tracks, and the handler turns that into
-        `ignored`. True covers both the note being posted and this mirror deciding it was not
-        worth posting, because the item is tracked either way and the delivery did its work.
-
-        Asked after the thread is found and not before it, which is the whole reason the check
-        sits here rather than in the handler. Up there it would answer `processed` for an item
-        nobody tracks, and `ignored` is how anybody watching sees that a registered repository is
-        sending events for items with no thread.
+        True also covers deciding the note was not worth posting. That check runs after the
+        thread is found, so an untracked item still answers `ignored` rather than `processed`.
         """
         try:
             target = await self._find_thread(snapshot)
@@ -124,33 +95,22 @@ class ItemNoteMirror:
                     snapshot.repository.full_name,
                     snapshot.item_number,
                 )
-                # No claim is taken, so a later decision to stop declining these would replay
-                # every one of them rather than finding them all recorded as mirrored.
+                # No claim is taken, so a later decision to post these would replay them all
+                # rather than find them recorded as mirrored.
                 return True
             return await self._post(snapshot, target)
         except ItemNotReadyError:
-            # Both ways of having nowhere to post arrive here: an item whose thread was never
-            # built, and one whose thread was deleted between the read and the post. Asking on
-            # the way out is what makes the ask repeat.
-            #
-            # It used to sit in the second branch alone, which is the one branch that cannot be
-            # reached twice: it clears the dead pointer on its way past, so every later attempt
-            # of this note, and every later note on the item, stopped at the first branch
-            # instead, where nothing asked for anything. One rebuild that failed for any reason
-            # ended the item's mirror, and a spent rate limit or the delivery deadline landing
-            # inside it is reason enough.
-            #
-            # Outside the sessions the two branches open, so nothing holds a connection while
-            # GitHub is read.
+            # Both ways of having nowhere to post arrive here: a thread never built, and one
+            # deleted between read and post. The second branch clears the dead pointer as it
+            # goes, so asking only there would let one failed rebuild end the item's mirror.
+            # This sits outside both sessions, so no connection is held while GitHub is read.
             await self._ask_for_a_rebuild(snapshot)
             raise
 
     async def _find_thread(self, snapshot: ItemNote) -> _NoteTarget | None:
-        """Which thread this note belongs in, or None if the item is not mirrored here.
+        """Find where a note should be posted, or `None` to end the delivery for good.
 
-        Raises `ItemNotReadyError` for an item that is tracked but has no thread yet, so the
-        delivery is retried. Answering "nothing to do" would lose the note for good, because
-        nothing ever revisits a delivery that said that.
+        A tracked item with no thread yet raises `ItemNotReadyError`, so the delivery is retried.
         """
         async with self._sessionmaker() as session:
             repository = await RepositoryStore(session).get_by_github_id(
@@ -183,33 +143,27 @@ class ItemNoteMirror:
                     f"{snapshot.repository.full_name}#{snapshot.item_number} has no thread yet"
                 )
 
-            # Read from the very string the renderer will swap names in, rather than from the
-            # body it was built out of. The two have to agree about what was named, and the
-            # preview is cut before the escaping with the cut landing mid-word, so reading the
-            # raw body would ask about `monalisa` where the renderer is handed `mona`. Handing
-            # both halves one string makes them agree by construction instead of by argument.
+            # Read from the very string the renderer swaps names in, not the body it came from.
+            # The preview is cut mid-word before the escaping, so the raw body would name
+            # `monalisa` where the renderer is handed `mona`.
             named = names_in(clipped(snapshot.body, limit=COMMENT_PREVIEW_LIMIT))
 
-            # The author last, which is load-bearing. `resolve_many` lowercases into a fresh
-            # mapping, so the last entry for a name wins, and the author's is the one carrying a
-            # GitHub id. That id is the only evidence of identity anywhere on this path and it is
-            # what the changed-hands check runs on, so an author who writes their own name in
-            # their own comment must not have it replaced by the unverified one.
+            # The author last: `resolve_many` lowercases into a fresh mapping, so the last entry
+            # for a name wins and the author's is the one carrying a GitHub id. That id is what
+            # the changed-hands check runs on, so a self-mention must not take the unverified one.
             people: dict[str, int | None] = dict.fromkeys(named.people, None)
             if snapshot.author:
                 people[snapshot.author.login] = snapshot.author.github_user_id
 
             links = UserLinkStore(session)
             mentions = await links.resolve_many(guild_id=repository.discord_guild_id, people=people)
-            # Neither store is guarded by a check for an empty mapping, because both answer one
-            # without asking the database anything.
+            # No empty-mapping guard: both stores answer one without asking the database.
             roles = await TeamLinkStore(session).resolve_many(
                 guild_id=repository.discord_guild_id,
                 people=dict.fromkeys(named.teams, None),
             )
-            # Built from the same map the renderer swaps names in, so the allow-list and the
-            # content agree by construction rather than by argument. That map covers both halves
-            # of a note: the author in the header line and every `@login` inside the quoted body.
+            # The same map the renderer swaps names in, so the allow-list covers both halves of
+            # a note: the author in the header line and every `@login` in the quoted body.
             notify = await MutedMemberStore(session).may_be_pinged(
                 guild_id=repository.discord_guild_id, ids=mentions.values()
             )
@@ -223,11 +177,9 @@ class ItemNoteMirror:
             )
 
     async def _post(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
-        """Put the note in its thread, once."""
-        # Claimed before the post, not recorded after it. The queue is at-least-once by design:
-        # a delivery whose status could not be written stays leased, comes back when the lease
-        # runs out, and is handled again from the top. Recording afterwards leaves that same gap
-        # one step further along, and the gap put the same comment in the thread twice.
+        # Claimed before the post, not recorded after it. The queue is at-least-once: a delivery
+        # whose status could not be written comes back when the lease runs out and is handled
+        # from the top, and recording afterwards put the same comment in the thread twice.
         if not await self._claim(target.tracked_item_id, snapshot.note_key):
             logger.info(
                 "a note on %s#%s is already in its thread, not posting it again",
@@ -243,13 +195,9 @@ class ItemNoteMirror:
                 notify=target.notify,
             )
         except ThreadNotFoundError as error:
-            # Only the item's own sync knows how to open a replacement, because only it has the
-            # channel and the metadata. Letting go of the dead id is what lets an item event
-            # that arrived late do it too: `_resolve` turns a stale delivery away, but only for
-            # an item that still has a thread to show for itself.
-            #
-            # Asking for the rebuild is the other half, and `mirror` does that, for this branch
-            # and for the one that finds no thread at all.
+            # Only the item's own sync can open a replacement; it has the channel and the
+            # metadata. Letting go of the dead id lets a late item event do it too: `_resolve`
+            # turns a stale delivery away, but only for an item that still has a thread.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             await self._forget_thread(target.tracked_item_id, target.thread_id)
             raise ItemNotReadyError(
@@ -257,17 +205,10 @@ class ItemNoteMirror:
                 f"#{snapshot.item_number} is gone and has to be rebuilt"
             ) from error
         except PermanentError:
-            # A refusal that reads as a permission, from a bot that may simply not be in the
-            # server any more. Once it is removed, discord.py drops the guild and its threads
-            # from the cache, so resolving a thread id falls through to a fetch and Discord
-            # answers for a thread it can no longer see exactly as it answers for one this bot
-            # is not allowed to touch.
-            #
-            # This path has more to lose by it than the item path does. A permanent failure is
-            # dropped on its first attempt, and nothing ever reads a comment back from GitHub,
-            # so the note is not mirrored on this delivery or on any later one: it is simply
-            # gone. An item is at least rewritten by its next event. Told apart, an absence
-            # keeps the sixteen attempts over two hours it was always meant to have.
+            # A removed bot reads as a permission refusal: discord.py drops its threads from the
+            # cache, so a fetch answers exactly as it does for a thread this bot may not touch.
+            # A permanent failure is dropped on its first attempt and comments are never re-read,
+            # so telling the two apart keeps an absence its sixteen attempts over two hours.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             if self._threads.is_in(target.guild_id):
                 raise
@@ -276,17 +217,14 @@ class ItemNoteMirror:
                 f"{snapshot.repository.full_name}#{snapshot.item_number} could not be posted"
             ) from None
         except BaseException:
-            # Nothing was said, so the claim has to go back or the retry reads it as already
-            # posted and the note is lost for good. Cancellation counts as a failure here, which
-            # is why this catches everything: the worker puts a deadline on each delivery and
-            # cancels the handler where it stands, and discord.py sleeps through a rate limit
-            # rather than failing, so where it stands is often exactly here.
+            # Nothing was said, so the claim has to go back or the retry reads it as posted and
+            # the note is lost. Cancellation counts, hence BaseException: the worker cancels a
+            # delivery on its deadline, and discord.py sleeps through a rate limit here.
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             raise
 
-        # Posting reopened the thread, because Discord takes no message into an archived one.
-        # People go on commenting after an item is closed, and every one of those comments would
-        # otherwise pull the thread back into the channel and leave it there.
+        # Posting reopened the thread: Discord takes no message into an archived one, and people
+        # go on commenting after an item is closed.
         await self._shut_again.again(
             tracked_item_id=target.tracked_item_id, thread_id=target.thread_id
         )
@@ -299,14 +237,9 @@ class ItemNoteMirror:
             return await MirroredNoteStore(session).claim(tracked_item_id, note_key)
 
     async def _ask_for_a_rebuild(self, snapshot: ItemNote) -> None:
-        """Get the item's thread built again, best effort.
+        """Ask for the thread to be rebuilt, best effort: the note is retried either way.
 
-        Best effort on purpose. The note is going to be retried either way, so a rebuild that
-        cannot happen now may well work on the attempt after, and raising from here would replace
-        a reason that names the thread with whatever went wrong reading GitHub.
-
-        Optional, because a mirror with nothing wired in still behaves as it did: the note is
-        retried and the thread waits for an item event. Only the wiring decides.
+        Raising would replace a reason naming the thread with whatever went wrong reading GitHub.
         """
         if self._rebuild is None:
             return
@@ -321,24 +254,10 @@ class ItemNoteMirror:
             )
 
     async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
-        """Give a claim back, best effort, and say so when the effort fails.
+        """Give back the claim, shielded so a cancellation mid-flight cannot interrupt it.
 
-        Shielded so a cancellation mid-flight cannot interrupt the hand-back. Still swallowed,
-        because the delivery is already failing on something and that error is the one that says
-        why, and raising a second from here would replace it.
-
-        Said out loud rather than passed over, which is what this used to do on the grounds that
-        the note stays unposted either way. It does not. The claim is what a retry reads to decide
-        the note is already in the thread, so a claim that could not be given back is a comment
-        that will never be posted and a delivery that reports itself done: the next attempt takes
-        the already-claimed branch, answers PROCESSED, and the queue clears the error with it.
-        Nothing revisits it, because nothing re-reads comments from GitHub and the row is removed
-        only by this method or by the item going away.
-
-        It needs two failures at once, this one and the Discord call before it, so it is rare
-        enough to live with and far too quiet to leave unsaid. Closing it properly means a retry
-        being able to tell its own claim from somebody else's, which is the delivery id on the
-        row, a migration, and that id threaded through a handler that is not given one today.
+        Swallowed because the delivery is already failing on the error that says why. Closing the
+        gap properly needs a delivery id on the row, so a retry can tell its own claim from another.
         """
         try:
             await asyncio.shield(self._release(tracked_item_id, note_key))
@@ -368,8 +287,8 @@ def build_note_handler(
 ) -> EventHandler:
     """Adapt a comment or review webhook to the mirror.
 
-    `then` runs once the note is in the thread. A submitted review is the only note that means
-    something beyond its own text: it closes the request that asked for it.
+    `then` runs before the post. A submitted review is the only note that means something beyond
+    its own text: it closes the request that asked for it.
     """
 
     async def handle(
@@ -379,10 +298,8 @@ def build_note_handler(
         if snapshot is None:
             return WebhookOutcome.IGNORED
 
-        # The database work first, the Discord post last. A retry re-runs the whole handler,
-        # and posting a message is the one step that cannot be undone: anything after it that
-        # fails puts the same comment in the thread a second time. Closing a review request
-        # twice costs nothing, so it is the half that is safe to repeat.
+        # The database work first, the Discord post last. A retry re-runs the whole handler and
+        # posting cannot be undone, while closing a review request twice costs nothing.
         if then is not None:
             await then(snapshot)
 
