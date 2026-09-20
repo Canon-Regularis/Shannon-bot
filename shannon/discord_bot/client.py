@@ -16,27 +16,19 @@ from shannon.discord_bot.slash import SlashCommand
 
 logger = logging.getLogger(__name__)
 
-# Turns whatever a command raised into something worth showing the person who ran it. Injected
-# because the mapping knows the service errors, and nothing in this package should.
+# Injected because the mapping knows the service errors, and nothing in this package should.
 ExplainError = Callable[[BaseException], Panel]
 
-# Told that a thread has gone, so whatever was pointing at it can stop. Injected for the same
-# reason: which table holds a thread id is not this package's business.
 ThreadGone = Callable[[int], Awaitable[None]]
 ChannelGone = Callable[[int], Awaitable[None]]
 
 
 class CapturesMessages(Protocol):
-    """What reading a thread needs of the thing that owns the transcripts. Issue #103.
+    """What capturing a thread needs of the store that holds the transcripts.
 
-    Named here rather than imported for the reason the two callables above are injected: which
-    table holds a thread id is not this package's business.
-
-    `is_logging` is synchronous, and that is the whole design. `on_message` fires for every message
-    in every channel of every server this bot is in, so it is the first thing asked and it has to
-    cost a set lookup. An async answer would allocate a coroutine and a task step for every message
-    in the server, and a database answer would be a scan of a column that carries no index on
-    purpose.
+    Named here rather than imported: which table holds a thread id is not this package's business.
+    `is_logging` is synchronous because `on_message` asks it of every message in the server, and a
+    database answer would scan a column that carries no index on purpose.
     """
 
     def is_logging(self, thread_id: int) -> bool: ...
@@ -49,32 +41,12 @@ class CapturesMessages(Protocol):
 
 
 def build_intents(*, capture_messages: bool = False) -> discord.Intents:
-    """What this bot needs off the gateway, which is one privileged thing at most.
+    """The gateway intents this bot asks Discord for.
 
-    It used to ask for `members`, on the stated grounds that turning a GitHub login into
-    somebody this server can ping needed it. It does not. A mention is a `<@id>` string built
-    from a row in `user_links`, and Discord resolves it on receipt; nothing here ever looks a
-    member up. The one thing that reads a member is the permission gate, and what it reads is
-    `interaction.user`, which discord.py builds from the interaction payload and whose roles
-    resolve against the guild role cache that arrives under `guilds`.
-
-    Asking for it anyway was not free. It is privileged, so it is a Developer Portal toggle
-    that stops the process starting at all when it is missed, and it needs Discord's approval
-    past a hundred servers. discord.py also reads it as a request to chunk: `members` on turns
-    `chunk_guilds_at_startup` on, so the whole member list of every server is pulled over the
-    gateway before READY fires and then kept in memory, and READY is what the worker waits for
-    before it will deliver anything.
-
-    `message_content` is the one thing here that is ever asked for privileged, and the cost is
-    paid knowingly. Issue #103 publishes what is said in a thread to the item's GitHub comments,
-    and without this every message arrives with `content` empty, so there is no way round it.
-
-    Two halves of that cost, and only one of them applies. It is the same Developer Portal toggle
-    with the same Discord approval past a hundred servers, which is why it is behind a setting: an
-    operator ticks the box, then turns the setting on, and a missed box never reaches a running
-    process. It does NOT set `chunk_guilds_at_startup`, which is what made `members` expensive
-    rather than merely privileged, so READY arrives exactly as quickly and the delivery worker's
-    wait on it is unchanged.
+    `message_content` is privileged: a Developer Portal toggle, and Discord's approval past a
+    hundred servers, which is why it is behind a setting. Without it every message arrives with
+    `content` empty. `members` is not needed, since nothing here looks a member up, and would set
+    `chunk_guilds_at_startup`, delaying the READY the delivery worker waits on.
     """
     intents = discord.Intents.default()
     intents.message_content = capture_messages
@@ -84,9 +56,8 @@ def build_intents(*, capture_messages: bool = False) -> discord.Intents:
 class ShannonBot(discord.Client):
     """Slash commands only, so a bare Client with a command tree is enough.
 
-    Commands are handed in rather than built here. The thread gateway needs a live client and
-    the commands need services that need that gateway, so the client has to exist before the
-    things that use it. Composition is the container's job.
+    Commands are handed in rather than built here: they need services that need this client, so it
+    has to exist first.
     """
 
     def __init__(
@@ -96,23 +67,10 @@ class ShannonBot(discord.Client):
         thread_gone: ThreadGone | None = None,
         capture_messages: bool = False,
     ) -> None:
-        # GitHub comment bodies are mirrored verbatim, so a comment containing @everyone would
-        # otherwise ping the whole server.
-        #
-        # Roles are allowed because a review asked of a GitHub team is announced as a mention of
-        # the Discord role somebody linked to it, and a role that cannot resolve is a ping that
-        # reaches nobody. That is safe here and not merely tolerable: every scrap of
-        # GitHub-authored text goes through `defuse_mentions` on the way in, which puts a
-        # zero-width space inside the brackets of `<@&123>` as well as `<@123>`, so the only live
-        # mentions in any message this bot sends are the ones it built. `everyone` stays off,
-        # because nothing this bot builds is ever addressed to everyone.
-        #
-        # This is also load-bearing for the per-message allow-lists that `/mentions` writes.
-        # discord.py merges those over this one, and an `AllowedMentions` built for a single
-        # message leaves `everyone` at a sentinel that is truthy, so its payload permits
-        # @everyone on its own. It is the merge against this that takes it back out. Deleting
-        # the keyword below would not fail: it would quietly let @everyone through every message
-        # that carries an allow-list, which is most of them.
+        # GitHub bodies are mirrored verbatim, so `everyone` stays off. Roles stay on for
+        # team-review mentions, and `defuse_mentions` neutralises every mention GitHub wrote.
+        # `everyone=False` also takes @everyone out of the per-message allow-lists `/mentions`
+        # writes: theirs leaves it at a truthy sentinel that discord.py merges over this.
         super().__init__(
             intents=build_intents(capture_messages=capture_messages),
             allowed_mentions=discord.AllowedMentions(
@@ -120,52 +78,33 @@ class ShannonBot(discord.Client):
             ),
         )
         self.tree = app_commands.CommandTree(self)
-        # Assignment is how discord.py documents installing this, and mypy has no way to
-        # say so. One line rather than the file, which is what the ratchet was doing.
+        # Assignment is how discord.py documents installing this, and mypy has no way to say so.
         self.tree.on_error = self._command_failed  # type: ignore[method-assign]
         self._explain_error = explain_error
         self._thread_gone = thread_gone
         self._channel_gone: ChannelGone | None = None
-        # Letting go of a thread is housekeeping, and it must never be the reason a delivery is
-        # late. Deleting a channel deletes every thread in it, and discord.py dispatches one of
-        # these for each of them at once, each running a transaction of its own against a pool
-        # the delivery worker, the board poller and every slash command are drawing on. Measured
-        # against a live database: a channel holding nine hundred threads made an ordinary query
-        # wait sixteen seconds for a connection, and the wait grows with the channel until it
-        # reaches the pool's own timeout and deliveries start failing outright.
-        #
-        # Two at a time, because the work is short and there is no hurry: the item recovers on
-        # its own even if this never runs, since the write path turns Discord saying a thread is
-        # gone into a replacement. This exists to save the ONE kind of item that has no other way
-        # of finding out, and taking an hour over a channel nobody is using any more costs that
-        # item nothing.
+        # Deleting a channel deletes every thread in it, and discord.py dispatches an event for
+        # each at once, each a transaction against the pool the delivery worker and every slash
+        # command share: nine hundred threads made an ordinary query wait sixteen seconds.
         self._letting_go = asyncio.Semaphore(2)
         self._capturing: CapturesMessages | None = None
-        # Its own limit rather than the one above, which is sized at two for housekeeping that
-        # must never delay a delivery. Capture is not housekeeping and must not queue behind a
-        # channel deletion cascading nine hundred threads, but it is still a write per message in
-        # an armed thread, so it is bounded rather than unbounded.
+        # Separate from the housekeeping limit above so capture cannot queue behind a channel
+        # deletion, and bounded because it is still a write per message in an armed thread.
         self._transcribing = asyncio.Semaphore(8)
         self._pending: list[SlashCommand] = []
-        # Whether the websocket is up right now, kept from the events discord.py already sends.
-        # `is_ready` cannot answer it: it reports whether the cache has ever been filled, is set
+        # `is_ready` cannot answer this: it reports whether the cache has ever been filled, is set
         # once when READY arrives and cleared only by `close`, so a connection that came up and
-        # later died still reads as ready for the life of the process.
+        # later died still reads as ready.
         self._connected = False
 
     async def _command_failed(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
-        """Answer an interaction whose command raised something it did not expect.
-
-        Each command handles the errors it knows about. Anything else, a dropped database
-        connection or a plain bug, would otherwise leave the person who ran it looking at a
-        spinner until Discord gave up, with the reason only in the log.
-        """
+        """An unanswered interaction leaves the person with a spinner until Discord gives up."""
         logger.error("a slash command failed", exc_info=error)
         # An error handler that raises is worse than not having one: discord.py logs a second
-        # traceback and the person who ran the command is still left waiting. The interaction
-        # may also have expired, or already been answered, and neither is worth a stack trace.
+        # traceback and the person is still left waiting. The interaction may also have expired
+        # or already been answered, and neither is worth a stack trace.
         with contextlib.suppress(discord.HTTPException):
             await reply(interaction, self._explain_error(error))
 
@@ -173,40 +112,19 @@ class ShannonBot(discord.Client):
         self._pending.extend(commands)
 
     def tell_when_a_channel_goes(self, gone: ChannelGone) -> None:
-        """Wire up the channel-delete listener, for the same reason as the one below.
-
-        A separate event because Discord treats it as one: deleting a channel deletes the threads
-        in it, and the per-thread events that follow cover only the ones discord.py still had
-        cached.
-        """
         self._channel_gone = gone
 
     def tell_when_a_message_arrives(self, capturing: CapturesMessages) -> None:
-        """Wire up the message listener, for the same reason as the two below.
-
-        Left unwired the handlers below return at once, which is what every deployment that has
-        not turned capture on gets. Wiring it does not on its own make the gateway send anything:
-        without the message content intent every message arrives with no text at all.
-        """
         self._capturing = capturing
 
     def tell_when_a_thread_goes(self, gone: ThreadGone) -> None:
-        """Wire up the thread-delete listener, once the thing that owns the rows exists.
-
-        A second step for the same reason `install` is one: the gateway has to exist before the
-        container that needs it, so the container cannot be handed to the constructor.
-        """
         self._thread_gone = gone
 
     async def setup_hook(self) -> None:
-        """Register the commands with Discord, once, before the gateway connects.
+        """Register the installed commands with Discord, once, at startup.
 
-        A global sync rather than a per-guild one, because this bot is invited to a server rather
-        than built into one and a global command works wherever it is invited. The cost is worth
-        saying out loud in the log: Discord serves global commands from a cache and can take up to
-        an hour to show a new one, so the first start of a fresh application looks exactly like a
-        broken one. A per-guild sync appears at once and is the thing to reach for while
-        developing.
+        A global sync rather than a per-guild one: this bot is invited to a server rather than built
+        into one. A per-guild sync appears at once and is what to reach for while developing.
         """
         for command in self._pending:
             self.tree.add_command(command)
@@ -222,45 +140,36 @@ class ShannonBot(discord.Client):
         logger.info("connected to Discord as %s", self.user)
 
     async def on_resumed(self) -> None:
-        """The other way back. A reconnection that resumes an existing session sends this and no
-        READY, so watching only for READY would leave the health check reporting a gateway that
-        is up as down until something forced a fresh session."""
+        """A reconnection that resumes an existing session sends this and no READY.
+
+        Watching only for READY would report a gateway that is up as down.
+        """
         self._connected = True
         logger.info("the connection to Discord came back")
 
     async def on_disconnect(self) -> None:
-        """discord.py reconnects for ever by design, so this is not an error and nothing is done
-        about it here. It is recorded because the health check has no other way to know: a
-        gateway that has stopped answering leaves the task running and the cache filled, and
-        without this the process reports itself well while delivering nothing."""
+        """discord.py reconnects for ever by design, so this is not an error.
+
+        It is recorded because a gateway that has stopped answering leaves the task running and the
+        cache filled, so the health check has no other way to know.
+        """
         self._connected = False
         logger.info("lost the connection to Discord, waiting for it to come back")
 
     def gateway_is_up(self) -> bool:
         """Whether Discord can be reached right now, for the health check to answer with.
 
-        Both halves. The cache has to have been filled at least once, because a client that has
-        never connected has nothing to write with, and the socket has to be up now, because one
-        that has fallen over will not answer either. A reconnection in progress reads as down for
-        as long as it lasts, which is the honest answer and what the health check's own start
-        period and retries are for.
+        A reconnection in progress reads as down while it lasts, which the health check's own start
+        period and retries cover.
         """
         return self._connected and self.is_ready()
 
     async def on_message(self, message: discord.Message) -> None:
-        """Somebody said something. Keep it if this thread is being published to GitHub.
+        """One of these for every message in every channel of every server this bot is in.
 
-        Issue #103, and the hottest handler in the process by a long way: Discord sends one of
-        these for every message in every channel of every server this bot is in, most of which are
-        nobody's business here. So the order of the checks below is the design, and the set lookup
-        is second because it is the one that rules out almost everything. A message in a thread
-        nobody armed reaches no coroutine, no database and no lock.
-
-        Not behind `contextlib.suppress`, unlike the two handlers below it. Those suppress because
-        the item they are about heals itself: the next webhook rebuilds a thread that has gone. A
-        transcript line dropped here is gone, nothing rebuilds it, and nothing anywhere else would
-        say so. Logged loudly instead, and the message is lost either way, which is the honest
-        outcome rather than a hidden one.
+        The order of the checks below is the design: the set lookup rules out almost everything. A
+        dropped transcript line is gone and nothing rebuilds it, so a failure here is logged rather
+        than suppressed as it is in the handlers below.
         """
         if self._capturing is None:
             return
@@ -282,32 +191,23 @@ class ShannonBot(discord.Client):
                 )
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        """Somebody took a message back before it was published. Honour that.
+        """Drop a message somebody deleted before it was published.
 
-        Deletion is honoured and editing is not, which is worth saying is deliberate rather than an
-        oversight. An edit reflected only while the message is still pending would land or not
-        depending on whether the quiet gap happened to elapse first, which is timing nobody can
-        see. Deleting something before it goes out is a rule somebody can hold in their head and
-        act on, and getting it wrong costs more than a typo does.
-
-        The raw event rather than `on_message_delete`, which discord.py dispatches only for a
-        message it still has cached. Nothing here is cached, and the id is all this needs.
-
-        Gated on the same cheap test as the handler above, so a deletion anywhere else in the
-        server costs a set lookup.
+        Edits are deliberately not honoured: whether one landed would depend on whether the quiet
+        gap elapsed first. The raw event rather than `on_message_delete`, which discord.py
+        dispatches only for a message it still has cached; nothing here is cached.
         """
         await self._forget(payload.channel_id, [payload.message_id])
 
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
-        """The same, for a moderator clearing a stretch of a thread at once.
+        """A bulk delete sends this and no per-message deletion.
 
-        Its own event because Discord treats it as one: a bulk delete sends this and no per-message
-        deletion, so without it a purge would leave every message in it still queued to publish.
+        Without it a moderator clearing a stretch of a thread would leave every message in it still
+        queued to publish.
         """
         await self._forget(payload.channel_id, sorted(payload.message_ids))
 
     async def _forget(self, channel_id: int, message_ids: Sequence[int]) -> None:
-        """Drop captured messages that have been deleted, if this channel is being captured."""
         if self._capturing is None:
             return
         if not self._capturing.is_logging(channel_id):
@@ -322,15 +222,11 @@ class ShannonBot(discord.Client):
                 )
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
-        """A whole channel has gone, and with it every thread that was in it.
+        """A channel has gone, and with it every thread that was in it.
 
-        The per-thread events Discord sends alongside this cover only the threads discord.py
-        still had cached, and it drops one the moment the thread archives, so a quiet thread is
-        announced by nothing. That is the case the thread listener below was written for and the
-        one shape of it that listener cannot see.
-
-        Behind the same limit as that one, and for the same reason: this is housekeeping and must
-        never be why a delivery is late.
+        The per-thread events Discord sends alongside this cover only the threads discord.py still
+        had cached, and it drops one the moment the thread archives, which Discord does by itself
+        after a few days of quiet. So a quiet thread is announced by nothing else.
         """
         if self._channel_gone is None:
             return
@@ -339,29 +235,12 @@ class ShannonBot(discord.Client):
                 await self._channel_gone(channel.id)
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
-        """Somebody removed a thread. Let go of it before anything tries to write there again.
+        """Let go of a thread somebody removed, before anything writes to it again.
 
-        The only gateway event this bot listens to besides READY, and it earns its place: the
-        alternative is finding out by being refused, and one kind of item never finds out at all.
-        A pull request or an issue is told again by its next webhook, and the write path turns
-        the refusal into a replacement thread. A draft card on a project board has no webhook.
-        Its only visitor is the poller, which decides whether to look at a card by comparing
-        timestamps and sees a row still holding a thread id, so it passes over the card without a
-        single Discord call and without a line in the log. A card parked in Done that nobody ever
-        edits again is then mirrored nowhere, permanently, and nothing anywhere says so.
-
-        Letting go here puts every kind of item back on the same footing: the pointer goes, and
-        the next thing to come past opens a replacement.
-
-        The raw event rather than `on_thread_delete`, which is the same thing with the deleted
-        thread already resolved and is dispatched only when discord.py still has that thread
-        cached. It drops one the moment it archives, and Discord archives a thread by itself
-        after a few days of quiet. So the cached form covers busy threads and misses every quiet
-        one, and quiet is the whole case this exists for: a card parked in Done, its thread
-        archived by age, then deleted. Nothing here needs the thread object anyway.
-
-        Fires for every thread in the server, most of which are nobody's business here. One
-        unindexed lookup that finds nothing is the whole cost of the ones that are not.
+        A pull request or an issue is told again by its next webhook, and the write path turns the
+        refusal into a replacement thread. A draft card on a project board has no webhook: the
+        poller sees a row still holding a thread id and passes over the card without a Discord call,
+        so a card parked in Done is mirrored nowhere, permanently, and nothing says so.
         """
         if self._thread_gone is None:
             return
