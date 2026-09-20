@@ -19,24 +19,19 @@ from shannon.domain.models import (
 class SyncPolicy(Protocol):
     """Everything that differs between the kinds of GitHub object being mirrored.
 
-    The sync service holds the orchestration that is the same for all of them; a policy holds
-    the handful of decisions that are not. Adding a third kind means adding a policy, not
-    another copy of the orchestration.
+    The sync service holds the orchestration that is the same for all of them.
     """
 
     object_type: ObjectType
 
-    # Where this kind of item's threads go when nobody has mapped a channel for it. /register
-    # only ever maps pull requests, so without a fallback an issue has nowhere to go until
-    # somebody runs /set_channel, and nothing appears to be happening. None means no fallback:
-    # if it is not mapped, it is not posted.
+    # Where this kind's threads go when nobody has mapped a channel for it. /register only maps
+    # pull requests, so without a fallback an issue has nowhere to go until somebody runs
+    # /set_channel. None means no fallback: if it is not mapped, it is not posted.
     channel_fallback: ObjectType | None
 
-    # Whether this kind's DONE means somebody shut the thread. True only where the lock is taken
-    # by a command and kept in the row, which makes the row the only place a replacement thread
-    # can learn it should come back shut. False where DONE is derived from something outside
-    # Discord and no lock was ever taken for it, because then shutting a replacement would
-    # invent a lock the original never had.
+    # Whether this kind's DONE means somebody shut the thread. True where a command took the lock
+    # and wrote it to the row, the only place a replacement thread can learn it. False where DONE
+    # comes from outside Discord, since shutting a replacement would invent a lock.
     lock_lives_in_the_row: bool
 
     def render(
@@ -53,9 +48,7 @@ class SyncPolicy(Protocol):
     def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Who this event has just asked for, as opposed to who is on the item.
 
-        Separate from `assignments` because the two answer different questions. That one is a
-        list to be matched; this one is an event, and an event is the only thing that can tell a
-        request made again from a request never withdrawn.
+        Only an event can tell a request made again from a request never withdrawn.
         """
         ...
 
@@ -64,40 +57,28 @@ class SyncPolicy(Protocol):
     def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """Whether the thread should be shut, or None to leave it as it is.
 
-        `status` is the row's, as this delivery leaves it. Only the pull request reads it, and
-        only because it is the one thing that separates a thread `/set_done` shut from one
-        nobody has shut, on an item whose payload says nothing about either.
+        `status` is the row's, as this delivery leaves it. Only the pull request reads it.
         """
         ...
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """Whether an item in this state belongs in a thread that is shut, from the row alone.
 
-        Asked where there is no payload to ask instead. A delivery turned away as superseded is
-        the case: it is refused before anything reads its snapshot, and the only thing that knows
-        what the item's thread should look like is the row.
-
-        Not the same question as `locked`, which answers about a payload and is allowed to say
-        None. This one has to answer yes or no, because its caller is deciding whether the
-        mirror is finished rather than what to do next.
+        Asked where there is no payload: a delivery turned away as superseded is refused before
+        anything reads its snapshot. Unlike `shut` it must answer yes or no.
         """
         ...
 
     def thread_name(self, snapshot: TrackedSnapshot) -> str:
-        """What the item's Discord thread is called.
-
-        Here rather than in the renderer because it is the one piece of the thread that is not
-        the metadata block, and because a ticket has no number to lead with while the other two
-        are found in a channel list by theirs.
-        """
+        """What the item's Discord thread is called."""
         ...
 
 
 class PullRequestPolicy:
     object_type = ObjectType.PR
     channel_fallback = None
-    # `/set_done` is the only thing that locks one, and it writes the status to the row. No
-    # payload can say a pull request is finished, so the row is all a replacement thread has.
+    # `/set_done` is the only thing that locks one, and no payload can say a pull request is
+    # finished, so the row is all a replacement thread has.
     lock_lives_in_the_row = True
 
     def render(
@@ -121,10 +102,7 @@ class PullRequestPolicy:
         }
 
     def asked_again(self, snapshot: PullRequestSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
-        """Whoever `review_requested` named at the top level, under the role they were asked as.
-
-        Empty for every other action, because no other payload carries one.
-        """
+        """Whoever `review_requested` named at the top level; empty for every other action."""
         return {
             ActorRole.REVIEWER: [snapshot.person_asked_now] if snapshot.person_asked_now else [],
             ActorRole.REVIEWER_TEAM: ([snapshot.team_asked_now] if snapshot.team_asked_now else []),
@@ -135,18 +113,10 @@ class PullRequestPolicy:
         return current
 
     def shut(self, snapshot: PullRequestSnapshot, *, status: Status) -> bool | None:
-        """Three answers, and it needs all three.
+        """Closed covers merged and abandoned alike.
 
-        Closed covers merged and abandoned alike, which `display_state` already folds together.
-
-        An open one at DONE is the case the status exists for. `/set_done` shut that thread and
-        the payload has no idea: answering False here would give it back on the next
-        `synchronize`, undoing a command somebody ran on purpose.
-
-        Anything else is False rather than None, and that is what gives a reopened pull request
-        its thread back. Nothing else on any path ever does. Answering it on every delivery
-        rather than only on the reopen is what makes it self-healing, because a refusal is then
-        retried by whatever arrives next instead of being lost.
+        An open one at DONE is `/set_done`, which no payload knows about; False elsewhere,
+        rather than None, is the only thing that gives a reopened pull request its thread back.
         """
         if snapshot.closed:
             return True
@@ -165,8 +135,7 @@ class PullRequestPolicy:
 class IssuePolicy:
     object_type = ObjectType.ISSUE
     channel_fallback = ObjectType.PR
-    # `locked` reads it straight off the payload, so a replacement is shut by the ordinary path
-    # and has nothing to learn from the row.
+    # `shut` reads it off the payload, so a replacement has nothing to learn from the row.
     lock_lives_in_the_row = False
 
     def render(
@@ -189,14 +158,14 @@ class IssuePolicy:
         }
 
     def asked_again(self, snapshot: IssueSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
-        """Nothing. An issue has no reviewers, so nothing about one can be asked twice."""
+        """Nothing. Only reviewers can be asked again."""
         return {}
 
     def status_for(self, snapshot: IssueSnapshot, current: Status) -> Status:
-        """A closed issue is done, and reopening one undoes that.
+        """A closed issue is done, and reopening one resets only DONE.
 
-        Reopening only resets a status of DONE rather than forcing NOT_REVIEWED on every open
-        issue, so that MVP 3's status commands are not overwritten on the next webhook.
+        Forcing NOT_REVIEWED on every open issue would overwrite MVP 3's status commands on the
+        next webhook.
         """
         if snapshot.closed:
             return Status.DONE
@@ -205,14 +174,15 @@ class IssuePolicy:
         return current
 
     def shut(self, snapshot: IssueSnapshot, *, status: Status) -> bool | None:
-        """GitHub decides, and the status is not asked. An issue has no `/set_done` of its own:
-        the command sends you to close it on GitHub instead, so the payload is the whole story."""
+        """GitHub decides: an issue has no `/set_done`, and the command closes it on GitHub."""
         return snapshot.closed
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
-        """The same answer `shut` gives, read from the column the payload writes into rather
-        than from the payload. Not the status: `/set_done` can put an open issue at DONE, and an
-        open issue's thread is one people are still meant to be talking in."""
+        """The answer `shut` gives, read from the column the payload writes into.
+
+        Not the status: `/set_done` can put an open issue at DONE, and an open issue's thread is
+        one people are still meant to be talking in.
+        """
         return github_state == "closed"
 
     def thread_name(self, snapshot: IssueSnapshot) -> str:
@@ -220,18 +190,15 @@ class IssuePolicy:
 
 
 class TicketPolicy:
-    """A draft item on a project board, which is a thing with a name and a column and no more.
+    """A draft item on a project board: a name and a column, and no more.
 
-    No channel fallback, unlike issues. An issue with nowhere to go is a mistake, because
-    /register maps pull requests and forgetting /set_channel is easy; a board is something
-    somebody chose to mirror, and putting draft items into the pull request channel uninvited
-    would be a surprise rather than a kindness.
+    No channel fallback, unlike issues: mirroring a board is deliberate.
     """
 
     object_type = ObjectType.TICKET
     channel_fallback = None
-    # A card in the Done column is DONE on the row, put there by the board rather than by
-    # anybody, and its thread was never locked. See `locked` for why it must not be.
+    # A card in the Done column is DONE on the row, put there by the board and not by anybody,
+    # and its thread was never locked.
     lock_lives_in_the_row = False
 
     def render(
@@ -249,38 +216,38 @@ class TicketPolicy:
         return {}
 
     def asked_again(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
-        """Nothing, for the same reason: there is nobody on a card to ask."""
         return {}
 
     def status_for(self, snapshot: TicketSnapshot, current: Status) -> Status:
-        """The board is the source: its column is the status, and moving the card is the change.
+        """The board is the source: its column is the status.
 
-        A column nobody has taught us leaves the status where it was. Falling back to a default
-        would move real work backwards every time the board is read.
+        A column nobody has taught us leaves the status where it was; a default would move real
+        work backwards every time the board is read.
         """
         return status_from_column(snapshot.column) or current
 
     def shut(self, snapshot: TicketSnapshot, *, status: Status) -> bool | None:
-        """Left alone. A board column is not a closed state, and a ticket that moves back out of
-        Done would be shut in a thread nobody could answer in, with no GitHub event coming to
-        open it again."""
+        """Left alone. A board column is not a closed state.
+
+        No GitHub event arrives when a card moves back out of Done, so nothing would open the
+        thread again.
+        """
         return None
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
-        """Never, for the reason above. A card in Done is a card somebody can drag back out."""
+        """Never: a card in Done is a card somebody can drag back out."""
         return False
 
     def thread_name(self, snapshot: TicketSnapshot) -> str:
-        """No number in front. A draft item has none, and the board is where it is found."""
+        """No number in front: a draft item has none."""
         return snapshot.title.strip() or "Untitled ticket"
 
 
 def channel_fallbacks() -> dict[ObjectType, ObjectType]:
     """Which kinds fall back to another kind's channel, read off the policies themselves.
 
-    So that anything else needing the answer asks the policies rather than restating the rule.
-    `/set_channel` needs it to say where the threads already open actually went, which for a
-    server that has never mapped issues is the pull request channel and not nowhere.
+    `/set_channel` needs it to say where threads already open went: on a server that has never
+    mapped issues, that is the pull request channel and not nowhere.
     """
     return {
         policy.object_type: policy.channel_fallback
