@@ -34,14 +34,9 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         github_username: str,
         member: discord.Member | None = None,
     ) -> None:
-        # Every link, not only the ones made on somebody else's behalf.
-        #
-        # Claiming your own account used to be ungated, on the reasoning that it is yours to
-        # claim. Nothing checked that it was: GitHub is never asked, so anybody could take any
-        # login and from then on receive every mention meant for it in this server, in the
-        # metadata block and in every ping. That is the same route by which somebody could have
-        # become a review team before teams were given a table of their own, and the honest fix
-        # is the same one, which is that a person who speaks for the server does the pointing.
+        # Gated for every link, not only the ones made on somebody else's behalf: GitHub is
+        # never asked to confirm the claim, so an ungated self-link lets anybody take any login
+        # and from then on receive every mention meant for it in this server.
         guild_id = await in_a_server(interaction, "link", gate, REGISTER_ROLES)
         if guild_id is None:
             return
@@ -60,7 +55,6 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         else:
             await reply(interaction, done(f"Linked GitHub user {username} to <@{target.id}>."))
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown; one line here rather
+    # than a suppression over the whole file.
     return link  # pyright: ignore[reportUnknownVariableType]

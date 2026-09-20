@@ -1,17 +1,8 @@
 """The four commands that put somebody on this thread's item, or take them off.
 
-Run inside the item's own thread, the way the `/set_*` commands are, and take one argument: who.
-Inside a thread Discord's `channel_id` IS the thread id, so the item needs no naming.
-
-Two pairs, because GitHub keeps two lists and a person can be on both. `/assign` puts somebody on
-the assignee list, which a pull request and an issue both have. `/request_review` asks for a review,
-which only a pull request can be asked for, so an issue refuses and says which command to use.
-
-They were one pair until issue #105, inferring the list from the kind of item. That read well and
-left no way to assign a pull request at all.
-
-Neither command posts into the thread. GitHub sends the change back as a delivery, and the ordinary
-mirror rewrites the block and says who was asked, exactly once.
+Run in the item's own thread, where Discord's `channel_id` is the thread id. GitHub keeps
+assignees and reviewers as two lists and a person can be on both; only a pull request can be
+asked for a review, so an issue refuses and says which command to use.
 """
 
 from __future__ import annotations
@@ -57,10 +48,8 @@ def build_assign_command(service: PutsSomebodyOnAnItem, gate: PermissionGate) ->
     async def assign(interaction: discord.Interaction, member: discord.Member) -> None:
         await _act(interaction, "assign", gate, member, service.assign)
 
-    # discord.py's decorator leaves the binding parameter unsolved for a module-level
-    # command, so the object it hands back is `Command[Unknown, ...]` whatever this is
-    # declared as. `discord_bot/slash.py` argues why `Any` is the only truthful thing to put
-    # in that slot; this silences pyright noticing the same gap a second time.
+    # discord.py's decorator leaves the binding parameter unsolved for a module-level command, so
+    # it hands back `Command[Unknown, ...]` whatever this is declared as. See `discord_bot/slash`.
     return assign  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -71,10 +60,6 @@ def build_unassign_command(service: PutsSomebodyOnAnItem, gate: PermissionGate) 
     async def unassign(interaction: discord.Interaction, member: discord.Member) -> None:
         await _act(interaction, "unassign", gate, member, service.unassign)
 
-    # discord.py's decorator leaves the binding parameter unsolved for a module-level
-    # command, so the object it hands back is `Command[Unknown, ...]` whatever this is
-    # declared as. `discord_bot/slash.py` argues why `Any` is the only truthful thing to put
-    # in that slot; this silences pyright noticing the same gap a second time.
     return unassign  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -89,10 +74,6 @@ def build_request_review_command(
     async def request_review(interaction: discord.Interaction, member: discord.Member) -> None:
         await _act(interaction, "request_review", gate, member, service.request_review)
 
-    # discord.py's decorator leaves the binding parameter unsolved for a module-level
-    # command, so the object it hands back is `Command[Unknown, ...]` whatever this is
-    # declared as. `discord_bot/slash.py` argues why `Any` is the only truthful thing to put
-    # in that slot; this silences pyright noticing the same gap a second time.
     return request_review  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -111,7 +92,7 @@ def build_unrequest_review_command(
 
 
 class _Change(Protocol):
-    """One of the service's two methods, which take and answer the same things."""
+    """Any of the service's four methods, which take and answer the same things."""
 
     async def __call__(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome: ...
 
@@ -123,7 +104,11 @@ async def _act(
     member: discord.Member,
     call: _Change,
 ) -> None:
-    """The half both commands share: check, defer, call, answer."""
+    """The half all four commands share: check, defer, call, answer.
+
+    Nothing is posted into the thread: GitHub sends the change back as a delivery, and the
+    ordinary mirror rewrites the block and says who was asked, exactly once.
+    """
     where = await in_a_thread(interaction, name, gate, SYNC_ROLES)
     if where is None:
         return
@@ -139,12 +124,7 @@ async def _act(
 
 
 def _said(outcome: PeopleOutcome, discord_user_id: int) -> str:
-    """What happened, named as the two different things they are.
-
-    The person is written as the mention the command was given rather than as the GitHub login it
-    resolved to. Both are true, and the one somebody picked out of a list is the one they will
-    recognise in the answer.
-    """
+    """What happened, with the person written as the mention the command was given."""
     item = f"{outcome.full_name}#{outcome.number}"
     who = f"<@{discord_user_id}>"
     if outcome.role is ActorRole.REVIEWER:

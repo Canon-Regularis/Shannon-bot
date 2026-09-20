@@ -17,35 +17,23 @@ from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
 
 logger = logging.getLogger(__name__)
 
-# What the counts are counting, in the reply. Read from a table rather than branched over, so the
-# three scopes cannot drift into saying different shapes of thing about the same numbers.
+# What the counts are counting, in the reply.
 _KINDS = {
     RefreshScope.EVERYTHING: "open items",
     RefreshScope.PULL_REQUESTS: "open pull requests",
     RefreshScope.ISSUES: "open issues",
 }
 
-# Discord shows the description, and the value is what reaches the callback.
-#
-# `all` offers nothing this command could not already do: leaving the argument out has always
-# meant both kinds. It is here because nothing in the picker said so, and a capability nobody can
-# see is one nobody uses. Issue #92.
-#
-# First, because Discord shows them in the order they are written and this is the one the command
-# does when nobody chooses. Built from the enum rather than from the string beside it, so a value
-# no scope has cannot be offered: the callback turns whatever arrives straight back into a member.
+# Discord shows the description, the value is what reaches the callback, and the choices appear
+# in the order they are written, so the default scope comes first.
 _CHOICES = [
     app_commands.Choice(name="all", value=RefreshScope.EVERYTHING.value),
     app_commands.Choice(name="pull requests", value=RefreshScope.PULL_REQUESTS.value),
     app_commands.Choice(name="issues", value=RefreshScope.ISSUES.value),
 ]
 
-# Said only where something was mirrored. It is the one surprising thing about this command, and
-# it is what lets somebody run it against a real backlog without wondering who they just woke up.
-#
-# It covers the blocks as well as the lines. A block that is posted notifies everybody it
-# mentions, so the sync services behind this are built to write names in plain text; the sentence
-# was false for as long as they were not.
+# True only because the sync services behind this write names in plain text: a block that is
+# posted notifies everybody it mentions.
 _QUIET = "Nobody was pinged."
 
 
@@ -59,18 +47,10 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
     @app_commands.command(
         name="refresh", description="Open threads for any GitHub items that do not have one"
     )
-    # `scope` rather than `only`, which was honest with two entries and became a contradiction at
-    # the third: `only: all` says the opposite of what it does.
-    #
-    # Renaming an option Discord has already registered is safe here for one reason, and it is
-    # worth writing down because it stops being true the moment somebody makes this required. A
-    # stale registration sends `only`; discord.py looks for `scope`, does not find it, and takes
-    # the default, which is all of them. Required, the same line raises `CommandSignatureMismatch`
-    # and the interaction dies with a generic error instead.
-    #
-    # "kinds of item" is load-bearing in the description. It is the only place in Discord that
-    # stops `all` being read as "including the ones that already have a thread", which is a
-    # different feature that this command deliberately does not do.
+    # Leaving `scope` optional is load-bearing: a stale registration that sends an option name
+    # this signature no longer has falls back to the default, where a required option would raise
+    # `CommandSignatureMismatch`. "kinds of item" stops `all` being read as including the ones
+    # that already have a thread.
     @app_commands.describe(scope="Which kinds of item to cover; leaving it out is the same as all")
     @app_commands.choices(scope=_CHOICES)
     @app_commands.guild_only()
@@ -81,34 +61,29 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
         if guild_id is None:
             return
 
-        # Two names, because they are two types: Discord hands across a choice object and the
-        # service wants the value inside it. Reusing the parameter hid that from both checkers.
         wanted = RefreshScope.EVERYTHING if scope is None else RefreshScope(scope.value)
 
         await defer(interaction)
         try:
             outcome = await service.refresh(guild_id=guild_id, scope=wanted)
         except ShannonError as error:
-            # `repository` rather than a kind, and it reads correctly in every row of the table
-            # this can reach: the failures that get here are about the repository or about GitHub,
-            # never about one item, because an item that fails is counted rather than raised.
+            # `repository` rather than a kind: an item that fails is counted rather than
+            # raised, so what reaches here is about the repository or about GitHub.
             logger.warning("/refresh could not finish: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
             await reply(interaction, done(_said(outcome, _KINDS[wanted])))
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
+    # says why `Any` is the only truthful thing to put in.
     return refresh  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: RefreshOutcome, kind: str) -> str:
     """The counts, as a sentence somebody can act on.
 
-    `left` is the number that matters and it is always named when it is not zero, because it is
-    the difference between "done" and "run it again". The failures are inside it rather than
-    beside it, and are mentioned separately only so nobody reads a shortfall as a miscount.
+    The failures are inside `left` rather than beside it, and are named separately only so nobody
+    reads a shortfall as a miscount.
     """
     if outcome.mirrored == 0 and outcome.left == 0:
         if outcome.already == 0:
@@ -123,8 +98,6 @@ def _said(outcome: RefreshOutcome, kind: str) -> str:
         f"{outcome.already} that already had a thread."
     )
     if outcome.left:
-        # Deliberately not explaining whether the cap or a failure left them. Both mean the same
-        # thing to whoever is reading: there is more to do and running it again does it.
         is_are = "is" if outcome.left == 1 else "are"
         said += f" {outcome.left} {is_are} still untracked, so run /refresh again to carry on."
     if outcome.failed:

@@ -85,9 +85,8 @@ def build_set_channel_command(
             f"appear in <#{channel.id}>."
         )
 
-        # The mapping is written by this point and has to be reported as written whatever happens
-        # next. A relocation that fails leaves the command half done, and saying nothing about the
-        # half that worked is how somebody runs it again and changes nothing.
+        # The mapping is written by this point, so a failed relocation still has to report the
+        # half that worked; saying nothing is how somebody runs it again and changes nothing.
         try:
             outcome = await relocation.relocate(
                 guild_id=guild_id,
@@ -104,20 +103,16 @@ def build_set_channel_command(
         else:
             await reply(interaction, done(f"{head}{_said(outcome)}"))
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` says why `Any` is the only truthful thing to put in.
     return set_channel  # pyright: ignore[reportUnknownVariableType]
 
 
 def _said(outcome: RelocationOutcome) -> str:
     """What became of the threads that were already open.
 
-    This used to say they stayed where they were, which was true and was the whole bug: Discord
-    cannot move a thread, so the honest answer was "nothing happens to them", and an admin who had
-    registered into the wrong channel had no way to put it right. The word "moved" was refused
-    here once, on the grounds that it would send somebody looking for threads that never went
-    anywhere. It is accurate now, and the clause after it says exactly what it means.
+    Discord cannot move a thread, so "moved" means a replacement was opened in the new channel
+    with the old one linked to it and locked.
     """
     if outcome.moved == 0 and outcome.left == 0:
         return " No threads were left in another channel."

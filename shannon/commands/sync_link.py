@@ -67,9 +67,8 @@ def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand
             interaction, pr_link, name="pr", noun="pull request", service=service, gate=gate
         )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
     return pr  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -82,7 +81,6 @@ def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> SlashComm
             interaction, issue_link, name="issue", noun="issue", service=service, gate=gate
         )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
     return issue  # pyright: ignore[reportUnknownVariableType]

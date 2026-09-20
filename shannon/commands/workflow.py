@@ -1,11 +1,7 @@
 """The eight commands that move an item through the workflow.
 
-None of them takes an argument, because none is needed: they act on the thread they are run in,
-which is the item the person running one is already looking at. Asking for a link as well would
-be asking somebody to name the thing on their screen.
-
-Eight separate commands rather than one with a choice, because that is what the requirements
-list and because Discord shows them in the picker as eight things a reviewer can do.
+None of them takes an argument: they act on the thread they are run in. Eight separate commands
+rather than one with a choice, because Discord shows them in the picker as eight things to do.
 """
 
 from __future__ import annotations
@@ -29,8 +25,7 @@ from shannon.services.workflow import WorkflowOutcome
 
 logger = logging.getLogger(__name__)
 
-# Command name to the status it sets. The requirements name these, and the names are what people
-# type, so they are written out rather than derived from the enum.
+# Command name to the status it sets, written out rather than derived: people type these.
 STATUS_COMMANDS: dict[str, Status] = {
     "set_backlog": Status.BACKLOG,
     "set_not_reviewed": Status.NOT_REVIEWED,
@@ -55,11 +50,7 @@ class MovesItems(Protocol):
 
 
 def build_workflow_commands(service: MovesItems, gate: PermissionGate) -> tuple[SlashCommand, ...]:
-    """Every status and priority command, built from the two tables above.
-
-    One builder rather than eight, because the eight differ only in the label they set and the
-    sentence they answer with. Anything that has to differ further belongs in the service.
-    """
+    """Every status and priority command, built from the two tables above."""
     return tuple(
         [_status_command(name, status, service, gate) for name, status in STATUS_COMMANDS.items()]
         + [
@@ -83,9 +74,8 @@ def _status_command(
             said=status.value,
         )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
+    # explains why `Any` is the only truthful thing to put in.
     return run  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -105,9 +95,8 @@ def _priority_command(
             said=f"{priority.value} priority",
         )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
+    # explains why `Any` is the only truthful thing to put in.
     return run  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -137,13 +126,9 @@ async def _act(
 def _said(outcome: WorkflowOutcome, said: str) -> str:
     item = f"{outcome.full_name}#{outcome.number}"
     if outcome.lock_refused:
-        # The move landed and the lock did not, and those two are one Discord permission apart.
-        # Reporting only the refusal reads as nothing having happened, which is the opposite of
-        # what did: the labels are on GitHub, the status is stored, the thread says so.
-        #
-        # Which way it was going matters to whoever reads this. A thread that would not lock is
-        # untidy; a thread that would not unlock is one nobody can reply in, which is the thing
-        # they just reopened it to do.
+        # The move landed and the lock did not, so reporting only the refusal would read as
+        # nothing having happened. Which way it was going matters: a thread that would not
+        # unlock is one nobody can reply in.
         left = (
             "this thread could not be locked"
             if outcome.wanted_locked
@@ -154,8 +139,7 @@ def _said(outcome: WorkflowOutcome, said: str) -> str:
             "missing Manage Threads. Run this again once it has it and the lock gets another go."
         )
     if not outcome.changed:
-        # A repeat is not a failure. The requirements say a duplicate takes no action, and the
-        # person running it wants to know the item is where they were putting it.
+        # A repeat is not a failure: the requirements say a duplicate takes no action.
         return f"{item} is already {said}."
     if outcome.locked:
         return f"{item} is now {said}, and this thread is locked."

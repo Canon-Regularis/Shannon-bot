@@ -33,14 +33,13 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
     async def link_team(
         interaction: discord.Interaction, github_team: str, role: discord.Role
     ) -> None:
-        # Nobody speaks for a team the way they speak for themselves, so unlike /link there is no
-        # anybody-may-claim-their-own case: this points a whole role at a name, which is the same
-        # kind of decision as mapping a channel.
+        # Unlike /link there is no anybody-may-claim-their-own case: this points a whole role
+        # at a name, which is the same kind of decision as mapping a channel.
         guild_id = await in_a_server(interaction, "link_team", gate, REGISTER_ROLES)
         if guild_id is None:
             return
         if role.is_default():
-            # `@everyone` is a role Discord gives every member, and pinging it is the thing the
+            # `@everyone` is a role Discord gives every member, and pinging it is what the
             # mention rules in the client exist to make impossible.
             await reply(interaction, "Pick a real role. Everyone is not a review team.")
             return
@@ -64,9 +63,8 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
                 ),
             )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` says why `Any` is the only truthful thing to put in.
     return link_team  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -75,14 +73,9 @@ def _unmentionable_role_warning(interaction: discord.Interaction, role: discord.
 
     Discord notifies a role's members only if the role is mentionable or the sender holds Mention
     Everyone. Roles are created not mentionable, and neither of those is in the permission list
-    the README gives, so on an ordinary server the ping renders as a blue pill in the thread and
-    tells nobody. That is the one moment the whole team feature exists for, and it looks like it
-    worked, so nobody finds out for days.
-
-    A warning rather than a refusal: the link is still worth having, whoever runs this can fix it
-    in one checkbox afterwards, and refusing over a permission would leave the team unlinked as
-    well as unpinged. The ping itself is claimed before it is sent and stamped as spent whether
-    or not anybody read it, so every review request that passes before the fix is silent.
+    the README gives, so the ping renders as a blue pill that tells nobody. A warning rather than
+    a refusal, but the ping is stamped as spent whether or not anybody read it, so every review
+    request that passes before the fix is silent.
     """
     if role.mentionable or interaction.app_permissions.mention_everyone:
         return ""

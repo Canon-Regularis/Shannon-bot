@@ -37,44 +37,33 @@ from shannon.services.workflow import ItemMovedError, NotAnItemThreadError, Work
 
 logger = logging.getLogger(__name__)
 
-# What the person who ran the command is told, by error type. Ordered most specific first: the
-# first match wins and several of these share a base class. One table for every command, so
-# nothing escapes after the interaction has been deferred and leaves the caller with silence.
+# What the person who ran the command is told, by error type. Ordered most specific first,
+# because the first match wins and several of these share a base class.
 _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (UnparseableLinkError, "That link did not work. {message}"),
-    # Above the 404 it replaces, because the first match wins and the row below would otherwise
-    # claim this one. That ordering is the fix for issue #98: GitHub answers 404 both for a
-    # repository that is not there and for one this bot may not see, so a private repository was
-    # reported as missing and the person went and checked a link that was perfectly correct. The
-    # service composes the sentence because only it knows which repository and which link to
-    # offer, so the template is the message and nothing else.
+    # Above the 404 row that would otherwise claim it: GitHub answers 404 both for a repository
+    # that is not there and for one this bot may not see, so a private repository was reported as
+    # missing and the person went and checked a link that was perfectly correct.
     (NotInstalledError, "{message}"),
-    # Not "at that link": the workflow commands take no link, and a 404 there means the
-    # item has gone from GitHub since it was mirrored.
+    # Not "at that link": the workflow commands take no link, and a 404 there means the item has
+    # gone from GitHub since it was mirrored.
     (GitHubNotFoundError, "GitHub could not find that {noun}."),
-    # Both of these are GitHubError and both used to fall through to it, so a spent quota and a
-    # refused token were each reported as GitHub being unreachable. Neither is: GitHub answered,
-    # and it said something the person in front of the bot can act on. One tells them when to come
-    # back and the other tells them who to ask, which is the difference between a message worth
-    # reading and one worth ignoring.
+    # Both are GitHubError and must stay above the catch-all row, or a spent quota and a refused
+    # token read as GitHub being unreachable when GitHub answered and said when to come back or
+    # who to ask.
     (GitHubRateLimitError, "GitHub's rate limit is spent. {wait}"),
     (
         GitHubAuthError,
         "GitHub refused this bot's access, so it could not read that {noun}. "
         "An admin needs to check its GitHub token.",
     ),
-    # Also above the catch-all, and for the sharper half of the same reason. GitHub answered and
-    # said no, and it said why in a sentence better than any kept here: not a collaborator, the
-    # item's own author, already asked. Reported as unreachable, all of those read as a fault to
-    # wait out rather than something the person in front of the bot can put right in ten seconds.
+    # Also above the catch-all: GitHub said no and said why in a sentence better than any kept
+    # here — not a collaborator, the item's own author, already asked.
     (GitHubRefusedError, "GitHub would not do that. {message}"),
     (GitHubError, "GitHub could not be reached. {message}"),
-    # The same split as the two GitHub rows above, for the same reason, on the side of it that
-    # is likelier to happen. Both of these are a DiscordGatewayError and both used to fall
-    # through to it, so a permission nobody granted and a channel somebody deleted were each
-    # reported as "Discord refused the update", followed by whatever discord.py had said, error
-    # code and all. Neither is a refusal to wait out, and echoing a raw API message at somebody
-    # sitting in Discord tells them nothing they can do.
+    # The same split as the two GitHub rows: both are DiscordGatewayError and must stay above it,
+    # or a permission nobody granted and a channel somebody deleted come back as "Discord refused
+    # the update" followed by whatever discord.py said, error code and all.
     (
         DiscordPermissionError,
         "Discord will not let this bot do that here. An admin needs to give it the missing "
@@ -88,9 +77,8 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
     (NotRegisteredError, "{message}"),
-    # Its own row rather than falling through to the catch-all, because the message names
-    # the account GitHub signed the person in as and what that account is missing. "Something
-    # went wrong here" would leave somebody who genuinely cannot do this with no idea why.
+    # Its own row because the message names the account GitHub signed the person in as and what
+    # that account is missing.
     (NotProvenError, "{message}"),
     (RepositoryMismatchError, "{message}"),
     (DuplicateRegistrationError, "{message}"),
@@ -100,24 +88,20 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),
     (ItemMovedError, "{message}"),
-    # All three say which thread and what state it is in, which is the whole of what somebody
-    # running one of these needs, so there is nothing a template here could add.
+    # All three name the thread and the state it is in, so a template here could add nothing.
     (AlreadyLoggingError, "{message}"),
     (NotLoggingError, "{message}"),
     (CannotLogError, "{message}"),
 )
 
-# Said when nothing above matches. Deliberately vague: whatever went wrong is a bug or an
-# outage, and neither is the user's business beyond knowing it did not work.
+# Said when nothing above matches. Vague on purpose: what went wrong is a bug or an outage.
 UNEXPECTED = "Something went wrong here. It has been logged."
 
 
 def _wait_for(seconds: object) -> str:
     """When to come back, in words a person reads rather than a number of seconds.
 
-    GitHub says when its window reopens and the client already works it out, so the only reason
-    not to pass it on is that nobody did. Rounded up, because telling somebody to wait less than
-    the truth earns a second refusal.
+    Rounded up: telling somebody to wait less than the truth earns a second refusal.
     """
     if not isinstance(seconds, int) or seconds <= 0:
         return "Try again shortly."
@@ -127,18 +111,13 @@ def _wait_for(seconds: object) -> str:
     return f"Try again in about {minutes} minutes."
 
 
-# Which refusals come right on their own. Amber for those and red for the rest, so
-# "wait a minute" and "somebody has to put this right" are told apart before either
-# sentence has been read.
+# Which refusals come right on their own: amber for those and red for the rest, so "wait a
+# minute" and "somebody has to put this right" are told apart before either sentence is read.
 _COMES_RIGHT: tuple[type[ShannonError], ...] = (GitHubRateLimitError, ItemNotReadyError)
 
 
 def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
-    """The refusal for an error, or the catch-all if it is not one we know about.
-
-    A card rather than a sentence since issue #116, and the words are unchanged. The
-    bar is the only thing added, which is why every call site kept the line it had.
-    """
+    """The refusal for an error, or the catch-all if it is not one we know about."""
     said = words_for(error, noun=noun)
     tone = Accent.MEDIUM if isinstance(error, _COMES_RIGHT) else Accent.FAILED
     return Panel(blocks=(Block(BlockKind.HEADING, said),), accent=tone)
@@ -147,8 +126,7 @@ def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
 def words_for(error: BaseException, *, noun: str = "item") -> str:
     """The message for an error, or the catch-all if it is not one we know about."""
     # discord.py hands its error handler whatever a command raised wrapped in a
-    # CommandInvokeError. Looking through that is what lets the table match at all when the
-    # error arrives that way; without it everything unexpected reads as the catch-all.
+    # CommandInvokeError; unwrapped, everything arriving that way reads as the catch-all.
     error = getattr(error, "original", error)
 
     for kind, template in _REPLIES:

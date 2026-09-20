@@ -1,9 +1,5 @@
 """The checks a slash command makes before it does anything.
 
-Every command needs a guild, most need a permission tier, and the ones that act on an item need
-the thread they were run in. Written once here because thirteen callbacks had it written out,
-and the three that drifted apart drifted in the reply text rather than the logic.
-
 `None` means the guard has already answered the interaction and the caller must return.
 """
 
@@ -54,8 +50,7 @@ async def in_a_thread(
 ) -> InAThread | None:
     """The guild and channel a permitted caller ran this in, or None having said why not.
 
-    The channel is checked after the tier, so somebody without the role is told that rather than
-    being told where to stand.
+    The channel is checked after the tier, so somebody without the role is told that instead.
     """
     guild_id = await in_a_server(interaction, command, gate, roles)
     if guild_id is None:

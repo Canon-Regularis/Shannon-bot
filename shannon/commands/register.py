@@ -41,8 +41,7 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
             await reply(interaction, gate.denial("register", REGISTER_ROLES))
             return
         # The channel this was run in becomes the home for pull request threads. Refusing here
-        # is the last chance to say so to somebody who is looking; the sync path hits it hours
-        # later with nobody to tell.
+        # is the last chance to say so: the sync path hits it hours later with nobody to tell.
         refusal = why_threads_will_not_open(interaction.channel)
         if refusal is not None:
             await reply(interaction, f"Threads cannot be opened here. {refusal}")
@@ -56,9 +55,6 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
                 link=github_repo_link,
             )
         except ShannonError as error:
-            # One table for every command, in _replies. Repeating four of its rows here meant
-            # two places to keep in step, and the wording had already been copied rather than
-            # shared.
             logger.warning("register failed: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
@@ -70,7 +66,6 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
                 ),
             )
 
-    # `app_commands.command()` leaves the command's binding type unknown, which
-    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in. One line
-    # rather than the file, which is what the ratchet was doing.
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` says why `Any` is the only truthful thing to put in.
     return register  # pyright: ignore[reportUnknownVariableType]
