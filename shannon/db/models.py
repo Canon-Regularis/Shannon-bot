@@ -289,7 +289,12 @@ class WebhookEvent(Base):
     processed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The one enum column that was typed as the string it holds. `varchar_enum` renders the
+    # same VARCHAR(32) and emits no CHECK, so the schema is unchanged; what changes is that
+    # reading it back gives a `DeliveryStatus` rather than a `str` that happens to match.
+    status: Mapped[DeliveryStatus] = mapped_column(
+        varchar_enum(DeliveryStatus, "delivery_status"), nullable=False
+    )
 
     # Nullable so the migration applies to a live table with nothing to backfill; the lease
     # requires a body, so rows written before this existed are never picked up. none_as_null is
