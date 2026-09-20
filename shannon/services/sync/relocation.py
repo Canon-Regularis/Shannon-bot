@@ -15,7 +15,7 @@ capped and it counts what it did, and one item failing must not take the rest wi
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -31,15 +31,11 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import FindsThreads, PostsToThread, ShutsThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, ShannonError
-from shannon.domain.models import TrackedSnapshot
+from shannon.domain.models import Fetcher
 from shannon.services.sync.items import SyncsItems
 from shannon.services.sync.policies import channel_fallbacks
 
 logger = logging.getLogger(__name__)
-
-# Owner, name, number, the way `ManualSync` takes one. The client is closed over by the wiring, so
-# this module never holds one.
-Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
 
 # Two answers about where a thread is that are not a channel id. Sentinels rather than None,
 # because None is what Discord says about a thread that has gone, and that is a different answer

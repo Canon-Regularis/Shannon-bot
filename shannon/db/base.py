@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import DateTime, Enum, MetaData, func
+from sqlalchemy import DateTime, Enum, Interval, MetaData, func, literal
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.expression import cast
 
 # Explicit naming so Alembic autogenerate produces stable constraint names across revisions.
 NAMING_CONVENTION = {
@@ -57,3 +59,8 @@ class TimestampMixin:
         onupdate=func.now(),
         nullable=False,
     )
+
+
+def interval(value: timedelta) -> ColumnElement[timedelta]:
+    """A timedelta as something the database can add to a timestamp."""
+    return cast(literal(value), Interval)

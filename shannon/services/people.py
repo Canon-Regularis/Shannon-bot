@@ -31,10 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.errors import RepositoryMismatchError
-from shannon.domain.models import PullRequestSnapshot
+from shannon.domain.models import Fetcher, PullRequestSnapshot
 from shannon.github import people
 from shannon.services.workflow import (
-    Fetcher,
     FoundItem,
     WorkflowRefusedError,
     locate,

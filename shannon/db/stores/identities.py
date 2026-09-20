@@ -13,16 +13,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, Interval, cast, delete, func, literal, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import interval
 from shannon.db.models import IdentityVerification, VerifiedIdentity
-
-
-def _interval(value: timedelta) -> ColumnElement[timedelta]:
-    """A timedelta as something the database can add to a timestamp."""
-    return cast(literal(value), Interval)
 
 
 class IdentityVerificationStore:
@@ -47,7 +43,7 @@ class IdentityVerificationStore:
                 state=state,
                 discord_guild_id=guild_id,
                 discord_user_id=discord_user_id,
-                expires_at=func.now() + _interval(lifetime),
+                expires_at=func.now() + interval(lifetime),
             )
         )
 

@@ -10,7 +10,7 @@ import re
 
 import discord
 
-from shannon.domain.text import lines_within
+from shannon.domain.text import ZERO_WIDTH_SPACE, lines_within
 
 EMPTY = "None"
 
@@ -134,7 +134,7 @@ def defuse_mentions(text: str) -> str:
     that, where backslashes would show. Do not assume the span suppresses the ping either:
     `allowed_mentions` gates delivery off the raw content and honours user mentions.
     """
-    return _MENTION.sub("<​\\1\\2>", text)
+    return _MENTION.sub("<" + ZERO_WIDTH_SPACE + "\\1\\2>", text)
 
 
 # `escape_markdown` escapes one character at a time, with one exception: `[text](url)` is an
@@ -143,7 +143,7 @@ def defuse_mentions(text: str) -> str:
 # backslash in front of all of it, and ships everything in between unescaped. Breaking the
 # bracket away from the parenthesis is enough to stop it matching, which leaves every marker to
 # be escaped individually the way the rest already are.
-_LINK_JOIN = re.compile(r"\]\(")
+LINK_JOIN = re.compile(r"\]\(")
 
 
 def as_plain_text(text: str) -> str:
@@ -167,7 +167,7 @@ def as_plain_text(text: str) -> str:
     the title paired with the wrong value, and the author of the title chose where that landed.
     A comment could do the same with a code fence and swallow the link back to GitHub with it.
     """
-    unlinked = _LINK_JOIN.sub("]​(", discord.utils.escape_mentions(text))
+    unlinked = LINK_JOIN.sub("]" + ZERO_WIDTH_SPACE + "(", discord.utils.escape_mentions(text))
     return defuse_mentions(discord.utils.escape_markdown(unlinked, ignore_links=False))
 
 
@@ -187,7 +187,7 @@ def code_span(text: str) -> str:
     So the fence never grows past two, and runs inside the text are broken up instead. A
     zero-width space is the same trick the mention defusing uses, and costs a reader nothing.
     """
-    text = _BACKTICK_RUN.sub(lambda run: "​".join(run.group(0)), text)
+    text = _BACKTICK_RUN.sub(lambda run: ZERO_WIDTH_SPACE.join(run.group(0)), text)
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
     fence = "`" * (longest + 1)
     # A space keeps a leading or trailing backtick from touching the fence, which would merge

@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from shannon.domain.text import lines_within
+from shannon.domain.text import ZERO_WIDTH_SPACE, lines_within
 
 # GitHub refuses a comment body over this with a 422. The transcript budget below is what the
 # flush actually aims at, so this is the backstop for a single message that is already enormous.
@@ -29,7 +29,6 @@ TRUNCATED = "\n[...]"
 
 # A zero-width space, the same trick `defuse_mentions` uses on the way in. It costs a reader
 # nothing and it is invisible in the rendered comment.
-_INVISIBLE = "​"
 
 # `@login` and `@org/team` both notify on GitHub, and a transcript is full of names. The lookbehind
 # is the whole of what makes this safe to apply everywhere: GitHub reads a mention only where the
@@ -73,10 +72,10 @@ def defuse(text: str) -> str:
     also cross-references. Somebody sharing a link is the point of this feature, and breaking the
     link to avoid the reference would cost more than the reference does. The README says so.
     """
-    text = _MENTION.sub("@" + _INVISIBLE, text)
-    text = _REFERENCE.sub("#" + _INVISIBLE, text)
-    text = _SHORTHAND.sub("GH-" + _INVISIBLE, text)
-    return _COMMENT_OPEN.sub("<" + _INVISIBLE + "!", text)
+    text = _MENTION.sub("@" + ZERO_WIDTH_SPACE, text)
+    text = _REFERENCE.sub("#" + ZERO_WIDTH_SPACE, text)
+    text = _SHORTHAND.sub("GH-" + ZERO_WIDTH_SPACE, text)
+    return _COMMENT_OPEN.sub("<" + ZERO_WIDTH_SPACE + "!", text)
 
 
 # Every character GitHub reads as inline markup. Escaped one at a time, which is safe here in a
@@ -117,7 +116,7 @@ def as_a_tag(name: str) -> str:
     reach GitHub intact. The escaping stops a name full of markup restyling everybody
     else's words.
     """
-    return "@" + _INVISIBLE + as_inline_text(name)
+    return "@" + ZERO_WIDTH_SPACE + as_inline_text(name)
 
 
 # The token `discord_bot.capture` leaves where somebody tagged a person, and the only

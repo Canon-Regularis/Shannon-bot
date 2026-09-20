@@ -7,6 +7,10 @@ them need and neither of them owns.
 
 from __future__ import annotations
 
+# Used by both dialects to break a construct GitHub or Discord would otherwise act on: a
+# mention, a reference, a link join. Named because a mistyped one is invisible in a diff.
+ZERO_WIDTH_SPACE = "\u200b"
+
 
 def lines_within(text: str, budget: int) -> list[str]:
     """The leading whole lines of `text` that fit in `budget`, newlines counted.

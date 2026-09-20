@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -584,3 +585,7 @@ class TrackedSnapshot(Protocol):
 
     @property
     def priority(self) -> Priority: ...
+
+
+# Owner, name, number: how every caller outside this package addresses an item on GitHub.
+Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]

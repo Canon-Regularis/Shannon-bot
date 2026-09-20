@@ -23,6 +23,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from shannon.domain.text import ZERO_WIDTH_SPACE
+
 # What the caller does with a name: the text to put in its place, or None to leave it as written.
 Render = Callable[[str], str | None]
 
@@ -71,7 +73,6 @@ _IS_TEAM_SLUG = re.compile(rf"\A{TEAM_SLUG}\Z")
 # called `back`. `test_an_escaped_underscore_is_read_back_as_one` is there for that alone.
 _SLUG_IN_TEXT = r"[A-Za-z0-9](?:(?:[A-Za-z0-9._-]|\\_)*[A-Za-z0-9])?"
 
-_ZERO_WIDTH_SPACE = "​"
 
 # What the preview puts where it cut the body short. A name with this against it was cut in half,
 # so what is left is a prefix of somebody's name and not a name: `@monalisa` shows as `@mona`,
@@ -96,7 +97,7 @@ _CUT_SHORT = "…"
 # may be all digits, so `<@7>` would otherwise be read as a name and rewritten into somebody
 # else. The rewrite is only ever applied to a quoted body and never to an assembled message, and
 # this is what makes that a belt as well as a rule. `/` keeps a name out of a pasted URL.
-_BEFORE_A_NAME = f"(?<![A-Za-z0-9_@/<{_ZERO_WIDTH_SPACE}-])"
+_BEFORE_A_NAME = f"(?<![A-Za-z0-9_@/<{ZERO_WIDTH_SPACE}-])"
 
 # The team alternative is first on purpose. An organisation can share a name with somebody who
 # has linked an account, and trying the person first would ping them in their team's place.

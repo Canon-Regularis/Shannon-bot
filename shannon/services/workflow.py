@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -25,7 +25,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
-from shannon.domain.models import Label, TrackedSnapshot
+from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
 from shannon.services.labels import RepositoryLabels
@@ -33,9 +33,6 @@ from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
 
 logger = logging.getLogger(__name__)
-
-# Owner, name, number.
-Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
 
 # A pull request is only finished once somebody has said it is ready to merge. The requirement
 # is about the order of a review, not about bookkeeping: marking a pull request done skips the

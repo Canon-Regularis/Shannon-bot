@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,7 +14,7 @@ from shannon.domain.errors import (
     ShannonError,
     UnparseableLinkError,
 )
-from shannon.domain.models import RepositoryRef, TrackedSnapshot
+from shannon.domain.models import Fetcher, RepositoryRef
 from shannon.github.client import GitHubClient, LooksUpRepository
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
@@ -23,9 +23,6 @@ from shannon.services.sync.items import SyncOutcome, SyncsItems
 logger = logging.getLogger(__name__)
 
 LinkParser = Callable[[str], RepositoryRef]
-# Owner, name, number. The client it reads from is closed over by the wiring, so this
-# service never holds one.
-Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
 
 
 @dataclass(frozen=True, slots=True)

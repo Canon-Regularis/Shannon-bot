@@ -4,18 +4,13 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import Interval, cast, delete, func, literal, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
+from shannon.db.base import interval
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
-
-
-def _interval(value: timedelta) -> ColumnElement[timedelta]:
-    """A timedelta as something the database can add to a timestamp."""
-    return cast(literal(value), Interval)
 
 
 class WebhookEventStore:
@@ -120,7 +115,7 @@ class WebhookEventStore:
             await self._session.scalars(
                 update(WebhookEvent)
                 .where(WebhookEvent.id.in_(eligible))
-                .values(status=DeliveryStatus.PROCESSING, locked_until=now + _interval(lease_for))
+                .values(status=DeliveryStatus.PROCESSING, locked_until=now + interval(lease_for))
                 .returning(WebhookEvent)
                 .execution_options(synchronize_session=False)
             )
@@ -158,7 +153,7 @@ class WebhookEventStore:
             .values(
                 status=DeliveryStatus.PENDING,
                 attempts=WebhookEvent.attempts + 1,
-                next_attempt_at=func.now() + _interval(delay),
+                next_attempt_at=func.now() + interval(delay),
                 locked_until=None,
                 last_error=error,
             )
@@ -187,7 +182,7 @@ class WebhookEventStore:
             delete(WebhookEvent)
             .where(
                 WebhookEvent.status.in_(DeliveryStatus.terminal()),
-                WebhookEvent.processed_at < func.now() - _interval(keep_for),
+                WebhookEvent.processed_at < func.now() - interval(keep_for),
             )
             # Without this the ORM cannot work out which loaded objects the DELETE hit, so it
             # asks the database to hand every deleted primary key back. Nothing here holds

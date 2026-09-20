@@ -22,7 +22,7 @@ their own directions.
 
 Deliberately not reached: `discord.utils.escape_markdown`. Its `[.+](.+)` alternative is greedy, so
 on a line carrying a link it runs to the last parenthesis and ships everything between unescaped,
-and `safe_text._LINK_JOIN` exists to stop it matching at all. Nothing here calls it, so there is
+and `safe_text.LINK_JOIN` exists to stop it matching at all. Nothing here calls it, so there is
 nothing to defeat, and the title path keeps both the rule and the tests that prove it.
 """
 
@@ -35,7 +35,13 @@ from urllib.parse import urlparse
 import discord
 
 from shannon.discord_bot.panels import PanelImage
-from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT, cut, defuse_mentions
+from shannon.discord_bot.safe_text import (
+    DESCRIPTION_PREVIEW_LIMIT,
+    LINK_JOIN,
+    cut,
+    defuse_mentions,
+)
+from shannon.domain.text import ZERO_WIDTH_SPACE
 from shannon.github.urls import GITHUB_HOST
 
 # Up to four. Discord's gallery takes ten, and ten screenshots is not a description, it is the
@@ -46,7 +52,6 @@ IMAGES_SHOWN = 4
 # Discord's own ceiling on what a gallery item may be described as.
 ALT_LIMIT = 256
 
-_INVISIBLE = "​"
 
 # GitHub's web form submits CRLF, and every rule below is anchored to a line. Folded first so the
 # rest of them see one kind of line ending, and so a blank line costs one character against the
@@ -98,11 +103,6 @@ _IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
 # through a part of the text nothing else sweeps.
 _LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
 
-# Every `](` the link rule did not write itself. The same trick `safe_text._LINK_JOIN` uses and for
-# the same reason: a masked link is the one piece of markdown where what a reader sees and where
-# they are taken are different strings.
-_LINK_JOIN = re.compile(r"\]\(")
-
 # Discord opens a code block on three backticks wherever they appear, including mid-line. That is
 # where this parts company with its GitHub-side twin, which is line-anchored.
 _FENCE = re.compile(r"```")
@@ -144,7 +144,7 @@ def as_rich_text(body: str) -> Described:
     text, images = _shown(text)
     text = _HEADING.sub("", text)
     text = _PLUS_BULLET.sub(r"\1-\2", text)
-    text = _SUBTEXT.sub("\\1" + _INVISIBLE + "\\2", text)
+    text = _SUBTEXT.sub("\\1" + ZERO_WIDTH_SPACE + "\\2", text)
     text = _BLANK_RUN.sub("\n\n", text)
     text = cut(text, limit=DESCRIPTION_PREVIEW_LIMIT)
     return Described(text=_balanced(_linked(text)), images=images)
@@ -162,7 +162,10 @@ def _defused(text: str) -> str:
 
 def _inert(text: str) -> str:
     """Text nobody vetted: mentions dead, and no bracket left touching a parenthesis."""
-    return _LINK_JOIN.sub("]" + _INVISIBLE + "(", _defused(text))
+    # Every `](` the link rule did not write itself, broken the way `safe_text` breaks them:
+    # a masked link is the one piece of markdown where what a reader sees and where they are
+    # taken are different strings.
+    return LINK_JOIN.sub("]" + ZERO_WIDTH_SPACE + "(", _defused(text))
 
 
 def _linked(text: str) -> str:
