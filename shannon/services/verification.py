@@ -145,6 +145,16 @@ class GitHubIdentityVerification:
             github_user_id=github_user_id,
         )
 
+    async def prune(self, *, keep_for: timedelta) -> int:
+        """Drop links long past being followable, answering how many went.
+
+        `consume` marks a link spent but leaves the row, and a link nobody follows is never
+        touched at all, so nothing here shrinks this table. Called on the delivery worker's
+        hourly sweep, which is the only timer in the process that ticks regardless.
+        """
+        async with self._sessionmaker() as session, session.begin():
+            return await IdentityVerificationStore(session).prune(keep_for=keep_for)
+
     async def _exchange(self, code: str) -> str:
         """Trade the code for a user token, and never keep it.
 

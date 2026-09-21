@@ -34,6 +34,16 @@ class Dispatch(Protocol):
     ) -> WebhookOutcome: ...
 
 
+class SpentLinks(Protocol):
+    """The one-time `/unregister` links, which nothing else clears.
+
+    Swept here because this loop is the only timer in the process that ticks whatever else is
+    happening, and an hour suits a table that gains a row per `/unregister` and loses none.
+    """
+
+    async def prune(self, *, keep_for: timedelta) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     """How hard the worker tries, and how long it holds on.
@@ -60,6 +70,9 @@ class WorkerSettings:
     # column is Text, so this is a readability limit and not a schema one.
     error_limit: int = 2000
     prune_interval: timedelta = timedelta(hours=1)
+    # A link is worth following for ten minutes. A day of spent ones is a short trail
+    # for anybody asking who tried to unbind a repository and when.
+    link_retention: timedelta = timedelta(days=1)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> WorkerSettings:
@@ -101,10 +114,12 @@ class DeliveryWorker:
         queue: DeliveryQueue,
         dispatch: Dispatch,
         settings: WorkerSettings | None = None,
+        links: SpentLinks | None = None,
     ) -> None:
         self._queue = queue
         self._dispatch = dispatch
         self._settings = settings or WorkerSettings()
+        self._links = links
         self._stopping = False
         # The flag alone is not enough before the loop starts: the wait for Discord reaches no
         # check and has nothing to interrupt it, so the stop is published as something waitable.
@@ -172,9 +187,7 @@ class DeliveryWorker:
                     # Rescheduled whatever happens: moving it only on success would retry a
                     # failing prune on every poll for as long as the failure lasts.
                     pruned_after = loop.time() + self._settings.prune_interval.total_seconds()
-                    removed = await self._queue.prune(keep_for=self._settings.retention)
-                    if removed:
-                        logger.info("pruned %s finished deliveries", removed)
+                    await self._sweep()
 
                 # Straight back round while there is a backlog, so a burst drains at once.
                 if handled < self._settings.batch_size and not self._stopping:
@@ -185,6 +198,18 @@ class DeliveryWorker:
                 # A bad batch must not kill the loop, or every later delivery waits for a restart.
                 logger.exception("the delivery worker hit an error, carrying on")
                 await asyncio.sleep(self._settings.poll_interval.total_seconds())
+
+    async def _sweep(self) -> None:
+        """The hourly clear-out, over every table that grows and nothing else empties."""
+        removed = await self._queue.prune(keep_for=self._settings.retention)
+        if removed:
+            logger.info("pruned %s finished deliveries", removed)
+
+        if self._links is None:
+            return
+        spent = await self._links.prune(keep_for=self._settings.link_retention)
+        if spent:
+            logger.info("pruned %s spent verification links", spent)
 
     async def _ready_or_stopped(self, wait_for_ready: ReadyCheck) -> bool:
         """Wait for Discord, and give up the moment a stop is asked for instead.
