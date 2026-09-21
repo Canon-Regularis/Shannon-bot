@@ -28,6 +28,7 @@ from shannon.github.errors import (
 )
 from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
 from shannon.services.sync.manual import SyncFailedError
+from shannon.services.sync.one_at_a_time import ItemBusyError
 from shannon.services.transcripts.log import (
     AlreadyLoggingError,
     CannotLogError,
@@ -76,6 +77,9 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     ),
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
+    # Somebody else's write, not a fault: a delivery for the same item is in flight and did
+    # not finish inside the wait.
+    (ItemBusyError, "Something else is changing that {noun} right now. Try again in a moment."),
     (NotRegisteredError, "{message}"),
     # Its own row because the message names the account GitHub signed the person in as and what
     # that account is missing.
@@ -113,7 +117,11 @@ def _wait_for(seconds: object) -> str:
 
 # Which refusals come right on their own: amber for those and red for the rest, so "wait a
 # minute" and "somebody has to put this right" are told apart before either sentence is read.
-_COMES_RIGHT: tuple[type[ShannonError], ...] = (GitHubRateLimitError, ItemNotReadyError)
+_COMES_RIGHT: tuple[type[ShannonError], ...] = (
+    GitHubRateLimitError,
+    ItemNotReadyError,
+    ItemBusyError,
+)
 
 
 def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
