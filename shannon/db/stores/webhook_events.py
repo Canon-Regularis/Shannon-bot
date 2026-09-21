@@ -137,16 +137,30 @@ class WebhookEventStore:
         )
 
     async def finish(self, event_id: int, status: DeliveryStatus) -> None:
+        """Record the outcome, on the row this worker still holds.
+
+        Guarded on PROCESSING the way `release` is. Unreachable today, because a lease is
+        fifteen minutes and a batch cannot outlive its own: `Settings._lease_fits_a_batch`
+        refuses a configuration where it could. Shorten the lease past that guard and this is
+        a worker writing an outcome onto a delivery another replica has already taken.
+        """
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(status=status, processed_at=func.now(), locked_until=None, last_error=None)
         )
 
     async def retry_later(self, event_id: int, *, error: str, delay: timedelta) -> None:
+        """Send it round again, on the row this worker still holds. See `finish`."""
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(
                 status=DeliveryStatus.PENDING,
                 attempts=WebhookEvent.attempts + 1,
@@ -157,9 +171,13 @@ class WebhookEventStore:
         )
 
     async def give_up(self, event_id: int, *, error: str) -> None:
+        """Stop trying, on the row this worker still holds. See `finish`."""
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(
                 status=DeliveryStatus.FAILED,
                 attempts=WebhookEvent.attempts + 1,
