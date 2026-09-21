@@ -104,6 +104,12 @@ class RepositoryUnregistrationService:
         Counted before the delete: the foreign keys cascade from `repositories` through
         `channel_mappings` and `tracked_items` on to the assignments and mirrored notes. The
         Discord threads themselves are untouched and stay in the channel.
+
+        What is keyed by guild rather than by repository stays: `user_links`,
+        `muted_members`, `verified_identities` and the outstanding `/unregister` links.
+        A decision rather than an oversight. A server that unbinds one repository to bind
+        another keeps who its members are on GitHub and who asked not to be pinged, and
+        re-proving all of it would cost every member a browser visit for nothing.
         """
         async with self._sessionmaker() as session, session.begin():
             orphaned = await session.scalar(

@@ -94,6 +94,11 @@ class TrackedItem(TimestampMixin, Base):
         # Comments and reviews are looked up by number, and the unique constraint above leads
         # with repository_id, so without this the planner scans every item in the repository.
         Index("ix_tracked_items_repo_number", "repository_id", "github_object_number"),
+        # Every workflow command resolves the item from the thread it was run in, and `/label`
+        # does it per keystroke inside the three seconds Discord allows an autocomplete.
+        Index("ix_tracked_items_discord_thread_id", "discord_thread_id"),
+        # The sweep that lets go of a whole channel's threads searches by this and nothing else.
+        Index("ix_tracked_items_discord_channel_id", "discord_channel_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -351,7 +356,8 @@ class IdentityVerification(TimestampMixin, Base):
     """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
 
     `/unregister` destroys a binding and everything mirrored under it, and `/link` checks only
-    that a login EXISTS, so a Discord role alone cannot authorise it. The callback GitHub
+    that a login EXISTS, so a Discord role alone cannot authorise it. Rows here outlive the
+    unbinding they authorised: this table is keyed by guild, not by repository. The callback GitHub
     redirects to is unauthenticated, so `state` is CSRF token and session identifier at once.
     Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the database.
     """
@@ -414,6 +420,13 @@ class LoggedConversation(TimestampMixin, Base):
             "uq_logged_conversations_open_item",
             "tracked_item_id",
             unique=True,
+            postgresql_where=text("stopped_at IS NULL"),
+        ),
+        # Read once per captured message, on a table that only grows. Partial for the same
+        # reason as the one above: both queries that search by thread ask for an open one.
+        Index(
+            "ix_logged_conversations_open_thread",
+            "discord_thread_id",
             postgresql_where=text("stopped_at IS NULL"),
         ),
     )

@@ -3,11 +3,23 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import SecretStr
 
 from shannon.config import Settings
 from shannon.container import build_container
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
+from tests.support import github_payloads as payloads
+
+
+class _Closeable:
+    """Anything else the wiring opened, standing in for the two HTTP clients it does."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class DisposableEngine:
@@ -58,6 +70,34 @@ class TestClosingTheContainer:
         await container_with(engine, FakeGitHubClient()).aclose()
 
         assert engine.disposed is True
+
+    async def test_everything_else_opened_here_is_closed_too(self) -> None:
+        """Not just `github`. The App's own client signs with a JWT rather than an installation
+        token, so it is a second client, and the board keeps a third when it has its own token.
+        Both were built in the wiring, reachable from nowhere else, and closed by nothing."""
+        container = container_with(DisposableEngine(), FakeGitHubClient())
+        opened = _Closeable()
+        container.also_opened = (*container.also_opened, opened)
+
+        await container.aclose()
+
+        assert opened.closed is True
+
+    async def test_the_app_client_is_held_so_it_can_be(self) -> None:
+        container = container_with(DisposableEngine(), FakeGitHubClient())
+
+        assert len(container.also_opened) == 1
+
+    async def test_the_board_keeping_its_own_token_is_held_as_well(self) -> None:
+        """A third client, and only when the board has a credential of its own."""
+        settings = Settings(
+            github_webhook_secret=SecretStr("x"),
+            github_project_token=SecretStr("ghp_board"),
+        )
+
+        container = container_with(DisposableEngine(), FakeGitHubClient(), settings)
+
+        assert len(container.also_opened) == 2
 
 
 class TestWhatItWiresUp:
@@ -114,6 +154,29 @@ class TestWhatItWiresUp:
             "installation_repositories",
         ):
             assert container.event_router.handles(event), f"{event} would be dropped on arrival"
+
+    def test_a_check_suite_naming_no_pull_request_is_never_written_down(self) -> None:
+        """The wiring for it, which is the half the router's own tests cannot see.
+
+        GitHub sends a suite for every branch running CI. Nothing here can turn a bare commit
+        into a tracked item, so each one was a row of around 25kB held for the retention window
+        and then dropped by the parser having done nothing. Declining it needs the question
+        registered beside the handler, and forgetting that is silent.
+        """
+        container = container_with(DisposableEngine(), FakeGitHubClient())
+
+        assert (
+            container.event_router.will_act_on(
+                "check_suite", "completed", payloads.check_suite_event(numbers=())
+            )
+            is False
+        )
+        assert (
+            container.event_router.will_act_on(
+                "check_suite", "completed", payloads.check_suite_event()
+            )
+            is True
+        )
 
 
 class TestTheOneCredentialTheAppCannotReplace:
