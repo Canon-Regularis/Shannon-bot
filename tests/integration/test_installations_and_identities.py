@@ -11,15 +11,17 @@ against a fake would be asserting that the fake settles races.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import GitHubInstallation, IdentityVerification
 from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
 from shannon.db.stores.installations import InstallationStore
+from tests.support.db import blocked_on_a_row
 
 pytestmark = pytest.mark.integration
 
@@ -150,6 +152,74 @@ class TestWhichInstallationCoversAnOwner:
         found = await store.for_owner("octocat")
         assert found is not None
         assert found.suspended is True
+
+
+class TestTwoWritersOfOneAccount:
+    """A reinstall and a transfer can land together, and neither may lose to the other.
+
+    `remember` clears the row holding the login and upserts on the installation id, which are
+    two constraints and two statements. Run twice at once without a lock, the clear from one
+    lands between the other's clear and its insert, and the insert then conflicts on the
+    constraint `ON CONFLICT` does not name: an `IntegrityError` out of a webhook handler, or two
+    writers deadlocked against each other.
+
+    GitHub sends `installation.created`, `installation.deleted` and `installation_repositories`
+    for one account in the same second, and the worker's batch is worked in order, so the
+    writers that collide are the worker and an inline directory refresh.
+    """
+
+    async def test_they_take_turns_rather_than_collide(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async def remember(installation_id: int, first: asyncio.Event | None) -> None:
+            async with db_sessionmaker() as session, session.begin():
+                await InstallationStore(session).remember(
+                    installation_id=installation_id, account_login="octocat"
+                )
+                if first is not None:
+                    first.set()
+                    # Held open, so the second writer is still inside the lock when the
+                    # assertion below asks Postgres whether anybody is waiting.
+                    await asyncio.sleep(0.3)
+
+        holding = asyncio.Event()
+        one = asyncio.create_task(remember(42, holding))
+        await holding.wait()
+        other = asyncio.create_task(remember(99, None))
+
+        await blocked_on_a_row(db_sessionmaker, other)
+        await asyncio.gather(one, other)
+
+        async with db_sessionmaker() as session:
+            rows = (await session.scalars(select(GitHubInstallation))).all()
+        assert [row.installation_id for row in rows] == [99], (
+            "the second writer did not replace the first, or both rows survived"
+        )
+
+    async def test_two_accounts_do_not_wait_for_each_other(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The other half: the lock is per account, so the App being installed on one
+        organisation cannot hold up a webhook about another."""
+        async with db_sessionmaker() as session:
+            taken = await session.scalar(
+                select(func.pg_advisory_xact_lock(8_532, func.hashtext("octocat")))
+            )
+            assert taken is None, "the lock call itself failed"
+
+        async def remember(installation_id: int, login: str) -> None:
+            async with db_sessionmaker() as session, session.begin():
+                await InstallationStore(session).remember(
+                    installation_id=installation_id, account_login=login
+                )
+
+        await asyncio.wait_for(
+            asyncio.gather(remember(42, "octocat"), remember(99, "hubot")), timeout=10
+        )
+
+        async with db_sessionmaker() as session:
+            rows = (await session.scalars(select(GitHubInstallation))).all()
+        assert {row.account_login for row in rows} == {"octocat", "hubot"}
 
 
 class TestTheOneTimeLink:

@@ -7,12 +7,17 @@ a missing or stale row costs one request and no reconciliation job stands behind
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.base import rows_changed
 from shannon.db.models import GitHubInstallation
+
+# The first key of the per-account advisory lock. Postgres keeps two-integer keys apart
+# from single-bigint ones, and `UserLinkStore` uses the latter; the other two-integer
+# space in this project leads with `_ONE_ITEM_AT_A_TIME`, so all three stay apart.
+_ONE_ACCOUNT_AT_A_TIME = 8_532
 
 
 class InstallationStore:
@@ -49,8 +54,17 @@ class InstallationStore:
         and a transfer keeps the id and changes the login. `account_id` is only overwritten when
         this caller has one, since it is the only thing that tells a rename apart from somebody
         taking a freed name.
+
+        Two steps against two constraints cannot be made atomic by `ON CONFLICT`, which
+        names one of them, and a retry loop only has the retries colliding instead. So an
+        advisory lock per account, exactly as `UserLinkStore.link` takes one per guild and
+        for the same reason. Keyed on the login rather than the installation id, because
+        the login is what two writers contend for: a reinstall keeps it and brings a new id.
         """
         login = account_login.strip().lower()
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_ONE_ACCOUNT_AT_A_TIME, func.hashtext(login)))
+        )
         await self._session.execute(
             delete(GitHubInstallation).where(
                 GitHubInstallation.account_login == login,
