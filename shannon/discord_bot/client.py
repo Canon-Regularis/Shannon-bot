@@ -22,6 +22,14 @@ ExplainError = Callable[[BaseException], Panel]
 ThreadGone = Callable[[int], Awaitable[None]]
 ChannelGone = Callable[[int], Awaitable[None]]
 
+# Deleting a channel deletes every thread in it, and discord.py dispatches an event for each at
+# once, each a transaction against the pool the delivery worker and every slash command share:
+# nine hundred threads made an ordinary query wait sixteen seconds.
+LETTING_GO_AT_ONCE = 2
+# Separate from the housekeeping limit above so capture cannot queue behind a channel deletion,
+# and bounded because it is still a write per message in an armed thread.
+TRANSCRIBING_AT_ONCE = 8
+
 
 class CapturesMessages(Protocol):
     """What capturing a thread needs of the store that holds the transcripts.
@@ -83,14 +91,9 @@ class ShannonBot(discord.Client):
         self._explain_error = explain_error
         self._thread_gone = thread_gone
         self._channel_gone: ChannelGone | None = None
-        # Deleting a channel deletes every thread in it, and discord.py dispatches an event for
-        # each at once, each a transaction against the pool the delivery worker and every slash
-        # command share: nine hundred threads made an ordinary query wait sixteen seconds.
-        self._letting_go = asyncio.Semaphore(2)
+        self._letting_go = asyncio.Semaphore(LETTING_GO_AT_ONCE)
         self._capturing: CapturesMessages | None = None
-        # Separate from the housekeeping limit above so capture cannot queue behind a channel
-        # deletion, and bounded because it is still a write per message in an armed thread.
-        self._transcribing = asyncio.Semaphore(8)
+        self._transcribing = asyncio.Semaphore(TRANSCRIBING_AT_ONCE)
         self._pending: list[SlashCommand] = []
         # `is_ready` cannot answer this: it reports whether the cache has ever been filled, is set
         # once when READY arrives and cleared only by `close`, so a connection that came up and

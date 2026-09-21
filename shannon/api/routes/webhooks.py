@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy.exc import TimeoutError as NoConnectionToSpare
 
 from shannon.api.dependencies import (
     DeliveryQueueDep,
@@ -93,14 +94,24 @@ async def _accept(
     nothing below this line talks to Discord.
     """
     # Recording a repeat of an event we would ignore anyway only grows the queue.
-    if not event_router.will_act_on(event, action):
+    if not event_router.will_act_on(event, action, payload):
         return WebhookOutcome.IGNORED
 
     # No queue means nowhere to put the work, so it runs inline: that is how route tests run.
     if queue is None:
         return await event_router.dispatch(event, action, payload)
 
-    if not await queue.enqueue(delivery_id, event, payload):
+    try:
+        accepted = await queue.enqueue(delivery_id, event, payload)
+    except NoConnectionToSpare as exc:
+        # 503 rather than the 500 an unhandled error would be: GitHub redelivers the first and
+        # never the second, so a pool that is briefly full would otherwise lose the delivery.
+        logger.error("no connection to record delivery %s, asking GitHub to retry", delivery_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No database connection to spare, retry this delivery",
+        ) from exc
+    if not accepted:
         return WebhookOutcome.DUPLICATE
     return WebhookOutcome.ACCEPTED
 
