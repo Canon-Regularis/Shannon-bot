@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
 from shannon.domain.enums import ObjectType
@@ -60,3 +63,32 @@ async def map_channel(
         )
     )
     await session.commit()
+
+
+async def blocked_on_a_row(
+    sessionmaker: async_sessionmaker[AsyncSession], task: asyncio.Task[object]
+) -> None:
+    """Wait until the task is genuinely waiting on a lock somebody else holds.
+
+    Sleeping a fixed moment instead is what these used to do, and on a loaded machine the task
+    had not reached the database at all: the holder committed first, the sync found the row
+    where it looks for it, and the test passed having exercised the other path entirely. It
+    passed on its own and stopped covering the branch it was written for in a full run, which is
+    the worst way for a race test to be wrong.
+
+    Asked of PostgreSQL rather than guessed at. A backend waiting on a lock says so.
+    """
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if task.done():
+            break
+        async with sessionmaker() as watcher:
+            waiting = await watcher.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                )
+            )
+        if waiting:
+            return
+    raise AssertionError("nothing ever blocked, so this proves nothing")

@@ -5,7 +5,7 @@ import contextlib
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
@@ -20,6 +20,7 @@ from shannon.services.sync.items import SyncOutcome, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import blocked_on_a_row
 
 pytestmark = pytest.mark.integration
 
@@ -553,35 +554,6 @@ async def test_two_syncs_of_one_item_do_not_share_the_discord_phase(
     assert threads.inside == ["in", "out", "in", "out"], (
         f"the two syncs were in Discord together: {threads.inside}"
     )
-
-
-async def blocked_on_a_row(
-    sessionmaker: async_sessionmaker[AsyncSession], task: asyncio.Task
-) -> None:
-    """Wait until the task is genuinely waiting on a lock somebody else holds.
-
-    Sleeping a fixed moment instead is what these used to do, and on a loaded machine the task
-    had not reached the database at all: the holder committed first, the sync found the row
-    where it looks for it, and the test passed having exercised the other path entirely. It
-    passed on its own and stopped covering the branch it was written for in a full run, which is
-    the worst way for a race test to be wrong.
-
-    Asked of PostgreSQL rather than guessed at. A backend waiting on a lock says so.
-    """
-    for _ in range(200):
-        await asyncio.sleep(0.05)
-        if task.done():
-            break
-        async with sessionmaker() as watcher:
-            waiting = await watcher.scalar(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                )
-            )
-        if waiting:
-            return
-    raise AssertionError("nothing ever blocked, so this proves nothing")
 
 
 async def _create(store: TrackedItemStore) -> TrackedItem:
