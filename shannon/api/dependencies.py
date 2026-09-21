@@ -22,7 +22,7 @@ class EventIntake(Protocol):
     `register` and `handles` are absent: a request handler must not change routes while running.
     """
 
-    def will_act_on(self, event: str, action: str | None) -> bool: ...
+    def will_act_on(self, event: str, action: str | None, payload: JsonObject) -> bool: ...
 
     async def dispatch(
         self, event: str, action: str | None, payload: JsonObject

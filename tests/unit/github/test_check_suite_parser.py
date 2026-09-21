@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from shannon.github.webhooks.checks import parse_check_suite_event
+from shannon.github.webhooks.checks import heads_a_pull_request, parse_check_suite_event
 from shannon.github.webhooks.events import CHECK_SUITE_ACTIONS
 from tests.support import github_payloads as payloads
 
@@ -107,3 +107,38 @@ def test_it_never_raises_on_a_body_that_makes_no_sense() -> None:
     arrived over the network."""
     for body in ({}, {"check_suite": None}, {"check_suite": {"pull_requests": None}}):
         assert parse_check_suite_event("completed", body) is None
+
+
+class TestWhatIsWorthRecording:
+    """The same refusal as the parser's last one, made before the delivery becomes a row.
+
+    A repository with CI on a protected default branch sends a suite per push and per merge,
+    and none of them name a pull request. Each was stored as around 25kB of JSONB, kept for the
+    retention window, leased, dispatched and dropped having done nothing.
+    """
+
+    def test_a_suite_heading_a_pull_request_is_recorded(self) -> None:
+        assert heads_a_pull_request(payloads.check_suite_event()) is True
+
+    def test_a_suite_heading_nothing_is_declined(self) -> None:
+        assert heads_a_pull_request(payloads.check_suite_event(numbers=())) is False
+
+    def test_a_body_with_no_check_suite_in_it_is_declined(self) -> None:
+        """The parser logs this one as a warning and drops it; there is nothing to record."""
+        assert heads_a_pull_request({"action": "completed"}) is False
+
+    def test_a_check_suite_that_is_not_an_object_is_declined(self) -> None:
+        assert heads_a_pull_request({"check_suite": "not an object"}) is False
+
+    def test_it_agrees_with_the_parser_about_every_case_here(self) -> None:
+        """The two must not drift: a suite recorded and then dropped is the waste this removes,
+        and a suite declined that the parser would have acted on is a lost CI result."""
+        bodies = [
+            payloads.check_suite_event(),
+            payloads.check_suite_event(numbers=()),
+            payloads.check_suite_event(numbers=(7, 9)),
+        ]
+        for body in bodies:
+            recorded = heads_a_pull_request(body)
+            parsed = parse_check_suite_event("completed", body) is not None
+            assert recorded == parsed, body

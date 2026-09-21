@@ -67,6 +67,21 @@ def parse_check_suite_event(action: str, payload: JsonObject) -> CheckSuiteEvent
     return CheckSuiteEvent(repository=repository, head_sha=head_sha, numbers=numbers)
 
 
+def heads_a_pull_request(payload: JsonObject) -> bool:
+    """Whether a check suite names a pull request there could be a thread for.
+
+    Asked at the route, before the delivery is written down. The parser below drops the same
+    suites, but by then the body is a row: a suite is around 25kB of JSONB, it is kept for the
+    retention window, and a repository with CI on a protected default branch sends one per push
+    and merge. None of those could ever have been acted on.
+
+    Only the array is read, not the head commit or the repository, because a suite with no
+    pull requests in it is dropped whatever else is wrong with it.
+    """
+    suite = payload.get("check_suite")
+    return is_json_object(suite) and bool(_pull_request_numbers(suite.get("pull_requests")))
+
+
 def _pull_request_numbers(payload: object) -> tuple[int, ...]:
     if not is_json_list(payload):
         return ()
