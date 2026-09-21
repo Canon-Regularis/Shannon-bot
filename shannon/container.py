@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Protocol
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -57,7 +58,7 @@ from shannon.domain.models import ItemNote
 from shannon.github.client import GitHubClient, HttpGitHubClient
 from shannon.github.installations import InstallationDirectory, InstallationTokens
 from shannon.github.projects import HttpProjectBoards
-from shannon.github.webhooks.checks import parse_check_suite_event
+from shannon.github.webhooks.checks import heads_a_pull_request, parse_check_suite_event
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.github.webhooks.installations import build_installation_handler
 from shannon.github.webhooks.issues import parse_issue_event
@@ -109,6 +110,12 @@ from shannon.services.workflow import ItemKind, ItemWorkflow, build_item_workflo
 logger = logging.getLogger(__name__)
 
 
+class Closes(Protocol):
+    """Something holding a socket that shutdown has to let go of."""
+
+    async def aclose(self) -> None: ...
+
+
 @dataclass(slots=True)
 class Container:
     """What the running process holds on to.
@@ -133,6 +140,11 @@ class Container:
     conversations: ConversationLog
     flusher: TranscriptFlusher
     commands: tuple[SlashCommand, ...]
+    # Opened in `build_container` and reachable from nowhere else, so this is the only
+    # thing that can close them: the App's own HTTP client, and the board's client when
+    # the board has a token of its own. Kept apart from `github` because that one may be
+    # a fake with nothing to close.
+    also_opened: tuple[Closes, ...]
     # Held so the OAuth callback route can reach it. The route is the one place in this project
     # that is entered from outside rather than called, so it reads its collaborator off app state
     # rather than being handed one.
@@ -189,11 +201,16 @@ class Container:
         Engine disposal sits in the finally: an HTTP client that throws on the way out must not
         take the database pool with it. `aclose` is looked up because GitHubClient does not
         declare it, and fakes standing in for the real client have nothing to close.
+
+        One that raises still strands the ones after it, which is the shape this already had.
+        That matters little at shutdown and a great deal to anything building containers in a
+        loop, which is the only place the leak was ever visible.
         """
-        closer = getattr(self.github, "aclose", None)
         try:
-            if closer is not None:
-                await closer()
+            for opened in (self.github, *self.also_opened):
+                closer = getattr(opened, "aclose", None)
+                if closer is not None:
+                    await closer()
         finally:
             await self.engine.dispose()
 
@@ -475,6 +492,10 @@ def _event_router(
             ),
             parse_check_suite_event,
         ),
+        # GitHub sends one of these for every branch running CI, and nothing here can
+        # turn a bare commit into a tracked item. Declined at the route rather than
+        # dropped by the parser, so a suite nothing could act on is never a row.
+        worth_recording=heads_a_pull_request,
     )
     return router
 
@@ -713,28 +734,33 @@ def build_container(
     # its set before the gateway connects.
     conversations = ConversationLog(sessionmaker, threads)
 
+    # The board's own client with its own token. GitHub publishes no App permission for a
+    # user-owned Projects v2 board, so this one feature cannot go through the installation
+    # and keeps a narrow credential instead. Left unset, the board reads through the
+    # ordinary client, which is what every deployment with the project number at zero does.
+    project_token = settings.github_project_token.get_secret_value()
+    board_client = (
+        HttpGitHubClient(
+            tokens=_OneToken(project_token),
+            base_url=settings.github_api_url,
+            timeout=settings.github_timeout_seconds,
+        )
+        if project_token
+        else None
+    )
+
     return Container(
         settings=settings,
         engine=engine,
         sessionmaker=sessionmaker,
         github=github,
         queue=queue,
-        worker=DeliveryWorker(queue, event_router, WorkerSettings.from_settings(settings)),
+        worker=DeliveryWorker(
+            queue, event_router, WorkerSettings.from_settings(settings), verification
+        ),
         poller=ProjectPoller(
             sessionmaker,
-            # Its own client with its own token. GitHub publishes no App permission for a
-            # user-owned Projects v2 board, so this one feature cannot go through the installation
-            # and keeps a narrow credential instead. Left unset, the board reads nothing, which is
-            # what every deployment with the project number at zero already does.
-            HttpProjectBoards(
-                github
-                if not settings.github_project_token.get_secret_value()
-                else HttpGitHubClient(
-                    tokens=_OneToken(settings.github_project_token.get_secret_value()),
-                    base_url=settings.github_api_url,
-                    timeout=settings.github_timeout_seconds,
-                )
-            ),
+            HttpProjectBoards(board_client or github),
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
             project_number=settings.github_project_number,
@@ -769,4 +795,5 @@ def build_container(
             conversations,
             capturing=settings.capture_discord_messages,
         ),
+        also_opened=(app_http,) if board_client is None else (app_http, board_client),
     )
