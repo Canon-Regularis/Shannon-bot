@@ -198,6 +198,7 @@ and there is nothing wrong: wait, or restart the Discord client, which usually s
 /set_channel issues #channel          where issue threads go
 /set_channel project tickets #channel only if a board is being mirrored
 /link <github_username> @member        once per person, so pings become mentions
+/verify                               each person, once, to prove the link is theirs
 /link_team <team> @role               so a review asked of a team reaches somebody
 ```
 
@@ -338,6 +339,7 @@ at the door.
 | `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/unregister`. Empty makes `/unregister` refuse rather than hand out a broken link |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
 | `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App |
+| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/verify` refuses every assignment; until then the reply says the link is unproved. Ignored where the OAuth round trip is not configured |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with user Projects: Read-only. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
@@ -406,8 +408,9 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
+| `/verify` | Anyone | Run it, open the GitHub link, run it again. GitHub says who signed in and the bot writes that as your link, so nobody types a login and nobody can be bound to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed: a proof beats a claim. The one other command with no gate, for the reason `/mentions` has none |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
-| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
+| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |

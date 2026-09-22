@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shannon.db.models import UserLink
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LinkedAccount:
+    """What one Discord member claimed here: the login, and who GitHub said was holding it.
+
+    Both halves or neither. The name on its own points at whoever holds it now, which is the
+    whole reason the id is stored beside it, and answering with only the name is what made a
+    renamed collaborator read as somebody with no access to the repository. Issue #133.
+
+    Plain values rather than the row, because what comes between reading this and acting on it is
+    a GitHub round trip, and a live row would hold a pooled connection open across it.
+    """
+
+    login: str
+    github_user_id: int | None
+
+    @classmethod
+    def of(cls, row: UserLink) -> LinkedAccount:
+        return cls(login=row.github_username, github_user_id=row.github_user_id)
 
 
 class UserLinkStore:
@@ -60,31 +81,105 @@ class UserLinkStore:
             resolved[row.github_username] = row.discord_user_id
         return resolved
 
-    async def login_for(self, *, guild_id: int, discord_user_id: int) -> str | None:
-        """Which GitHub account this Discord member claimed here, or None if they never did.
+    async def account_for(self, *, guild_id: int, discord_user_id: int) -> LinkedAccount | None:
+        """What this Discord member claimed here, or None if they never claimed anything.
 
-        Unlike `resolve_many` there is no second account id to hold the stored one against, so this
-        answers with the claim as it was made; a stale link asks the wrong person for a review, and
-        GitHub still applies its own rules about who may go on an item. At most one row matches:
-        `uq_user_links_guild_discord` is unique on this pair and its index serves the lookup.
+        Both halves, because the login alone is not enough to write to GitHub with. This used to
+        answer with the name and a note saying there was no second id to hold it against; there
+        was, one column over, and the cost of not reading it was a collaborator being told he had
+        no access to a repository he could write to. Issue #133.
+
+        At most one row matches: `uq_user_links_guild_discord` is unique on this pair and its
+        index serves the lookup.
         """
-        found = await self._session.scalar(
-            select(UserLink.github_username).where(
+        row = await self._session.scalar(
+            select(UserLink).where(
                 UserLink.discord_guild_id == guild_id,
                 UserLink.discord_user_id == discord_user_id,
             )
         )
-        # A scalar off a column comes back untyped, and a login is the one thing this may promise.
-        return found if isinstance(found, str) else None
+        return None if row is None else LinkedAccount.of(row)
+
+    async def follow_rename(
+        self, *, guild_id: int, discord_user_id: int, github_user_id: int, login: str
+    ) -> None:
+        """Take the login GitHub is using for this account now, where nothing is in the way.
+
+        Named for `RepositoryStore.follow_rename`, which is the same move made for a repository:
+        the id is the identity and the name is a label GitHub reassigns, so following it is how a
+        stored name stays true. Called only when the two have actually been seen to differ, so
+        this never touches a row for a command that changed nothing.
+
+        The same lock `link` takes, keyed the same way, because the check below races it
+        otherwise. Taken here rather than around the GitHub call that found the new name: holding
+        a lock across a network round trip would serialise a guild on somebody else's latency.
+        """
+        await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
+        username = login.lower()
+
+        row = await self._session.scalar(
+            select(UserLink).where(
+                UserLink.discord_guild_id == guild_id,
+                UserLink.discord_user_id == discord_user_id,
+                UserLink.github_user_id == github_user_id,
+            )
+        )
+        if row is None:
+            # Somebody re-ran `/link` for them between the read and here. That is a claim somebody
+            # made deliberately and this is a correction made in passing, so the claim wins.
+            logger.info(
+                "the link for discord user %s in guild %s moved while %s was being followed",
+                discord_user_id,
+                guild_id,
+                username,
+            )
+            return
+
+        held = await self._session.scalar(
+            select(UserLink.discord_user_id).where(
+                UserLink.discord_guild_id == guild_id,
+                UserLink.github_username == username,
+                UserLink.id != row.id,
+            )
+        )
+        if held is not None:
+            # `link` would delete the row in the way, and that is its prerogative: it runs when
+            # somebody states a claim. This runs inside `/assign`, so a developer putting a
+            # colleague on an issue must not silently destroy a third person's link on the way
+            # past. Said out loud instead, because a collision means one of the two rows is wrong.
+            logger.warning(
+                "discord user %s in guild %s is now %s on GitHub, which discord user %s is "
+                "already linked to; leaving both alone, and one of them wants relinking",
+                discord_user_id,
+                guild_id,
+                username,
+                held,
+            )
+            return
+
+        logger.info(
+            "discord user %s in guild %s is now %s on GitHub, following the rename from %s",
+            discord_user_id,
+            guild_id,
+            username,
+            row.github_username,
+        )
+        row.github_username = username
+        await self._session.flush()
 
     async def logins_for(
         self, *, guild_id: int, discord_user_ids: Collection[int]
     ) -> dict[int, str]:
         """Which GitHub account each of these Discord members claimed here, keyed by Discord id.
 
-        `login_for` for a batch, and as lenient: with no item payload to supply an account id, a
-        login somebody freed and a stranger took is answered with the stranger. An id nobody linked
-        is absent from the result.
+        `account_for` for a batch, and deliberately less careful than it: this answers with the
+        claims as they were made, so a login somebody freed and a stranger took is answered with
+        the stranger. That is the right trade here and not there. Its caller renders names into a
+        published transcript rather than writing to GitHub, where the cost of being wrong is a
+        name reading oddly rather than a stranger put on somebody's pull request, and asking
+        GitHub about every person every publish would be a call each.
+
+        An id nobody linked is absent from the result.
         """
         wanted = set(discord_user_ids)
         if not wanted:

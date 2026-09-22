@@ -5940,3 +5940,109 @@ to set the project number will find it.
   which if it does not is one line to fix by sending every link down the naming branch. What
   Discord does with a gallery URL it cannot fetch, which decides whether the public-repository gate
   is load-bearing or merely cautious. And how four pictures lay out under a card on a phone.
+
+## A login is a label, and GitHub hands a freed one back out
+
+- **`/assign` refused a collaborator who had every access there is.** Closes #133. He was a direct
+  collaborator with write access on a public repository, linked and verified, and he was told he
+  had no access to the repository. The name stored for him was one GitHub had reassigned since
+  somebody ran `/link`, so the question actually asked was about nobody, and the answer to that
+  was reported as an answer about him.
+- **The id was in the row the whole time.** `user_links.github_user_id` exists because "GitHub
+  frees a name the moment it is renamed or deleted and lets anybody take it", and `login_for` read
+  past it every time. Its docstring said there was no second id to hold the stored one against;
+  there was, one column over. The only thing missing was somewhere to hold it against, and GitHub
+  will say what an account is called now if you ask it by id.
+- **So the rename is followed rather than reported.** `account_for` answers with both halves,
+  `UserLinkStore.follow_rename` takes the name GitHub is using, and the command carries on and
+  does what was asked. Named for `RepositoryStore.follow_rename`, which is the same move already
+  made for a repository and for the same reason.
+- **It is done where the login is read, not where the refusal was written.** Only `/assign` ever
+  reached that refusal. The other three are decided before GitHub is touched at all, by comparing
+  the stored name against who is on the item, so `/unassign` on somebody assigned under their new
+  name was refused as somebody who had never been there. One seam fixes all four.
+- **Best effort, and deliberately so.** A row stored before the id column has nothing to ask about
+  and spends no call. The call is anonymous, so it sits on the smaller of GitHub's two hourly
+  budgets, and a GitHub that cannot be reached leaves the stored name standing — which is exactly
+  what all four commands did before this existed. Running out of a budget is not a reason to
+  refuse to assign anybody.
+- **A collision is left alone and said out loud.** Where the new name is one another member is
+  already linked to, both rows survive and a warning names both Discord accounts. `link` deletes
+  whatever is in the way, and that is its prerogative because it runs when somebody states a
+  claim; this runs inside somebody else's `/assign`, and a developer putting a colleague on an
+  issue must not destroy a third person's link on the way past.
+- **The refusal stopped guessing.** One sentence used to cover every refusal, and the assignee
+  endpoint answers the same 404 for somebody who is not a collaborator, somebody who is one
+  without write access, and a login GitHub has never heard of. Only the first matched the words.
+  The permission is read now and each answer gets the sentence that is true of it, including the
+  case where GitHub says write access and still refuses, which is not something this can explain
+  and says so instead of inventing a reason.
+- **A diagnosis must not be able to make the answer worse.** It reads the collaborators endpoint,
+  which is not the permission the assignee endpoint needs, so a GitHub that will not answer the
+  follow-up leaves the refusal standing and admits only that it could not be asked.
+- **What this retires.** The paragraph at "It cannot check what the other direction checks" was
+  true when it was written and is not now: it said this direction had no second id to compare
+  with, and that reading was what shipped the bug. What remains true is the asymmetry underneath
+  it — `resolve_many` and `logins_for` still answer with the claim as made, because a rendered
+  mention has an id off the payload to check against and a login read out of the database does
+  not.
+- **The fake could not have caught this, and now can.** It modelled assignability as a flat set of
+  logins, unrelated to the permissions it kept for `/unregister` and with the opposite default, so
+  no test could tell a refusal for no access from a refusal for any other reason. Assignability is
+  derived from the permission now, in both the check and the write, with the flat set kept as the
+  override for the one answer a permission cannot express.
+- **Still not proof of identity.** `/link` checks that somebody holds the login, never that it is
+  the person being linked. Following a rename means a wrongly linked account now succeeds under
+  its new name rather than failing confusingly, which in that one case is worse. Proving it means
+  asking GitHub whose account it is, which is `GitHubIdentityVerification` and is wired for
+  `/unregister` alone. That is its own piece of work.
+
+## Somebody can prove a link now, and the proxy lets them
+
+- **The OAuth callback was never reachable, and had not been since it shipped.** `Caddyfile` is an
+  allowlist: it forwarded `/health` and `/webhooks/*` and answered everything else itself with an
+  empty 404. `/oauth/*` was not on it. So `/unregister` handed out links, GitHub authorised people,
+  and every redirect landed on the catch-all; the bot never saw one callback. Measured rather than
+  guessed at: `/health` answers `Server: uvicorn` with `Via: 1.1 Caddy`, and the callback answered
+  `Server: Caddy` with no `Via` and no body at all.
+- **A test now holds the proxy against the app.** Every path FastAPI declares must be one the
+  Caddyfile forwards, and the four endpoints it blocks on purpose must stay blocked. Nothing else
+  could have caught this: the route answered fine in the suite, was wired correctly, and simply did
+  not exist in production. It went red against the shipped config before the block was added.
+- **`/verify` exists, and nobody types a login.** Run it, open the link, run it again. GitHub says
+  who signed in and that is what gets written down, so a typo binds nothing and a stranger's name
+  cannot be bound by mistake. The two-run handshake is `/unregister`'s, for the same reason: an
+  interaction cannot wait on somebody opening a browser.
+- **It is the second command with no gate, and the first that gives a member a way back.** `/link`
+  is gated because it records a login nobody checked, so an ungated one lets anybody take any name.
+  There is nothing to gate here: the only account anybody can bind is the one they have just signed
+  into. Until now a wrongly linked member could do nothing about it themselves — there is no
+  `/unlink` — and had to find an admin willing to type the right name.
+- **A proof beats a claim.** Binding replaces whatever either half was bound to, including a login
+  somebody else had typed against their own Discord account. GitHub has now said whose it is, and
+  the row that goes is the one nobody ever vouched for.
+- **No migration.** `verified_identities` already held the login, the account id and the moment,
+  keyed per person per server, upserted and never pruned. A link is proved when the account id on
+  it matches the one that was proved — held on the id rather than the name, which cuts both ways:
+  a proof survives its owner renaming on GitHub, and does not survive an admin pointing the link at
+  a different account.
+- **What was one read is two, because the two questions are different.** Unbinding a repository
+  wants a proof from minutes ago, since it permits something irreversible. Asking whether a stored
+  link was ever more than somebody's say-so has no business expiring: treating it as stale would
+  quietly mark every long-standing member unproved. `proved_just_now` and `ever_proved` rather than
+  one method with a window, because a caller passing the wrong window would fail silently and in
+  the permissive direction.
+- **The write path warns, and refuses when told to.** Assigning or asking for a review on an
+  unproved link still goes through, with a line under the reply saying it went out on somebody's
+  word. `SHANNON_REQUIRE_PROVED_LINKS` turns that into a refusal. It is off by default because
+  every link in a server predates the command that would fix it, and turning it on beforehand
+  refuses every assignment at once — the trap migration 0021 exists to remember.
+- **All four, rather than the two that add somebody.** Taking a reviewer off under a name nobody
+  proved is the same claim as putting one on, and the way out of it is half a minute in a browser.
+- **A deployment that cannot verify anybody warns however the setting is set.** Without a public
+  URL the round trip cannot run, so `/verify` refuses there too, and enforcing would leave every
+  member holding a link they have no way to prove and a command that will not act on it.
+- **What is still a claim, deliberately.** Mentions in a block, ping lines and the `@login` a
+  published transcript writes into a GitHub comment all still run off links nobody proved. Those
+  name somebody; this path acts as them. A mention going to the wrong person is a mistake, and a
+  stranger appearing as an assignee is the bot asserting something untrue on a real repository.

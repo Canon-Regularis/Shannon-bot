@@ -41,7 +41,7 @@ async def github_callback(request: Request, code: str = "", state: str = "") -> 
     if not code or not state:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="That link is incomplete. Run /unregister in Discord again.",
+            detail="That link is incomplete. Run the command in Discord again.",
         )
 
     try:
@@ -53,6 +53,9 @@ async def github_callback(request: Request, code: str = "", state: str = "") -> 
             status_code=status.HTTP_400_BAD_REQUEST, detail=refusal.message
         ) from refusal
 
+    # Which command to run again is not named, because this row does not record which one issued
+    # the link, and two of them use this now. Saying the wrong one would send somebody to a
+    # command they cannot run.
     return PlainTextResponse(
-        f"Signed in as {verified.login}.\n\nGo back to Discord and run /unregister again to finish."
+        f"Signed in as {verified.login}.\n\nGo back to Discord and run the command again to finish."
     )

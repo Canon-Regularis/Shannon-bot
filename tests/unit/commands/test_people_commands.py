@@ -30,8 +30,12 @@ THREAD = 9001
 WHO = 4242
 
 
-def outcome(*, role: ActorRole = ActorRole.ASSIGNEE, added: bool = True) -> PeopleOutcome:
-    return PeopleOutcome(login="alice", full_name="acme/widget", number=7, role=role, added=added)
+def outcome(
+    *, role: ActorRole = ActorRole.ASSIGNEE, added: bool = True, proved: bool = True
+) -> PeopleOutcome:
+    return PeopleOutcome(
+        login="alice", full_name="acme/widget", number=7, role=role, added=added, proved=proved
+    )
 
 
 class StubAssignment:
@@ -170,6 +174,28 @@ class TestWhatItSays:
         await command.callback(interaction, member)
 
         assert interaction.reply == f"Took <@{WHO}> off the assignees on acme/widget#7."
+
+    async def test_a_change_made_on_a_link_nobody_proved_says_so(self) -> None:
+        """`/link` records a login an admin typed and GitHub was never asked whose it is, so this
+        may have acted on a real repository as somebody unrelated to the member named above. The
+        person reading the reply is the only one in a position to notice."""
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(proved=False))
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.reply.startswith(f"Assigned <@{WHO}> to acme/widget#7.")
+        assert "run /verify" in interaction.reply
+
+    async def test_a_proved_one_says_nothing_extra(self) -> None:
+        """A note under every reply is a note nobody reads, and almost every link will be proved
+        once the server has been through it."""
+        command, interaction, _, member = run_it()
+
+        await command.callback(interaction, member)
+
+        assert interaction.reply == f"Assigned <@{WHO}> to acme/widget#7."
 
     async def test_a_review_asked_for(self) -> None:
         """Said differently from an assignment, because they are different lists and somebody can
