@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -35,7 +34,7 @@ class InstallationEvent:
     account_id: int | None
 
 
-def parse_installation_event(payload: Any) -> InstallationEvent | None:
+def parse_installation_event(payload: object) -> InstallationEvent | None:
     """The installation out of any delivery that carries one, or None for one that does not.
 
     Every App delivery carries the `installation` block, an `issues` one as much as an
