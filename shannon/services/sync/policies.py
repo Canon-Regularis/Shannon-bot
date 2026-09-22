@@ -76,24 +76,26 @@ class SyncPolicy(Protocol):
 
 class PullRequestPolicy:
     object_type = ObjectType.PR
-    channel_fallback = None
+    channel_fallback: ObjectType | None = None
     # `/set_done` is the only thing that locks one, and no payload can say a pull request is
     # finished, so the row is all a replacement thread has.
     lock_lives_in_the_row = True
 
     def render(
         self,
-        snapshot: PullRequestSnapshot,
+        snapshot: TrackedSnapshot,
         *,
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
     ) -> Panel:
+        assert isinstance(snapshot, PullRequestSnapshot)
         return formatting.format_pull_request(
             snapshot, status=status, priority=priority, mentions=mentions
         )
 
-    def assignments(self, snapshot: PullRequestSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+        assert isinstance(snapshot, PullRequestSnapshot)
         return {
             ActorRole.AUTHOR: [snapshot.author] if snapshot.author else [],
             ActorRole.ASSIGNEE: snapshot.assignees,
@@ -101,18 +103,19 @@ class PullRequestPolicy:
             ActorRole.REVIEWER_TEAM: snapshot.reviewer_teams,
         }
 
-    def asked_again(self, snapshot: PullRequestSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Whoever `review_requested` named at the top level; empty for every other action."""
+        assert isinstance(snapshot, PullRequestSnapshot)
         return {
             ActorRole.REVIEWER: [snapshot.person_asked_now] if snapshot.person_asked_now else [],
             ActorRole.REVIEWER_TEAM: ([snapshot.team_asked_now] if snapshot.team_asked_now else []),
         }
 
-    def status_for(self, snapshot: PullRequestSnapshot, current: Status) -> Status:
+    def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """Closing a pull request does not move its workflow status; MVP 3 owns that."""
         return current
 
-    def shut(self, snapshot: PullRequestSnapshot, *, status: Status) -> bool | None:
+    def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """Closed covers merged and abandoned alike.
 
         An open one at DONE is `/set_done`, which no payload knows about; False elsewhere,
@@ -128,40 +131,41 @@ class PullRequestPolicy:
         """`/set_done` writes the status, and closing or merging writes the state."""
         return status is Status.DONE or github_state != "open"
 
-    def thread_name(self, snapshot: PullRequestSnapshot) -> str:
+    def thread_name(self, snapshot: TrackedSnapshot) -> str:
         return formatting.thread_name(snapshot)
 
 
 class IssuePolicy:
     object_type = ObjectType.ISSUE
-    channel_fallback = ObjectType.PR
+    channel_fallback: ObjectType | None = ObjectType.PR
     # `shut` reads it off the payload, so a replacement has nothing to learn from the row.
     lock_lives_in_the_row = False
 
     def render(
         self,
-        snapshot: IssueSnapshot,
+        snapshot: TrackedSnapshot,
         *,
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
     ) -> Panel:
+        assert isinstance(snapshot, IssueSnapshot)
         return formatting.format_issue(
             snapshot, status=status, priority=priority, mentions=mentions
         )
 
-    def assignments(self, snapshot: IssueSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Issues have no reviewers, so that role is never written for them."""
         return {
             ActorRole.AUTHOR: [snapshot.author] if snapshot.author else [],
             ActorRole.ASSIGNEE: snapshot.assignees,
         }
 
-    def asked_again(self, snapshot: IssueSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Nothing. Only reviewers can be asked again."""
         return {}
 
-    def status_for(self, snapshot: IssueSnapshot, current: Status) -> Status:
+    def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """A closed issue is done, and reopening one resets only DONE.
 
         Forcing NOT_REVIEWED on every open issue would overwrite MVP 3's status commands on the
@@ -173,7 +177,7 @@ class IssuePolicy:
             return Status.NOT_REVIEWED
         return current
 
-    def shut(self, snapshot: IssueSnapshot, *, status: Status) -> bool | None:
+    def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """GitHub decides: an issue has no `/set_done`, and the command closes it on GitHub."""
         return snapshot.closed
 
@@ -185,7 +189,7 @@ class IssuePolicy:
         """
         return github_state == "closed"
 
-    def thread_name(self, snapshot: IssueSnapshot) -> str:
+    def thread_name(self, snapshot: TrackedSnapshot) -> str:
         return formatting.thread_name(snapshot)
 
 
@@ -196,49 +200,52 @@ class TicketPolicy:
     """
 
     object_type = ObjectType.TICKET
-    channel_fallback = None
+    channel_fallback: ObjectType | None = None
     # A card in the Done column is DONE on the row, put there by the board and not by anybody,
     # and its thread was never locked.
     lock_lives_in_the_row = False
 
     def render(
         self,
-        snapshot: TicketSnapshot,
+        snapshot: TrackedSnapshot,
         *,
         status: Status,
         priority: Priority,
         mentions: Mapping[str, int],
     ) -> Panel:
+        assert isinstance(snapshot, TicketSnapshot)
         return formatting.format_ticket(snapshot, status=status)
 
-    def assignments(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Nobody. A draft item carries no author, assignee or reviewer to record or to ping."""
         return {}
 
-    def asked_again(self, snapshot: TicketSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
+    def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         return {}
 
-    def status_for(self, snapshot: TicketSnapshot, current: Status) -> Status:
+    def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """The board is the source: its column is the status.
 
         A column nobody has taught us leaves the status where it was; a default would move real
         work backwards every time the board is read.
         """
+        assert isinstance(snapshot, TicketSnapshot)
         return status_from_column(snapshot.column) or current
 
-    def shut(self, snapshot: TicketSnapshot, *, status: Status) -> bool | None:
+    def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """Left alone. A board column is not a closed state.
 
         No GitHub event arrives when a card moves back out of Done, so nothing would open the
         thread again.
         """
+        assert isinstance(snapshot, TicketSnapshot)
         return None
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """Never: a card in Done is a card somebody can drag back out."""
         return False
 
-    def thread_name(self, snapshot: TicketSnapshot) -> str:
+    def thread_name(self, snapshot: TrackedSnapshot) -> str:
         """No number in front: a draft item has none."""
         return snapshot.title.strip() or "Untitled ticket"
 

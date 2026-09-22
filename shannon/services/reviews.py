@@ -8,7 +8,7 @@ from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ActorRole, ObjectType
-from shannon.domain.models import ReviewSnapshot
+from shannon.domain.models import ItemNote, ReviewSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class ReviewRequestLedger:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
-    async def fulfilled(self, snapshot: ReviewSnapshot) -> None:
+    async def fulfilled(self, snapshot: ItemNote) -> None:
         if snapshot.author is None:
             return
 
@@ -67,7 +67,7 @@ class ReviewRequestLedger:
             )
 
 
-def is_worth_a_message(snapshot: ReviewSnapshot) -> bool:
+def is_worth_a_message(snapshot: ItemNote) -> bool:
     """Whether a submitted review says anything its inline comments do not.
 
     GitHub wraps every inline note in a review, so leaving notes or replying to somebody else's
@@ -79,4 +79,5 @@ def is_worth_a_message(snapshot: ReviewSnapshot) -> bool:
     ledger that closes the request it answers, or the reviewer is pinged again for the review
     they just gave.
     """
+    assert isinstance(snapshot, ReviewSnapshot)
     return snapshot.verdict != "commented" or bool(snapshot.body.strip())
