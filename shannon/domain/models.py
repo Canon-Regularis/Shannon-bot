@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.priority import parse_priority
@@ -108,6 +108,19 @@ class ItemSnapshot:
     @property
     def priority(self) -> Priority:
         return parse_priority(self.label_names)
+
+    def corrected(self, *, title: str, state: str, html_url: str) -> Self:
+        """This snapshot with the three fields a stored row is allowed to overrule.
+
+        Offered here rather than reached for by the caller: `dataclasses.replace` wants a
+        dataclass and the sync path holds its snapshots as `TrackedSnapshot`, which is a
+        protocol. Asking the snapshot to do it keeps that path from having to know it is one.
+        """
+        return replace(self, title=title, state=state, html_url=html_url)
+
+    def relabelled(self, labels: tuple[Label, ...]) -> Self:
+        """This snapshot carrying a different set of labels, for the same reason as above."""
+        return replace(self, labels=labels)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -427,8 +440,11 @@ class ItemNote(Protocol):
 class TrackedSnapshot(Protocol):
     """What the sync path needs from any GitHub object it mirrors.
 
-    `state` and `labels` are absent because nothing reads them: everything goes through
-    `display_state`, `label_names` and `priority`, which are what the kinds of item disagree on."""
+    `state` is absent because nothing reads it: everything goes through `display_state`, which
+    is what the kinds of item disagree on. `labels` is here, unlike `state`, because a label
+    carries a colour as well as a name and `_relabelled` rebuilds the set rather than reading
+    it; `label_names` cannot answer for that.
+    """
 
     # Properties rather than plain attributes: a plain attribute is writable, and a frozen
     # dataclass cannot offer a writable member, so nothing would satisfy this protocol at all.
@@ -476,6 +492,13 @@ class TrackedSnapshot(Protocol):
 
     @property
     def priority(self) -> Priority: ...
+
+    @property
+    def labels(self) -> tuple[Label, ...]: ...
+
+    def corrected(self, *, title: str, state: str, html_url: str) -> Self: ...
+
+    def relabelled(self, labels: tuple[Label, ...]) -> Self: ...
 
 
 # Owner, name, number: how every caller outside this package addresses an item on GitHub.

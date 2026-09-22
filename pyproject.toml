@@ -147,9 +147,6 @@ warn_return_any = false
 # which is the property that makes this worth doing before the work is finished rather than after.
 [[tool.mypy.overrides]]
 module = [
-    "shannon.container",
-    "shannon.services.sync.items",
-    "shannon.services.workflow",
     "tests.fakes.github",
     "tests.integration.conftest",
     "tests.integration.test_a_block_that_names_without_ringing",
@@ -251,9 +248,6 @@ ignore = [
     "tests/unit/commands/test_people_commands.py",
     "tests/unit/commands/test_label_commands.py",
     "tests/unit/commands/test_conversation_commands.py",
-    "shannon/container.py",
-    "shannon/services/sync/items.py",
-    "shannon/services/workflow.py",
     "tests/fakes/github.py",
     "tests/integration/conftest.py",
     "tests/integration/test_a_block_that_names_without_ringing.py",

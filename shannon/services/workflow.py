@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -724,7 +724,7 @@ def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> Tracke
     kept = [label for label in snapshot.labels if label.name.casefold() not in gone]
     if change.add and change.add.casefold() not in {label.name.casefold() for label in kept}:
         kept.append(Label(name=change.add))
-    return replace(snapshot, labels=tuple(kept))
+    return snapshot.relabelled(tuple(kept))
 
 
 async def locate(sessionmaker: async_sessionmaker[AsyncSession], thread_id: int) -> FoundItem:

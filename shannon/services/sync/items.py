@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
@@ -631,7 +631,9 @@ class ItemSyncService:
             applied=item.last_delivery_id,
         )
 
-        if superseded and item.discord_thread_id is not None:
+        # `item is not None` is what `superseded` already implies; it is written out because the
+        # checker cannot carry that through the local, and everything read below is the row.
+        if item is not None and superseded and item.discord_thread_id is not None:
             logger.info(
                 "ignoring a stale %s.%s for %s#%s",
                 object_type.value,
@@ -735,7 +737,7 @@ class ItemSyncService:
                 private=snapshot.repository.private,
             )
 
-        roles = self._policy.assignments(snapshot)
+        roles: Mapping[ActorRole, Sequence[Actor]] = self._policy.assignments(snapshot)
         if superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
             # no reason to believe the payload about anything else: adopting it would put back a
@@ -804,12 +806,7 @@ class ItemSyncService:
         # and the empty mention map the superseded branch leaves behind is what stops the rebuild
         # pinging whoever was on the item at the time.
         shown = (
-            replace(
-                snapshot,
-                title=item.title,
-                state=item.github_state,
-                html_url=item.github_url,
-            )
+            snapshot.corrected(title=item.title, state=item.github_state, html_url=item.github_url)
             if superseded
             else snapshot
         )
