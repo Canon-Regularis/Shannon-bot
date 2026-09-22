@@ -32,11 +32,6 @@ from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
 from shannon.github.safe_text import one_message
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
-from shannon.github.webhooks.comments import parse_comment_event
-from shannon.github.webhooks.issues import parse_issue_event
-from shannon.github.webhooks.pull_request import parse_pull_request_event
-from shannon.github.webhooks.review_comments import parse_review_comment_event
-from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.sync.staleness import is_superseded
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
@@ -270,41 +265,15 @@ json_values = st.recursive(
 json_objects = st.dictionaries(st.text(max_size=12), json_values, max_size=8)
 
 
-class TestParsersAgainstArbitraryPayloads:
-    """Webhook bodies come off the network. A parser that raises takes the request down with it.
+class TestTheFieldMappersAgainstArbitraryValues:
+    """Webhook bodies come off the network. A mapper that raises takes the request down with it.
 
-    Every one of these should answer with a snapshot or with nothing, whatever it is handed.
+    Handed the value directly rather than wrapped in a payload. Five parser properties used to
+    sit here doing the latter, and every draw died at `if action not in SUPPORTED`, because
+    `st.text` does not produce "opened": 1,500 examples to run one early return, asserting
+    nothing. The parsers are covered by tables in `tests/unit/github/`, which can name the field
+    that broke. This one reaches the bodies and says what has to be true of them.
     """
-
-    @given(st.text(max_size=20), json_objects)
-    @settings(max_examples=300)
-    def test_the_pull_request_parser_never_raises(self, action: str, payload: dict) -> None:
-
-        parse_pull_request_event(action, payload)
-
-    @given(st.text(max_size=20), json_objects)
-    @settings(max_examples=300)
-    def test_the_issue_parser_never_raises(self, action: str, payload: dict) -> None:
-
-        parse_issue_event(action, payload)
-
-    @given(st.text(max_size=20), json_objects)
-    @settings(max_examples=300)
-    def test_the_comment_parser_never_raises(self, action: str, payload: dict) -> None:
-
-        parse_comment_event(action, payload)
-
-    @given(st.text(max_size=20), json_objects)
-    @settings(max_examples=300)
-    def test_the_review_parser_never_raises(self, action: str, payload: dict) -> None:
-
-        parse_review_event(action, payload)
-
-    @given(st.text(max_size=20), json_objects)
-    @settings(max_examples=300)
-    def test_the_review_comment_parser_never_raises(self, action: str, payload: dict) -> None:
-
-        parse_review_comment_event(action, payload)
 
     @given(json_values)
     @settings(max_examples=300)
