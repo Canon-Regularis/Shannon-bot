@@ -30,6 +30,11 @@ PULL_REQUEST_ACTIONS = frozenset(
         # It is listed so the thread can say what landed. GitHub sends one per push rather than
         # per commit, and the pruner clears the rows after seven days.
         "synchronize",
+        # The two halves of the draft switch, listed together for the reason above. A draft is
+        # coloured differently and rings nobody, so with only one half a pull request keeps the
+        # colour and the silence of whichever state it was last told about. Issue #132.
+        "ready_for_review",
+        "converted_to_draft",
     }
 )
 
