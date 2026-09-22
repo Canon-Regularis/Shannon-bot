@@ -156,7 +156,7 @@ async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
         # Started while the first holds the row uncommitted, so it waits on the index rather
         # than racing by luck. This is the interleaving, made to happen rather than hoped for.
         loser = asyncio.create_task(request_the_same_reviewer(second))
-        await asyncio.sleep(0.1)
+        await blocked_on_a_row(db_sessionmaker, loser)
 
         await first.commit()
         await loser
@@ -214,9 +214,14 @@ async def test_a_rename_does_not_take_back_a_ping_claimed_while_it_ran(
                     actors=[Actor(login="mona-lisa", github_user_id=200)],
                 )
             )
-            # Let it get as far as the write, which parks on the row the claim is holding.
-            await asyncio.sleep(0.2)
-            claim_done.set()
+            try:
+                # Let it get as far as the write, which parks on the row the claim is holding.
+                await blocked_on_a_row(db_sessionmaker, reading)
+            finally:
+                # Set whatever happened above. `claim` is waiting on it inside an open
+                # transaction, and giving up without setting it leaves that task pending on an
+                # event nobody will set, holding a connection into the fixture's teardown.
+                claim_done.set()
             await reading
 
     await asyncio.gather(claim(), rename())
@@ -342,7 +347,6 @@ async def test_a_sync_decides_it_is_current_only_once_nobody_else_is_writing(
         # part way through writing.
         catching_up = asyncio.create_task(service.sync(snapshot))
         await blocked_on_a_row(db_sessionmaker, catching_up)
-        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
         result = await catching_up
@@ -399,7 +403,6 @@ async def test_a_brand_new_item_is_judged_against_whoever_created_it_first(
 
         catching_up = asyncio.create_task(service.sync(older))
         await blocked_on_a_row(db_sessionmaker, catching_up)
-        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
         await catching_up
@@ -456,7 +459,6 @@ async def test_a_brand_new_item_whose_thread_the_winner_already_opened_is_turned
 
         catching_up = asyncio.create_task(service.sync(older))
         await blocked_on_a_row(db_sessionmaker, catching_up)
-        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
         result = await catching_up
@@ -510,7 +512,6 @@ async def test_a_brand_new_item_the_loser_knows_more_about_is_still_written(
 
         catching_up = asyncio.create_task(service.sync(newer))
         await blocked_on_a_row(db_sessionmaker, catching_up)
-        assert not catching_up.done(), "nothing overlapped, so this proves nothing"
 
         await holder.commit()
         result = await catching_up
