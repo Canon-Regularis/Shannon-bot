@@ -41,6 +41,18 @@ _SHORTHAND = re.compile(r"\bGH-(?=\d)", re.IGNORECASE)
 # `<!--` would swallow everyone else's.
 _COMMENT_OPEN = re.compile(r"<!(?=--)")
 
+# A tag that would end the container the message was put in. GitHub permits `<details>` and
+# `<summary>`, so a transcript folded into one is something a captured message can walk out
+# of, taking every later message with it.
+#
+# Both directions, because both escape. A closing tag ends the fold outright. An opening one
+# is subtler: the fold's own closer is spent on the message's tag instead, the fold is left
+# open, and GitHub's sanitiser shuts it at the end of the body, which puts everything after
+# the thread inside it.
+#
+# Narrow on purpose. `a < b` is arithmetic somebody typed and `<3` is a heart.
+_ESCAPING_TAG = re.compile(r"<(?=/|details\b|summary\b)", re.IGNORECASE)
+
 # GitHub reads a fence only at the start of a line. A balanced pair is left to render; an odd
 # one has to be closed, because left open it swallows every line after it.
 _FENCE = re.compile(r"^[ \t]*(?:```|~~~)", re.MULTILINE)
@@ -57,7 +69,8 @@ def defuse(text: str) -> str:
     text = _MENTION.sub("@" + ZERO_WIDTH_SPACE, text)
     text = _REFERENCE.sub("#" + ZERO_WIDTH_SPACE, text)
     text = _SHORTHAND.sub("GH-" + ZERO_WIDTH_SPACE, text)
-    return _COMMENT_OPEN.sub("<" + ZERO_WIDTH_SPACE + "!", text)
+    text = _COMMENT_OPEN.sub("<" + ZERO_WIDTH_SPACE + "!", text)
+    return _ESCAPING_TAG.sub("<" + ZERO_WIDTH_SPACE, text)
 
 
 # Every character GitHub reads as inline markup. Escaping all of them is only safe on a name,
@@ -127,17 +140,21 @@ def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
     return balanced("".join(pieces))
 
 
-def fit_body(body: str) -> str:
+def fit_body(body: str, *, limit: int = GITHUB_BODY_LIMIT) -> str:
     """Trim a whole comment to what GitHub will accept, on a line boundary.
 
     Lines rather than characters: a cut landing inside a fence or a link takes everything after
     it with it. The flush aims well under this limit, so reaching it means a single message was
     already near it.
+
+    `limit` is for a caller putting this inside something else. The transcript frames its
+    messages in a fold and a note, measures the frame, and asks for what is left: trimmed to the
+    whole limit instead, the frame would be what fell off the end.
     """
-    if len(body) <= GITHUB_BODY_LIMIT:
+    if len(body) <= limit:
         return body
 
-    budget = GITHUB_BODY_LIMIT - len(TRUNCATED) - len(CLOSING_FENCE)
+    budget = limit - len(TRUNCATED) - len(CLOSING_FENCE)
     kept = lines_within(body, budget)
 
     # Not passed through `balanced`, unlike the line cut below: a prefix of one over-long line

@@ -14,16 +14,23 @@ from typing import Any
 
 import pytest
 
+from shannon.domain.enums import ObjectType
 from shannon.github.mentions import MENTION_LIMIT
+from shannon.github.safe_text import GITHUB_BODY_LIMIT
+from shannon.services.transcripts.flush import BODY_BUDGET
 from shannon.services.transcripts.lines import (
-    HEADING,
+    DETAILS_OPEN_UP_TO,
     MARKER,
+    NOTE,
+    SUMMARY,
+    TITLE,
+    Relay,
     Tagged,
     TranscriptLine,
     looks_like_ours,
     not_a_transcript,
-    render,
 )
+from shannon.services.transcripts.lines import render as render_with
 
 pytestmark = pytest.mark.unit
 
@@ -47,6 +54,18 @@ def line(**changes: Any) -> TranscriptLine:
     return TranscriptLine(**fields)
 
 
+RELAY = Relay(object_type=ObjectType.PR, number=7, guild_id=1, thread_id=2)
+
+
+def render(lines: list[TranscriptLine], relay: Relay = RELAY) -> str:
+    """The body for these lines, with a relay nothing here is about.
+
+    Every test below is about what the transcript says, not about which item it lands on, and
+    spelling out the same four ids twenty-three times would bury that.
+    """
+    return render_with(relay, lines)
+
+
 @dataclass
 class FakeNote:
     """Enough of an `ItemNote` for the suppressor, which reads one field."""
@@ -56,9 +75,14 @@ class FakeNote:
 
 class TestNamingWhoSpoke:
     def test_somebody_link_knows(self) -> None:
-        said = render([line(login="alice-gh")])
+        """Linked once, in the participants row, rather than on every line they spoke.
 
-        assert "[alice-gh](https://github.com/alice-gh)" in said
+        The label is the name the thread showed them under, not the login: the row says who was
+        in the conversation, and that is who they were in it as.
+        """
+        said = render([line(author_display_name="alice", login="alice-gh")])
+
+        assert "[alice](https://github.com/alice-gh)" in said
 
     def test_the_link_text_is_never_an_at_mention(self) -> None:
         """GitHub's mention parser reads the raw markdown, so an `@` inside the brackets notifies
@@ -97,7 +121,10 @@ class TestTheComment:
         assert render([line()]).startswith(MARKER)
 
     def test_it_says_where_it_came_from(self) -> None:
-        assert HEADING in render([line()])
+        said = render([line()])
+
+        assert TITLE in said
+        assert "Discord" in said
 
     def test_every_line_is_in_it_in_order(self) -> None:
         said = render([line(content="first"), line(content="second")])
@@ -111,11 +138,107 @@ class TestTheComment:
         assert "@" + ZWSP in said
 
     def test_the_time_is_stamped_in_utc(self) -> None:
-        assert "2026-09-18 14:02 UTC" in render([line()])
+        """The date once at the top, the clock against each message.
+
+        A transcript is one sitting, so repeating the date on every line of it says nothing.
+        """
+        said = render([line()])
+
+        assert "18 Sep 2026 · 14:02 UTC" in said
+        assert "`14:02 UTC`" in said
 
     def test_a_message_and_its_attribution_are_separated_by_a_blank_line(self) -> None:
-        """A message can begin with a list or a fence, and either needs the line to itself."""
-        assert "UTC\n\ngot the repro" in render([line()])
+        """A message can begin with a list or a fence, and either needs the line to itself.
+
+        The issue asking for this format wrote the attribution with a trailing double space
+        instead. That is a line break rather than a paragraph, and a fence on the line after one
+        is not at the start of a block.
+        """
+        assert "UTC`\n\ngot the repro" in render([line()])
+
+
+class TestTheFold:
+    """The thread is collapsible, and whether it opens depends on how much of it there is."""
+
+    def test_a_short_thread_opens_expanded(self) -> None:
+        said = render([line() for _ in range(DETAILS_OPEN_UP_TO)])
+
+        assert "<details open>" in said
+
+    def test_a_long_thread_opens_shut(self) -> None:
+        """Past a certain length a transcript owns the page it is posted on, and somebody
+        scrolling to the next review comment has to scroll the whole conversation."""
+        said = render([line() for _ in range(DETAILS_OPEN_UP_TO + 1)])
+
+        assert "<details open>" not in said
+        assert "<details>" in said
+
+    def test_the_summary_says_what_is_behind_it(self) -> None:
+        assert f"<summary><strong>{SUMMARY}</strong></summary>" in render([line()])
+
+    def test_a_message_cannot_climb_out_of_it(self) -> None:
+        """The one hazard the fold introduces. A closing tag in something somebody typed would
+        end the block early and every later message would render outside it; an opening one
+        would spend the fold's own closer and leave it hanging, which GitHub shuts at the end of
+        the body, swallowing the note.
+
+        `defuse` breaks both, and this is the test that says the transcript depends on it.
+        """
+        said = render([line(content="</details> escaped? <details>")])
+
+        assert said.count("</details>") == 1, "a message ended the fold"
+        assert said.count("<details") == 1, "a message opened one of its own"
+        assert said.endswith(NOTE), "the note fell inside the fold"
+
+
+class TestWhatFramesTheThread:
+    def test_it_closes_with_a_note_saying_who_posted_it(self) -> None:
+        assert render([line()]).endswith(NOTE)
+
+    def test_the_frame_survives_a_transcript_too_long_to_fit(self) -> None:
+        """The case with no test before this one. `fit_body` trims whole lines from the end and
+        knows only about code fences, so asked to trim the whole body it would take the closing
+        tag and the note with it, leave the fold open, and have GitHub's sanitiser swallow
+        everything after the thread.
+
+        Swept rather than sampled: only a few lengths land the cut where the frame matters.
+        """
+        for count in range(300, 340):
+            said = render([line(content="x" * 200) for _ in range(count)])
+
+            assert len(said) <= GITHUB_BODY_LIMIT, f"{len(said)} at {count} messages"
+            assert said.startswith(MARKER), "the marker went, and with it the echo suppression"
+            assert said.count("</details>") == 1, "the fold lost its closer"
+            assert said.endswith(NOTE), "the note fell off the end"
+
+
+class TestTheBudgetTheFlusherFlushesOn:
+    """`BODY_BUDGET` counts what people typed; GitHub's limit is on what that renders to.
+
+    Nothing holds the two together but this. The frame and the per-message markup sit in the gap,
+    so anything added to either eats the margin, and it would be eaten silently: the body would
+    still go out, just truncated, with the end of somebody's conversation missing.
+    """
+
+    @pytest.mark.parametrize("messages", [1, 40, 200, 500])
+    def test_a_full_batch_renders_inside_what_github_takes(self, messages: int) -> None:
+        """Split every way a batch of that size can be, because the overhead is per message:
+        the same raw budget costs more the more messages it is spread across.
+        """
+        each = BODY_BUDGET // messages
+        said = render([line(content="x" * each) for _ in range(messages)])
+
+        assert len(said) <= GITHUB_BODY_LIMIT, (
+            f"{messages} messages of {each} render to {len(said)}, over GitHub's limit"
+        )
+
+    def test_the_frame_is_paid_for_once_rather_than_per_message(self) -> None:
+        """What makes the margin hold at five hundred messages. A format charging its header to
+        every line would not reach forty."""
+        one = len(render([line(content="")]))
+        two = len(render([line(content=""), line(content="")]))
+
+        assert two - one < one, "the second message cost as much as the whole first body"
 
 
 class TestTellingOneOfOursApart:
@@ -200,7 +323,7 @@ class TestWhoWasTagged:
             ]
         )
 
-        assert "[alice-gh](https://github.com/alice-gh)" in said
+        assert "[alice](https://github.com/alice-gh)" in said
         assert "[@" not in said
         assert "@bob-gh" in said
 

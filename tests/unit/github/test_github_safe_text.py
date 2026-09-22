@@ -66,6 +66,24 @@ class TestWhatWouldHideTheRest:
     def test_a_lone_angle_bracket_is_left_alone(self) -> None:
         assert defuse("a < b and c <! d") == "a < b and c <! d"
 
+    @pytest.mark.parametrize("tag", ["</details>", "</summary>", "<details>", "<SUMMARY>"])
+    def test_a_tag_that_would_end_the_fold_is_broken(self, tag: str) -> None:
+        """The transcript folds its messages into a `<details>`, so those two tags are a
+        container a captured message can walk out of.
+
+        Both directions escape. A closing tag ends the fold outright and every later message
+        renders outside it. An opening one spends the fold's own closer on the message's tag,
+        leaves the fold open, and GitHub's sanitiser shuts it at the end of the body — which
+        puts the note after the thread inside it.
+        """
+        assert "<" + ZWSP in defuse(tag)
+
+    @pytest.mark.parametrize("text", ["a < b", "<3", "<div>", "<detailsy>", "x <summarise>"])
+    def test_an_angle_bracket_that_ends_nothing_is_left_alone(self, text: str) -> None:
+        """Narrow on purpose: `a < b` is arithmetic somebody typed and `<3` is a heart. Only
+        the two tags the transcript actually builds with are worth breaking."""
+        assert defuse(text) == text
+
     def test_an_open_code_fence_is_closed(self) -> None:
         """Left open it swallows every line after it, including everyone else's attribution."""
         assert balanced("look\n```py\ncode") == "look\n```py\ncode\n```"
