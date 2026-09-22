@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, NonCallableMagicMock, create_autospec
 
 import discord
 import pytest
+from discord import ui
 
 from shannon.discord_bot.errors import (
     ChannelNotFoundError,
@@ -12,11 +13,12 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
-from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
 from shannon.discord_bot.threads import (
     ARCHIVE_AFTER_MINUTES,
     THREAD_NAME_LIMIT,
     DiscordThreadGateway,
+    Notify,
     _may_notify,
     truncate_thread_name,
     why_threads_will_not_open,
@@ -202,6 +204,42 @@ def client_with(channel: object, *, ready: bool = True) -> NonCallableMagicMock:
     stub.get_channel.return_value = channel
     stub.fetch_channel.return_value = channel
     return stub
+
+
+def a_card() -> Panel:
+    """A panel that is not plain, so `as_message` answers with components and no content."""
+    return Panel(blocks=(Block(BlockKind.BODY, "metadata"),), accent=Accent.OPEN)
+
+
+async def test_a_card_is_posted_as_components_rather_than_text() -> None:
+    """Discord refuses a message carrying components beside content, so exactly one goes.
+
+    Both arms are exercised because the choice is a branch rather than a keyword dict, and it is
+    a branch so that discord.py's overloads can be checked at all: its `LayoutView` overloads
+    take no content, and nothing splatting a dict can show it is not passing one.
+    """
+    created = thread()
+    channel = text_channel(created)
+    gateway = DiscordThreadGateway(client_with(channel))
+
+    await gateway.create(channel_id=10, name="#7 Title", panel=a_card())
+
+    sent = created.send.await_args.kwargs
+    assert "content" not in sent, "components and content together are refused by Discord"
+    assert isinstance(sent["view"], ui.LayoutView)
+
+
+async def test_a_card_opens_a_forum_post_as_components() -> None:
+    """The forum's opening post is a message and takes the same either-or."""
+    created = thread()
+    channel = forum_channel(created, message(901))
+    gateway = DiscordThreadGateway(client_with(channel))
+
+    await gateway.create(channel_id=10, name="#7 Title", panel=a_card())
+
+    opened = channel.create_thread.await_args.kwargs
+    assert "content" not in opened
+    assert isinstance(opened["view"], ui.LayoutView)
 
 
 async def test_text_channel_thread_is_created_with_its_metadata_message() -> None:
@@ -782,11 +820,23 @@ class TestWhoAMessageMayNotify:
     def test_saying_nothing_leaves_the_clients_own_rule_alone(self) -> None:
         assert _may_notify(None) == {}
 
+    @staticmethod
+    def allow_list(notify: Notify) -> discord.AllowedMentions:
+        """What `_may_notify` built, for the cases that expect it to have built one.
+
+        The keyword is absent for a caller with no opinion, so the type says it may not be
+        there. Every test below hands over an allow-list and means the present case; asserting
+        that once here is what lets them read the object rather than the dict.
+        """
+        built = _may_notify(notify)
+        assert "allowed_mentions" in built
+        return built["allowed_mentions"]
+
     def test_an_empty_allow_list_is_not_the_same_as_saying_nothing(self) -> None:
         """The two are both falsy and mean opposite things: one is a caller with no opinion and
         one is a caller saying nobody. A gateway asking `if notify` reads the second as the first
         and notifies everybody the message names, which is this whole feature inverted."""
-        allowed = _may_notify(())["allowed_mentions"]
+        allowed = self.allow_list(())
 
         assert allowed.users == []
 
@@ -796,12 +846,12 @@ class TestWhoAMessageMayNotify:
         not an HTTPException, so it would walk past the gateway's translation and be retried for
         two hours. Nothing but a live Discord or this assertion catches it.
         """
-        assert _may_notify([555, 444])["allowed_mentions"].to_dict()["users"] == [555, 444]
+        assert self.allow_list([555, 444]).to_dict()["users"] == [555, 444]
 
     def test_a_role_ping_still_reaches_the_role(self) -> None:
         """A member cannot opt out of a role ping and this must not pretend otherwise: naming
         only `users` leaves `roles` to the client, which allows them."""
-        merged = _CLIENT_RULE.merge(_may_notify([555])["allowed_mentions"])
+        merged = _CLIENT_RULE.merge(self.allow_list([555]))
 
         assert "roles" in merged.to_dict()["parse"]
 
@@ -811,8 +861,8 @@ class TestWhoAMessageMayNotify:
         own rule takes it back out, which couples the two: a client built without an
         `allowed_mentions` would have every message written here permit `@everyone`.
         """
-        alone = _may_notify([555])["allowed_mentions"].to_dict()["parse"]
-        merged = _CLIENT_RULE.merge(_may_notify([555])["allowed_mentions"]).to_dict()["parse"]
+        alone = self.allow_list([555]).to_dict()["parse"]
+        merged = _CLIENT_RULE.merge(self.allow_list([555])).to_dict()["parse"]
 
         assert "everyone" in alone, "discord.py stopped defaulting this on; the merge below is why"
         assert "everyone" not in merged

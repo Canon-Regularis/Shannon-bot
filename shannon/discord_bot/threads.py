@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, NotRequired, Protocol, TypedDict
 
 import discord
 from discord import ui
@@ -33,12 +33,19 @@ THREAD_NAME_LIMIT = 100
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
 
 
-def _said(content: str | None, view: ui.LayoutView | None) -> dict[str, object]:
-    """Discord refuses a message with components beside content, so exactly one of these is set."""
-    return {"content": content} if view is None else {"view": view}
+class _Notified(TypedDict):
+    """The allow-list keyword, present or absent.
+
+    A TypedDict rather than a plain dict so the calls below stay checkable. discord.py overloads
+    `send` and `create_thread` twelve ways; splatting a `dict[str, object]` into one tells the
+    checker nothing about the keys, so every overload fails and each reports its own mismatch.
+    That is where fifty-seven of this file's errors came from, on eleven lines.
+    """
+
+    allowed_mentions: NotRequired[discord.AllowedMentions]
 
 
-def _may_notify(notify: Notify) -> dict[str, discord.AllowedMentions]:
+def _may_notify(notify: Notify) -> _Notified:
     """No keyword rather than a permissive object.
 
     discord.py merges a per-call value over the client's and has no value meaning "leave it alone",
@@ -56,6 +63,21 @@ def _may_notify(notify: Notify) -> dict[str, discord.AllowedMentions]:
             users=[discord.Object(id=user_id) for user_id in notify]
         )
     }
+
+
+async def _post(
+    thread: discord.Thread, content: str | None, view: ui.LayoutView | None, notify: Notify
+) -> discord.Message:
+    """One message, carrying components or text and never both.
+
+    Discord refuses a message with components beside content, and `as_message` already answers
+    with one or the other. Written as a branch rather than a keyword dict because that is what
+    lets discord.py's overloads be checked: the `LayoutView` overloads take no content, and
+    nothing that hands over a dict can show it is not passing one.
+    """
+    if view is None:
+        return await thread.send(content=content, **_may_notify(notify))
+    return await thread.send(view=view, **_may_notify(notify))
 
 
 def why_threads_will_not_open(channel: object) -> str | None:
@@ -116,7 +138,10 @@ def _missing_thread_permission(channel: discord.abc.GuildChannel) -> str | None:
 
 # The longest window Discord offers before it archives a quiet thread by itself. Its default of
 # one day would archive most threads while their item was still open.
-ARCHIVE_AFTER_MINUTES = 10080
+#
+# `Final` so the value keeps its literal type. discord.py types this parameter as the four
+# windows it accepts, and a plain `int` matches none of them.
+ARCHIVE_AFTER_MINUTES: Final = 10080
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +208,7 @@ def truncate_thread_name(name: str) -> str:
 
 
 @contextlib.contextmanager
-def _translated(what: str) -> Iterator[None]:
+def _translated(what: str) -> Generator[None]:
     """Discord's refusals as this project's errors, named by what the bot was trying to do.
 
     Forbidden is a subclass of HTTPException, so catching the general one first would file a missing
@@ -212,11 +237,21 @@ class DiscordThreadGateway:
 
         if isinstance(channel, discord.ForumChannel):
             with _translated("create a thread"):
-                created = await channel.create_thread(
-                    name=name,
-                    auto_archive_duration=ARCHIVE_AFTER_MINUTES,
-                    **_said(content, view),
-                    **_may_notify(notify),
+                # Branched for the reason `_post` gives; a forum's opening post is a message.
+                created = (
+                    await channel.create_thread(
+                        name=name,
+                        auto_archive_duration=ARCHIVE_AFTER_MINUTES,
+                        content=content,
+                        **_may_notify(notify),
+                    )
+                    if view is None
+                    else await channel.create_thread(
+                        name=name,
+                        auto_archive_duration=ARCHIVE_AFTER_MINUTES,
+                        view=view,
+                        **_may_notify(notify),
+                    )
                 )
             return ThreadHandle(thread_id=created.thread.id, message_id=created.message.id)
 
@@ -234,7 +269,7 @@ class DiscordThreadGateway:
                 with _translated("post the first message"):
                     # `TextChannel.create_thread` takes neither the content nor an allow-list:
                     # it opens an empty thread and the first message is a separate call.
-                    message = await thread.send(**_said(content, view), **_may_notify(notify))
+                    message = await _post(thread, content, view, notify)
             except DiscordGatewayError as error:
                 raise ThreadStartedEmptyError(str(error), thread_id=thread.id) from error
             return ThreadHandle(thread_id=thread.id, message_id=message.id)
@@ -269,7 +304,7 @@ class DiscordThreadGateway:
         thread = await self._thread(thread_id)
         with _translated("post to the thread"):
             await self._wake(thread)
-            message = await thread.send(**_said(content, view), **_may_notify(notify))
+            message = await _post(thread, content, view, notify)
         return message.id
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
@@ -347,7 +382,7 @@ class DiscordThreadGateway:
 
         # A new message does notify, unlike the edit above, which is why `update` takes an
         # allow-list at all.
-        replacement = await thread.send(**_said(content, view), **_may_notify(notify))
+        replacement = await _post(thread, content, view, notify)
         return replacement.id
 
     def _require_a_connection(self) -> None:

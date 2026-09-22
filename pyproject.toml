@@ -148,7 +148,6 @@ warn_return_any = false
 [[tool.mypy.overrides]]
 module = [
     "shannon.container",
-    "shannon.discord_bot.threads",
     "shannon.services.sync.items",
     "shannon.services.workflow",
     "tests.fakes.github",
@@ -253,7 +252,6 @@ ignore = [
     "tests/unit/commands/test_label_commands.py",
     "tests/unit/commands/test_conversation_commands.py",
     "shannon/container.py",
-    "shannon/discord_bot/threads.py",
     "shannon/services/sync/items.py",
     "shannon/services/workflow.py",
     "tests/fakes/github.py",
