@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock, NonCallableMagicMock, create_autospec
 
 import discord
 import pytest
@@ -24,7 +24,26 @@ from shannon.discord_bot.threads import (
 from shannon.domain.errors import PermanentError
 
 
-def a_channel(kind: type, **permissions: bool) -> MagicMock:
+def stub_for(kind: type) -> NonCallableMagicMock:
+    """A discord.py object whose methods take only what the real ones take.
+
+    `spec=` checks attribute names and nothing else: the methods it hands out accept any keyword
+    at all, so every `assert_awaited_once_with(archived=..., locked=...)` below was comparing a
+    call against a mock that would have taken `archivd=` just as happily. Autospec binds each
+    call to discord.py's own signature, which is what makes those assertions mean anything.
+
+    `spec_set` closes the other half. Plain `spec=` permits SETTING an attribute the real class
+    does not have, so `stub.fetch_message = ...` kept working after a rename and the test went on
+    passing against a method that had gone. Reading one has always raised; writing one now does
+    too.
+
+    This is the only mock-based Discord boundary in the project, and `discord_bot/threads.py` is
+    on both checkers' ignore lists, so nothing else would notice either rename.
+    """
+    return create_autospec(kind, instance=True, spec_set=True)
+
+
+def a_channel(kind: type, **permissions: bool) -> NonCallableMagicMock:
     """A channel this bot has been given exactly the permissions named."""
     stub = MagicMock(spec=kind)
     if kind is discord.ForumChannel:
@@ -32,7 +51,7 @@ def a_channel(kind: type, **permissions: bool) -> MagicMock:
     held = discord.Permissions.none()
     for name, granted in permissions.items():
         setattr(held, name, granted)
-    stub.permissions_for = MagicMock(return_value=held)
+    stub.permissions_for.return_value = held
     return stub
 
 
@@ -111,16 +130,28 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
     def test_a_guild_that_is_not_cached_yet_is_not_guessed_about(self) -> None:
         """A client still starting has no member object to ask with, and the answer would be a
         guess. The type checks are the ones this function exists for."""
-        channel = MagicMock(spec=discord.TextChannel)
+        channel = stub_for(discord.TextChannel)
         channel.guild.me = None
 
         assert why_threads_will_not_open(channel) is None
 
 
-def message(message_id: int) -> MagicMock:
+def message(message_id: int) -> NonCallableMagicMock:
+    """A message a test is going to assert about, so its methods carry real signatures."""
+    stub = stub_for(discord.Message)
+    stub.id = message_id
+    return stub
+
+
+def _id_only(message_id: int) -> NonCallableMagicMock:
+    """The message a thread answers with, which is only ever read for its id.
+
+    Deliberately not autospec'd. `Message` is the most expensive class here to build one of and
+    `thread` makes two per call, which is most of what this file spends; nothing calls a method
+    on either. A test that wants to assert about what was sent takes `message` above.
+    """
     stub = MagicMock(spec=discord.Message)
     stub.id = message_id
-    stub.edit = AsyncMock()
     return stub
 
 
@@ -131,8 +162,8 @@ def thread(
     archived: bool = False,
     locked: bool = False,
     parent_id: int = 99,
-) -> MagicMock:
-    stub = MagicMock(spec=discord.Thread)
+) -> NonCallableMagicMock:
+    stub = stub_for(discord.Thread)
     stub.id = thread_id
     stub.name = name
     # Set explicitly: an unset attribute on a MagicMock is itself a Mock, which is truthy, so
@@ -142,32 +173,34 @@ def thread(
     stub.archived = archived
     stub.locked = locked
     stub.parent_id = parent_id
-    stub.send = AsyncMock(return_value=message(900))
-    stub.edit = AsyncMock()
-    stub.delete = AsyncMock()
-    stub.fetch_message = AsyncMock(return_value=message(600))
+    stub.send.return_value = _id_only(900)
+    stub.fetch_message.return_value = _id_only(600)
     return stub
 
 
-def text_channel(created: MagicMock) -> MagicMock:
-    stub = MagicMock(spec=discord.TextChannel)
-    stub.create_thread = AsyncMock(return_value=created)
+def text_channel(created: NonCallableMagicMock) -> NonCallableMagicMock:
+    stub = stub_for(discord.TextChannel)
+    stub.create_thread.return_value = created
     return stub
 
 
-def forum_channel(created: MagicMock, created_message: MagicMock) -> MagicMock:
-    stub = MagicMock(spec=discord.ForumChannel)
-    stub.create_thread = AsyncMock(return_value=MagicMock(thread=created, message=created_message))
+def forum_channel(
+    created: NonCallableMagicMock, created_message: NonCallableMagicMock
+) -> NonCallableMagicMock:
+    stub = stub_for(discord.ForumChannel)
+    stub.create_thread.return_value = MagicMock(thread=created, message=created_message)
     return stub
 
 
-def client_with(channel: object, *, ready: bool = True) -> MagicMock:
+def client_with(channel: object, *, ready: bool = True) -> NonCallableMagicMock:
+    # Not autospec'd either: nothing here asserts a keyword against the client, both the
+    # lookups take an id positionally, and it is called once per test.
     stub = MagicMock(spec=discord.Client)
     # Set explicitly. Left to the mock it answers with a truthy Mock, which is the right answer
     # by accident and would keep answering it if the gateway stopped asking.
-    stub.is_ready = MagicMock(return_value=ready)
-    stub.get_channel = MagicMock(return_value=channel)
-    stub.fetch_channel = AsyncMock(return_value=channel)
+    stub.is_ready.return_value = ready
+    stub.get_channel.return_value = channel
+    stub.fetch_channel.return_value = channel
     return stub
 
 
@@ -197,16 +230,16 @@ async def test_forum_channel_thread_carries_its_content_in_the_starter_post() ->
 
 
 async def test_creating_in_a_voice_channel_is_refused() -> None:
-    gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.VoiceChannel)))
+    gateway = DiscordThreadGateway(client_with(stub_for(discord.VoiceChannel)))
 
     with pytest.raises(ChannelNotFoundError, match="cannot hold threads"):
         await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
 
 async def test_an_unreachable_channel_is_reported() -> None:
-    client = MagicMock(spec=discord.Client)
-    client.get_channel = MagicMock(return_value=None)
-    client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "missing"))
+    client = stub_for(discord.Client)
+    client.get_channel.return_value = None
+    client.fetch_channel.side_effect = discord.NotFound(MagicMock(status=404), "missing")
     gateway = DiscordThreadGateway(client)
 
     with pytest.raises(ChannelNotFoundError):
@@ -216,7 +249,7 @@ async def test_an_unreachable_channel_is_reported() -> None:
 async def test_update_edits_the_existing_metadata_message() -> None:
     existing = thread()
     edited = message(600)
-    existing.fetch_message = AsyncMock(return_value=edited)
+    existing.fetch_message.return_value = edited
     gateway = DiscordThreadGateway(client_with(existing))
 
     handle = await gateway.update(
@@ -247,7 +280,7 @@ async def test_update_renames_only_when_the_title_changed() -> None:
 
 async def test_update_posts_a_replacement_when_the_message_was_deleted() -> None:
     existing = thread()
-    existing.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    existing.fetch_message.side_effect = discord.NotFound(MagicMock(status=404), "gone")
     gateway = DiscordThreadGateway(client_with(existing))
 
     handle = await gateway.update(
@@ -281,9 +314,9 @@ async def test_update_never_creates_a_second_thread() -> None:
 
 
 async def test_a_missing_thread_is_reported() -> None:
-    client = MagicMock(spec=discord.Client)
-    client.get_channel = MagicMock(return_value=None)
-    client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    client = stub_for(discord.Client)
+    client.get_channel.return_value = None
+    client.fetch_channel.side_effect = discord.NotFound(MagicMock(status=404), "gone")
     gateway = DiscordThreadGateway(client)
 
     with pytest.raises(ThreadNotFoundError):
@@ -291,7 +324,7 @@ async def test_a_missing_thread_is_reported() -> None:
 
 
 async def test_a_channel_that_is_not_a_thread_is_refused() -> None:
-    gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.TextChannel)))
+    gateway = DiscordThreadGateway(client_with(stub_for(discord.TextChannel)))
 
     with pytest.raises(ThreadNotFoundError, match="is not a thread"):
         await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
@@ -309,7 +342,7 @@ async def test_post_sends_into_the_thread() -> None:
 
 async def test_a_discord_failure_surfaces_as_a_gateway_error() -> None:
     existing = thread()
-    existing.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "boom"))
+    existing.send.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
     gateway = DiscordThreadGateway(client_with(existing))
 
     with pytest.raises(DiscordGatewayError):
@@ -446,14 +479,14 @@ class TestWhereAThreadIs:
         next. Discord reports a deletion only while discord.py still has the thread cached.
         """
         client = client_with(None)
-        client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(), "gone"))
+        client.fetch_channel.side_effect = discord.NotFound(MagicMock(), "gone")
 
         assert await DiscordThreadGateway(client).channel_of(thread_id=500) is None
 
     async def test_an_id_that_is_not_a_thread_answers_nothing(self) -> None:
         """The same answer, and correct: whatever the row is pointing at, it is not this item's
         thread."""
-        gateway = DiscordThreadGateway(client_with(MagicMock(spec=discord.TextChannel)))
+        gateway = DiscordThreadGateway(client_with(stub_for(discord.TextChannel)))
 
         assert await gateway.channel_of(thread_id=500) is None
 
@@ -463,14 +496,14 @@ class TestWhereAThreadIs:
         failure this path exists to undo rather than cause.
         """
         client = client_with(None)
-        client.fetch_channel = AsyncMock(side_effect=discord.Forbidden(MagicMock(), "no"))
+        client.fetch_channel.side_effect = discord.Forbidden(MagicMock(), "no")
 
         with pytest.raises(DiscordPermissionError):
             await DiscordThreadGateway(client).channel_of(thread_id=500)
 
     async def test_an_outage_is_not_read_as_gone_either(self) -> None:
         client = client_with(None)
-        client.fetch_channel = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "503"))
+        client.fetch_channel.side_effect = discord.HTTPException(MagicMock(), "503")
 
         with pytest.raises(DiscordGatewayError):
             await DiscordThreadGateway(client).channel_of(thread_id=500)
@@ -490,7 +523,7 @@ class TestPartialCreation:
 
     async def test_a_failed_first_message_still_reports_the_thread_id(self) -> None:
         created = thread()
-        created.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "boom"))
+        created.send.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
         gateway = DiscordThreadGateway(client_with(text_channel(created)))
 
         with pytest.raises(ThreadStartedEmptyError) as raised:
@@ -500,7 +533,7 @@ class TestPartialCreation:
 
     async def test_a_missing_permission_is_not_worth_retrying(self) -> None:
         created = thread()
-        created.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "nope"))
+        created.send.side_effect = discord.Forbidden(MagicMock(status=403), "nope")
         gateway = DiscordThreadGateway(client_with(text_channel(created)))
 
         with pytest.raises(ThreadStartedEmptyError) as raised:
@@ -509,10 +542,8 @@ class TestPartialCreation:
         assert isinstance(raised.value.__cause__, DiscordPermissionError)
 
     async def test_being_refused_the_thread_itself_is_a_permission_error(self) -> None:
-        channel = MagicMock(spec=discord.TextChannel)
-        channel.create_thread = AsyncMock(
-            side_effect=discord.Forbidden(MagicMock(status=403), "nope")
-        )
+        channel = stub_for(discord.TextChannel)
+        channel.create_thread.side_effect = discord.Forbidden(MagicMock(status=403), "nope")
         gateway = DiscordThreadGateway(client_with(channel))
 
         with pytest.raises(DiscordPermissionError):
@@ -535,13 +566,13 @@ class TestWhetherThisBotIsStillInTheServer:
 
     def test_a_server_it_is_in_is_answered_yes(self) -> None:
         client = client_with(None)
-        client.get_guild = MagicMock(return_value=MagicMock(spec=discord.Guild))
+        client.get_guild.return_value = stub_for(discord.Guild)
 
         assert DiscordThreadGateway(client).is_in(guild_id=1) is True
 
     def test_a_server_it_has_been_removed_from_is_answered_no(self) -> None:
         client = client_with(None)
-        client.get_guild = MagicMock(return_value=None)
+        client.get_guild.return_value = None
 
         assert DiscordThreadGateway(client).is_in(guild_id=1) is False
 
@@ -566,7 +597,7 @@ class TestDeletingAThread:
 
     async def test_failing_to_remove_one_is_not_worth_raising_over(self) -> None:
         existing = thread()
-        existing.delete = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "x"))
+        existing.delete.side_effect = discord.HTTPException(MagicMock(status=500), "x")
         gateway = DiscordThreadGateway(client_with(existing))
 
         await gateway.delete(thread_id=500)
@@ -585,10 +616,10 @@ class TestDiscordFailingOnTheLookupItself:
     """
 
     def _client_failing(self, error: Exception) -> MagicMock:
-        stub = MagicMock(spec=discord.Client)
-        stub.is_ready = MagicMock(return_value=True)
-        stub.get_channel = MagicMock(return_value=None)
-        stub.fetch_channel = AsyncMock(side_effect=error)
+        stub = stub_for(discord.Client)
+        stub.is_ready.return_value = True
+        stub.get_channel.return_value = None
+        stub.fetch_channel.side_effect = error
         return stub
 
     async def test_a_thread_lookup_that_fails_is_a_gateway_error(self) -> None:
@@ -640,9 +671,9 @@ class TestRefusedIsNotGone:
     """
 
     def _client_refusing(self) -> MagicMock:
-        stub = MagicMock(spec=discord.Client)
-        stub.get_channel = MagicMock(return_value=None)
-        stub.fetch_channel = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "no"))
+        stub = stub_for(discord.Client)
+        stub.get_channel.return_value = None
+        stub.fetch_channel.side_effect = discord.Forbidden(MagicMock(status=403), "no")
         return stub
 
     async def test_a_refused_thread_is_a_permission_error(self) -> None:
@@ -658,9 +689,9 @@ class TestRefusedIsNotGone:
             await gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
 
     async def test_a_missing_thread_is_still_reported_as_missing(self) -> None:
-        client = MagicMock(spec=discord.Client)
-        client.get_channel = MagicMock(return_value=None)
-        client.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "x"))
+        client = stub_for(discord.Client)
+        client.get_channel.return_value = None
+        client.fetch_channel.side_effect = discord.NotFound(MagicMock(status=404), "x")
         gateway = DiscordThreadGateway(client)
 
         with pytest.raises(ThreadNotFoundError):
@@ -830,7 +861,7 @@ async def test_a_replacement_for_a_deleted_metadata_message_carries_it() -> None
     somebody deleted is REPOSTED, and a repost is indistinguishable from opening the thread as
     far as everybody it names is concerned."""
     existing = thread()
-    existing.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    existing.fetch_message.side_effect = discord.NotFound(MagicMock(status=404), "gone")
     gateway = DiscordThreadGateway(client_with(existing))
 
     await gateway.update(
