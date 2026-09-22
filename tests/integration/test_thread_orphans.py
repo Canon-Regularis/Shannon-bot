@@ -34,18 +34,27 @@ class SlowToAnswer(FakeThreadGateway):
     message, and the sending half is what discord.py sleeps through when it is rate limited.
     """
 
-    def __init__(self, delay: float = 0.3) -> None:
+    def __init__(self, delay: float = 0.3, *, holds: bool = False) -> None:
         super().__init__()
         self.delay = delay
         # Set once Discord has the thread and before the answer comes back, so a test cancels at
         # the point it means to rather than wherever a sleep happens to land. The first try used
         # a sleep and cancelled during the database work instead, which proved nothing.
         self.made_one = asyncio.Event()
+        # Answers when told to rather than when a timer runs out, for the test that has to be
+        # sure the grace expired with the answer still outstanding. The grace opens the moment
+        # `made_one` is set, so a delay has to out-last it on the slowest machine anybody runs
+        # this on; an answer nobody has released cannot arrive early however loaded the box is.
+        self.holds = holds
+        self.go_on = asyncio.Event()
 
     async def create(self, **kwargs) -> ThreadHandle:
         handle = await super().create(**kwargs)
         self.made_one.set()
-        await asyncio.sleep(self.delay)
+        if self.holds:
+            await self.go_on.wait()
+        else:
+            await asyncio.sleep(self.delay)
         return handle
 
 
@@ -135,6 +144,7 @@ async def test_a_failure_during_shutdown_is_reported_in_our_own_words(
 async def test_a_gateway_that_never_answers_does_not_hold_the_process_open(
     registered: Repository,
     db_engine: AsyncEngine,
+    db_session: AsyncSession,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,9 +153,11 @@ async def test_a_gateway_that_never_answers_does_not_hold_the_process_open(
     Ten seconds in production, cut here so the test does not take ten. A thread may or may not
     exist in the channel at this point, and nothing will ever point at it, so the log is the
     only trace of it there will be.
+
+    Held rather than slowed, for the reason `SlowToAnswer.holds` gives.
     """
     monkeypatch.setattr("shannon.services.sync.threads.CLAIM_GRACE_SECONDS", 0.05)
-    threads = SlowToAnswer(delay=1.0)
+    threads = SlowToAnswer(holds=True)
     container = build_stack(db_engine, threads=threads)
 
     syncing = asyncio.create_task(container.pr_sync.sync(an_opened_pull_request()))
@@ -155,9 +167,15 @@ async def test_a_gateway_that_never_answers_does_not_hold_the_process_open(
         await asyncio.wait({syncing})
 
     assert "gave up waiting for a thread to be attached" in caplog.text
+
     # The claim is still going. Letting it land keeps the loop from closing under it, which is
-    # what production does not do and what makes the log line above true.
-    await asyncio.sleep(1.2)
+    # what production does not do and what makes the log line above true. Waited for rather than
+    # slept through: what has to be true is that the claim finished, and a sleep long enough on
+    # an idle machine covers a Postgres write that a loaded one does not finish in time.
+    threads.go_on.set()
+    async with asyncio.timeout(5):
+        while await db_session.scalar(select(TrackedItem.discord_thread_id)) is None:
+            await asyncio.sleep(0.01)
 
 
 async def test_nothing_changes_when_nobody_cancels_anything(

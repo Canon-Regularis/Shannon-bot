@@ -602,13 +602,21 @@ class TestTheLoop:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A flusher that died would take the feature with it until a restart, and nothing but one
-        line in the log would say so."""
+        line in the log would say so.
+
+        The tick is cut rather than stepped around, and that distinction is the whole of it.
+        Reaching a second pass means `_wait` timing out, and this is the only test anywhere that
+        takes that arm: anything that woke the loop another way would be faster and would stop
+        covering it. `_tick` is read inside `_wait` on every turn, so setting it here bites on
+        the next one.
+        """
         passes = []
 
         async def explode() -> None:
             passes.append(1)
             raise RuntimeError("the database went away")
 
+        monkeypatch.setattr(flusher, "_tick", timedelta(milliseconds=10))
         monkeypatch.setattr(flusher, "flush_once", explode)
 
         with caplog.at_level("ERROR", logger="shannon.services.transcripts.flush"):

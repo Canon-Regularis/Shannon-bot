@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, TypeVar
@@ -135,8 +136,13 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         if self.users is None:
-            # Anybody, and a stable id per login so two calls about one person agree.
-            return abs(hash(login.lower())) % 1_000_000 + 1
+            # Anybody, and a stable id per login so two calls about one person agree. A checksum
+            # rather than `hash`, which is salted per process: `resolve_many` drops a mention
+            # when a stored id disagrees with the item's, so a colliding id here is a test that
+            # flips between runs and cannot be reproduced, because the seed has moved on. Above
+            # every id the fixtures hand out, so a login nobody thought about cannot land on one
+            # somebody wrote down.
+            return 1_000_000_000 + zlib.crc32(login.lower().encode())
         return {name.lower(): found for name, found in self.users.items()}.get(login.lower())
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
