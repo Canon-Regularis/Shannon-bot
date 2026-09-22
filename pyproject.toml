@@ -48,6 +48,10 @@ packages = ["shannon"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A marker that is not declared below now fails collection. Both of them are applied to whole
+# tiers and never typed by hand, so the only thing this can catch is a new one somebody invented,
+# which is exactly when a warning would be missed among the others.
+addopts = ["--strict-markers"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Nothing here is allowed to wait for ever. A good many tests poll for something a background
@@ -64,6 +68,10 @@ asyncio_default_fixture_loop_scope = "function"
 timeout = 60
 markers = [
     "integration: requires a live PostgreSQL instance (SHANNON_TEST_DATABASE_URL)",
+    # Applied to the whole tier by `tests/unit/conftest.py` rather than file by file. It was on
+    # 32 of 88 files, so `-m unit` selected a third of the unit tests and read as though it
+    # selected all of them.
+    "unit: needs nothing but the interpreter",
 ]
 filterwarnings = [
     # A deprecation warning from our own code is a bug to fix, not a note to read later.
@@ -83,9 +91,14 @@ branch = true
 
 [tool.coverage.report]
 # A floor rather than a target: both are complete today, so anything under it is a regression.
-# Worth saying what it does not mean. A line running is not a behaviour being asserted, and
-# three tests here reached their subject only by luck of timing while passing either way. This
+# Worth saying what it does not mean. A line running is not a behaviour being asserted, and this
 # catches code nothing executes, which is a narrower thing than code nothing checks.
+#
+# Twice over, at a hundred per cent. Five properties ran fifteen hundred examples through the
+# webhook parsers and asserted nothing, every one of them dying at the first guard; and the
+# gateway tests pinned twenty-two keyword assertions against a mock that would have accepted any
+# keyword at all. Both were covered the whole time, and the number did not move when either
+# was fixed.
 fail_under = 100
 show_missing = true
 skip_covered = true

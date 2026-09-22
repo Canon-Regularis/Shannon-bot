@@ -230,6 +230,24 @@ def test_review_requested_does_not_duplicate_an_already_listed_reviewer() -> Non
     assert [r.login for r in snapshot.reviewers] == ["monalisa"]
 
 
+def test_a_reviewer_already_listed_under_another_id_is_not_doubled() -> None:
+    """Same login, different id, which is the shape GitHub actually sends.
+
+    The test above puts the identical `payloads.user("monalisa", 200)` at both ends, so the two
+    `Actor`s compare equal and folding by identity cannot be told from folding by login. GitHub
+    fills `requested_reviewer` from a different serialiser than the listing, so the ids and the
+    avatar url need not agree. Folded by identity, the reviewer is asked and pinged twice for one
+    request, which is the single thing that list exists to stop.
+    """
+    payload = payloads.pull_request_event("review_requested")
+    payload["requested_reviewer"] = payloads.user("monalisa", 999)
+
+    snapshot = parse_pull_request_event("review_requested", payload)
+
+    assert snapshot is not None
+    assert [r.login for r in snapshot.reviewers] == ["monalisa"]
+
+
 def test_a_team_review_request_joins_the_people_already_asked() -> None:
     """This used to assert the team was dropped, which is how the gap looked deliberate.
 
@@ -266,6 +284,36 @@ def test_a_merged_pull_request_is_detected_from_the_flag() -> None:
     assert snapshot is not None
     assert snapshot.merged is True
     assert snapshot.display_state == "merged"
+
+
+@pytest.mark.parametrize("merged", ["yes", 1, [1], {"a": 1}, "false"])
+def test_anything_truthy_in_the_merged_flag_reads_as_merged(merged: object) -> None:
+    """The `bool()` around it is load-bearing and looks redundant.
+
+    `merged` reaches a frozen slotted dataclass with no validation, and nothing downstream
+    re-checks it, so a string surviving this far is a string in `PullRequestSnapshot.merged`
+    reaching `display_state` and the thread. Every other test here passes a real bool, which is
+    exactly what a coercion cannot be caught by.
+    """
+    payload = payloads.pull_request_event("closed", state="closed", merged=merged)
+
+    snapshot = parse_pull_request_event("closed", payload)
+
+    assert snapshot is not None
+    assert snapshot.merged is True
+
+
+@pytest.mark.parametrize("draft", ["yes", 1, None, 0, [], "false"])
+def test_only_a_real_true_makes_it_a_draft(draft: object) -> None:
+    """`is True` rather than truthiness, and for the opposite reason to `merged` above: a draft
+    is what holds the mirror back, so anything GitHub sends that is not the flag itself must not
+    be read as one."""
+    payload = payloads.pull_request_event("opened", draft=draft)
+
+    snapshot = parse_pull_request_event("opened", payload)
+
+    assert snapshot is not None
+    assert snapshot.draft is False
 
 
 def test_a_merged_pull_request_is_detected_from_the_timestamp() -> None:
@@ -359,6 +407,13 @@ class TestAReviewAskedOfATeam:
         assert [r.login for r in snapshot.reviewer_teams] == ["security"]
 
     def test_a_team_already_on_the_list_is_not_doubled(self) -> None:
+        """No counterpart to the reviewer case beside this one, and there cannot be.
+
+        `mapping.team` builds `Actor(login=handle)` and sets nothing else, so two teams sharing
+        a slug are equal objects. Folding by identity and folding by slug cannot be told apart
+        here whatever the payload says; the person branch carries the difference because an
+        `Actor` built from a user also carries an id.
+        """
         payload = payloads.pull_request_event("review_requested", requested_reviewers=[])
         payload["pull_request"]["requested_teams"] = [{"slug": "security"}]
         payload["requested_team"] = {"slug": "security"}

@@ -152,8 +152,19 @@ def a_message(**changes: Any) -> Message:
     """A `FakeMessage` handed over as the `discord.Message` the capture rules are typed against.
 
     One cast, here, rather than one at every call site. A real `Message` cannot be built without a
-    live connection state, so the stand-in is structural and this is where that is admitted. The
-    test that holds every stand-in against what it replaces is what stops the shape drifting.
+    live connection state, so the stand-in is structural and this is where that is admitted.
+
+    Nothing checks that the shape below still matches, which is worth saying rather than leaving
+    somebody to assume otherwise. `test_stand_ins_match_what_they_replace` compares a fake
+    against a Protocol by reading `__protocol_attrs__` off it, and `discord.Message` is a
+    concrete class with no such attribute. Nor would this pass it: the fields below are only the
+    ones `capture` reads, and being narrower than the real thing is the very failure that table
+    exists to catch. There is no narrow Protocol to put on the other side either, because
+    `on_message` overrides discord.py's own signature and `capture` is deliberately the one
+    module in the project that touches `discord.Message` at all.
+
+    So a field discord.py renames shows up as `test_capture` or `test_client` failing, and not
+    as a conformance failure naming the field.
     """
     return cast(Message, FakeMessage(**changes))  # pyright: ignore[reportArgumentType]
 

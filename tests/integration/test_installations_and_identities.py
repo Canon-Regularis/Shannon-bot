@@ -15,7 +15,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import GitHubInstallation, IdentityVerification
@@ -171,23 +171,27 @@ class TestTwoWritersOfOneAccount:
     async def test_they_take_turns_rather_than_collide(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
-        async def remember(installation_id: int, first: asyncio.Event | None) -> None:
+        holding, let_go = asyncio.Event(), asyncio.Event()
+
+        async def remember(installation_id: int, holds: bool) -> None:
             async with db_sessionmaker() as session, session.begin():
                 await InstallationStore(session).remember(
                     installation_id=installation_id, account_login="octocat"
                 )
-                if first is not None:
-                    first.set()
-                    # Held open, so the second writer is still inside the lock when the
-                    # assertion below asks Postgres whether anybody is waiting.
-                    await asyncio.sleep(0.3)
+                if holds:
+                    holding.set()
+                    await let_go.wait()
 
-        holding = asyncio.Event()
-        one = asyncio.create_task(remember(42, holding))
+        one = asyncio.create_task(remember(42, holds=True))
         await holding.wait()
-        other = asyncio.create_task(remember(99, None))
+        other = asyncio.create_task(remember(99, holds=False))
 
+        # Held until the wait is observed rather than for a fixed moment: a sleep long enough
+        # on an idle machine is not long enough on a loaded one, and the helper answers
+        # "nothing ever blocked" rather than passing, which is the right way round but still
+        # a failure that says nothing about the lock.
         await blocked_on_a_row(db_sessionmaker, other)
+        let_go.set()
         await asyncio.gather(one, other)
 
         async with db_sessionmaker() as session:
@@ -196,26 +200,35 @@ class TestTwoWritersOfOneAccount:
             "the second writer did not replace the first, or both rows survived"
         )
 
-    async def test_two_accounts_do_not_wait_for_each_other(
+    async def test_another_account_is_not_held_up_by_it(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
-        """The other half: the lock is per account, so the App being installed on one
-        organisation cannot hold up a webhook about another."""
-        async with db_sessionmaker() as session:
-            taken = await session.scalar(
-                select(func.pg_advisory_xact_lock(8_532, func.hashtext("octocat")))
-            )
-            assert taken is None, "the lock call itself failed"
+        """The other half, and the half a lock taken on nothing in particular would fail.
 
-        async def remember(installation_id: int, login: str) -> None:
+        Every GitHub call resolves an installation, so serialising the whole table would put
+        one organisation's webhooks behind whichever other account is slowest to write.
+        """
+        holding, let_go = asyncio.Event(), asyncio.Event()
+
+        async def hold_octocat() -> None:
             async with db_sessionmaker() as session, session.begin():
                 await InstallationStore(session).remember(
-                    installation_id=installation_id, account_login=login
+                    installation_id=42, account_login="octocat"
                 )
+                holding.set()
+                await let_go.wait()
 
-        await asyncio.wait_for(
-            asyncio.gather(remember(42, "octocat"), remember(99, "hubot")), timeout=10
-        )
+        held = asyncio.create_task(hold_octocat())
+        await holding.wait()
+
+        async with db_sessionmaker() as session, session.begin():
+            await asyncio.wait_for(
+                InstallationStore(session).remember(installation_id=99, account_login="hubot"),
+                timeout=5,
+            )
+
+        let_go.set()
+        await held
 
         async with db_sessionmaker() as session:
             rows = (await session.scalars(select(GitHubInstallation))).all()
