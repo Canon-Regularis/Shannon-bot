@@ -893,6 +893,53 @@ class TestAskingWhoHoldsALogin:
                 await client.user_id("monalisa")
 
 
+class TestAskingWhichLoginAnAccountAnswersTo:
+    """The other direction, for a stored login that may have moved since. Issue #133.
+
+    A login is a label and GitHub hands it back out; the account behind it is what lasts. Asked
+    with an id rather than a name, so the answer is about the person somebody meant rather than
+    about whoever holds their old name now.
+    """
+
+    async def test_an_account_that_is_there_answers_with_its_login(self) -> None:
+        async with client_with(responds(200, {"login": "monalisa", "id": 583231})) as client:
+            assert await client.user_login(583231) == "monalisa"
+
+    async def test_an_account_that_is_gone_is_nobody(self) -> None:
+        """A deleted account, or an id nothing ever held. Both leave the caller with the name it
+        already had, which is no worse than never having asked."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            assert await client.user_login(999_999) is None
+
+    async def test_an_answer_with_no_login_in_it_is_nobody(self) -> None:
+        """GitHub always sends one. Reading a body that does not carry it as an account would
+        hand back None and read as a deletion, which is a different thing entirely."""
+        async with client_with(responds(200, {"id": 583231})) as client:
+            assert await client.user_login(583231) is None
+
+    async def test_it_asks_the_account_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({"login": "monalisa"}))
+
+        async with client_with(handler) as client:
+            await client.user_login(583231)
+
+        assert seen == ["/user/583231"]
+
+    @pytest.mark.parametrize("status", [401, 403, 500, 503])
+    async def test_anything_else_github_says_is_raised_rather_than_answered(
+        self, status: int
+    ) -> None:
+        """The same rule the call above follows. A question that could not be put is not an
+        answer, and answering None here would report a live account as deleted."""
+        async with client_with(responds(status, {"message": "nope"})) as client:
+            with pytest.raises(GitHubError):
+                await client.user_login(583231)
+
+
 class TestAWriteToARepositoryThatMoved:
     """The same 301, on the half of the client that changes something.
 

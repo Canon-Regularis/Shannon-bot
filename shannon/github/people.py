@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Final
 
 from shannon.domain.models import Actor, PullRequestSnapshot, TrackedSnapshot
 
@@ -48,6 +49,45 @@ def assignee_change(login: str, snapshot: TrackedSnapshot, *, adding: bool) -> P
     needs the network, since a snapshot says who is on an item and never who could be.
     """
     return _held(login, snapshot.assignees, adding=adding, asked="assigned to this")
+
+
+# GitHub's whole ladder, as it answers rather than as its settings page reads: it folds
+# `maintain` onto `write` and `triage` onto `read` before replying, so these two names and
+# everything else between them cover every answer there is.
+NO_ACCESS: Final = "none"
+READ_ONLY: Final = "read"
+
+
+def assignment_refusal(login: str, full_name: str, permission: str) -> str:
+    """Why GitHub would not take this account on an item, once it has already said it would not.
+
+    Issue #133. What stood here was one sentence for every refusal, guessing that the person had
+    no access to the repository. It was wrong for the case that brought this about: a
+    collaborator with write access whose login had moved since somebody linked it, so the name
+    GitHub was asked about belonged to nobody. They were told they were not in a repository they
+    had every access to.
+
+    So the permission is read rather than assumed, and each answer gets the sentence that is true
+    of it. The last one is deliberately not a guess: two GitHub answers disagreeing is not
+    something this can explain, and saying so is better than inventing a reason.
+    """
+    if permission == NO_ACCESS:
+        return (
+            f"GitHub does not have {login} as a collaborator on {full_name}, so it will not put "
+            "them on anything there. Somebody who can administer the repository has to invite "
+            "them first."
+        )
+    if permission == READ_ONLY:
+        return (
+            f"{login} can read {full_name} but cannot be assigned in it: GitHub takes an "
+            "assignee with write access or better. Triage counts as read here, which is "
+            "GitHub's own folding rather than a rule of this bot's."
+        )
+    return (
+        f"GitHub says {login} has {permission} access to {full_name} and will still not take "
+        "them as an assignee. Those two answers should agree, so the GitHub account linked to "
+        "them is worth checking."
+    )
 
 
 def _held(login: str, people: Iterable[Actor], *, adding: bool, asked: str) -> PeopleChange:
