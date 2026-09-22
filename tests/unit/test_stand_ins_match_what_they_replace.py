@@ -102,6 +102,7 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
+from shannon.services.sync.ready_lines import ReadyLine
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
@@ -203,11 +204,12 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),
     (EventHandler, RecordingHandler),
-    # Both announcers on one seam. Neither has a stand in, because a test that wants to
-    # know what reached a thread reads the fake gateway's posts instead, so these are the
+    # Every announcer on one seam. None has a stand in, because a test that wants to know
+    # what reached a thread reads the fake gateway's posts instead, so these are the
     # real-only shape `(Notifier, ActorNotifier)` already has.
     (AnnouncesInThread, LabelLine),
     (AnnouncesInThread, StateLine),
+    (AnnouncesInThread, ReadyLine),
 ]
 
 
