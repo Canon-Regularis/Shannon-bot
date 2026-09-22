@@ -141,6 +141,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, Prot
 
     async def user_id(self, login: str) -> int | None: ...
 
+    async def user_login(self, account_id: int) -> str | None: ...
+
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
@@ -257,6 +259,30 @@ class HttpGitHubClient:
             return None
         found = payload.get("id")
         return found if isinstance(found, int) else None
+
+    async def user_login(self, account_id: int) -> str | None:
+        """Which login this account answers to now, or None if GitHub has no such account.
+
+        The inverse of the call above, and here for the reason that one stores an id at all: a
+        login is a label GitHub reassigns, and the account behind it is the thing that lasts. A
+        stored login whose owner has since renamed reads to GitHub as a stranger, or as nobody,
+        and a caller holding the id can find out which.
+
+        An int rather than a string, so there is nothing to escape. Every sibling here quotes
+        what it interpolates and has a test standing behind it; this one cannot need one, which
+        is worth saying rather than leaving as an omission a reader has to work out.
+
+        Anonymous, like the call above, because the endpoint is public. That puts it on the
+        hourly budget GitHub gives one address rather than the larger one it gives an
+        installation, so a caller that would make it often should pass an owner and authenticate
+        it instead.
+        """
+        try:
+            payload = await self._get(f"/user/{account_id}")
+        except GitHubNotFoundError:
+            return None
+        found = payload.get("login")
+        return found if isinstance(found, str) else None
 
     async def compare_commits(
         self, owner: str, name: str, base: str, head: str

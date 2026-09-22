@@ -47,6 +47,32 @@ class UserLinkingService:
         )
         return username
 
+    async def bind(
+        self, *, guild_id: int, discord_user_id: int, login: str, github_user_id: int
+    ) -> str:
+        """Record an account GitHub has just vouched for, against the person it vouched to.
+
+        Nothing is checked and nothing is asked, unlike `link` above, because there is nothing
+        left to check: both halves came back from `GET /user` answering about the account that
+        had just authorised. Asking GitHub again whether that login exists would be asking it to
+        confirm its own sentence.
+
+        It replaces whatever either half was bound to, which `link` already does and which is
+        right here for a reason it is not there. A proof beats a claim: if somebody else had
+        typed this login against their own Discord account, GitHub has now said whose it is, and
+        the row that goes is the one nobody ever vouched for.
+        """
+        username = login.strip().lstrip("@").lower()
+        await self._write(guild_id, username, github_user_id, discord_user_id)
+
+        logger.info(
+            "github:%s proved to discord:%s in guild %s, and is now linked there",
+            username,
+            discord_user_id,
+            guild_id,
+        )
+        return username
+
     async def _write(
         self, guild_id: int, username: str, github_user_id: int, discord_user_id: int
     ) -> None:

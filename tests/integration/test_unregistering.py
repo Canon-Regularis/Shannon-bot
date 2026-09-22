@@ -207,9 +207,27 @@ class TestRedeemingIt:
             link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
             await verification.redeem(state=_state(link), code="abc")
 
-            assert (
-                await verification.already_proved(guild_id=GUILD, discord_user_id=ALICE)
-            ) == "octocat"
+            proved = await verification.proved_just_now(guild_id=GUILD, discord_user_id=ALICE)
+            assert proved is not None
+            assert (proved.login, proved.github_user_id) == ("octocat", 583231)
+
+    async def test_the_proof_does_not_go_stale_when_nothing_asks_for_a_recent_one(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The other read of the same row. Whether somebody is at the keyboard now and whether
+        they have ever proved anything are different questions, and only the first expires."""
+        clock = Clock()
+        handler, _ = github_says()
+
+        async with verifying(db_sessionmaker, handler, clock=clock) as verification:
+            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            await verification.redeem(state=_state(link), code="abc")
+            clock.at = NOW + timedelta(days=400)
+
+            assert await verification.proved_just_now(guild_id=GUILD, discord_user_id=ALICE) is None
+            ever = await verification.ever_proved(guild_id=GUILD, discord_user_id=ALICE)
+            assert ever is not None
+            assert ever.github_user_id == 583231
 
     async def test_a_proof_goes_stale(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
@@ -224,7 +242,7 @@ class TestRedeemingIt:
             await verification.redeem(state=_state(link), code="abc")
             clock.at = NOW + PROOF_LIFETIME + timedelta(seconds=1)
 
-            assert await verification.already_proved(guild_id=GUILD, discord_user_id=ALICE) is None
+            assert await verification.proved_just_now(guild_id=GUILD, discord_user_id=ALICE) is None
 
     async def test_one_link_cannot_be_redeemed_twice(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]

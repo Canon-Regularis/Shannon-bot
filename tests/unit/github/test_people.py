@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.models import Actor, IssueSnapshot, PullRequestSnapshot, RepositorySnapshot
-from shannon.github.people import assignee_change, reviewer_change
+from shannon.github.people import assignee_change, assignment_refusal, reviewer_change
 
 pytestmark = pytest.mark.unit
 
@@ -138,3 +138,52 @@ class TestHowTwoLoginsAreCompared:
         change = reviewer_change("bob", pull_request(reviewers=(Actor("alice"),)), adding=True)
 
         assert change.wanted is True
+
+
+class TestWhyGitHubWouldNotTakeAnAssignee:
+    """The sentence a refusal carries, which used to be the same guess whatever had happened.
+
+    Issue #133. A collaborator with write access was told he had no access to the repository,
+    because a login that had moved and a person who was never there produce the same 404 and the
+    message named only one of them. These are the three answers apart.
+    """
+
+    def test_somebody_with_no_relationship_to_the_repository(self) -> None:
+        said = assignment_refusal("newbie", "acme/widget", "none")
+
+        assert said == (
+            "GitHub does not have newbie as a collaborator on acme/widget, so it will not put "
+            "them on anything there. Somebody who can administer the repository has to invite "
+            "them first."
+        )
+
+    def test_somebody_who_can_only_read_it(self) -> None:
+        """The case the old sentence was least true of: they are in the repository, and the thing
+        they are missing is write access rather than access."""
+        said = assignment_refusal("reader", "acme/widget", "read")
+
+        assert said == (
+            "reader can read acme/widget but cannot be assigned in it: GitHub takes an assignee "
+            "with write access or better. Triage counts as read here, which is GitHub's own "
+            "folding rather than a rule of this bot's."
+        )
+
+    def test_triage_arrives_as_read_and_the_sentence_says_so(self) -> None:
+        """GitHub folds it before answering, so nothing here ever sees the word. Somebody looking
+        at a triage member in the settings page and this line beside it deserves the join."""
+        assert "Triage counts as read here" in assignment_refusal("t", "acme/widget", "read")
+
+    @pytest.mark.parametrize("permission", ["write", "admin", "maintain"])
+    def test_an_access_github_ought_to_have_accepted_is_named_as_it_came(
+        self, permission: str
+    ) -> None:
+        """Verbatim, so a name GitHub stops folding one day still reads sensibly instead of
+        falling into a bucket it does not belong in. `maintain` is the one to watch: it is folded
+        onto write today, and nothing here would notice if it stopped being."""
+        said = assignment_refusal("mona", "acme/widget", permission)
+
+        assert said == (
+            f"GitHub says mona has {permission} access to acme/widget and will still not take "
+            "them as an assignee. Those two answers should agree, so the GitHub account linked "
+            "to them is worth checking."
+        )

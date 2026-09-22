@@ -15,6 +15,7 @@ from discord import app_commands
 from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
+from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
@@ -25,12 +26,19 @@ logger = logging.getLogger(__name__)
 
 
 class VerifiesIdentity(Protocol):
-    """Proving which GitHub account a Discord account belongs to."""
+    """Proving which GitHub account a Discord account belongs to.
+
+    `proved_just_now` rather than whether they have ever proved anything: this permits an
+    irreversible command, so what matters is that the person is at the keyboard now, having just
+    come back from the browser.
+    """
 
     @property
     def configured(self) -> bool: ...
 
-    async def already_proved(self, *, guild_id: int, discord_user_id: int) -> str | None: ...
+    async def proved_just_now(
+        self, *, guild_id: int, discord_user_id: int
+    ) -> ProvedAccount | None: ...
 
     async def link_for(self, *, guild_id: int, discord_user_id: int) -> str: ...
 
@@ -70,10 +78,10 @@ def build_unregister_command(
 
         await defer(interaction)
         try:
-            login = await verification.already_proved(
+            proved = await verification.proved_just_now(
                 guild_id=guild_id, discord_user_id=interaction.user.id
             )
-            if login is None:
+            if proved is None:
                 link = await verification.link_for(
                     guild_id=guild_id, discord_user_id=interaction.user.id
                 )
@@ -84,7 +92,9 @@ def build_unregister_command(
                 )
                 return
 
-            outcome = await service.unregister(guild_id=guild_id, full_name=repository, login=login)
+            outcome = await service.unregister(
+                guild_id=guild_id, full_name=repository, login=proved.login
+            )
         except ShannonError as error:
             logger.warning("unregister failed: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))

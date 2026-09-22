@@ -28,6 +28,7 @@ from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.unregister import build_unregister_command
+from shannon.commands.verify import build_verify_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
@@ -602,12 +603,22 @@ def _relocation(
     )
 
 
-def _people(sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient) -> ItemPeople:
+def _people(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    github: GitHubClient,
+    verification: GitHubIdentityVerification,
+    *,
+    require_proved: bool,
+) -> ItemPeople:
     """Putting a person on an item, with a reader per kind and nothing that renders.
 
     No sync service and no thread gateway, unlike every other builder here, and that absence is
     the design. This writes to GitHub and stops; GitHub's own delivery comes back and the ordinary
     mirror does the rest, so anything that could touch a thread would only be a way to do it twice.
+
+    The verification is here because this is the one path that acts on GitHub as a particular
+    person, so it is the one place that has any business asking whether anybody vouched for the
+    link it is about to act on.
     """
     return ItemPeople(
         sessionmaker,
@@ -616,6 +627,8 @@ def _people(sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient
             ObjectType.PR: lambda owner, name, number: github.get_pull_request(owner, name, number),
             ObjectType.ISSUE: lambda owner, name, number: github.get_issue(owner, name, number),
         },
+        verification,
+        require_proved=require_proved,
     )
 
 
@@ -657,9 +670,12 @@ def _commands(
         build_regenerate_command(regenerate, gate),
         build_link_command(UserLinkingService(sessionmaker, github), gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
-        # The only one here with no gate, which is visible at a glance and is the point. See
-        # `_permissions.UNGATED`.
+        # The two with no gate, which is visible at a glance and is the point. See
+        # `_permissions.UNGATED`. `/verify` is handed the same linking service as `/link` above
+        # and the same verification as `/unregister`, because it is the two halves of those in
+        # one: GitHub says who somebody is, and the answer is written down as their link.
         build_mentions_command(MentionPreferences(sessionmaker)),
+        build_verify_command(UserLinkingService(sessionmaker, github), verification),
         # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
         # service, which decides from the thread whether that means a reviewer or an assignee.
         build_assign_command(people, gate),
@@ -799,7 +815,12 @@ def build_container(
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,
-            _people(sessionmaker, github),
+            _people(
+                sessionmaker,
+                github,
+                verification,
+                require_proved=settings.require_proved_links,
+            ),
             conversations,
             capturing=settings.capture_discord_messages,
         ),

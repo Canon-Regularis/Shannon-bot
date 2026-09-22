@@ -42,6 +42,24 @@
 		reverse_proxy app:8000
 	}
 
+	# Where GitHub sends somebody back after they have proved who they are, for `/unregister` and
+	# `/verify`. Public and unsigned because it has to be: a browser arrives carrying a code, with
+	# no credential of its own and nothing to sign with.
+	#
+	# What stands in for one is the `state` in the query string. It is 256 bits from
+	# `secrets.token_urlsafe`, it is spent by a single UPDATE so two clicks on one link race in
+	# Postgres rather than in Python, it expires in ten minutes, and the page echoes neither it nor
+	# the code back. Guessing one is the whole attack and there is nothing here to guess it from.
+	#
+	# Left out when this file was written, which is not a small thing: the route existed, the
+	# command handed out links to it, and every one of them landed on the catch-all below. So
+	# `/unregister` could never finish, and the failure looked like a dead domain rather than like
+	# a proxy rule. `tests/unit/test_the_proxy_forwards_every_route.py` is there so the next route
+	# cannot go the same way.
+	handle /oauth/* {
+		reverse_proxy app:8000
+	}
+
 	# Anything else is not part of this service.
 	handle {
 		respond 404

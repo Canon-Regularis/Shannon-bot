@@ -16,7 +16,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
+from shannon.db.stores.identities import (
+    IdentityVerificationStore,
+    ProvedAccount,
+    VerifiedIdentityStore,
+)
 from shannon.domain.errors import ShannonError
 from shannon.github.responses import json_object
 
@@ -79,13 +83,31 @@ class GitHubIdentityVerification:
     def callback_url(self) -> str:
         return f"{self._public_base_url}/oauth/github/callback"
 
-    async def already_proved(self, *, guild_id: int, discord_user_id: int) -> str | None:
-        """The login this person proved recently, if they proved one recently."""
+    async def proved_just_now(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
+        """The account this person proved within the last few minutes, if they proved one.
+
+        What a command asks between handing out a link and acting on it: the person went away to a
+        browser and came back, and this is how the second run knows the first one landed.
+        """
         async with self._sessionmaker() as session:
-            return await VerifiedIdentityStore(session).fresh(
+            return await VerifiedIdentityStore(session).proved(
                 guild_id=guild_id,
                 discord_user_id=discord_user_id,
                 newer_than=self._now() - PROOF_LIFETIME,
+            )
+
+    async def ever_proved(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
+        """The account this person has proved they hold, however long ago that was.
+
+        Two methods rather than one taking a window, because the difference is not a parameter: it
+        is the difference between asking permission for something irreversible and asking whether a
+        stored link was ever anything more than somebody's say-so. The second does not go stale.
+        A name somebody proved and then gave up is not a name anybody else can have quietly, since
+        what is held against the link is the account id rather than the name.
+        """
+        async with self._sessionmaker() as session:
+            return await VerifiedIdentityStore(session).proved(
+                guild_id=guild_id, discord_user_id=discord_user_id
             )
 
     async def link_for(self, *, guild_id: int, discord_user_id: int) -> str:

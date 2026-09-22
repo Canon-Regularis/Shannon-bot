@@ -39,6 +39,7 @@ class FakeGitHubClient:
         pull_requests: dict[tuple[str, int], PullRequestSnapshot] | None = None,
         issues: dict[tuple[str, int], IssueSnapshot] | None = None,
         users: dict[str, int] | None = None,
+        logins: dict[int, str] | None = None,
         compares: dict[tuple[str, str], CommitRange | None] | None = None,
         commits: dict[str, CommitStats | None] | None = None,
     ) -> None:
@@ -59,6 +60,13 @@ class FakeGitHubClient:
         # rather than a set because what `/link` needs is the account's id, not a yes.
         self.users = users
         self.user_calls: list[str] = []
+        # Which login each account id answers to now, for a caller following a rename. Derived
+        # from `users` where a test stocked that, so the two directions cannot disagree about one
+        # person. The default above cannot be inverted, because it makes an id out of a checksum
+        # of the login and a checksum does not run backwards, so an id in neither map is an
+        # account GitHub no longer has, which is the other thing this call can say.
+        self.logins = logins or {found: name for name, found in (users or {}).items()}
+        self.login_calls: list[int] = []
         self.repositories = repositories or {}
         self.pull_requests = pull_requests or {}
         self.issues = issues or {}
@@ -98,6 +106,11 @@ class FakeGitHubClient:
         # call including the read that comes first, which is no use for showing what a
         # refused WRITE leaves behind: nothing has happened yet when the read fails.
         self.write_error: Exception | None = None
+        # Raised by the two calls a refusal leans on, each alone. `error` fails everything
+        # including the reads that come first, which is no use for showing what happens when the
+        # ONE extra question cannot be put: the command is meant to carry on without its answer.
+        self.login_error: Exception | None = None
+        self.permission_error: Exception | None = None
         # Who has been put on which item, and every call that tried. The calls are recorded before
         # any staged failure is raised, so a test can assert what was asked for as well as what
         # landed.
@@ -144,6 +157,14 @@ class FakeGitHubClient:
             # somebody wrote down.
             return 1_000_000_000 + zlib.crc32(login.lower().encode())
         return {name.lower(): found for name, found in self.users.items()}.get(login.lower())
+
+    async def user_login(self, account_id: int) -> str | None:
+        self.login_calls.append(account_id)
+        if self.error is not None:
+            raise self.error
+        if self.login_error is not None:
+            raise self.login_error
+        return self.logins.get(account_id)
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         key = (f"{owner}/{name}".lower(), number)
@@ -292,7 +313,7 @@ class FakeGitHubClient:
         # Silently dropped, exactly as GitHub does it. A test that forgets the assignability
         # check should see the same nothing-happened a user would.
         self.assignees.setdefault(key, []).extend(
-            login for login in logins if login.casefold() not in self.unassignable
+            login for login in logins if self._would_assign(login)
         )
 
     async def remove_assignees(
@@ -309,7 +330,23 @@ class FakeGitHubClient:
     async def can_be_assigned(self, owner: str, name: str, login: str) -> bool:
         self.assignable_calls.append((f"{owner}/{name}".lower(), login))
         self._refuse_if_staged()
-        return login.casefold() not in self.unassignable
+        return self._would_assign(login)
+
+    def _would_assign(self, login: str) -> bool:
+        """Whether this fake's GitHub would take them, decided the way GitHub decides it.
+
+        Off the permission, because an assignee needs write access or better. These two used to
+        be unrelated pieces of state with opposite defaults, so no test could tell a refusal for
+        no access apart from a refusal for any other reason, which is the confusion issue #133
+        was reported as.
+
+        `unassignable` stays as the override, because "has write access and GitHub refuses
+        anyway" is a real answer the permission alone cannot express, and it is the one case a
+        refusal has no good explanation for.
+        """
+        if login.casefold() in self.unassignable:
+            return False
+        return self.permissions.get(login.lower(), "admin") not in {"none", "read"}
 
     def _refuse_if_staged(self) -> None:
         if self.write_error is not None:
@@ -335,6 +372,8 @@ class FakeGitHubClient:
         relationship to the repository.
         """
         self.permission_calls.append((f"{owner}/{name}".lower(), login))
+        if self.permission_error is not None:
+            raise self.permission_error
         if self.error is not None:
             raise self.error
         return self.permissions.get(login.lower(), "admin")

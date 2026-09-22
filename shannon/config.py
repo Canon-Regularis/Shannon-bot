@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # The origin the OAuth `redirect_uri` is built from. Empty makes `/unregister` refuse rather
     # than hand out a link that goes nowhere.
     public_base_url: str = ""
+    # Whether a link nobody proved may be used to write to GitHub. `/link` records a login an
+    # admin typed and nobody checked, so a wrong one acts on a real repository under somebody
+    # else's name. Off by default, because turning it on before people have run `/verify` refuses
+    # every assignment in the server; until then an unproved link still works and the reply says
+    # so. Ignored where the round trip is not configured at all, since refusing a command nobody
+    # could satisfy is only a way to break it.
+    require_proved_links: bool = False
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
     # A GitHub project board to mirror, by the number in its URL. Zero means none. Polled rather

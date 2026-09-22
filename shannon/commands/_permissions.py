@@ -19,6 +19,12 @@ SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
 WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 
 # The commands that take no gate at all, by name. `/mentions` decides only whether your own name
-# notifies you, where every other command decides something about the server. A test holds this
-# set against what the command factories actually take.
-UNGATED = frozenset({"mentions"})
+# notifies you, and `/verify` binds the one GitHub account whoever ran it has just signed into,
+# where every other command decides something about the server. A test holds this set against
+# what the command factories actually take.
+#
+# `/verify` is the odd one, since `/link` does something that looks the same and is gated. The
+# difference is what stands behind the claim: `/link` records a login nobody checked, so an
+# ungated one lets anybody take any name, and this records one GitHub has just vouched for to the
+# person in front of it. A gate would only stop somebody proving who they are.
+UNGATED = frozenset({"mentions", "verify"})

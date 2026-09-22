@@ -53,7 +53,17 @@ def build_link_command(service: LinksAccounts, gate: PermissionGate) -> SlashCom
         except InvalidGitHubUsernameError as error:
             await reply(interaction, error.message)
         else:
-            await reply(interaction, done(f"Linked GitHub user {username} to <@{target.id}>."))
+            await reply(
+                interaction,
+                done(
+                    f"Linked GitHub user {username} to <@{target.id}>."
+                    # Said every time, including a self-link. GitHub was asked whether the login
+                    # exists and never whose it is, so this is somebody's word for it whoever
+                    # typed it, and the person it names is the only one who can settle that.
+                    "\n-# That is a claim rather than proof: this bot checked the account exists, "
+                    "not that it is theirs. They can run /verify to prove it."
+                ),
+            )
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather
     # than a suppression over the whole file.

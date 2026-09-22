@@ -125,6 +125,24 @@ async def _act(
 
 def _said(outcome: PeopleOutcome, discord_user_id: int) -> str:
     """What happened, with the person written as the mention the command was given."""
+    return _did(outcome, discord_user_id) + ("" if outcome.proved else _UNPROVED)
+
+
+# Said under a change that went through on a link nobody ever proved. `/link` records a login an
+# admin typed and GitHub was never asked whose it is, so this may have acted on a real repository
+# as somebody who has nothing to do with the person named above.
+#
+# A note rather than a refusal, because every link in a server predates the command that would
+# fix it: refusing on the day this ships would stop `/assign` for everybody at once, which is the
+# trap migration 0021 exists to remember. `SHANNON_REQUIRE_PROVED_LINKS` turns it into a refusal
+# once people have had the chance.
+_UNPROVED = (
+    "\n-# Nobody has proved that account belongs to them, so this went out on somebody's word "
+    "for it. They can run /verify to settle it."
+)
+
+
+def _did(outcome: PeopleOutcome, discord_user_id: int) -> str:
     item = f"{outcome.full_name}#{outcome.number}"
     who = f"<@{discord_user_id}>"
     if outcome.role is ActorRole.REVIEWER:
