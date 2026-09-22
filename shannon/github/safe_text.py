@@ -20,6 +20,11 @@ LINE_LIMIT = 4000
 
 TRUNCATED = "\n[...]"
 
+# What `balanced` closes an odd fence with. Named because `fit_body` has to hold room for
+# it: a body trimmed to exactly the limit and then closed is a body four characters over,
+# and GitHub refuses the whole comment rather than trimming it itself.
+CLOSING_FENCE = "\n```"
+
 # `@login` and `@org/team` both notify on GitHub. GitHub reads a mention only where the `@` is
 # not preceded by a word character, so the lookbehind leaves `someone@example.com` as written
 # and still catches a raw `<@123>` that never went through `clean_content`.
@@ -77,7 +82,7 @@ def balanced(text: str) -> str:
     """
     if len(_FENCE.findall(text)) % 2 == 0:
         return text
-    return text + "\n```"
+    return text + CLOSING_FENCE
 
 
 def as_a_tag(name: str) -> str:
@@ -132,7 +137,7 @@ def fit_body(body: str) -> str:
     if len(body) <= GITHUB_BODY_LIMIT:
         return body
 
-    budget = GITHUB_BODY_LIMIT - len(TRUNCATED)
+    budget = GITHUB_BODY_LIMIT - len(TRUNCATED) - len(CLOSING_FENCE)
     kept = lines_within(body, budget)
 
     # Not passed through `balanced`, unlike the line cut below: a prefix of one over-long line

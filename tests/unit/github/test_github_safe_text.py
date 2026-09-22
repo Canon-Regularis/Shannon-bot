@@ -137,6 +137,30 @@ class TestFittingTheWholeBody:
 
         assert fit_body(body).endswith("```")
 
+    def test_the_fence_it_closes_with_is_counted_in_the_budget(self) -> None:
+        """Closing the fence is what pushed the body back over the limit.
+
+        The budget was the limit less the truncation marker, and the closer went on after it,
+        so a body trimmed to exactly the limit came back four characters over. GitHub refuses
+        the whole comment rather than trimming it itself, so the transcript is simply lost.
+
+        Swept rather than sampled: only a handful of lengths land the cut on the exact boundary
+        where the four characters matter, and a single example is as likely to miss them as hit.
+        """
+        worst = 0
+        for lines in range(32_760, 32_775):
+            body = "```\n" + "x\n" * lines
+            if len(body) <= GITHUB_BODY_LIMIT:
+                # Under the limit it is returned as written, fence open and all: `fit_body`
+                # trims, and a body nobody trimmed is nobody's to close.
+                continue
+            fitted = fit_body(body)
+            worst = max(worst, len(fitted))
+            assert fitted.endswith("```")
+
+        assert worst, "every body was under the limit, so nothing was trimmed"
+        assert worst <= GITHUB_BODY_LIMIT, f"{worst} is over GitHub's {GITHUB_BODY_LIMIT}"
+
 
 class TestATag:
     """How somebody nobody linked is written where they were tagged. Issue #121."""
