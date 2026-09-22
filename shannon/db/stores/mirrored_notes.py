@@ -16,10 +16,8 @@ class MirroredNoteStore:
     async def claim(self, tracked_item_id: int, note_key: str) -> bool:
         """Take responsibility for posting this note, reporting whether it was ours to take.
 
-        False means somebody already has it, which on a retried delivery means it is already in
-        the thread. The insert settles that itself rather than reading first: two workers can
-        lease the same row once a lease has expired, and a read followed by a write would have
-        both find nothing and both post.
+        False means somebody already has it; on a retried delivery the note is already in the
+        thread. Two workers can lease the same row once a lease expires, so the insert settles it.
         """
         claimed = await self._session.scalar(
             pg_insert(MirroredNote)

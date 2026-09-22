@@ -41,6 +41,7 @@ from shannon.domain.models import (
     Commit,
     CommitStats,
     IssueSnapshot,
+    ItemNote,
     LabelMove,
     PullRequestSnapshot,
     ReviewCommentSnapshot,
@@ -406,16 +407,17 @@ def _headed(heading: str, under: str, accent: Accent) -> Panel:
 
 
 def format_comment(
-    snapshot: CommentSnapshot,
+    snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
 ) -> Panel:
     """Render a GitHub comment for its Discord thread."""
+    assert isinstance(snapshot, CommentSnapshot)
     return _note(snapshot, "commented", mentions, roles)
 
 
 def format_review(
-    snapshot: ReviewSnapshot,
+    snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
 ) -> Panel:
@@ -424,11 +426,12 @@ def format_review(
     A review with an empty body is normal: approving without comment is the common case, and
     the verdict alone is the point.
     """
+    assert isinstance(snapshot, ReviewSnapshot)
     return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions, roles)
 
 
 def format_review_comment(
-    snapshot: ReviewCommentSnapshot,
+    snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,
     roles: Mapping[str, int] | None = None,
 ) -> Panel:
@@ -442,6 +445,7 @@ def format_review_comment(
     and `fit` drops lines from the end, so a hunk would be the first thing cut and would take the
     link back to GitHub down with it.
     """
+    assert isinstance(snapshot, ReviewCommentSnapshot)
     verb = "replied" if snapshot.in_reply_to_id is not None else "commented"
     where = _where(snapshot)
     return _note(snapshot, f"{verb} on {where}" if where else verb, mentions, roles)

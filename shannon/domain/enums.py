@@ -29,11 +29,8 @@ class Priority(StrEnum):
 class StateChange(StrEnum):
     """What a delivery did to an item, for the three moves worth saying out loud in a thread.
 
-    Not the states an item can be in, which is what the name would suggest and what
-    `display_state` actually answers. REOPENED is a move into `open` and has no state of its
-    own; CLOSED and MERGED are two ways of arriving at the same GitHub state. The three are here
-    because they are the three a reader of a thread would want announced, and there is no fourth
-    that a webhook can tell us about.
+    Not the states an item can be in, which is what `display_state` answers: REOPENED is a move
+    into `open` with no state of its own, and CLOSED and MERGED reach the same GitHub state.
     """
 
     CLOSED = "CLOSED"
@@ -44,33 +41,23 @@ class StateChange(StrEnum):
 class ActorRole(StrEnum):
     """How a GitHub user relates to a tracked item.
 
-    Only what GitHub can tell us. `PROJECT_MANAGER` was here and is gone: it is a Discord
-    permission tier, and there is no fact about a pull request or an issue that produces one, so
-    nothing ever wrote it and nothing could have. The tier still exists where it belongs, as
-    `CommandRole` in `discord_bot/roles.py`.
-
-    Neither the removal nor the addition below needs a migration. `role_type` is a plain varchar
-    with no constraint, which `varchar_enum` explains, and no row can hold a value nothing ever
-    wrote.
+    Only what GitHub can tell us; a Discord permission tier is `CommandRole` in `discord_bot`.
+    Values come and go without a migration: `role_type` is a plain varchar with no constraint.
     """
 
     AUTHOR = "AUTHOR"
     ASSIGNEE = "ASSIGNEE"
     REVIEWER = "REVIEWER"
-    # A team asked for a review, kept apart from the people asked. Apart because the two are
-    # told in different words and closed by different rules: a person's request is answered when
-    # they submit a review, and a team's is answered when any of its members does, which no
-    # payload identifies. Sharing one role would leave a team row that nothing could ever close.
+    # A team asked for a review, kept apart from the people asked: a person's request is closed
+    # when they submit a review, and a team's when any member does, which no payload identifies.
     REVIEWER_TEAM = "REVIEWER_TEAM"
 
 
 class DeliveryStatus(StrEnum):
     """How far a webhook delivery has got.
 
-    A delivery is either still going or finished with, and which is which is asked in three
-    places: the lease, the prune, and the partial index that serves them. Answering it here
-    means adding a sixth state cannot leave one of the three behind. FAILED means the attempts
-    ran out, and the row is kept with its reason so someone can see what happened.
+    Whether a delivery is still going is asked by the lease, the prune and the partial index
+    serving them, so it is answered here once. FAILED means the attempts ran out; the row stays.
     """
 
     PENDING = "PENDING"

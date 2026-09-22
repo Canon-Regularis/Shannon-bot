@@ -1,16 +1,9 @@
 """Mirroring the open items that nothing ever opened a thread for.
 
-The bot learns about an item when a webhook arrives for it, and nothing revisits one. So anything
-open before the repository was registered, and anything open through a gap in delivery, has no
-thread and never will: `/pr` and `/issue` mend one at a time, if somebody notices. Issue #74.
-
-The shape is the board poller's, because it is the same job: read a list from GitHub, compare it
-against what is already stored in one query, and mirror the gaps one at a time, tolerating an item
-that fails without abandoning the rest. What differs is that this is a person waiting on a reply
-rather than a timer, so it is capped and it counts what it did.
-
-Nothing here pings. That is not a rule this module keeps; it is a consequence of the sync services
-it is handed being built without a notifier, which is `container._refresh`.
+The bot learns about an item when a webhook arrives for it, so anything open before the
+repository was registered, or open through a gap in delivery, has no thread and never will.
+Nothing here pings: the sync services it is handed are built without a notifier, in
+`container._refresh`.
 """
 
 from __future__ import annotations
@@ -33,22 +26,10 @@ from shannon.services.sync.manual import SyncFailedError
 
 logger = logging.getLogger(__name__)
 
-# How many items one run will mirror.
-#
-# The number is fixed by Discord rather than by the deployment, which is why it is here and not in
-# Settings. A command has fifteen minutes after it defers, and each item costs two Discord calls:
-# the thread and the message in it. Twenty-five of those is fifty calls, which is about two
-# minutes even at the pessimistic end, where discord.py is sitting out thread-create rate limits
-# rather than failing on them.
-#
-# A hundred would still fit, and that is the argument against it. It fits with no margin, and the
-# failure when the margin goes is the worst one on offer: the work is done, the threads are in the
-# channel, and the reply cannot be delivered because the token has expired. What that looks like
-# from the outside is nothing happening, so it gets run again.
-#
-# Twenty-five also happens to be as many new threads as a channel can absorb at once without the
-# people reading it losing the thread, and it makes "run it again" a sentence somebody will
-# actually act on: a hundred-item backlog is four runs, not twenty.
+# How many items one run will mirror. Fixed by Discord, not by the deployment: a command has
+# fifteen minutes after it defers and each item costs two Discord calls, the thread and the
+# message in it, so a larger cap risks finishing the work after the token has expired and the
+# reply can no longer be delivered.
 MIRRORED_PER_RUN = 25
 
 
@@ -64,9 +45,8 @@ class RefreshScope(StrEnum):
 class RefreshOutcome:
     """What a run did, in numbers, for the command to turn into a sentence.
 
-    `failed` is inside `left` rather than beside it. An item this run could not mirror is still
-    untracked and a later run will try it again, so the number somebody should act on is the one
-    that counts it. Reported separately only so the reply can say some of them went wrong.
+    `failed` is counted inside `left`: an item this run could not mirror is still untracked, and
+    a later run will try it again.
     """
 
     full_name: str
@@ -104,9 +84,8 @@ class RepositoryRefresh:
                 "was mirrored."
             )
 
-        # Both lists before either is mirrored, even when the first exhausts the cap. It costs one
-        # call that might not have been needed and buys the only honest answer to "how many are
-        # still untracked", which is the number the reply asks somebody to act on.
+        # Both lists before either is mirrored, even when the first exhausts the cap: one extra
+        # GitHub call buys an honest count of how many are still untracked.
         work: list[TrackedSnapshot] = []
         already = 0
         for object_type in _kinds(scope):
@@ -130,8 +109,8 @@ class RepositoryRefresh:
     async def _registered(self, guild_id: int) -> tuple[int, RepositorySnapshot]:
         """The repository this server is bound to, as plain values.
 
-        Read out into a snapshot rather than carried as a row, because everything after this
-        happens outside the session and a detached row is a lazy load waiting to fail.
+        A snapshot rather than a row: everything after this happens outside the session, and a
+        detached row is a lazy load waiting to fail.
         """
         async with self._sessionmaker() as session:
             stored = await RepositoryStore(session).get_by_guild(guild_id)
@@ -155,10 +134,9 @@ class RepositoryRefresh:
     async def _threaded(self, repository_id: int, object_type: ObjectType) -> set[int]:
         """The items of one kind that already have a thread, in one query.
 
-        A thread rather than a row, and the difference is the point. The row is committed before
-        the Discord call that gives it one, so an item whose thread creation was refused is
-        recorded here and invisible in the channel. Counting it as tracked would leave it that way
-        for good, because nothing but a webhook ever comes back for it.
+        Keyed on the thread, not the row: the row is committed before the Discord call that gives
+        it one, so an item whose thread creation was refused is recorded here and invisible in
+        the channel, and nothing but a webhook ever comes back for it.
         """
         async with self._sessionmaker() as session:
             state = await TrackedItemStore(session).mirrored_state(
@@ -173,7 +151,7 @@ class RepositoryRefresh:
     async def _mirror(self, work: Sequence[TrackedSnapshot]) -> tuple[int, int]:
         """One item at a time, counting what landed and what did not.
 
-        Sequential rather than gathered. Every sync holds a Postgres advisory lock, and holds the
+        Sequential rather than gathered: every sync holds a Postgres advisory lock, and holds the
         connection it took it on for the whole of its Discord phase, so running these at once
         would put the pool's fifteen connections against however many items the cap allows.
         """
@@ -183,8 +161,7 @@ class RepositoryRefresh:
             try:
                 result = await self._syncs[snapshot.object_type].sync(snapshot)
             except ShannonError as refusal:
-                # One item at a time, or a single thread Discord refuses takes every item after
-                # it down with it and the reply says nothing was mirrored when most of it was.
+                # A single thread Discord refuses must not take every item after it down.
                 failed += 1
                 logger.warning(
                     "could not mirror %s#%s on a refresh: %s",
@@ -193,9 +170,7 @@ class RepositoryRefresh:
                     refusal,
                 )
             except Exception:
-                # Caught for the same reason and a stronger one: a surprise on item seven has
-                # nothing to do with items eight to twenty-five, and letting it out would strand
-                # the command with no reply at all. The traceback goes to the log whole.
+                # Letting an unexpected failure out would strand the command with no reply.
                 failed += 1
                 logger.exception(
                     "an unexpected failure mirroring %s#%s on a refresh",
@@ -204,9 +179,8 @@ class RepositoryRefresh:
                 )
             else:
                 if result.outcome is SyncOutcome.NOT_TRACKED:
-                    # Nothing about this item decided that. The sync refuses on the repository or
-                    # on the channel, so every item after it would be refused identically, each
-                    # opening a session and writing the same warning. One is enough to learn it.
+                    # A refusal on the repository or the channel, not on this item, so every
+                    # item after it would be refused identically.
                     raise SyncFailedError(
                         "The repository is registered but has no channel mapped for that. "
                         "Run /set_channel first."
@@ -217,8 +191,7 @@ class RepositoryRefresh:
 
 
 def _kinds(scope: RefreshScope) -> tuple[ObjectType, ...]:
-    """Pull requests first, so a run that reaches its cap spends it on the reviews people are
-    waiting on rather than on the issue backlog behind them."""
+    """Pull requests first, so a capped run spends it on reviews, not the issue backlog."""
     if scope is RefreshScope.PULL_REQUESTS:
         return (ObjectType.PR,)
     if scope is RefreshScope.ISSUES:

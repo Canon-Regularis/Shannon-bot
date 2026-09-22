@@ -3,11 +3,20 @@ from __future__ import annotations
 import logging
 
 import pytest
+from sqlalchemy.exc import TimeoutError as NoConnectionToSpare
 
+from shannon.domain.json import JsonObject
 from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.support.webhooks import RecordingHandler, build_client, post
 
 PR_OPENED = {"action": "opened", "number": 7}
+
+
+class SaturatedQueue:
+    """A queue whose pool has nothing left, which is what a busy deployment looks like."""
+
+    async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool:
+        raise NoConnectionToSpare("QueuePool limit of size 25 overflow 10 reached")
 
 
 @pytest.fixture
@@ -110,3 +119,20 @@ async def test_a_duplicate_is_logged(
             await post(client, "pull_request", PR_OPENED, delivery="delivery-a")
 
     assert "outcome=duplicate" in caplog.text
+
+
+async def test_a_full_pool_asks_github_to_send_the_delivery_again(
+    handler: RecordingHandler, caplog: pytest.LogCaptureFixture
+) -> None:
+    """503, not the 500 an unhandled error would be.
+
+    GitHub redelivers the first and never the second, so a pool that is full for a moment would
+    otherwise lose the delivery outright.
+    """
+    async with build_client(handler, queue=SaturatedQueue()) as client:
+        with caplog.at_level(logging.ERROR, logger="shannon.api.routes.webhooks"):
+            response = await post(client, "pull_request", PR_OPENED, delivery="delivery-a")
+
+    assert response.status_code == 503
+    assert "delivery-a" in caplog.text
+    assert handler.calls == []

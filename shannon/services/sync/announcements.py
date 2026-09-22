@@ -1,13 +1,8 @@
 """One line posted into an item's thread, because a rewritten block cannot show a change.
 
-Discord posts no message when a message is edited. It notifies nobody and it does not bump the
-thread, so everything that only moves the metadata block looks from the channel exactly like
-nothing happening. An announcer answers that for one kind of change: it decides whether this
-delivery is one it has anything to say about, and hands the words to `ClaimedLine`.
-
-The claim is what makes it safe to say. The delivery queue is at-least-once by design, so every
-other handler on this path is written to be repeatable, and posting a message is the one thing
-that is not repeatable on its own.
+Discord sends no message when a message is edited: it notifies nobody and does not bump the
+thread, so a delivery that only rewrites the metadata block looks from the channel like nothing
+happened. Posting is the one step on this path that is not repeatable, hence the claim.
 """
 
 from __future__ import annotations
@@ -33,58 +28,41 @@ logger = logging.getLogger(__name__)
 class Arrival:
     """One delivery that reached a thread, for whatever wants to say something about it.
 
-    Not the queue's `Delivery`, which is the row this was read from. That one is a payload
-    waiting to be worked; this is what it turned into once the sync had found the item, opened
-    or claimed its thread, and written the block.
-
-    The payload as well as the snapshot, because the two announcers need different halves. Which
-    label moved is named only at the top level of the raw delivery; what a closed pull request
-    did is already worked out on the snapshot, where the merged flag and the merged timestamp
-    have been reconciled once. Carrying both costs two references the handler already holds.
-
-    What is deliberately absent is the sync's outcome. Neither announcer reads it: the tag line
-    posts on a superseded delivery on purpose, and the state line asks the item's row instead,
-    which is a better question for the reason `StateLine` gives at length.
+    Not the queue's `Delivery`, which is the row this was read from. Both the payload and the
+    snapshot, because the two announcers need different halves: which label moved is named only
+    at the top level of the raw delivery, and what a closed pull request did is reconciled once
+    on the snapshot. The sync's outcome is deliberately absent, because the tag line posts on a
+    superseded delivery on purpose and the state line asks the item's row instead.
     """
 
-    # What GitHub called this delivery. Taken from the delivery rather than from the copy on the
-    # snapshot, which is optional because a sync driven by a command or the board has no action
-    # at all, so reading it there would make every announcer handle a None that cannot happen.
+    # What GitHub called this delivery. Read here rather than off the snapshot, whose copy is
+    # None for a sync driven by a command or the board.
     action: str
     snapshot: TrackedSnapshot
     payload: JsonObject
     tracked_item_id: int
     thread_id: int
-    # The number the queue gave this delivery, which is the order it reached this bot. It is what
-    # every announcement is keyed on, because the delivery is the thing that repeats.
+    # The number the queue gave this delivery. Every announcement is keyed on it, because the
+    # delivery is the thing that repeats.
     arrived: int
-    # Whether a permission refused to shut the thread on this delivery. The one thing here that
-    # is the sync's outcome rather than the delivery's, and it is carried because the row cannot
-    # say it: a thread nobody asked to shut and one Discord would not let this bot shut both
-    # leave the column reading open, and only one of them is worth a line in the thread.
+    # Whether a permission refused to shut the thread on this delivery. Carried because the row
+    # cannot say it: a thread nobody asked to shut and one Discord would not let this bot shut
+    # both leave the column reading open.
     shut_refused: bool = False
 
 
 class AnnouncesInThread(Protocol):
     """Saying one thing about a delivery, or saying nothing, which is the usual answer.
 
-    Each announcer holds its own gate rather than being handed a filtered delivery, because the
-    gates have nothing in common: one reads the payload for a label, the other reads the row to
-    find out whether the item still agrees with what the delivery says about it.
+    Each announcer holds its own gate: one reads the payload for a label, the other reads the row
+    to find out whether the item still agrees with what the delivery says about it.
     """
 
     async def say(self, arrival: Arrival) -> None: ...
 
 
 class ClaimedLine:
-    """Posts one line into a thread, once, however many times its delivery is handled.
-
-    Shared by both announcers rather than copied into each, because the interesting part of an
-    announcer is its gate and this is the part that is identical. The failure paths are the
-    other half of the argument: the last of them is only reached when a Discord failure and a
-    database failure arrive together, so a second copy would need its own test for that to keep
-    the coverage floor, and that test would prove nothing the first one has not.
-    """
+    """Posts one line into a thread, once, however many times its delivery is handled."""
 
     def __init__(
         self,
@@ -107,19 +85,10 @@ class ClaimedLine:
     ) -> None:
         """Claim the line, post it, and give the claim back if the post did not land.
 
-        `notify` defaults to None, which is what every caller but one passes and which leaves the
-        client's own rule in force untouched. Issue #112 added it because a CI result is the first
-        claimed line that has to ring anybody.
-
-        It does not let a line ping by accident. An allow-list permits a notification; it does not
-        produce one. `_person` is still the only thing that builds a mention and it still needs a
-        map to look an account up in, so a renderer handed none cannot name anybody whatever this
-        permits, which is the guarantee the commit lines rest on.
-
-        Claimed before the post and not recorded after it, for the reason the note mirror gives:
-        the queue is at-least-once by design, a delivery whose status could not be written comes
-        back when its lease runs out and is handled again from the top, and recording afterwards
-        leaves that same gap one step further along.
+        Claimed before the post, not recorded after it: the queue is at-least-once, and a delivery
+        whose status could not be written is handled again from the top when its lease runs out.
+        `notify` permits a notification rather than producing one, and `_person` still needs an
+        account map to build a mention, so a renderer handed none cannot ping anybody.
         """
         if not await self._claim(tracked_item_id, note_key):
             logger.info(
@@ -130,21 +99,16 @@ class ClaimedLine:
         try:
             await self._threads.post(thread_id=thread_id, panel=panel, notify=notify)
         except BaseException:
-            # Nothing was said, so the claim goes back or the retry reads it as already announced
-            # and the line is lost. Cancellation counts as a failure here for the reason the note
-            # mirror catches everything: the worker puts a deadline on each delivery and cancels
-            # the handler where it stands, and discord.py sleeps through a rate limit rather than
-            # failing, so where it stands is often exactly here.
+            # Nothing was said, so the claim goes back or the retry reads it as already
+            # announced and the line is lost. Cancellation counts as a failure: the worker puts a
+            # deadline on each delivery, and discord.py sleeps through a rate limit rather than
+            # failing.
             await self._hand_back(tracked_item_id, note_key)
             raise
 
         # Posting reopened the thread, because Discord will not take a message into an archived
-        # one. This is where the closing header lands, a moment after the sync shut the thread
-        # it is describing, so without this the thread the header says is closed is open.
-        #
-        # Required rather than optional, and that is deliberate. A collaborator that can be
-        # left out is one every test leaves out, and what it would be hiding is a feature that
-        # silently does nothing.
+        # one. The closing header lands here a moment after the sync shut the thread it is
+        # describing, so without this the thread the header calls closed is open.
         await self._shut_again.again(tracked_item_id=tracked_item_id, thread_id=thread_id)
 
     async def _claim(self, tracked_item_id: int, note_key: str) -> bool:
@@ -154,9 +118,9 @@ class ClaimedLine:
     async def _hand_back(self, tracked_item_id: int, note_key: str) -> None:
         """Give the claim back, shielded, and say so loudly if even that cannot be done.
 
-        Shielded because the usual reason for being here is the delivery's deadline expiring,
-        and an unshielded release would be cancelled at its first await for the same reason the
-        post was. Swallowed because the failure that brought us here is the one worth raising.
+        Shielded because the usual reason for being here is the delivery's deadline expiring, and
+        an unshielded release would be cancelled at its first await. The failure that brought us
+        here is the one worth raising, so this one is swallowed.
         """
         try:
             await asyncio.shield(self._release(tracked_item_id, note_key))

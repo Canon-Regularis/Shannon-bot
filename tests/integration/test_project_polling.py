@@ -32,6 +32,7 @@ from shannon.services.workflow import (
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support.db import map_channel, register_repository
+from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
@@ -346,7 +347,7 @@ class TestTheLoop:
         # Waited for rather than slept through. A read is a database round trip and a fake call,
         # and on a loaded machine two of them do not fit inside any sleep short enough to write,
         # so a fixed wait here passes when the box is quiet and fails when it is not.
-        await _until(lambda: len(board.reads) > 1)
+        await until(lambda: len(board.reads) > 1)
         poller.stop()
         await asyncio.wait_for(running, timeout=5)
 
@@ -369,7 +370,7 @@ class TestTheLoop:
         poller = poller_for(board)
 
         running = asyncio.create_task(poller.run_forever())
-        await _until(lambda: len(board.reads) >= 1)
+        await until(lambda: len(board.reads) >= 1)
         await asyncio.sleep(0.2)
         poller.stop()
         await asyncio.wait_for(running, timeout=5)
@@ -1605,13 +1606,6 @@ class ExplodingWorkflow:
     async def set_status(self, *, thread_id: int, status: Status) -> object:
         self.calls += 1
         raise RuntimeError("something nobody wrote a branch for")
-
-
-async def _until(condition, timeout: float = 10.0) -> None:
-    """Wait for something the poller does on its own schedule, rather than guessing at a sleep."""
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.01)
 
 
 class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:

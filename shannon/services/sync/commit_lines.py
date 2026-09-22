@@ -1,12 +1,7 @@
-"""Saying what landed on a pull request, which nothing else in the thread does.
+"""Announcing what landed on a pull request when somebody pushes.
 
-A thread says what the item is and what people said about it. Until issue #67 it said nothing at
-all about the work: somebody could push five commits and the channel would look exactly as it did
-before, because the delivery that says so was matched and dropped at the endpoint.
-
-This is the only announcer that reads GitHub. The other two work entirely off the delivery they
-were handed, so they cannot fail for a reason outside this process; this one makes up to eleven
-calls and is last in the chain for that reason.
+The only announcer that reads GitHub, and so the only one that can fail for a reason outside
+this process. It makes up to eleven calls and runs last in the chain for that reason.
 """
 
 from __future__ import annotations
@@ -27,33 +22,22 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
-# How many commits one push is allowed to say out loud.
-#
-# The arithmetic behind the number rather than a round figure somebody liked: the worker gives a
-# delivery sixty seconds, and this is ten GitHub reads plus ten Discord posts plus the sync that
-# ran before it. That is survivable only because a batch cancelled halfway has already said
-# everything it got through, and the claim it was holding when the deadline hit goes back.
-#
-# It is also about the channel. Eleven messages for one push is already the loudest thing this
-# bot does, and a rebase of forty commits landing as forty messages would bury the conversation
-# the thread exists for.
+# How many commits one push is allowed to say out loud. The worker gives a delivery sixty
+# seconds, and this is ten GitHub reads plus ten Discord posts on top of the sync that ran first.
 COMMITS_PER_PUSH = 10
 
 PUSHED = "synchronize"
 
-# What GitHub calls a head that is no longer a descendant of the base. `behind` is the one that
-# is easy to leave out and the one that matters most: a `reset --hard HEAD~3 && push --force`
-# leaves nothing ahead and `total_commits` at zero, so without it the thread says nothing at all
-# about a push that threw three commits away.
+# GitHub's compare statuses for a head that is no longer a descendant of the base. `behind` is
+# the one that matters most: a `reset --hard HEAD~3 && push --force` leaves nothing ahead and
+# `total_commits` at zero.
 REWRITTEN = frozenset({"behind", "diverged"})
 
-# And the only status worth reading commits off. `identical` is a push that changed nothing the
-# compare can see, which is what a no-op force push of the same tree looks like.
+# The only status worth reading commits off. `identical` is a no-op force push of the same tree.
 AHEAD = "ahead"
 
-# A ref of forty zeros is git's way of saying there was nothing there. It cannot happen on a pull
-# request, whose branch existed before the push by definition, but the field is read off a
-# payload and is worth refusing rather than turning into a request for a compare against nothing.
+# Git's null ref: forty zeros mean there was nothing there. It cannot happen on a pull request,
+# whose branch existed before the push, but the value is read off a payload.
 _NOTHING = "0" * 40
 
 Renderer = Callable[[Commit], Panel]
@@ -64,24 +48,10 @@ CountRenderer = Callable[[int], Panel]
 class CommitLine:
     """Posts a message per commit into a pull request's thread when somebody pushes.
 
-    The same shape as `LabelLine` and `StateLine`: it reads the delivery, decides whether it has
-    anything to say, and hands the words to `ClaimedLine`. What is different is where the words
-    come from. A push payload carries the two ends of the range and nothing else, so everything
-    a reader sees here is fetched.
-
-    Keyed on the commit's SHA rather than on the delivery, which is the one design decision in
-    this module worth arguing about. A label move is a fact about a delivery, so `LabelLine` keys
-    on one; a commit is a fact about a SHA, and a single delivery carries up to ten of them. With
-    a delivery key, a delivery that posts three of five and then fails would find the key claimed
-    on its retry and post nothing, losing two commits for good while the delivery is recorded as
-    handled. With a SHA key the retry is turned away on the three that landed and says the other
-    two.
-
-    What the key does not protect against: a rewritten commit is a new SHA and is genuinely a new
-    commit, which is what the force-push line is for. And somebody merging a branch that carries
-    their own earlier work announces it again in a different thread, because suppressing that
-    needs a call per commit asking whether the default branch already has it, which triples the
-    budget to hide something true.
+    A push payload carries the two ends of the range and nothing else, so everything a reader
+    sees here is fetched. Notes are keyed on the commit's SHA rather than the delivery, so a
+    retry after a partial batch says the commits that did not land; the cost is that a branch
+    carrying somebody's own earlier work is announced again in the thread it is merged into.
     """
 
     def __init__(
@@ -102,11 +72,10 @@ class CommitLine:
         self._left = left
 
     async def say(self, arrival: Arrival) -> None:
-        """Announce what this push did, in as few lines as tell the truth about it.
+        """Announce what this push did.
 
-        Nothing is gathered up before anything is posted. Each commit is read, claimed and said
-        before the next one is started, so a batch that runs out of time or hits a Discord failure
-        has already delivered everything up to that point rather than losing the lot.
+        Each commit is read, claimed and posted before the next one is started, so a batch
+        cancelled on the worker's deadline keeps everything it got through.
         """
         if arrival.action != PUSHED:
             return
@@ -129,10 +98,9 @@ class CommitLine:
             return
 
         if compared.status in REWRITTEN:
-            # Once, and about the rewrite rather than about its commits. Every commit on a rebased
-            # branch has a new SHA and would be announced as new work, so a rebase of five would
-            # say five things nobody did just now. Keyed on the delivery because a force push is a
-            # fact about one, and because two of them in a row are two separate things to say.
+            # Once, about the rewrite rather than its commits: every commit on a rebased branch
+            # has a new SHA and would otherwise be announced as new work. Keyed on the delivery,
+            # so two force pushes in a row say two things.
             await self._line.say_once(
                 tracked_item_id=arrival.tracked_item_id,
                 thread_id=arrival.thread_id,
@@ -152,8 +120,8 @@ class CommitLine:
         theirs = [
             commit for commit in compared.commits if _is_the_pushers_own_work(commit, pushed_by)
         ]
-        # The newest, not the first. A long branch catching up puts other people's older commits
-        # at the front of the range, and the ones somebody is waiting to review are at the end.
+        # The newest, not the first: a compare returns oldest first, and a long branch catching
+        # up puts other people's older commits at the front of the range.
         wanted = theirs[-COMMITS_PER_PUSH:]
 
         said = 0
@@ -167,9 +135,8 @@ class CommitLine:
         """One commit, read and posted, or False for one GitHub could not be read.
 
         The numbers are a call each because the commit rows inside a compare carry no `stats`
-        block at all. A commit that has gone between the compare and this read is skipped rather
-        than raised: the branch was rewritten under us, and failing the whole delivery over it
-        would lose the commits that are still there.
+        block. A commit that has gone between the compare and this read was rewritten away, and
+        is skipped rather than failing the whole delivery.
         """
         stats = await self._github.commit_stats(owner, name, ref.sha)
         if stats is None:
@@ -180,9 +147,6 @@ class CommitLine:
         await self._line.say_once(
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
-            # Off the commit rather than written out here, which is where the two other kinds of
-            # mirrored note already keep theirs. One place says what a key looks like, and the
-            # reason it is the SHA is written down beside it.
             note_key=commit.note_key,
             panel=self._render(commit),
         )
@@ -193,22 +157,17 @@ class CommitLine:
     ) -> None:
         """A footnote counting the commits this would have announced and did not.
 
-        Counted from what was kept rather than from GitHub's total, which is the difference
-        between a useful note and a lie about a merge: pulling main in brings forty commits with
-        other people's names on them, none of which this was ever going to announce, and a
-        footnote saying forty were left out would be the whole of what a merge posts.
-
-        The unlisted rows are added back on top, because a compare stops at 250 commits while
-        `total_commits` keeps counting. Nothing can be said about who wrote those, and they were
-        certainly not announced.
+        Counted from what was kept rather than from GitHub's total: pulling main in brings
+        dozens of other people's commits that were never going to be announced. The unlisted
+        rows are added back, because a compare stops at 250 commits while `total_commits` keeps
+        counting.
         """
         unlisted = max(compared.total - len(compared.commits), 0)
         left = kept - said + unlisted
         if left <= 0:
             return
 
-        # Deliberately not saying whether the cap, a merge or a failed read left them out. All of
-        # them mean the same thing to whoever is reading, which is that GitHub has the rest.
+        # One count, without saying whether the cap, a merge or a failed read left them out.
         await self._line.say_once(
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
@@ -218,7 +177,6 @@ class CommitLine:
 
 
 def _ends(payload: JsonObject) -> tuple[str, str] | None:
-    """The two ends of the push, or None for a payload that cannot say what moved."""
     before = payload.get("before")
     after = payload.get("after")
     for end in (before, after):
@@ -228,21 +186,12 @@ def _ends(payload: JsonObject) -> tuple[str, str] | None:
 
 
 def _is_the_pushers_own_work(commit: CommitRef, pushed_by: Actor | None) -> bool:
-    """Whether this commit is one the push is worth announcing.
+    """Whether this commit is the pusher's own work, and so worth announcing.
 
-    Two rules, and the second is narrower than "authored by whoever pushed" on purpose.
-
-    A merge is dropped. It carries somebody else's whole branch behind it and says nothing about
-    the work, so a pull request kept up to date with main would post one every time.
-
-    A commit is dropped when it HAS a GitHub account and that account belongs to somebody else.
-    Taken strictly, "not authored by the pusher" would also drop a commit whose account is null,
-    which happens whenever somebody's git address is not registered to their profile; that would
-    swallow their commits silently and they would have no way of guessing why. Merging main in
-    still says nothing, because main's commits have real accounts that are not the pusher's.
-
-    A push with no sender at all keeps everything. It cannot happen on a real webhook, and a
-    guess about who pushed is a worse answer than announcing a commit twice.
+    A merge is dropped: it carries somebody else's whole branch behind it, and a pull request
+    kept up to date with main would post one every time. A commit whose author has no GitHub
+    account is kept, because the account is null whenever a git address is not registered to a
+    profile and dropping those would swallow somebody's commits silently.
     """
     if commit.merge:
         return False

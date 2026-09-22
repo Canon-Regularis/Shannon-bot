@@ -51,13 +51,6 @@ def workflow(
     )
 
 
-@pytest.fixture
-async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
-    result = await sync_service.sync(pr_event("opened"))
-    assert result.thread_id is not None
-    return result.thread_id
-
-
 def added(github: FakeGitHubClient) -> list[str]:
     return [label for kind, _, label in github.label_calls if kind == "add"]
 

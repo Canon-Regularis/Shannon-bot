@@ -29,20 +29,9 @@ class UserLinkingService:
     async def link(self, *, guild_id: int, github_username: str, discord_user_id: int) -> str:
         """Bind a login to an account, refusing one GitHub has never heard of.
 
-        Asked of GitHub rather than only matched against a pattern, because the failure this
-        prevents is silent and permanent. A login nobody holds is recorded happily, the command
-        answers that it worked, and from then on that person is named in the thread as plain
-        text instead of being mentioned, which is exactly what somebody who never linked at all
-        looks like. There is nothing in the thread, the block or the log to tell the two apart,
-        so neither they nor the server admin has any way to find out.
-
-        One public call, on a command each person runs once. GitHub being unreachable makes this
-        fail rather than bind, and the reply says so: a link that cannot be checked is worth
-        less than a person trying again in a minute.
-
-        The same call answers the other half. A login is not an identity, so the account's own
-        numeric id is stored beside it, and every mention built later is checked against the
-        person somebody meant rather than against whoever holds the name by then.
+        Checked against GitHub, not just the pattern: a login nobody holds binds happily and then
+        reads as plain text, just like never linking. The numeric account id is stored beside the
+        login, because a login can change hands and a mention should follow the person.
         """
         username = github_username.strip().lstrip("@")
         if not is_login(username):
@@ -77,10 +66,8 @@ class InvalidGitHubTeamError(ShannonError):
 class TeamLinkingService:
     """Binds a GitHub team to a Discord role, so a review asked of it reaches somebody.
 
-    The sibling of the account linking above, and separate because the halves differ all the way
-    down: a person claims their own account and anybody may do that for themselves, while
-    pointing a role at a team is a decision about the server. That is why the command that drives
-    this is gated like `/set_channel` rather than like `/link`.
+    Pointing a role at a team is a decision about the server rather than a claim on one's own
+    account, so the command that drives this is gated like `/set_channel` rather than `/link`.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:

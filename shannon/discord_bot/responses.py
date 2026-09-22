@@ -7,22 +7,16 @@ from shannon.discord_bot.layout import as_message
 from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 
-# Command replies stay ephemeral. Thread traffic is the signal; an "ok, registered" seen by
-# everyone is not.
+# Command replies stay ephemeral: thread traffic is the signal, an acknowledgement is not.
 EPHEMERAL = True
 
 
 async def reply(interaction: discord.Interaction, message: str | Panel) -> None:
     """Answer an interaction whether or not it was already deferred.
 
-    A string goes as a string, and most of them are. A bar drawn down the side of one sentence
-    is louder than the sentence and says nothing the sentence does not; `done` and the refusal
-    table below are for the answers where it says something real.
-
-    Trimmed to Discord's limit here rather than at each call site. Several replies quote what
-    the person typed back at them, and a slash command argument can be far longer than a
-    message may be, so an over-long argument would otherwise make the refusal itself fail and
-    leave them with nothing at all.
+    Trimmed to Discord's limit here rather than at each call site: several replies quote what
+    the person typed back at them, and a slash command argument can be far longer than a message
+    may be, so an over-long one would make the refusal itself fail.
     """
     if isinstance(message, Panel):
         content, view = as_message(message)
@@ -36,12 +30,7 @@ async def reply(interaction: discord.Interaction, message: str | Panel) -> None:
 
 
 def done(message: str) -> Panel:
-    """A command that worked, in green.
-
-    For the answers with more than one part to them: what was done, and what that means for the
-    threads or the people it was done to. The colour is what a reader takes in first, and on
-    those it is worth having, because the sentence after it takes a moment to read.
-    """
+    """A command that worked, in green."""
     return Panel(blocks=(Block(BlockKind.HEADING, _fitted(message)),), accent=Accent.OPEN)
 
 
@@ -50,7 +39,6 @@ def _fitted(message: str) -> str:
 
 
 async def _as_text(interaction: discord.Interaction, content: str) -> None:
-    """The reply as a string, which is what most of them are."""
     if interaction.response.is_done():
         await interaction.followup.send(content, ephemeral=EPHEMERAL)
     else:
@@ -60,9 +48,9 @@ async def _as_text(interaction: discord.Interaction, content: str) -> None:
 async def _as_components(interaction: discord.Interaction, view: ui.LayoutView) -> None:
     """The reply as a card, which carries no content at all.
 
-    Its own call rather than a keyword on the one above, because Discord refuses a message
-    carrying both and discord.py types the two as separate overloads: the absence of `content`
-    is what selects the components one, so passing it as `None` is not the same thing.
+    Its own call rather than a keyword on the one above: discord.py types content and components
+    as separate overloads, and the absence of `content` is what selects this one, so passing
+    `None` is not the same thing.
     """
     if interaction.response.is_done():
         await interaction.followup.send(view=view, ephemeral=EPHEMERAL)

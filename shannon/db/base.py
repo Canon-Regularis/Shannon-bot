@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, MetaData, func
+from sqlalchemy import CursorResult, DateTime, Enum, Interval, MetaData, func, literal
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.dml import UpdateBase
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.expression import cast
 
 # Explicit naming so Alembic autogenerate produces stable constraint names across revisions.
 NAMING_CONVENTION = {
@@ -15,31 +20,28 @@ NAMING_CONVENTION = {
 }
 
 
-def varchar_enum(python_enum: type, name: str) -> Enum:
+def _values_of(python_enum: type[StrEnum]) -> list[str]:
+    """What SQLAlchemy writes, which is the value rather than the member name."""
+    return [member.value for member in python_enum]
+
+
+def varchar_enum(python_enum: type[StrEnum], name: str) -> Enum:
     """Store an enum as VARCHAR rather than a native PostgreSQL type.
 
-    A native enum needs an ALTER TYPE migration every time a later stage adds a value, and two
-    stages are still to come. The cost is that nothing constrains the column: `create_constraint`
-    defaults to False, so no CHECK is emitted and the database will take any string that fits.
-    The application is the only thing enforcing these values.
-
-    Worth knowing what that costs if something else ever writes one. SQLAlchemy raises
-    `LookupError` on the way out, for the whole query rather than the one row, so a single value
-    the code does not recognise makes every read of that table fail rather than that item
-    misbehave. Reached by editing the database by hand, or by rolling back to a version whose
-    enum is missing a value a newer one wrote. Adding a value is safe in both directions; taking
-    one away needs the rows carrying it moved first.
-
-    Here rather than in `models.py` because it is a decision about how this schema renders, which
-    is what this module is for, and `NAMING_CONVENTION` above is the same kind of decision made
-    for the same reason.
+    A native enum needs an ALTER TYPE migration for every value a later stage adds. The cost is
+    that nothing constrains the column: `create_constraint` defaults to False, so no CHECK is
+    emitted and the database takes any string that fits, leaving the application to enforce these
+    values. A value the code does not recognise — edited in by hand, or written by a newer version
+    — then fails every read of that table rather than the one row, because SQLAlchemy raises
+    `LookupError` for the whole query. Adding a value is safe in both directions; taking one away
+    needs the rows carrying it moved first.
     """
     return Enum(
         python_enum,
         name=name,
         native_enum=False,
         length=32,
-        values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        values_callable=_values_of,
     )
 
 
@@ -57,3 +59,21 @@ class TimestampMixin:
         onupdate=func.now(),
         nullable=False,
     )
+
+
+def interval(value: timedelta) -> ColumnElement[timedelta]:
+    """A timedelta as something the database can add to a timestamp."""
+    return cast(literal(value), Interval)
+
+
+async def rows_changed(session: AsyncSession, statement: UpdateBase) -> int:
+    """How many rows an INSERT, UPDATE or DELETE touched.
+
+    Only `CursorResult` carries `rowcount`, and a DML statement always produces one, but
+    `AsyncSession.execute` promises only `Result`. Asserted rather than tested with an `if`, which
+    would be an arm no test could reach under a hundred per cent branch floor; an always-true
+    assert is a plain statement to coverage.py.
+    """
+    result = await session.execute(statement)
+    assert isinstance(result, CursorResult)
+    return int(result.rowcount)

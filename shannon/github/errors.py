@@ -24,13 +24,8 @@ class GitHubRateLimitError(GitHubError):
 class GitHubRefusedError(GitHubError):
     """GitHub understood the request perfectly well and would not do it.
 
-    Its own type rather than falling in with the unavailable one, because the two want opposite
-    things. A GitHub that could not be reached is worth trying again; a refusal never is, and it is
-    almost always something the person who asked can put right themselves: a reviewer who is not a
-    collaborator on the repository, the pull request's own author, somebody who was already asked.
-
-    The message is GitHub's own. It names which of those it was, and any sentence written here
-    would be a worse guess kept in step with GitHub's list by hand.
+    Never worth retrying, unlike a GitHub that could not be reached: a reviewer who is not a
+    collaborator, the author themselves, somebody already asked. The message is GitHub's own.
     """
 
 

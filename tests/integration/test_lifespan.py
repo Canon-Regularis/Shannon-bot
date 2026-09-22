@@ -133,9 +133,18 @@ class TestStartingUp:
         """Starting anyway would accept deliveries and fail every one of them behind the port.
 
         A refused connection surfaces as OSError rather than anything SQLAlchemy wraps, which
-        is why the lifespan catches broadly and reports rather than matching a type.
+        is why the lifespan catches broadly and reports rather than matching a type. The two
+        beside this one drive the same handler with a `SQLAlchemyError`, so this is the only
+        place that says the catch cannot be narrowed to one.
+
+        The address is written out rather than `localhost`, which resolves to `::1` and
+        `127.0.0.1` both and so pays for two refusals. Measured here: 4.06s against 2.02s, all
+        of it Windows retransmitting before it reports the refusal. Linux answers at once either
+        way, so this buys nothing on CI and halves it for anybody working on Windows. The
+        refusal is still the kernel's; faking it would leave the paragraph above describing a
+        stub in this same function.
         """
-        engine = create_async_engine("postgresql+asyncpg://nobody:nobody@localhost:1/nothing")
+        engine = create_async_engine("postgresql+asyncpg://nobody:nobody@127.0.0.1:1/nothing")
         _, lifespan = await runbuild_lifespan(
             FakeBot(), container_for(engine, FakeWorker(), ClosingGitHub()), settings_with()
         )
@@ -184,9 +193,7 @@ class TestStartingUp:
         # time is the assertion: `wait_for` raises the same TimeoutError and proves nothing.
         started = asyncio.get_running_loop().time()
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(
-                lifespan_module.require_a_working_database(NeverAnswers()), timeout=5
-            )
+            await asyncio.wait_for(lifespan_module.require_database(NeverAnswers()), timeout=5)
 
         assert asyncio.get_running_loop().time() - started < 1, "it waited on the outer bound"
 

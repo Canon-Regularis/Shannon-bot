@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 OWNER = "Canon-Regularis"
@@ -313,3 +315,11 @@ def check_suite_event(
         "repository": repository(),
         "sender": user("octocat", 583231),
     }
+
+
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "payloads"
+
+
+def load(name: str) -> dict[str, Any]:
+    """A recorded GitHub webhook body, read off disk."""
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))

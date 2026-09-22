@@ -188,3 +188,11 @@ def issue_event():
         return snapshot
 
     return build
+
+
+@pytest.fixture
+async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
+    """A pull request already mirrored, which is where most of these tests start."""
+    result = await sync_service.sync(pr_event("opened"))
+    assert result.thread_id is not None
+    return result.thread_id

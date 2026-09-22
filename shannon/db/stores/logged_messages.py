@@ -1,4 +1,4 @@
-"""The messages captured from a thread, waiting to be published. Issue #103."""
+"""The messages captured from a thread, waiting to be published."""
 
 from __future__ import annotations
 
@@ -15,10 +15,9 @@ from shannon.db.models import LoggedMessage
 def mentioned_in(message: LoggedMessage) -> dict[int, str]:
     """Who this message tagged, by Discord id.
 
-    The column holds a JSON object and JSON has no integer keys, so the ids go in as
-    decimal strings and come back here. A key that is not one is skipped rather than
-    raised on: capture is the only writer, so any other shape could only be a hand edit,
-    and a whole transcript refusing to publish over one is the worse failure.
+    The column holds a JSON object and JSON has no integer keys, so the ids go in as decimal
+    strings. A key that is not one is skipped rather than raised on, since a whole transcript
+    refusing to publish over one hand edit is the worse failure.
     """
     return {int(who): name for who, name in message.mentions.items() if who.isdigit()}
 
@@ -42,10 +41,9 @@ class LoggedMessageStore:
     ) -> None:
         """Keep one message until it is published.
 
-        Idempotent on the message id, because discord.py redelivers an event after a resumed
-        session and the same message would otherwise be transcribed twice. Doing nothing on a
-        conflict rather than updating is what makes edits a no-op without a rule anywhere saying
-        so: a second arrival of a message already held changes nothing.
+        Idempotent on the message id: discord.py redelivers an event after a resumed session,
+        and the same message would otherwise be transcribed twice. Doing nothing on a conflict
+        rather than updating is also what makes an edit a no-op.
         """
         await self._session.execute(
             pg_insert(LoggedMessage)
@@ -64,8 +62,8 @@ class LoggedMessageStore:
     async def through(self, conversation_id: int, through_id: int) -> Sequence[LoggedMessage]:
         """The claimed batch, oldest first.
 
-        Ordered by id rather than by `said_at`, so the transcript reads in the order the thread
-        was written in even where two messages share a timestamp.
+        Ordered by id rather than `said_at`, so two messages sharing a timestamp still read in
+        the order the thread was written in.
         """
         found = await self._session.scalars(
             select(LoggedMessage)
@@ -89,12 +87,8 @@ class LoggedMessageStore:
     async def forget(self, message_ids: Sequence[int]) -> None:
         """Drop messages deleted in Discord before they were published.
 
-        Retraction rather than accuracy, which is why this exists and why editing a message does
-        not change what is published. Deleting something before it goes out is a rule somebody can
-        hold in their head and act on; whether an edit lands would depend on invisible timing.
-
-        By message id alone rather than per conversation, because a raw delete event carries a
-        channel and a message and the caller has already decided the channel is one being logged.
+        By message id alone rather than per conversation: a raw delete event carries a channel
+        and a message, and the caller has already decided the channel is one being logged.
         """
         if not message_ids:
             return

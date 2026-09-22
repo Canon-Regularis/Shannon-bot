@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from contextlib import AbstractAsyncContextManager
 
 from fastapi import FastAPI
 
@@ -17,23 +17,18 @@ def create_app(
     settings: Settings | None = None,
     event_router: EventIntake | None = None,
     queue: DeliveryInbox | None = None,
-    lifespan: Callable[[FastAPI], Any] | None = None,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
-    """Build the ASGI app.
-
-    Collaborators are arguments rather than module globals so tests can hand in their own
-    router without touching the environment. Leaving the queue out makes the route do the work
-    inline, which is what the route-level tests want.
-    """
+    """Build the ASGI app. Leaving the queue out makes the route do its work inline."""
     app = FastAPI(title="Shannon Bot", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings or get_settings()
     app.state.event_router = event_router or EventRouter()
     app.state.delivery_queue = queue
     # Set by the lifespan once the worker exists. Without it /health can only report that the
-    # port is open, which is what it says.
+    # port is open.
     app.state.liveness = None
-    # Set by the lifespan once the container exists, the same way `liveness` is. The OAuth route
-    # is entered from outside rather than called, so it reads what it needs off app state.
+    # Set by the lifespan once the container exists. The OAuth route is entered from outside
+    # rather than called, so it reads what it needs off app state.
     app.state.verification = None
     app.include_router(webhooks.router)
     app.include_router(health.router)

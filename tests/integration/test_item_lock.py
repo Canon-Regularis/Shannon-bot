@@ -12,9 +12,16 @@ import contextlib
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.services.sync.one_at_a_time import _ONE_ITEM_AT_A_TIME, ItemLock, _lock_key
+from shannon.services.sync import one_at_a_time
+from shannon.services.sync.one_at_a_time import (
+    _ONE_ITEM_AT_A_TIME,
+    ItemBusyError,
+    ItemLock,
+    _lock_key,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -186,3 +193,103 @@ async def test_the_note_of_holding_it_is_given_back_after_a_failure(
         assert await postgres_holds(db_sessionmaker, ONE), (
             "the second hold took nothing, so the first one's note was never given back"
         )
+
+
+async def test_a_writer_that_waits_too_long_is_told_to_come_back(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The wait has an end, and reaching it is an error rather than a hang.
+
+    Without one, a writer parks in `pg_advisory_xact_lock` until something cancels it, and
+    cancelling a task blocked there has asyncpg open a second socket for the cancel and wait on
+    that unbounded. The poller has nothing that would cancel it at all.
+    """
+    await warm_the_pool(db_sessionmaker)
+    holding = asyncio.Event()
+    let_go = asyncio.Event()
+
+    async def holder() -> None:
+        async with ItemLock(db_sessionmaker).held(ONE):
+            holding.set()
+            await let_go.wait()
+
+    held = asyncio.create_task(holder())
+    await holding.wait()
+
+    async def waiter() -> None:
+        async with ItemLock(db_sessionmaker, wait_for=0.2).held(ONE):
+            pass
+
+    with pytest.raises(ItemBusyError):
+        await asyncio.wait_for(waiter(), timeout=10)
+
+    let_go.set()
+    await held
+
+
+async def test_giving_up_leaves_nothing_behind(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The note of holding it is given back, so the retry that follows is not walked past.
+
+    `ItemBusyError` is raised on the way in rather than out of the block, which is the one path
+    where the note is set and the lock never taken.
+    """
+    await warm_the_pool(db_sessionmaker)
+    holding = asyncio.Event()
+    let_go = asyncio.Event()
+
+    async def holder() -> None:
+        async with ItemLock(db_sessionmaker).held(ONE):
+            holding.set()
+            await let_go.wait()
+
+    held = asyncio.create_task(holder())
+    await holding.wait()
+
+    waiter = ItemLock(db_sessionmaker, wait_for=0.2)
+    with pytest.raises(ItemBusyError):
+        async with waiter.held(ONE):
+            pass
+
+    let_go.set()
+    await held
+
+    async with waiter.held(ONE):
+        assert await postgres_holds(db_sessionmaker, ONE), (
+            "the retry took nothing, so the refused attempt left its note behind"
+        )
+
+
+async def test_a_database_error_that_is_not_the_timeout_arrives_as_itself(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `55P03` becomes `ItemBusyError`.
+
+    Anything else reaching that except - a connection dropped mid-statement, a refused
+    statement - has to come out as what it is. Disguised as `ItemBusyError` it would be told
+    to every caller as somebody else holding the item, put on the worker's ordinary backoff,
+    and an outage would read as contention for two hours.
+
+    Staged by moving the code rather than the error, because the error this raises for real is
+    the one code it is meant to catch.
+    """
+    monkeypatch.setattr(one_at_a_time, "_LOCK_NOT_AVAILABLE", "00000")
+    await warm_the_pool(db_sessionmaker)
+    holding, let_go = asyncio.Event(), asyncio.Event()
+
+    async def holder() -> None:
+        async with ItemLock(db_sessionmaker).held(ONE):
+            holding.set()
+            await let_go.wait()
+
+    held = asyncio.create_task(holder())
+    await holding.wait()
+
+    with pytest.raises(DBAPIError) as raised:
+        async with ItemLock(db_sessionmaker, wait_for=0.2).held(ONE):
+            pass
+    assert not isinstance(raised.value, ItemBusyError)
+
+    let_go.set()
+    await held

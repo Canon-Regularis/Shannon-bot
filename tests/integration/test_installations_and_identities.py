@@ -11,15 +11,17 @@ against a fake would be asserting that the fake settles races.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import GitHubInstallation, IdentityVerification
 from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
 from shannon.db.stores.installations import InstallationStore
+from tests.support.db import blocked_on_a_row
 
 pytestmark = pytest.mark.integration
 
@@ -121,7 +123,7 @@ class TestWhichInstallationCoversAnOwner:
         store = InstallationStore(db_session)
         await store.remember(installation_id=42, account_login="octocat")
 
-        await store.set_suspended(42, suspended=True)
+        await store.remember(installation_id=42, account_login="octocat", suspended=True)
 
         found = await store.for_owner("octocat")
         assert found is not None
@@ -131,18 +133,106 @@ class TestWhichInstallationCoversAnOwner:
         store = InstallationStore(db_session)
         await store.remember(installation_id=42, account_login="octocat", suspended=True)
 
-        await store.set_suspended(42, suspended=False)
+        await store.remember(installation_id=42, account_login="octocat", suspended=False)
 
         found = await store.for_owner("octocat")
         assert found is not None
         assert found.suspended is False
 
-    async def test_suspending_something_that_is_not_there_is_not_an_error(
+    async def test_suspending_something_that_is_not_there_writes_the_row(
         self, db_session: AsyncSession
     ) -> None:
         """A suspend for an installation this bot never recorded is ordinary: the App may have
-        been installed while the process was down. There is nothing to do and nothing to fail."""
-        await InstallationStore(db_session).set_suspended(999, suspended=True)
+        been installed while the process was down. The row is written rather than skipped, so the
+        next lookup says the App is off instead of never installed."""
+        store = InstallationStore(db_session)
+
+        await store.remember(installation_id=999, account_login="octocat", suspended=True)
+
+        found = await store.for_owner("octocat")
+        assert found is not None
+        assert found.suspended is True
+
+
+class TestTwoWritersOfOneAccount:
+    """A reinstall and a transfer can land together, and neither may lose to the other.
+
+    `remember` clears the row holding the login and upserts on the installation id, which are
+    two constraints and two statements. Run twice at once without a lock, the clear from one
+    lands between the other's clear and its insert, and the insert then conflicts on the
+    constraint `ON CONFLICT` does not name: an `IntegrityError` out of a webhook handler, or two
+    writers deadlocked against each other.
+
+    GitHub sends `installation.created`, `installation.deleted` and `installation_repositories`
+    for one account in the same second, and the worker's batch is worked in order, so the
+    writers that collide are the worker and an inline directory refresh.
+    """
+
+    async def test_they_take_turns_rather_than_collide(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        holding, let_go = asyncio.Event(), asyncio.Event()
+
+        async def remember(installation_id: int, holds: bool) -> None:
+            async with db_sessionmaker() as session, session.begin():
+                await InstallationStore(session).remember(
+                    installation_id=installation_id, account_login="octocat"
+                )
+                if holds:
+                    holding.set()
+                    await let_go.wait()
+
+        one = asyncio.create_task(remember(42, holds=True))
+        await holding.wait()
+        other = asyncio.create_task(remember(99, holds=False))
+
+        # Held until the wait is observed rather than for a fixed moment: a sleep long enough
+        # on an idle machine is not long enough on a loaded one, and the helper answers
+        # "nothing ever blocked" rather than passing, which is the right way round but still
+        # a failure that says nothing about the lock.
+        await blocked_on_a_row(db_sessionmaker, other)
+        let_go.set()
+        await asyncio.gather(one, other)
+
+        async with db_sessionmaker() as session:
+            rows = (await session.scalars(select(GitHubInstallation))).all()
+        assert [row.installation_id for row in rows] == [99], (
+            "the second writer did not replace the first, or both rows survived"
+        )
+
+    async def test_another_account_is_not_held_up_by_it(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The other half, and the half a lock taken on nothing in particular would fail.
+
+        Every GitHub call resolves an installation, so serialising the whole table would put
+        one organisation's webhooks behind whichever other account is slowest to write.
+        """
+        holding, let_go = asyncio.Event(), asyncio.Event()
+
+        async def hold_octocat() -> None:
+            async with db_sessionmaker() as session, session.begin():
+                await InstallationStore(session).remember(
+                    installation_id=42, account_login="octocat"
+                )
+                holding.set()
+                await let_go.wait()
+
+        held = asyncio.create_task(hold_octocat())
+        await holding.wait()
+
+        async with db_sessionmaker() as session, session.begin():
+            await asyncio.wait_for(
+                InstallationStore(session).remember(installation_id=99, account_login="hubot"),
+                timeout=5,
+            )
+
+        let_go.set()
+        await held
+
+        async with db_sessionmaker() as session:
+            rows = (await session.scalars(select(GitHubInstallation))).all()
+        assert {row.account_login for row in rows} == {"octocat", "hubot"}
 
 
 class TestTheOneTimeLink:

@@ -15,19 +15,15 @@ from shannon.domain.errors import DuplicateRegistrationError, NotInstalledError
 from shannon.github.client import LooksUpRepository
 from shannon.github.urls import parse_repository_url
 
-# What somebody is told to do about a repository this bot cannot see. The slug is read from
-# GitHub rather than configured, so this is built rather than written down whole.
+# Where somebody is sent to install the App. The slug is read from GitHub rather than
+# configured, so the URL is built rather than written down whole.
 INSTALL_URL = "https://github.com/apps/{slug}/installations/new"
 
 logger = logging.getLogger(__name__)
 
 
 class FindsInstallations(Protocol):
-    """Asking GitHub whether the App is installed on a repository, and what it is called.
-
-    Its own protocol rather than the whole token minter, because this is all registration needs:
-    it never mints a token itself, it only wants to know whether one could be minted.
-    """
+    """Asking GitHub whether the App is installed on a repository, and what it is called."""
 
     async def installed_on(self, owner: str, name: str) -> int | None: ...
 
@@ -53,24 +49,18 @@ class RepositoryRegistrationService:
     ) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
-        # Optional so that every test which built this before the App existed still builds one.
-        # Left out, the installation check is skipped and the behaviour is exactly what it was:
-        # read the repository and let a 404 speak for itself.
+        # Left out, the installation check is skipped and a 404 from reading the repository
+        # speaks for itself.
         self._installations = installations
 
     async def register(self, *, guild_id: int, channel_id: int, link: str) -> RegistrationResult:
         """Register a repository against a guild.
 
         Raises UnparseableLinkError for a bad link, NotInstalledError when the GitHub App is not
-        installed on the repository, GitHubNotFoundError when it is installed and the repository
-        still cannot be read, and DuplicateRegistrationError when either side of the binding is
-        already taken.
-
-        The installation is checked BEFORE the repository is read, and that order is the fix for
-        issue #98 rather than an optimisation. Read first, a private repository answers 404 and
-        the person is told it could not be found, so they go and check a link that was correct.
-        Asked first, the answer is that the App is not installed, which is both true and
-        actionable.
+        installed, GitHubNotFoundError when it is installed and the repository still cannot be
+        read, and DuplicateRegistrationError when either side of the binding is taken. The
+        installation is checked before the repository is read: read first, a private repository
+        answers 404 and the person goes and checks a link that was perfectly correct.
         """
         ref = parse_repository_url(link)
         installation = await self._installation_for(ref.owner, ref.name)
@@ -79,9 +69,8 @@ class RepositoryRegistrationService:
         async with self._sessionmaker() as session, session.begin():
             repositories = RepositoryStore(session)
             if installation is not None:
-                # Written down on the way past, so the next call about this owner resolves from
-                # the database rather than asking GitHub again. `/register` is the one command
-                # that always knows the answer, so it is the cheapest place to learn it.
+                # Written down on the way past, so the next call about this owner resolves
+                # from the database rather than asking GitHub again.
                 await InstallationStore(session).remember(
                     installation_id=installation, account_login=ref.owner
                 )
@@ -108,12 +97,10 @@ class RepositoryRegistrationService:
                 )
             except IntegrityError as conflict:
                 # Two people running /register at the same moment both get past the checks
-                # above. The database settles it, and the loser should hear the same thing it
-                # would have heard a second later.
+                # above, so the database settles it and the loser hears the same refusal.
                 raise DuplicateRegistrationError(
                     "This server was registered a moment ago. Try /register again to see where."
                 ) from conflict
-            # The channel the command was run in becomes the home for PR threads.
             await ChannelMappingStore(session).set(
                 repository_id=repository.id,
                 object_type=ObjectType.PR,
@@ -135,11 +122,7 @@ class RepositoryRegistrationService:
         return result
 
     async def _installation_for(self, owner: str, name: str) -> int | None:
-        """Which installation covers this repository, refusing if none does.
-
-        Skipped entirely when nothing was wired in, which is how every caller written before the
-        App existed goes on working unchanged.
-        """
+        """Which installation covers this repository, refusing if none does."""
         if self._installations is None:
             return None
 

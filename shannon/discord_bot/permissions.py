@@ -9,8 +9,7 @@ from shannon.discord_bot.roles import CommandRole
 class RoleNames(Protocol):
     """The role names a server has configured, which is all a permission check needs.
 
-    Taking the whole of Settings here would hand the thing that decides who may run a command a
-    database URL and a bot token as well.
+    The whole of Settings would hand it a database URL and a bot token as well.
     """
 
     def role_names(self, role: CommandRole) -> frozenset[str]: ...
@@ -21,11 +20,8 @@ class RoleNames(Protocol):
 class PermissionGate:
     """Turns a member's Discord roles into the permission tiers they hold.
 
-    Role names come from configuration, so a server can call its reviewers whatever it likes
-    without a code change.
-
-    Members are read with getattr rather than against a typed protocol, so an object that is
-    not a guild member at all resolves to no permissions instead of raising.
+    Members are read with getattr rather than against a typed protocol, so an object that is not
+    a guild member at all resolves to no permissions instead of raising.
     """
 
     def __init__(self, settings: RoleNames) -> None:
@@ -34,8 +30,7 @@ class PermissionGate:
     def roles_of(self, member: object) -> frozenset[CommandRole]:
         held: set[CommandRole] = set()
 
-        # A guild administrator outranks every configured role, including a server that never
-        # set the role names up at all.
+        # A guild administrator outranks every configured role, even where none are set.
         if getattr(getattr(member, "guild_permissions", None), "administrator", False):
             held.add(CommandRole.ADMIN)
 
@@ -51,10 +46,7 @@ class PermissionGate:
         return frozenset(held)
 
     def allows(self, member: object, allowed: Collection[CommandRole]) -> bool:
-        """Whether a member holds any of the tiers a command is open to.
-
-        Any, not all: several roles grant the union of what each one does.
-        """
+        """Whether a member holds any of the tiers a command is open to; any, not all."""
         held = self.roles_of(member)
         if CommandRole.ADMIN in held:
             return True

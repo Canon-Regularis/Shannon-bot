@@ -54,7 +54,7 @@ async def test_a_suspended_installation_resolves_to_nothing(
     nobody ever installed."""
     store = InstallationStore(db_session)
     await store.remember(installation_id=42, account_login="octocat")
-    await store.set_suspended(42, suspended=True)
+    await store.remember(installation_id=42, account_login="octocat", suspended=True)
     await db_session.commit()
 
     assert await InstallationDirectory(db_sessionmaker).installation_for("octocat") is None
@@ -69,7 +69,7 @@ async def test_a_suspended_installation_says_so_rather_than_looking_uninstalled(
     wondering why nothing mirrors has nothing anywhere to tell them what they did."""
     store = InstallationStore(db_session)
     await store.remember(installation_id=42, account_login="octocat")
-    await store.set_suspended(42, suspended=True)
+    await store.remember(installation_id=42, account_login="octocat", suspended=True)
     await db_session.commit()
 
     with caplog.at_level(logging.INFO):
@@ -83,7 +83,7 @@ async def test_resuming_makes_it_resolve_again(
 ) -> None:
     store = InstallationStore(db_session)
     await store.remember(installation_id=42, account_login="octocat", suspended=True)
-    await store.set_suspended(42, suspended=False)
+    await store.remember(installation_id=42, account_login="octocat", suspended=False)
     await db_session.commit()
 
     assert await InstallationDirectory(db_sessionmaker).installation_for("octocat") == 42

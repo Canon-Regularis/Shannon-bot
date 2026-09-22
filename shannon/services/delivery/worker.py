@@ -22,8 +22,7 @@ ReadyCheck = Callable[[], Awaitable[None]]
 class Dispatch(Protocol):
     """Handing a delivery to whatever handles that event type.
 
-    Declared here rather than imported, so the worker names what it needs instead of depending
-    on the router that happens to provide it. The router satisfies this by shape.
+    The router satisfies this by shape; nothing here imports it.
     """
 
     async def dispatch(
@@ -35,39 +34,45 @@ class Dispatch(Protocol):
     ) -> WebhookOutcome: ...
 
 
+class SpentLinks(Protocol):
+    """The one-time `/unregister` links, which nothing else clears.
+
+    Swept here because this loop is the only timer in the process that ticks whatever else is
+    happening, and an hour suits a table that gains a row per `/unregister` and loses none.
+    """
+
+    async def prune(self, *, keep_for: timedelta) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     """How hard the worker tries, and how long it holds on.
 
-    The defaults survive roughly two hours of Discord being unreachable, which covers an outage
-    without holding a delivery so long that acting on it would be strange. `total_backoff`
-    computes that figure rather than restating it.
+    The defaults survive roughly two hours of Discord being unreachable.
     """
 
     poll_interval: timedelta = timedelta(seconds=2)
     batch_size: int = 10
-    # Sixteen attempts is what the two hours actually costs. Growth stops at the cap after nine
-    # of them, so the first nine are worth half an hour between them and the rest are flat.
+    # Sixteen attempts is what those two hours cost; growth stops at the cap after the ninth.
     max_attempts: int = 16
     first_backoff: timedelta = timedelta(seconds=5)
     max_backoff: timedelta = timedelta(minutes=15)
-    # Long enough to cover a whole batch at its worst, which is every delivery in it running to
-    # the timeout, and short enough that a killed worker's rows come back reasonably soon. A
-    # lease that expires while the batch is still being worked would let a second replica take
-    # deliveries this one is in the middle of.
+    # Long enough for a whole batch of deliveries each running to the timeout: a lease that
+    # expires mid-batch lets a second replica take deliveries this one is still working.
     lease: timedelta = timedelta(minutes=15)
-    # How long the first batch waits on Discord before going ahead without it. Long enough to
-    # cover an ordinary login, which is seconds, and a slow one; short enough that a gateway that
-    # is never coming back does not take the queue with it. Not an environment knob: nothing
-    # about a deployment makes a different number right, and the failure it guards against is one
-    # nobody knew they had.
+    # How long the first batch waits on Discord before going ahead without it. Long enough for a
+    # slow login, short enough that a gateway which is never coming back does not take the queue
+    # with it. Deliberately not an environment knob.
     gateway_wait: timedelta = timedelta(minutes=5)
     delivery_timeout: timedelta = timedelta(seconds=60)
     retention: timedelta = timedelta(days=7)
-    # A stack trace stringified from a handler can be enormous, and `last_error` exists to be
-    # read by a person. The column is Text, so this is a readability limit and not a schema one.
+    # A stringified handler traceback can be enormous and `last_error` is read by a person. The
+    # column is Text, so this is a readability limit and not a schema one.
     error_limit: int = 2000
     prune_interval: timedelta = timedelta(hours=1)
+    # A link is worth following for ten minutes. A day of spent ones is a short trail
+    # for anybody asking who tried to unbind a repository and when.
+    link_retention: timedelta = timedelta(days=1)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> WorkerSettings:
@@ -83,17 +88,14 @@ class WorkerSettings:
 
     def backoff_for(self, attempts: int) -> timedelta:
         """Double the wait each time, up to the cap."""
-        # 2 ** a large number is a real number here, so the cap is applied to a value that is
-        # cheap to compute rather than one that grows without bound.
-        grown = self.first_backoff * 2 ** min(max(attempts, 0), 32)
+        # The exponent is clamped because `2 ** attempts` is computed before the cap applies.
+        # `grown` is annotated because `2 ** n` is `Any` to a type checker: a negative exponent
+        # would make it a float, which `min` below would then hand back untyped.
+        grown: timedelta = self.first_backoff * 2 ** min(max(attempts, 0), 32)
         return min(grown, self.max_backoff)
 
     def total_backoff(self) -> timedelta:
-        """How long a delivery is held before it is given up on.
-
-        Several comments quote this figure. Having it computed from the settings rather than
-        written down again means they cannot drift apart from what the worker really does.
-        """
+        """How long a delivery is held before it is given up on."""
         return sum(
             (self.backoff_for(attempt) for attempt in range(self.max_attempts - 1)),
             timedelta(),
@@ -104,8 +106,7 @@ class DeliveryWorker:
     """Does the work the webhook endpoint no longer does inline.
 
     GitHub gives an endpoint ten seconds and never redelivers, so the route writes the delivery
-    down and answers. Everything slow, meaning every Discord call, happens here where taking
-    longer costs nothing and failing means trying again.
+    down and everything slow, meaning every Discord call, happens here.
     """
 
     def __init__(
@@ -113,14 +114,15 @@ class DeliveryWorker:
         queue: DeliveryQueue,
         dispatch: Dispatch,
         settings: WorkerSettings | None = None,
+        links: SpentLinks | None = None,
     ) -> None:
         self._queue = queue
         self._dispatch = dispatch
         self._settings = settings or WorkerSettings()
+        self._links = links
         self._stopping = False
-        # The flag is enough for the loop, which reaches a check every couple of seconds. It is
-        # not enough before the loop starts, where the wait for Discord has no such check and
-        # nothing to interrupt it, so the stop is published as something waitable too.
+        # The flag alone is not enough before the loop starts: the wait for Discord reaches no
+        # check and has nothing to interrupt it, so the stop is published as something waitable.
         self._stopped = asyncio.Event()
 
     def stop(self) -> None:
@@ -131,9 +133,8 @@ class DeliveryWorker:
     async def run_once(self) -> int:
         """Work through one batch, returning how many deliveries were handled.
 
-        Deliveries are taken in the order they arrived and handled one at a time, so two events
-        for the same item keep their order. A repository's events are not a stream, and
-        preserving order is worth more here than working through them at once.
+        Deliveries are handled one at a time in arrival order, so two events for the same item
+        keep their order.
         """
         deliveries = await self._queue.lease(
             limit=self._settings.batch_size, lease_for=self._settings.lease
@@ -141,35 +142,23 @@ class DeliveryWorker:
 
         for index, delivery in enumerate(deliveries):
             if self._stopping:
-                # Shutting down. Anything not started is handed straight back, or it would sit
-                # locked for the whole lease while the replacement process polls an empty queue.
+                # Anything not started is handed straight back, or it sits locked for the whole
+                # lease while the replacement process polls a queue that looks empty.
                 await self._queue.release(deliveries[index:])
                 return index
             try:
                 await self._handle(delivery)
             except Exception:
-                # Everything a handler can raise is already dealt with inside `_handle`. What
-                # reaches here is the queue write that records the outcome, and a database that
-                # cannot take it left this delivery and every one behind it leased and marked
-                # PROCESSING. Nothing else would touch them until the lease ran out a quarter of
-                # an hour later, and the loop would meanwhile poll a queue that looked empty.
-                #
-                # Handed back from this one inclusive: whether its outcome landed is exactly what
-                # is not known, and `release` only moves rows still marked PROCESSING, so a write
-                # that did commit is left alone and one that did not comes back for another go.
-                #
-                # Re-raised rather than swallowed. The error is not this loop's to interpret and
-                # `run_forever` is where the decision to carry on lives, which is also what makes
-                # it visible to a caller running one batch at a time.
+                # Only the queue write recording the outcome reaches here; a database that cannot
+                # take it leaves this delivery and every one behind it leased and PROCESSING
+                # until the lease runs out. Released from this one inclusive: `release` moves
+                # only rows still marked PROCESSING, so an outcome that did commit is left alone.
                 await self._queue.release(deliveries[index:])
                 raise
             except asyncio.CancelledError:
-                # The grace period ran out mid-delivery. The rest of the batch was never touched,
-                # so hand it back instead of letting it sit out the lease. Best effort: awaiting
-                # from inside a cancelled task returns at once, so this starts the release
-                # without seeing it finish. It usually lands, since shutdown is still waiting on
-                # this task; if the loop closes first those rows wait out their lease, which is
-                # where they would have been anyway. The cooperative stop above is the usual path.
+                # Cancelled mid-delivery: hand back the rest of the batch rather than let it sit
+                # out the lease. Best effort, since an await inside a cancelled task returns at
+                # once; if the loop closes first those rows wait out the lease instead.
                 await asyncio.shield(self._queue.release(deliveries[index + 1 :]))
                 raise
         return len(deliveries)
@@ -177,9 +166,9 @@ class DeliveryWorker:
     async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None:
         """Work the queue until asked to stop.
 
-        `wait_for_ready` holds the first batch back until Discord is connected. Logging in and
-        connecting takes seconds, and every delivery leased before that fails against a client
-        with no session, which spends attempts on a problem that fixes itself.
+        `wait_for_ready` holds the first batch back until Discord is connected: a delivery leased
+        before that fails against a client with no session, spending attempts on a problem that
+        fixes itself.
         """
         if wait_for_ready is not None:
             logger.info("waiting for Discord before working through the queue")
@@ -195,46 +184,42 @@ class DeliveryWorker:
                 handled = await self.run_once()
 
                 if loop.time() >= pruned_after:
-                    # Rescheduled whatever happens. Moving it only on success would have a
-                    # failing prune tried again on every poll, which is every couple of
-                    # seconds, for as long as the reason it failed lasts.
+                    # Rescheduled whatever happens: moving it only on success would retry a
+                    # failing prune on every poll for as long as the failure lasts.
                     pruned_after = loop.time() + self._settings.prune_interval.total_seconds()
-                    removed = await self._queue.prune(keep_for=self._settings.retention)
-                    if removed:
-                        logger.info("pruned %s finished deliveries", removed)
+                    await self._sweep()
 
-                # Straight back round while there is a backlog, so a burst drains at once
-                # rather than one batch per tick.
+                # Straight back round while there is a backlog, so a burst drains at once.
                 if handled < self._settings.batch_size and not self._stopping:
                     await asyncio.sleep(self._settings.poll_interval.total_seconds())
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # The loop itself must not die on a bad batch, or every later delivery waits
-                # for a restart.
+                # A bad batch must not kill the loop, or every later delivery waits for a restart.
                 logger.exception("the delivery worker hit an error, carrying on")
                 await asyncio.sleep(self._settings.poll_interval.total_seconds())
+
+    async def _sweep(self) -> None:
+        """The hourly clear-out, over every table that grows and nothing else empties."""
+        removed = await self._queue.prune(keep_for=self._settings.retention)
+        if removed:
+            logger.info("pruned %s finished deliveries", removed)
+
+        if self._links is None:
+            return
+        spent = await self._links.prune(keep_for=self._settings.link_retention)
+        if spent:
+            logger.info("pruned %s spent verification links", spent)
 
     async def _ready_or_stopped(self, wait_for_ready: ReadyCheck) -> bool:
         """Wait for Discord, and give up the moment a stop is asked for instead.
 
-        Waiting on the gateway alone leaves `stop` unnoticed until the shutdown grace runs out
-        and something cancels this, so a process asked to stop before Discord ever answered sits
-        out the whole grace period and is then killed.
-
-        Bounded, because the wait it replaces had no end. discord.py's client reconnects for ever
-        by design: a gateway outage, blocked egress, or a handshake that never completes leaves
-        `start()` running and `wait_until_ready()` unfired, with nothing here to notice. The
-        worker then sat in this call for the life of the process, never leasing a delivery and
-        never pruning one, while the task it belongs to was alive and `/health` said so.
-
-        Giving up and working anyway is the better of the two. Every delivery then fails against
-        a client with no session, which is a retryable gateway error the queue already backs off
-        and eventually reports in `last_error`. A queue draining slowly with a visible reason beats
-        one that never moves and says nothing.
-
-        Returns whether Discord connected. An error from the wait is still raised: a bot that
-        stopped before connecting is a real failure and the caller reports it.
+        Waiting on the gateway alone leaves `stop` unnoticed until the shutdown grace runs out.
+        The wait is bounded because the discord.py client reconnects for ever by design: a
+        gateway outage, blocked egress, or a handshake that never completes leaves
+        `wait_until_ready()` unfired, and the worker then leases and prunes nothing for the life
+        of the process while `/health` still reports it alive. Returns whether to carry on; an
+        error from the wait is raised, since a bot that stopped before connecting is a failure.
         """
         ready = asyncio.ensure_future(wait_for_ready())
         stopped = asyncio.ensure_future(self._stopped.wait())
@@ -255,10 +240,10 @@ class DeliveryWorker:
             if not ready.done():
                 ready.cancel()
 
-        # Checked before the flag, so a gateway that failed is reported rather than being read
-        # as an ordinary stop when both finish together.
-        if ready.done() and not ready.cancelled() and ready.exception() is not None:
-            raise ready.exception()
+        # Checked before the flag, so a gateway that failed is reported rather than read as an
+        # ordinary stop when both finish together.
+        if ready.done() and not ready.cancelled() and (failed := ready.exception()) is not None:
+            raise failed
         return not self._stopping
 
     async def _handle(self, delivery: Delivery) -> None:
@@ -268,8 +253,8 @@ class DeliveryWorker:
                     delivery.event_type,
                     delivery.action,
                     delivery.payload,
-                    # The order this reached us, which is the only thing that can separate two
-                    # deliveries GitHub stamped with the same second.
+                    # Arrival order, the only thing separating two deliveries GitHub stamped
+                    # with the same second.
                     delivery.id,
                 ),
                 timeout=self._settings.delivery_timeout.total_seconds(),
@@ -277,8 +262,7 @@ class DeliveryWorker:
         except asyncio.CancelledError:
             raise
         except PermanentError as error:
-            # A missing permission or a channel that cannot hold threads does not heal on its
-            # own, so retrying for two hours only delays the log line that says so.
+            # A missing permission or a channel that cannot hold threads does not heal on its own.
             logger.error(
                 "delivery %s (%s) cannot be handled: %s",
                 delivery.delivery_id,
@@ -299,8 +283,6 @@ class DeliveryWorker:
         )
 
     def _reason(self, error: Exception) -> str:
-        """What gets written to `last_error`, trimmed where it is written rather than where it
-        is stored, so the store carries no policy of its own."""
         return f"{type(error).__name__}: {error}"[: self._settings.error_limit]
 
     async def _reschedule(self, delivery: Delivery, error: Exception) -> None:

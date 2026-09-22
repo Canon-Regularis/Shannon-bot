@@ -196,6 +196,22 @@ jobs:
       - name: Confirm the suite still passes without a database
         # A fresh clone has no PostgreSQL, and the integration tier is supposed to skip rather
         # than fail. This is the only step that proves it.
+        #
+        # The whole suite rather than `tests/integration`, which would prove only half of it.
+        # The fixtures live in `tests/integration/conftest.py` so a unit test that ASKED for one
+        # already fails at collection in the step above; what only this step catches is a unit
+        # test that opens its own connection out of the environment, which passes above because
+        # PostgreSQL is up. That is not hypothetical - `tests/conftest.py` exists because nine
+        # tests were reading a real `.env` off whoever's machine they ran on. README tells a
+        # newcomer to run the whole suite, so the whole suite is what this guards.
+        #
+        # One version rather than three, for the reason the coverage flag above gives: nothing
+        # here branches on the Python version, so the other two legs would be running the unit
+        # tier a second time to re-learn the same answer.
+        #
+        # No `--cov` on purpose: with the integration tier skipped the hundred per cent floor
+        # cannot be met.
+        if: matrix.python == '3.12'
         env:
           SHANNON_TEST_DATABASE_URL: ""
         run: uv run pytest -q

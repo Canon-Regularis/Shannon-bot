@@ -1,19 +1,9 @@
-"""What CI made of a pull request, said in its thread, to the people it concerns. Issue #112.
+"""What CI made of a pull request, said in its thread, to the people it concerns.
 
-Beside the note mirror rather than under `sync/`, because it is neither. It does not sync an item
-and it carries no `Arrival`: a check suite is its own delivery, so it resolves its own thread the
-way `ItemNoteMirror` does rather than being handed one.
-
-The guards are ordered so the cheapest refusal comes first. A suite with nothing to say about it,
-which is most of them on a repository that runs CI on every branch, costs a parse and one indexed
-read and never touches GitHub.
-
-Nothing here reads `item_assignments.notified_at`. That column answers whether somebody has been
-told they are ON an item, once, for the life of the row; a CI ping recurs, and the same reviewer is
-rung again the next time CI finishes. Using it would also fire once over every `AUTHOR` row written
-since `PullRequestPolicy.assignments` shipped, none of which has ever been claimed, which is the
-incident migration `0021` exists to prevent. The claim in `mirrored_notes` is what makes this say
-a thing once, and it needs no migration at all.
+`item_assignments.notified_at` is unusable here: it answers once for the life of a row while a CI
+ping recurs, and reading it would fire over every unclaimed `AUTHOR` row ever written, the incident
+migration `0021` exists to prevent. The claim in `mirrored_notes` is what makes this say a thing
+once.
 """
 
 from __future__ import annotations
@@ -42,20 +32,13 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
 
-# What GitHub says a run is doing once it has stopped. Tested against rather than against a set of
-# pending words on purpose: GitHub has added `waiting`, `requested` and `pending` since this
-# endpoint was written, and a guard listing the ones it knew about reads a new one as finished and
-# announces a result while jobs are still running.
+# GitHub keeps adding pending states (`waiting`, `requested`, `pending`), so a guard listing the
+# pending words it knew about would read a new one as finished and announce mid-run.
 FINISHED = "completed"
 
 
 class ReadsChecksAndItems(Protocol):
-    """The two reads a check result needs, and nothing that could write anything.
-
-    Its own protocol rather than the whole client, on the grounds the rest of this project uses:
-    this runs on every completed suite, which is every push to every branch running CI, and a
-    handle that could also move a label is one that could move a label by accident there.
-    """
+    """The two reads a check result needs, and nothing that could write anything."""
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
@@ -65,11 +48,7 @@ class ReadsChecksAndItems(Protocol):
 
 
 class Renders(Protocol):
-    """Turning a report and an audience into the message.
-
-    Injected rather than imported, so this module never reaches `formatting` and the renderer it
-    is given is the only thing that decides what a reader sees.
-    """
+    """Turning a report and an audience into the message."""
 
     def __call__(
         self,
@@ -83,6 +62,16 @@ class Renders(Protocol):
 
 
 Parses = Callable[[str, JsonObject], CheckSuiteEvent | None]
+
+
+class Announces(Protocol):
+    """Saying what CI did, and whether there was anything to say.
+
+    The handler below asks only this, the way it asks only `Parses` of the parser, so the
+    two halves of the seam the router registers are stated the same way.
+    """
+
+    async def announce(self, event: CheckSuiteEvent) -> bool: ...
 
 
 class CheckSuiteAnnouncer:
@@ -105,20 +94,17 @@ class CheckSuiteAnnouncer:
 
     async def announce(self, event: CheckSuiteEvent) -> bool:
         """Report this suite on every pull request it heads. True if anything was said."""
-        self._note_that_checks_are_arriving()
+        self._note_first_suite()
         said = False
         for number in event.numbers:
             said = await self._one(event, number) or said
         return said
 
-    def _note_that_checks_are_arriving(self) -> None:
+    def _note_first_suite(self) -> None:
         """Say once that a check suite reached this process at all.
 
-        `Checks: Read` is a permission added to an App that is already installed, and granting one
-        suspends event delivery until somebody accepts the change. Until they do, no suite arrives
-        and the feature is indistinguishable from a broken one. This is the positive signal: a
-        line in the log the first time one lands, so "did the permission go through" is a question
-        with an answer.
+        Adding `Checks: Read` to an installed App suspends event delivery until somebody accepts
+        the change, so until then no suite arrives and the feature looks broken.
         """
         if self._said_it_is_working:
             return
@@ -134,11 +120,10 @@ class CheckSuiteAnnouncer:
 
         item = await self._github.get_pull_request(owner, name, number)
         if item.head_sha != event.head_sha:
-            # Superseded. `cancel-in-progress` stops the previous run the moment a new commit is
-            # pushed, and it completes as `cancelled` with its finished jobs still reading
-            # `success`, so it looks like a partial failure of work nobody is looking at any more.
-            # The suite's own conclusion cannot be used for this: GitHub takes the worst of its
-            # runs and `cancelled` outranks `failure`, so that test would swallow a real break.
+            # Superseded. `cancel-in-progress` stops the previous run on a new push and it
+            # completes as `cancelled` with its finished jobs still reading `success`. The suite's
+            # own conclusion cannot stand in: GitHub takes the worst of its runs and `cancelled`
+            # outranks `failure`, so that test would swallow a real break.
             logger.info(
                 "%s#%s has moved off %s, so its checks are not announced",
                 event.repository.full_name,
@@ -147,8 +132,7 @@ class CheckSuiteAnnouncer:
             )
             return False
         if item.closed:
-            # Posting reopens an archived thread and something then has to shut it again. A
-            # merged pull request does not want a late CI result either way.
+            # Posting reopens an archived thread and something then has to shut it again.
             logger.info(
                 "%s#%s is closed, so its checks are not announced",
                 event.repository.full_name,
@@ -163,11 +147,6 @@ class CheckSuiteAnnouncer:
         return await self._say(event, item, report, tracked_item_id, thread_id, guild_id)
 
     async def _locate(self, event: CheckSuiteEvent, number: int) -> tuple[int, int, int] | None:
-        """The item, its thread and its server, in one read.
-
-        The guild comes off the repository row this already had to fetch, rather than a second
-        query for it. `ItemNoteMirror._find_thread` reads it the same way and for the same reason.
-        """
         async with self._sessionmaker() as session:
             repository = await RepositoryStore(session).get_by_github_id(
                 event.repository.github_repo_id
@@ -191,9 +170,9 @@ class CheckSuiteAnnouncer:
                 return None
 
             if item.discord_thread_id is None:
-                # Retried rather than dropped. A suite can finish while the `opened` delivery that
-                # builds the thread is still behind a Discord outage, and answering "nothing to
-                # do" loses the result for good because nothing revisits that.
+                # Retried rather than dropped: a suite can finish while the `opened` delivery
+                # that builds the thread is still behind a Discord outage, and nothing revisits a
+                # "nothing to do".
                 raise ItemNotReadyError(f"{event.repository.full_name}#{number} has no thread yet")
 
             return item.id, item.discord_thread_id, repository.discord_guild_id
@@ -201,9 +180,8 @@ class CheckSuiteAnnouncer:
     async def _report(self, event: CheckSuiteEvent, owner: str, name: str) -> CheckReport | None:
         """Every check on the commit, or None if there is nothing worth saying about them.
 
-        The whole commit rather than the suite that reported it. A suite belongs to one app, so a
-        repository running GitHub Actions beside anything else has several finishing at different
-        moments, and each would otherwise report a fraction of the answer as the whole of it.
+        The whole commit rather than the suite that reported it: a suite belongs to one app, so a
+        repository running several apps has several suites, each seeing a fraction of the answer.
         """
         runs = await self._github.list_check_runs(owner, name, event.head_sha)
         if not runs:
@@ -221,8 +199,7 @@ class CheckSuiteAnnouncer:
 
         report = CheckReport(sha=event.head_sha, runs=tuple(runs))
         if not report.worth_saying:
-            # Nothing ran. A path filter skipped every job on a docs-only push, and narrating that
-            # is noise in a thread nobody asked to have narrated.
+            # Nothing ran: a path filter skipped every job, and narrating that is noise.
             logger.info("nothing ran on %s, so nothing is said about it", event.head_sha)
             return None
         return report
@@ -259,15 +236,10 @@ class CheckSuiteAnnouncer:
     ) -> tuple[dict[str, int], dict[str, int], Notify]:
         """Names into mentions, and the allow-list that decides which of them ring.
 
-        The ids go with the logins rather than the names alone, because that is the only evidence
-        of identity on this path: GitHub frees a login when an account is renamed or deleted, and
-        without the id a mention meant for one person reaches whoever took the name.
-
-        Roles are deliberately absent from the allow-list. `_may_notify` only ever sets `users`,
-        so a role ping is governed by the client's own rule and a member cannot opt out of one at
-        all: Discord rings everybody holding the role. That asymmetry is already written down
-        beside the team notifier in the container, and it is restated here rather than left to be
-        rediscovered.
+        The ids travel with the logins because GitHub frees a login when an account is renamed or
+        deleted, and without the id a mention meant for one person reaches whoever took the name.
+        Roles are absent from the allow-list on purpose: Discord rings everybody holding a role and
+        a member cannot opt out of one.
         """
         async with self._sessionmaker() as session:
             mentions = await UserLinkStore(session).resolve_many(
@@ -288,12 +260,8 @@ def _who_to_tell(
 ) -> tuple[tuple[Actor, ...], tuple[Actor, ...]]:
     """Who this result is for.
 
-    A draft rings nobody. GitHub runs CI on one like any other pull request, and reviewers have
-    not been asked to look at it yet. The results are still posted, because the person writing it
-    is the one who wants the failures.
-
-    A pass goes to the reviewers, a failure to the author and whoever is assigned. Deduplicated,
-    because assigning yourself your own pull request is the ordinary thing to do.
+    A draft rings nobody: GitHub runs CI on one like any other pull request, but reviewers have not
+    been asked to look yet. The panel is still posted, for the author.
     """
     if item.draft:
         return (), ()
@@ -304,12 +272,11 @@ def _who_to_tell(
     return tuple(people.values()), ()
 
 
-def build_check_suite_handler(announcer: CheckSuiteAnnouncer, parse: Parses) -> EventHandler:
+def build_check_suite_handler(announcer: Announces, parse: Parses) -> EventHandler:
     """The seam the router registers, shaped like the other two handler builders.
 
-    `arrived` is taken and ignored. Every other handler keys its claim on the delivery number; a
-    check result keys on the set of runs it read, because two suites on one commit are two
-    deliveries that must produce one message between them.
+    `arrived` is taken and ignored: two suites on one commit are two deliveries that must produce
+    one message between them, so the claim keys on the runs read rather than the delivery number.
     """
 
     async def handle(

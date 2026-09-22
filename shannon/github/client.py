@@ -1,3 +1,10 @@
+"""The GitHub calls this project makes, and the narrow handles it makes them through.
+
+Each protocol below names only what one caller needs, so a handle that can put a reviewer on a
+pull request cannot also read a commit or write a label. They are declared here rather than
+beside their implementations, which reach the database and would drag storage in behind HTTP.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -54,11 +61,7 @@ _Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
 
 
 def _an_issue(payload: Any, repository: RepositorySnapshot) -> IssueSnapshot | None:
-    """An issue row, or None for the pull requests GitHub mixes into the issues endpoint.
-
-    Named rather than written inline, because the paging helper takes one parser and the pulls
-    side passes `mapping.pull_request` straight in.
-    """
+    """An issue row, or None for the pull requests GitHub mixes into the issues endpoint."""
     if mapping.is_pull_request(payload):
         return None
     return mapping.issue(payload, repository)
@@ -67,27 +70,16 @@ def _an_issue(payload: Any, repository: RepositorySnapshot) -> IssueSnapshot | N
 class SuppliesTokens(Protocol):
     """A bearer token for calls about one GitHub account, or the empty string for none.
 
-    Declared here rather than beside the thing that implements it, because this is the module that
-    depends on the shape. The implementation lives in `github/installations.py` and reaches the
-    database; a client that imported it would drag the whole storage layer in behind an HTTP
-    wrapper, and nothing in here should know that installations are stored at all.
-
-    Empty rather than an exception, and a good deal rests on that. It is exactly the state this
-    client already modelled for an unset token: no `Authorization` header at all, public endpoints
-    answer, private ones report as missing. So a deployment with no App configured behaves as one
-    with no token used to, rather than failing on the first command anybody runs.
+    Empty rather than an exception: it is the state an unset token already produced, so a
+    deployment with no App configured answers on public endpoints rather than failing on the
+    first command anybody runs.
     """
 
     async def token_for(self, owner: str) -> str: ...
 
 
 class LooksUpRepository(Protocol):
-    """Resolving a repository by owner and name.
-
-    Split out because that is all the link commands need of GitHub directly. Fetching the item
-    itself is a closure the wiring builds, so nothing has to hold a handle that can read every
-    pull request in order to check one repository still exists.
-    """
+    """Resolving a repository by owner and name, which is all the link commands need."""
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
 
@@ -95,14 +87,9 @@ class LooksUpRepository(Protocol):
 class ListsOpenItems(LooksUpRepository, Protocol):
     """Every open pull request or issue on a repository, which is all `/refresh` needs.
 
-    Its own protocol for the reason `LooksUpRepository` is: mirroring a backlog should not need a
-    handle that can write a label. `get_repository` comes with it because a list may only be asked
-    for against a repository the caller has already resolved, and that is the call that resolves
-    one.
-
-    The repository is passed in rather than an owner and a name. It makes that rule unforgeable,
-    it means the current name is used rather than a stale one, and `list_open_issues` cannot work
-    without it: GitHub's issue rows carry no repository object at all.
+    A resolved repository rather than an owner and a name, so the current name is used rather
+    than a stale one, and because `list_open_issues` cannot work without it: GitHub's issue rows
+    carry no repository object at all.
     """
 
     async def list_open_pull_requests(
@@ -113,25 +100,16 @@ class ListsOpenItems(LooksUpRepository, Protocol):
 
 
 class LooksUpUsers(Protocol):
-    """Asking who holds a GitHub login, which is all `/link` needs of GitHub.
-
-    Its own protocol rather than the whole client, so binding a name to a Discord account cannot
-    reach anything that reads a pull request or writes a label.
-    """
+    """Asking who holds a GitHub login, which is all `/link` needs."""
 
     async def user_id(self, login: str) -> int | None: ...
 
 
 class ReadsCommits(Protocol):
-    """What a push did to a branch, which is all the commit announcer needs of GitHub.
-
-    Its own protocol for the same reason as the two above. This one runs on every push to every
-    open pull request, which makes it the busiest reader in the project, and a handle that could
-    also write a label is a handle that could write one by accident on the noisiest path there is.
+    """What a push did to a branch, which is all the commit announcer needs.
 
     Both answer None rather than raising when GitHub has nothing. A SHA that has been collected
-    never comes back, so a retry would spend sixteen attempts over two hours to say the same
-    thing, and the caller can carry on with the commits it can read.
+    never comes back, so a retry would spend sixteen attempts over two hours on the same answer.
     """
 
     async def compare_commits(
@@ -142,15 +120,9 @@ class ReadsCommits(Protocol):
 
 
 class ReadsChecks(Protocol):
-    """Every CI job on one commit, which is all the check announcer needs of GitHub.
+    """Every CI job on one commit, which is all the check announcer needs.
 
-    Its own protocol on the same grounds as the one above: this runs on every completed check
-    suite, which is every push to every branch running CI, and a handle that reads jobs has no
-    business being able to write a label on the second noisiest path in the project.
-
-    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives. A
-    commit that has been collected never comes back, so sixteen attempts over two hours would
-    reach the same answer and hold a delivery open for it.
+    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
     """
 
     async def list_check_runs(
@@ -218,9 +190,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, Prot
     async def can_be_assigned(self, owner: str, name: str, login: str) -> bool: ...
 
     # Untyped bodies, for the project endpoints, which answer with arrays and are parsed by a
-    # module that checks every field it touches. Declared here because the wiring hands this
-    # same object to the board reader, and a stand-in that satisfied the protocol without them
-    # would build a container that fails on the first poll rather than at the seam.
+    # module that checks every field it touches. Declared here because the wiring hands this same
+    # object to the board reader, and a stand-in without them would fail on the first poll.
     async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
 
     def get_pages(
@@ -237,13 +208,9 @@ class HttpGitHubClient:
         timeout: float = 10.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        # A supplier rather than a token, because there is no longer one token. Each call carries
-        # a credential minted for the account it is about, so the header cannot be baked into the
-        # client the way it was: it is decided per request, from the owner the caller already had
-        # in its hand.
-        #
-        # None means no App is configured, and every request then goes out unauthenticated. That
-        # is deliberately the same behaviour an empty `SHANNON_GITHUB_TOKEN` used to produce.
+        # A supplier rather than a token: each call carries a credential minted for the account
+        # it is about, so the header is decided per request. None means no App is configured and
+        # every request goes out unauthenticated, which is what an empty token already did.
         self._tokens = tokens
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
@@ -279,16 +246,10 @@ class HttpGitHubClient:
     async def user_id(self, login: str) -> int | None:
         """Who holds this login, by GitHub's own numeric id, or None if nobody does.
 
-        The endpoint is public, so this answers with no token set and answers the same for
-        somebody who can only be seen through a private repository.
-
-        The id rather than a yes, because a login is not an identity: GitHub frees one the moment
-        it is renamed or deleted and lets anybody take it. Storing what was asked for alongside
-        the name is what lets a mention built later be checked against the person somebody meant.
-
-        Only "not there" is turned into an answer. Anything else GitHub says is a reason the
-        question could not be put, and the caller has a person in front of it who can be told to
-        try again, which is a better outcome than binding a name nothing will ever match.
+        A public endpoint, so it answers with no token set. The id rather than a yes, because
+        GitHub frees a login when it is renamed and lets anybody take it; storing the id is what
+        lets a mention built later be checked against the person somebody meant. Only "not there"
+        becomes None, because anything else leaves a person who can be told to try again.
         """
         try:
             payload = await self._get(f"/users/{quote(login, safe='')}")
@@ -302,15 +263,10 @@ class HttpGitHubClient:
     ) -> CommitRange | None:
         """What happened between two commits, from the older one's point of view.
 
-        The SHAs are quoted. They arrive off a webhook payload, and a path segment is the one
-        place where a value nobody validated decides which endpoint gets called.
-
-        Only the first page is read, so a push of more than 250 commits has its list cut while
-        `total_commits` stays right. That is what the count is for: the announcer subtracts what
-        it said from GitHub's own total, so the overflow is reported rather than lost.
-
-        Gone means gone. A branch deleted between the push and this call, or a base rewritten out
-        of existence, never comes back, and a retry only delays the deliveries behind it.
+        The SHAs are quoted: they arrive off a webhook payload, and a path segment is where an
+        unvalidated value would decide which endpoint gets called. Only the first page is read,
+        so a push of more than 250 commits has its list cut while `total_commits` stays right,
+        which is what the announcer subtracts from to report the overflow. A 404 is permanent.
         """
         path = f"/repos/{owner}/{name}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
         try:
@@ -323,9 +279,8 @@ class HttpGitHubClient:
     async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None:
         """How much one commit changed.
 
-        A call each, because the commit rows inside a compare carry no `stats` block. The
-        alternative is the compare's own totals, which cover the whole range against the merge
-        base and would be attributed to whichever commit happened to be rendered.
+        A call each, because the commit rows inside a compare carry no `stats` block, and the
+        compare's own totals cover the whole range rather than any one commit.
         """
         try:
             payload = await self._get(f"/repos/{owner}/{name}/commits/{quote(sha, safe='')}", owner)
@@ -337,16 +292,10 @@ class HttpGitHubClient:
     async def list_check_runs(self, owner: str, name: str, sha: str) -> Sequence[CheckRun] | None:
         """Every CI job on one commit, across every checks provider the repository uses.
 
-        The commit rather than the suite that reported it. A check suite belongs to one app, so a
-        repository running GitHub Actions beside anything else has several of them finishing at
-        different moments, and answering about one would be answering about part of it.
-
-        `filter=latest` is GitHub's default and is stated anyway, because it is what makes a
-        re-run replace its predecessor rather than sit beside it, and a reader that lost that
-        would report every attempt at once.
-
-        The page body is an OBJECT with the list under `check_runs`, unlike the labels list
-        above. `mapping.check_runs` is where that is handled and where it is written down.
+        The commit rather than the suite: a suite belongs to one app, so a repository running
+        GitHub Actions beside anything else has several finishing at different moments.
+        `filter=latest` is GitHub's default, stated because it is what makes a re-run replace its
+        predecessor. The page body is an object with the list under `check_runs`.
         """
         found: list[CheckRun] = []
         path = f"{_repository(owner, name)}/commits/{quote(sha, safe='')}/check-runs"
@@ -401,11 +350,9 @@ class HttpGitHubClient:
     ) -> Sequence[PullRequestSnapshot]:
         """Every open pull request, whole.
 
-        The pulls endpoint rather than the issues one, which also answers with pull requests. A
-        pull request row there is the issue shape: no requested reviewers, no requested teams and
-        no repository on the base. Mirroring from those would open a thread saying nobody had been
-        asked to review, on every pull request, and the only way back would be a second call per
-        item, which is the cost this whole method exists to avoid.
+        The pulls endpoint rather than the issues one, which answers with pull requests in the
+        issue shape: no requested reviewers, no teams, no repository on the base. Mirroring from
+        those would open every thread saying nobody had been asked to review.
         """
         return await self._open_items(
             f"/repos/{repository.owner}/{repository.name}/pulls", repository, mapping.pull_request
@@ -452,16 +399,10 @@ class HttpGitHubClient:
     async def permission_for(self, owner: str, name: str, login: str) -> str:
         """What one GitHub account may do to one repository: admin, write, read or none.
 
-        Read for `/unregister`, and the login handed in must be one GitHub itself vouched for a
-        moment ago rather than one out of `user_links`: that table records a claim somebody made
-        about themselves, so a check built on it proves nothing at all.
-
-        GitHub maps `maintain` onto `write` and `triage` onto `read` before answering, so the four
-        values here are the whole ladder.
-
-        A 404 is "not a collaborator" rather than an error. GitHub answers it for an account it
-        has never heard of and for one with no relationship to the repository, and both mean the
-        same thing to the caller: this person may not do that.
+        The login must be one GitHub vouched for a moment ago, not one out of `user_links`,
+        which records only a claim somebody made about themselves. GitHub maps `maintain` onto
+        `write` and `triage` onto `read`, so these four are the whole ladder. A 404 means not a
+        collaborator rather than an error.
         """
         path = (
             f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
@@ -478,14 +419,9 @@ class HttpGitHubClient:
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
         """Say something on an item, as the App rather than as a person.
 
-        The issues endpoint serves pull requests too, so one method covers both, the same way
-        `add_label` below does.
-
-        Nothing is read back. The created comment's id would be the obvious thing to want, since
-        GitHub sends this straight back as an `issue_comment` delivery, but what recognises the
-        echo is a marker in the body rather than anything about the row it lands in. So this stays
-        a plain write and `_send` keeps its promise that a write only ever answers whether it
-        worked.
+        The issues endpoint serves pull requests too, so one method covers both here and below.
+        Nothing is read back: GitHub sends this straight back as an `issue_comment` delivery,
+        and what recognises the echo is a marker in the body rather than the comment's id.
         """
         await self._send(
             "POST",
@@ -497,9 +433,8 @@ class HttpGitHubClient:
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Put a label on an item.
 
-        The issues endpoint serves pull requests too, so one method covers both. GitHub creates
-        a label this repository does not have yet rather than refusing, which is what lets a
-        server start using the workflow without setting five labels up by hand first.
+        GitHub creates a label the repository does not have rather than refusing, which is what
+        lets a server use the workflow without setting five labels up by hand first.
         """
         await self._send(
             "POST",
@@ -511,9 +446,8 @@ class HttpGitHubClient:
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Take a label off an item, treating one that is not there as done.
 
-        Removals are computed from a snapshot read a moment earlier, and anything can have
-        happened since. A 404 here means the end state is the wanted one, and failing the
-        command over it would leave the caller retrying towards where they already are.
+        Removals are computed from a snapshot read a moment earlier, so a 404 means the end
+        state is already the wanted one.
         """
         path = f"{_repository(owner, name)}/issues/{number}/labels/{quote(label, safe='')}"
         with contextlib.suppress(GitHubNotFoundError):
@@ -524,10 +458,9 @@ class HttpGitHubClient:
     ) -> None:
         """Ask the named accounts to review a pull request.
 
-        Its own endpoint rather than the issues one the labels use: a reviewer is not an assignee,
-        and GitHub keeps the two apart on pull requests. It refuses with a 422 for an account that
-        is not a collaborator, for the pull request's own author and for somebody already asked,
-        which is why `_raise_for_status` learned to tell a refusal from an outage.
+        Its own endpoint, because a reviewer is not an assignee. It answers 422 for an account
+        that is not a collaborator, for the author, and for somebody already asked, which is why
+        `_raise_for_status` tells a refusal from an outage.
         """
         await self._send(
             "POST",
@@ -553,9 +486,8 @@ class HttpGitHubClient:
     ) -> None:
         """Put the named accounts on an issue.
 
-        GitHub does NOT refuse somebody who cannot be assigned here; it drops them and answers 201
-        as though it had done what was asked. `can_be_assigned` is asked first for that reason, and
-        this method cannot be made to report the difference on its own.
+        GitHub does not refuse somebody who cannot be assigned: it drops them and answers 201 as
+        though it had not. `can_be_assigned` is asked first for that reason.
         """
         await self._send(
             "POST",
@@ -580,8 +512,7 @@ class HttpGitHubClient:
         """Whether GitHub would actually put this account on an item in this repository.
 
         Asked because the assignee write is silent about it. 204 means yes and 404 means no, and
-        both are answers rather than failures, which is why the 404 is caught here and nothing
-        above has to know that this question is asked by asking for a page.
+        both are answers rather than failures.
         """
         path = f"{_repository(owner, name)}/assignees/{quote(login, safe='')}"
         try:
@@ -593,12 +524,8 @@ class HttpGitHubClient:
     async def list_labels(self, owner: str, name: str) -> Sequence[str]:
         """Every label this repository has, by name.
 
-        Read so that a label set by hand can be checked against them first. GitHub creates a label
-        it has never seen rather than refusing, which is what lets the workflow commands work on a
-        repository nobody set up, and is exactly wrong for a typed name: one typo would add a label
-        to the repository for good, and nothing here can delete one.
-
-        Paged, because a repository with a real taxonomy has more than a page of them and a
+        Read so a typed label can be checked before `add_label` creates it: one typo would add a
+        label to the repository for good, and nothing here can delete one. Paged, because a
         half-read list would refuse a label that exists.
         """
         found: list[str] = []
@@ -614,17 +541,11 @@ class HttpGitHubClient:
     async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
         """A write, whose answer is only ever whether it worked.
 
-        Redirects are followed here rather than by the transport, because httpx follows one the
-        way the RFC allows and not the way a write needs. A 301 is what GitHub answers after a
-        rename, and on a POST httpx re-issues it as a bodyless GET, so putting a label on a
-        renamed repository fetched the label list, was answered 200, and wrote nothing. Nothing
-        downstream can tell that from success: the command replies that it worked, the status
-        goes into the row and into the thread, and no later delivery re-derives status from
-        labels, so the item keeps the label it had. The DELETE beside it is not downgraded and
-        does land, which leaves the item with its old status label stripped and no new one.
-
-        The stale name is ordinary rather than rare. Nothing corrects `repositories.repo_name`
-        until an item webhook arrives, and no `repository` event is registered at all.
+        Redirects are followed here rather than by the transport. GitHub answers 301 after a
+        rename, and httpx re-issues a redirected POST as a bodyless GET, so a label write
+        against a renamed repository fetched the label list, was answered 200, and wrote nothing
+        that anything downstream could tell from success. A stale name is ordinary: nothing
+        corrects `repositories.repo_name` until an item webhook arrives.
         """
         try:
             headers = await self._authorization(owner)
@@ -642,8 +563,7 @@ class HttpGitHubClient:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
 
         # A redirect still standing after that lands in the catch-all as "GitHub returned 301",
-        # which is retryable and loud. That is the answer the write path had before this, and
-        # for a chain that never resolves it is still the right one.
+        # which is retryable and loud, and for a chain that never resolves is the right answer.
         _raise_for_status(response, path)
 
     async def get_pages(
@@ -651,13 +571,9 @@ class HttpGitHubClient:
     ) -> AsyncIterator[object]:
         """Every page of a list endpoint, following GitHub's own Link header.
 
-        The project endpoints paginate by cursor rather than by page number: there is no `page`
-        parameter, and the cursor for the next page is only ever given in the Link header. Asking
-        for page two by number is not an error, it is silently the first page again, so a caller
-        that counted pages would read the same cards over and over and mirror each of them twice.
-
-        Following the header rather than building the next URL, because the cursor is opaque and
-        the shape of it is GitHub's business.
+        The project endpoints paginate by cursor: there is no `page` parameter, and asking for
+        page two by number silently returns the first page again, so a caller that counted pages
+        would mirror every card twice. The cursor is opaque, so the header is followed as given.
         """
         url: str | None = path
         for _ in range(MAX_PAGES):
@@ -696,9 +612,8 @@ class HttpGitHubClient:
     async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
         """Whatever GitHub answers at a path, list or object alike.
 
-        The typed readers above each know what they asked for and refuse anything else. The
-        project endpoints answer with arrays and are parsed by a module that checks every field
-        it touches, so this hands the body over as it came and leaves the judging to them.
+        The project endpoints are parsed by a module that checks every field it touches, so
+        this hands the body over as it came.
         """
         try:
             response = await self._client.get(
@@ -717,12 +632,9 @@ class HttpGitHubClient:
     async def _authorization(self, owner: str) -> dict[str, str]:
         """The credential for calls about one account, or nothing at all.
 
-        Nothing rather than an empty bearer: a header reading `Bearer ` is a malformed credential
-        and GitHub answers 401 to it, where no header at all is an anonymous request that public
-        endpoints answer. The second is what a deployment with no App configured wants.
-
-        An empty owner means a call that is not about a repository - the user lookup behind
-        `/link` is the only one - and those endpoints are public.
+        Nothing rather than an empty bearer: `Bearer ` is malformed and GitHub answers 401,
+        where no header at all is anonymous and public endpoints answer. An empty owner means
+        a call that is not about a repository, and those endpoints are public.
         """
         if self._tokens is None or not owner:
             return {}
@@ -750,9 +662,8 @@ class HttpGitHubClient:
 def _repository(owner: str, name: str) -> str:
     """The path segment naming one repository, with both halves escaped.
 
-    `permission_for` quoted these and `add_label` did not, which is a difference nobody meant. A
-    repository name is GitHub's to shape and a stray slash in one would otherwise read as another
-    path segment and send the write somewhere else entirely.
+    A repository name is GitHub's to shape, and a stray slash in one would read as another path
+    segment and send the write somewhere else.
     """
     return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
 
@@ -760,9 +671,8 @@ def _repository(owner: str, name: str) -> str:
 def _headers() -> dict[str, str]:
     """The headers every request carries whoever it is about.
 
-    `Authorization` is deliberately not among them any more. It used to be, because there was one
-    token for everything; now it depends on which account the request concerns, so it is built per
-    request by `_authorization` below.
+    `Authorization` is not among them: it depends on which account the request concerns, so
+    `_authorization` below builds it per request.
     """
     return {
         "Accept": "application/vnd.github+json",
@@ -774,9 +684,8 @@ def _headers() -> dict[str, str]:
 def _redirect_target(response: httpx.Response, path: str) -> str:
     """Where a redirected write goes instead, if it can go anywhere at all.
 
-    Following one by hand means deciding for oneself who the Authorization header is handed to,
-    which is the job httpx was doing. GitHub answers a rename with the same host and a new path,
-    so anything else is refused rather than trusted with the token.
+    Following one by hand means deciding who the Authorization header is handed to. GitHub
+    answers a rename with the same host and a new path, so anything else is refused.
     """
     location = response.headers.get("location")
     if not location:
@@ -812,9 +721,8 @@ def _raise_for_status(response: httpx.Response, path: str) -> None:
 def _refusal(response: httpx.Response, path: str) -> str:
     """GitHub's own words for why it would not do something.
 
-    Read rather than replaced. The reasons are specific, numerous and GitHub's to change, so a list
-    of them kept here would be a worse sentence and one more thing to hold in step. A body that is
-    not the shape this expects falls back to naming the path, which is still better than silence.
+    Read rather than replaced: the reasons are specific, numerous and GitHub's to change. A body
+    that is not the expected shape falls back to naming the path.
     """
     try:
         payload = response.json()
@@ -828,20 +736,13 @@ def _refusal(response: httpx.Response, path: str) -> str:
 def _is_rate_limited(response: httpx.Response) -> bool:
     """Whether a 403 is GitHub asking for a wait rather than refusing outright.
 
-    GitHub has two limits and they answer differently. The primary one is the hourly budget, and
-    a spent budget says so in the counter. The secondary one is about how fast requests arrive,
-    does not spend the budget at all, and marks itself only by asking for a wait: the counter
-    beside it is untouched and often nowhere near zero.
-
-    Reading the counter alone therefore recognised the limit this bot will almost never reach and
-    missed the one it actually trips. A write costs several times what a read does against the
-    secondary allowance, and a board with a handful of cards moving does exactly that, so it is
-    the poller that finds this limit. Filed as a refusal it lost the wait GitHub had asked for,
-    the poller's one backoff could not fire, and it carried on at its ordinary interval, which
-    GitHub's own documentation says is how an integration gets banned. Everybody running a
-    command was meanwhile told to go and check a token that was perfectly healthy.
-
-    A 429 is already a rate limit whatever else it carries, and is handled by the caller.
+    Two limits, answering differently. The primary one is the hourly budget and says so in the
+    counter. The secondary one is about how fast requests arrive, spends no budget, and marks
+    itself only by asking for a wait, with the counter beside it often nowhere near zero. So
+    reading the counter alone misses the limit this bot actually trips, which is the poller
+    moving cards: filed as a refusal it loses the wait, and carrying on at the ordinary
+    interval is how GitHub's documentation says an integration gets banned. A 429 is already a
+    rate limit whatever else it carries, and the caller handles it.
     """
     if response.status_code != 403:
         return False
@@ -853,9 +754,8 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 def _retry_after(response: httpx.Response) -> int | None:
     """Seconds to wait before trying again.
 
-    The two headers GitHub can answer with are not the same kind of number. `retry-after` is
-    already a delay; `x-ratelimit-reset` is the epoch second the window reopens, so returning
-    it unchanged would report a wait of about fifty-six years. It is turned into a delay
+    The two headers are different kinds of number. `retry-after` is already a delay;
+    `x-ratelimit-reset` is the epoch second the window reopens, so it is turned into a delay
     against GitHub's own `date` header, which is the clock it was measured on.
     """
     delay = response.headers.get("retry-after")

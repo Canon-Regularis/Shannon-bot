@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Mapping
 from datetime import timedelta
 from typing import Any
@@ -22,6 +23,7 @@ from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
 from tests.support.stack import DeliveryClient, deliver, registered_stack
+from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
@@ -60,10 +62,15 @@ class Exploding:
         return WebhookOutcome.PROCESSED
 
 
-def build_worker(queue: WebhookDeliveryQueue, handler: Any, **overrides: Any) -> DeliveryWorker:
+def build_worker(
+    queue: WebhookDeliveryQueue,
+    handler: Any,
+    links: Any = None,
+    **overrides: Any,
+) -> DeliveryWorker:
     router = EventRouter()
     router.register("issues", handler)
-    return DeliveryWorker(queue, router, WorkerSettings(**overrides))
+    return DeliveryWorker(queue, router, WorkerSettings(**overrides), links)
 
 
 async def enqueue(queue: WebhookDeliveryQueue, delivery_id: str, action: str = "opened") -> None:
@@ -448,7 +455,7 @@ class TestWaitingForDiscord:
         assert (await stored(db_session, "delivery-a")).status == DeliveryStatus.PENDING
 
         connected.set()
-        await _until(lambda: handler.calls == 1)
+        await until(lambda: handler.calls == 1)
         worker.stop()
         await running
 
@@ -506,7 +513,7 @@ class TestWaitingForDiscord:
 
         with caplog.at_level("ERROR"):
             running = asyncio.create_task(worker.run_forever(never_answers))
-            await _until(lambda: handler.calls == 1)
+            await until(lambda: handler.calls == 1)
             worker.stop()
             await asyncio.wait_for(running, timeout=5)
 
@@ -525,7 +532,7 @@ class TestWaitingForDiscord:
 
         with caplog.at_level("ERROR"):
             running = asyncio.create_task(worker.run_forever(_connected))
-            await _until(lambda: handler.calls == 1)
+            await until(lambda: handler.calls == 1)
             worker.stop()
             await running
 
@@ -538,7 +545,7 @@ class TestWaitingForDiscord:
         await enqueue(queue, "delivery-a")
 
         running = asyncio.create_task(worker.run_forever())
-        await _until(lambda: handler.calls == 1)
+        await until(lambda: handler.calls == 1)
         worker.stop()
         await running
 
@@ -569,13 +576,6 @@ async def _connected() -> None:
     return
 
 
-async def _until(condition, timeout: float = 10.0) -> None:
-    """Wait for something the worker does on its own schedule, rather than guessing at a sleep."""
-    async with asyncio.timeout(timeout):
-        while not condition():
-            await asyncio.sleep(0.01)
-
-
 class TestDrainingABacklog:
     """A full batch means there is more waiting, so the loop goes straight back round.
 
@@ -597,7 +597,7 @@ class TestDrainingABacklog:
 
         running = asyncio.create_task(worker.run_forever())
         try:
-            await _until(lambda: handler.calls == 4, timeout=5)
+            await until(lambda: handler.calls == 4, timeout=5)
         finally:
             worker.stop()
             running.cancel()
@@ -617,7 +617,7 @@ class TestDrainingABacklog:
 
         running = asyncio.create_task(worker.run_forever())
         try:
-            await _until(lambda: handler.calls == 1, timeout=5)
+            await until(lambda: handler.calls == 1, timeout=5)
             await enqueue(queue, "b")
             await asyncio.sleep(0.5)
 
@@ -678,13 +678,54 @@ class TestPruning:
         assert (await stored(db_session, "old")).status == DeliveryStatus.PROCESSED
 
         running = asyncio.create_task(worker.run_forever())
-        await _until(lambda: True)
+        await until(lambda: True)
         await asyncio.sleep(0.2)
         worker.stop()
         await running
 
         db_session.expire_all()
         assert await db_session.scalar(select(func.count()).select_from(WebhookEvent)) == 0
+
+    async def test_the_sweep_also_clears_the_unregister_links(
+        self, queue: WebhookDeliveryQueue
+    ) -> None:
+        """`IdentityVerificationStore.prune` was written and tested and never called, so the
+        table only ever grew. This loop is the timer it hangs off, so this is what says so."""
+        links = _LinksPruned(3)
+        worker = build_worker(
+            queue,
+            Exploding(failures=0),
+            links,
+            poll_interval=timedelta(seconds=0.01),
+            link_retention=timedelta(days=2),
+        )
+
+        await self._sweep_once(worker)
+
+        assert links.swept == [timedelta(days=2)]
+
+    async def test_a_sweep_that_finds_no_links_says_nothing(
+        self, queue: WebhookDeliveryQueue, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Most hours it finds none, and an hourly log line reporting zero is noise."""
+        worker = build_worker(
+            queue,
+            Exploding(failures=0),
+            _LinksPruned(0),
+            poll_interval=timedelta(seconds=0.01),
+        )
+
+        with caplog.at_level(logging.INFO, logger="shannon.services.delivery.worker"):
+            await self._sweep_once(worker)
+
+        assert "verification links" not in caplog.text
+
+    @staticmethod
+    async def _sweep_once(worker: DeliveryWorker) -> None:
+        running = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.2)
+        worker.stop()
+        await running
 
     async def test_a_delivery_still_waiting_is_never_pruned(
         self, queue: WebhookDeliveryQueue, db_session: AsyncSession
@@ -746,6 +787,18 @@ class TestPruningThatFails:
         await running
 
         assert attempts == 1
+
+
+class _LinksPruned:
+    """The `/unregister` links, standing in for the verification service the container passes."""
+
+    def __init__(self, found: int) -> None:
+        self._found = found
+        self.swept: list[timedelta] = []
+
+    async def prune(self, *, keep_for: timedelta) -> int:
+        self.swept.append(keep_for)
+        return self._found
 
 
 class _PruneFails:

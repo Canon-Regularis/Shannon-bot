@@ -22,15 +22,12 @@ class ProcessLiveness:
 
     engine: AsyncEngine
     worker_task: asyncio.Task[None] | None = None
-    # None means no token was configured, which is the deliberate no-bot mode. Otherwise a
-    # finished task means the gateway has gone.
+    # None means no token was configured (no-bot mode); a finished task means the gateway went.
     bot_task: asyncio.Task[None] | None = None
-    # None means no board was configured, which is the default. Otherwise a finished task means
-    # the board is no longer being read.
+    # None means no board was configured, the default; a finished task means it is not read.
     poller_task: asyncio.Task[None] | None = None
     flusher_task: asyncio.Task[None] | None = None
-    # Whether the client has actually reached the gateway, which the task being alive does not
-    # say. None when there is no bot to ask.
+    # Whether the client has reached the gateway, which the task being alive does not say.
     gateway_is_ready: Callable[[], bool] | None = None
     # How long a probe is reused. The route is public, and a connection per request would let a
     # flood exhaust the pool the worker runs on.
@@ -64,9 +61,8 @@ class ProcessLiveness:
             else:
                 self._reachable = True
 
-            # Stamped once there is an answer, never on the way in. Stamping first marks the
-            # result fresh while it is still being worked out, so callers arriving in that window
-            # read `_reachable` before anything has set it: on a first probe, its initial False.
+            # Stamped once there is an answer, never on the way in. Stamping first would mark
+            # the result fresh while it is unknown, so callers read `_reachable`'s initial False.
             self._probed_at = time.monotonic()
             return self._reachable
 
@@ -76,52 +72,24 @@ class ProcessLiveness:
     def poller_running(self) -> bool:
         """Whether a configured board is still being read.
 
-        Reported without being part of the verdict, deliberately, and it is the only thing here
-        that is. The process can do its job without this one: webhooks keep arriving, threads
-        keep being written, and only board movement stops. Failing the check would have an
-        orchestrator restart a process that is still working, throwing away whatever the worker
-        had in hand to fix something a restart may not fix.
-
-        Reported all the same, because the alternative is what happens now: the poller is the one
-        task with no halt wired to it, so it dies with a line in the log and the process runs on
-        for ever answering that everything is fine. Board mirroring stops and nothing anybody
-        looks at says so.
-
-        True where there is no board, which is the default: nothing to run is not something
-        stopped.
+        Reported without counting towards the verdict: the poller is the only task with no halt
+        wired to it, so it dies quietly, but the process works on. True where there is no board.
         """
         return self.poller_task is None or not self.poller_task.done()
 
     def flusher_running(self) -> bool:
-        """Whether captured conversations are still being published. Issue #103.
+        """Whether captured conversations are still being published.
 
-        Reported without being part of the verdict, for the poller's reason above and
-        with the same shape: nothing halts the process when this task dies, so without
-        this it goes with one line in the log and everything afterwards answers that all
-        is well, while what people said piles up in a table and reaches GitHub never.
-
-        Not counted, because the rest of the process is unharmed: webhooks arrive,
-        threads are written, and capture itself carries on into the table. What is held
-        there is published by the next process with a working flusher, so restarting
-        over this would throw away a working worker's batch to fix something that is
-        already waiting patiently.
+        Reported without counting towards the verdict, like the poller: nothing halts the process
+        when this dies, so captured words pile up in the table until a working flusher runs.
         """
         return self.flusher_task is None or not self.flusher_task.done()
 
     def bot_connected(self) -> bool:
         """Whether the gateway is still there, if this deployment has one at all.
 
-        The worker only waits for the bot once, before its first batch, so a gateway that dies
-        after connecting leaves the worker running and leasing while every Discord call fails.
-        Reporting only the worker would call that healthy, which is exactly the case this
-        endpoint was added for.
-
-        Asking the client and not only the task, because discord.py reconnects for ever by
-        design: a gateway outage or blocked egress leaves `start()` running and the connection
-        never made, so the task stays alive and said nothing was wrong while every delivery
-        failed against a client with no session. A reconnection in progress reads as not
-        connected for as long as it lasts, which is the honest answer and what the health
-        check's own start period and retries are for.
+        The worker waits for the bot only once, so a gateway dying later leaves it leasing while
+        Discord calls fail; discord.py reconnects for ever, so `start()` runs on unconnected.
         """
         if self.bot_task is None:
             return True

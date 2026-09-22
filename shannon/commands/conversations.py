@@ -1,13 +1,7 @@
 """`/log_conversation` and `/stop_conversation`: publishing a thread to its GitHub item.
 
-Issue #103. Everything else in this project runs the other way, so these are the only commands
-whose effect is to start reading Discord rather than to write to GitHub once.
-
-Two things here are unlike the other command modules. The service posts a visible line into the
-thread before anything is armed, because the ephemeral reply below is seen by one person and
-everybody else in the thread is about to have their words published. And `/log_conversation`
-refuses outright when the deployment has not turned capture on, since the privileged intent it
-needs is a Developer Portal toggle that this process cannot check for itself.
+A visible line goes into the thread first: the reply below is ephemeral and the rest of the
+thread is about to be published. Capture needs a Developer Portal toggle nothing here can check.
 """
 
 from __future__ import annotations
@@ -18,6 +12,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -52,8 +47,7 @@ def build_log_conversation_command(
     async def log_conversation(interaction: discord.Interaction) -> None:
         await _act(interaction, "log_conversation", gate, service, capturing=capturing)
 
-    # discord.py's decorator leaves the binding parameter unsolved for a module-level command, so
-    # the object it hands back is `Command[Unknown, ...]` whatever this is declared as.
+    # discord.py's decorator leaves the binding parameter unsolved for a module-level command.
     return log_conversation  # pyright: ignore[reportUnknownVariableType]
 
 
@@ -62,9 +56,8 @@ def build_stop_conversation_command(
 ) -> SlashCommand:
     """Deliberately not given the capture flag.
 
-    Turning capture off in a deployment that had it on leaves conversations open in the database.
-    Nothing is captured into them, but somebody looking at a thread has been told logging is on and
-    has no way to make that stop. So this one always works.
+    Turning capture off in a deployment that had it on leaves conversations open in the
+    database, with the thread told logging is on and no way to stop it. So this one always works.
     """
 
     @app_commands.command(
@@ -86,14 +79,8 @@ async def _act(
     capturing: bool,
 ) -> None:
     """The half both commands share: check, defer, call, answer."""
-    if interaction.guild_id is None:
-        await reply(interaction, "Run this inside a server channel.")
-        return
-    if not gate.allows(interaction.user, SYNC_ROLES):
-        await reply(interaction, gate.denial(command, SYNC_ROLES))
-        return
-    if interaction.channel_id is None:
-        await reply(interaction, "Run this inside the item's thread.")
+    where = await in_a_thread(interaction, command, gate, SYNC_ROLES)
+    if where is None:
         return
     if not capturing:
         await reply(interaction, NOT_CAPTURING)
@@ -103,7 +90,7 @@ async def _act(
     await defer(interaction)
     try:
         act = service.start if starting else service.stop
-        full_name, number = await act(thread_id=interaction.channel_id, by=interaction.user.id)
+        full_name, number = await act(thread_id=where.channel_id, by=interaction.user.id)
     except ShannonError as error:
         logger.warning("/%s could not finish: %s", command, error.message)
         await reply(interaction, reply_for(error))
@@ -112,11 +99,6 @@ async def _act(
 
 
 def _said(full_name: str, number: int, *, starting: bool) -> str:
-    """What happened, and for the start, that the thread was told.
-
-    Worth saying back. The notice is the thing that makes publishing somebody's words defensible,
-    and whoever ran the command cannot see their own ephemeral reply and the thread line together.
-    """
     item = f"{full_name}#{number}"
     if starting:
         return f"Logging this thread to {item}. Everyone in the thread has been told."

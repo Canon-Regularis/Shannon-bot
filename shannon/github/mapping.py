@@ -25,11 +25,10 @@ Payload = JsonObject
 
 
 class _SharedFields(TypedDict):
-    """What `_shared_fields` hands back, spelled out so the `**` into a snapshot stays checked.
+    """Typed so the `**` into a snapshot stays checked.
 
-    A plain dict cannot do that job here. `dict[str, object]` refuses to unpack into a typed
-    constructor at all, and `dict[str, Any]` unpacks into anything at all, which is the same as
-    not checking it.
+    `dict[str, object]` will not unpack into a typed constructor at all, and `dict[str, Any]`
+    unpacks into anything.
     """
 
     repository: RepositorySnapshot
@@ -47,8 +46,6 @@ class _SharedFields(TypedDict):
 
 
 class _NoteFields(TypedDict):
-    """The same, for what a comment and a review carry alike."""
-
     html_url: str
     body: str
     author: Actor | None
@@ -56,12 +53,7 @@ class _NoteFields(TypedDict):
 
 
 def parse_timestamp(value: object) -> datetime | None:
-    """Read a GitHub timestamp, always as an aware one.
-
-    Normalising here means nothing downstream has to wonder whether a timestamp carries an
-    offset. GitHub sends them, but a payload without one would otherwise be read as local time
-    by whatever machine happened to be running.
-    """
+    """Read a GitHub timestamp as aware; one with no offset would be read as local time."""
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -86,12 +78,9 @@ def actor(payload: object) -> Actor | None:
 
 
 def _avatar(value: object) -> str | None:
-    """The account's picture, or None for anything this would not hand to Discord.
+    """The account's picture, or None for anything but an `https://` URL.
 
-    `https://` and nothing else. Discord fetches a thumbnail's media itself and refuses the WHOLE
-    message when it cannot, so a value that is merely odd rather than usable does not cost a panel
-    its picture, it costs the item its block. Checked here because this is where untrusted GitHub
-    JSON stops being untrusted.
+    Discord fetches a thumbnail's media itself and refuses the whole message when it cannot.
     """
     return value if isinstance(value, str) and value.startswith("https://") else None
 
@@ -104,19 +93,10 @@ def actors(payloads: object) -> tuple[Actor, ...]:
 
 
 def team(payload: object) -> Actor | None:
-    """A GitHub team asked for a review, read as though it were a person.
+    """A GitHub team asked for a review, carried as an Actor.
 
-    A team is not a user: it has a slug and a name where an account has a login, and no id in the
-    space user ids come from. Carrying it as an Actor anyway is what lets one review request mean
-    one thing all the way through, so a team is recorded, shown in the reviewers line and told
-    about in the thread on exactly the same path a person is.
-
-    What it cannot be is mentioned. `/link` binds a GitHub login to a Discord account, and a team
-    has no login to bind, so a team resolves to no mention and is named in plain text. That is
-    what the renderer already does for anybody nobody has linked, so it needs no special case.
-
-    The slug is preferred over the name because it is the stable, URL-safe handle; the name is a
-    display string somebody can change.
+    A team has no login, so `/link` cannot bind it and it renders as plain text the way an
+    unlinked person does. The slug is the stable handle; the name is one somebody can change.
     """
     if not is_json_object(payload):
         return None
@@ -165,9 +145,8 @@ def repository(payload: object) -> RepositorySnapshot | None:
     if not isinstance(html_url, str) or not html_url:
         html_url = f"https://github.com/{owner}/{name}"
 
-    # Checked for the type rather than coerced. `bool(payload.get("private"))` would read a
-    # missing field, a null and the string "false" all as public, and the whole point of the
-    # column behind this is that "nobody said" is a different answer from "no".
+    # Checked for the type, not coerced: `bool(...)` reads a missing field, a null and the string
+    # "false" all as public, and the column behind this keeps "nobody said" apart from "no".
     private = payload.get("private")
     return RepositorySnapshot(
         github_repo_id=repo_id,
@@ -183,8 +162,7 @@ def _owner_login(payload: Payload) -> str | None:
     if owner is not None:
         return owner.login
 
-    # Nothing read here arrives without an owner block, so this covers one that turns up
-    # malformed. Guessing the owner from full_name is recoverable; dropping the delivery is not.
+    # Nothing read here arrives without an owner block; this covers one that turns up malformed.
     full_name = payload.get("full_name")
     if isinstance(full_name, str) and "/" in full_name:
         return full_name.split("/", 1)[0]
@@ -198,10 +176,6 @@ def issue(
 
     The same shape comes back from `GET /repos/{owner}/{repo}/issues/{number}`, from a row of
     `GET /repos/{owner}/{repo}/issues`, and inside `issues` webhook payloads.
-
-    A list row is the same object with the single-item extras left off, and none of them are read
-    here. What a list row does carry, and a caller has to handle, is pull requests: GitHub serves
-    those from the issues endpoint too, which is what `is_pull_request` below is for.
     """
     if not is_json_object(payload):
         return None
@@ -216,9 +190,8 @@ def issue(
 def is_pull_request(payload: object) -> bool:
     """Whether an issue-shaped payload is really a pull request.
 
-    GitHub serves pull requests from the issues endpoint too, and marks them only with this
-    key. Without the check, `/issue` pointed at a pull request number would track it a second
-    time under the wrong type.
+    GitHub serves pull requests from the issues endpoint too, and marks them only with this key.
+    Without it, `/issue` on a pull request number would track it again under the wrong type.
     """
     return is_json_object(payload) and payload.get("pull_request") is not None
 
@@ -228,13 +201,8 @@ def pull_request(
 ) -> PullRequestSnapshot | None:
     """Build a snapshot from a pull request object.
 
-    The same object shape comes back from `GET /repos/{owner}/{repo}/pulls/{number}`, from a row
-    of `GET /repos/{owner}/{repo}/pulls`, and inside `pull_request` webhook payloads, so all three
-    callers land here.
-
-    Read only from those. A pull request also appears in the *issues* list, and there it is the
-    issue shape: no requested reviewers, no requested teams, no repository on the base. This would
-    build a snapshot from one without complaining and quietly say nobody had been asked to review.
+    Read only from `GET /repos/{owner}/{repo}/pulls/...` or a `pull_request` webhook: the *issues*
+    shape of a pull request has no requested reviewers, and this reads one as nobody being asked.
     """
     if not is_json_object(payload):
         return None
@@ -251,19 +219,12 @@ def pull_request(
         # endpoint or event it came from.
         merged=bool(payload.get("merged")) or payload.get("merged_at") is not None,
         head_sha=_head_sha(payload),
-        # `isinstance` rather than `bool(...)`, for the reason `repository` reads `private` that
-        # way: a string is truthy, so `"false"` would come back as a draft.
         draft=payload.get("draft") is True,
     )
 
 
 def _head_sha(payload: Payload) -> str:
-    """The commit a pull request currently points at, or empty where it does not say.
-
-    Absent from the ISSUES shape of a pull request, which carries no head at all. Empty rather
-    than guessed, so a caller comparing against it is asking a question with no answer rather
-    than being told the wrong one.
-    """
+    """The issues shape of a pull request carries no head, so this can come back empty."""
     head = payload.get("head")
     sha = head.get("sha") if is_json_object(head) else None
     return sha if isinstance(sha, str) else ""
@@ -272,11 +233,6 @@ def _head_sha(payload: Payload) -> str:
 def _shared_fields(
     payload: Payload, repo: RepositorySnapshot, *, path: str, action: str | None
 ) -> _SharedFields | None:
-    """The fields every mirrored object has, or None when the payload is unusable.
-
-    Issues and pull requests are the same shape here apart from the URL path, so pulling them
-    out once is what keeps the two from validating slightly differently.
-    """
     object_id = payload.get("id")
     number = payload.get("number")
     if not isinstance(object_id, int) or not isinstance(number, int):
@@ -288,8 +244,7 @@ def _shared_fields(
 
     title = payload.get("title")
     state = payload.get("state")
-    # Read the way a comment's is next door, and for the same reason: GitHub sends a null for an
-    # item opened with no description, and every reader downstream wants a string.
+    # GitHub sends a null body for an item opened with no description.
     body = payload.get("body")
     return {
         "repository": repo,
@@ -310,11 +265,7 @@ def _shared_fields(
 def comment(
     payload: object, repo: RepositorySnapshot, *, item_number: int, on: object
 ) -> CommentSnapshot | None:
-    """Build a snapshot from a comment object.
-
-    `on` is the issue the comment was left under, needed only to tell which kind of item it is:
-    GitHub serves pull request comments from the issues endpoint and marks them with one key.
-    """
+    """Build a snapshot from a comment object; `on` is the issue it was left under."""
     if not is_json_object(payload):
         return None
 
@@ -332,7 +283,6 @@ def comment(
 
 
 def review(payload: object, repo: RepositorySnapshot, *, item_number: int) -> ReviewSnapshot | None:
-    """Build a snapshot from a submitted review."""
     if not is_json_object(payload):
         return None
 
@@ -355,10 +305,8 @@ def review_comment(
 ) -> ReviewCommentSnapshot | None:
     """Build a snapshot from one inline comment on a pull request's diff.
 
-    Everything saying where the comment points is optional. GitHub leaves `start_line` out of a
-    single-line comment, leaves `in_reply_to_id` out of one that opens a thread, and empties `line`
-    on one the diff has moved out from under. None of the three is a failure, so none of them
-    refuses the snapshot.
+    GitHub leaves `start_line` out of a single-line comment, leaves `in_reply_to_id` out of one
+    that opens a thread, and empties `line` on one the diff has moved out from under.
     """
     if not is_json_object(payload):
         return None
@@ -382,20 +330,10 @@ def review_comment(
 
 
 def _optional_int(value: object) -> int | None:
-    """A number GitHub may send, may send as null, or may leave out of the body altogether.
-
-    All three mean the same thing to a reader and none of them is a failure, so they collapse to
-    one answer here rather than being told apart three times at the call site.
-    """
     return value if isinstance(value, int) else None
 
 
 def _note_fields(payload: Payload, *, created: str) -> _NoteFields:
-    """What a comment and a review carry alike.
-
-    They differ only in which key holds the time they were written, which is why that is a
-    parameter and the rest is not.
-    """
     html_url = payload.get("html_url")
     body = payload.get("body")
     return {
@@ -407,11 +345,7 @@ def _note_fields(payload: Payload, *, created: str) -> _NoteFields:
 
 
 def commit_ref(payload: object) -> CommitRef | None:
-    """One row of a compare, or None for a row that cannot be used.
-
-    A row with no SHA is not a commit anybody can go and read, and nothing downstream could claim
-    it, so it is dropped rather than rendered as a gap.
-    """
+    """One row of a compare; a row with no SHA is dropped rather than rendered as a gap."""
     if not is_json_object(payload):
         return None
     sha = payload.get("sha")
@@ -432,11 +366,7 @@ def commit_ref(payload: object) -> CommitRef | None:
 
 
 def commit_range(payload: object) -> CommitRange | None:
-    """A compare between two commits, or None for a body that says nothing usable.
-
-    One unusable row does not lose the rest: the range is what the caller asked about, and
-    dropping every other commit because GitHub sent one odd entry would say less than it knows.
-    """
+    """A compare between two commits; one unusable row does not lose the rest."""
     if not is_json_object(payload):
         return None
     status = payload.get("status")
@@ -451,8 +381,7 @@ def commit_range(payload: object) -> CommitRange | None:
     return CommitRange(
         status=status,
         commits=commits,
-        # Falls back to what was listed rather than to zero. A missing count with commits beside
-        # it would otherwise report every one of them as left out.
+        # Not zero: a missing count with commits beside it would report every one as left out.
         total=total if isinstance(total, int) else len(commits),
     )
 
@@ -460,9 +389,8 @@ def commit_range(payload: object) -> CommitRange | None:
 def commit_stats(payload: object) -> CommitStats | None:
     """How much one commit changed, or None for a body without the numbers.
 
-    The file count is the length of the list, because GitHub sends no count on a commit. That
-    list stops at three hundred entries, so a very wide commit understates its files while its
-    additions and deletions stay exact.
+    GitHub sends no file count on a commit, and the list it sends instead stops at three hundred
+    entries, so a very wide commit understates its files while the other two stay exact.
     """
     if not is_json_object(payload):
         return None
@@ -486,10 +414,8 @@ def commit_stats(payload: object) -> CommitStats | None:
 def check_run(payload: object) -> CheckRun | None:
     """One CI job off the check-runs endpoint, or None for a row that cannot be rendered.
 
-    A name is the whole of what a reader gets, so a run without one is dropped rather than shown
-    as a blank line. The conclusion is allowed to be missing: GitHub leaves it null on a run it
-    has not finished with, and the caller refuses the whole set on that before it reaches here.
-    An empty conclusion falls in the third bucket either way, which is the safe direction.
+    GitHub leaves the conclusion null on a run it has not finished with, and the caller refuses
+    the whole set on that before it reaches here.
     """
     if not is_json_object(payload):
         return None
@@ -508,8 +434,8 @@ def check_run(payload: object) -> CheckRun | None:
     return CheckRun(
         check_run_id=check_run_id,
         name=name,
-        # Empty where GitHub did not say, which reads as "not completed" and holds the whole
-        # announcement back. The safe direction: a result said late is better than one said wrong.
+        # Empty where GitHub did not say, which reads downstream as "not completed" and holds
+        # the announcement back.
         status=status if isinstance(status, str) else "",
         conclusion=conclusion if isinstance(conclusion, str) else "",
         html_url=html_url if isinstance(html_url, str) else "",
@@ -519,9 +445,8 @@ def check_run(payload: object) -> CheckRun | None:
 def check_runs(payload: object) -> list[CheckRun]:
     """The usable runs on one page of the check-runs endpoint.
 
-    That endpoint answers an OBJECT with the list under `check_runs`, unlike the labels list
-    beside it in the client, which pages through an array directly. Copying the label reader is
-    the easy mistake here and it yields nothing at all rather than failing.
+    That endpoint answers an object with the list under `check_runs`, unlike the labels list in
+    the client, which pages through an array directly.
     """
     if not is_json_object(payload):
         return []

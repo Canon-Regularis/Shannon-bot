@@ -48,6 +48,10 @@ packages = ["shannon"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A marker that is not declared below now fails collection. Both of them are applied to whole
+# tiers and never typed by hand, so the only thing this can catch is a new one somebody invented,
+# which is exactly when a warning would be missed among the others.
+addopts = ["--strict-markers"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Nothing here is allowed to wait for ever. A good many tests poll for something a background
@@ -64,6 +68,10 @@ asyncio_default_fixture_loop_scope = "function"
 timeout = 60
 markers = [
     "integration: requires a live PostgreSQL instance (SHANNON_TEST_DATABASE_URL)",
+    # Applied to the whole tier by `tests/unit/conftest.py` rather than file by file. It was on
+    # 32 of 88 files, so `-m unit` selected a third of the unit tests and read as though it
+    # selected all of them.
+    "unit: needs nothing but the interpreter",
 ]
 filterwarnings = [
     # A deprecation warning from our own code is a bug to fix, not a note to read later.
@@ -83,9 +91,14 @@ branch = true
 
 [tool.coverage.report]
 # A floor rather than a target: both are complete today, so anything under it is a regression.
-# Worth saying what it does not mean. A line running is not a behaviour being asserted, and
-# three tests here reached their subject only by luck of timing while passing either way. This
+# Worth saying what it does not mean. A line running is not a behaviour being asserted, and this
 # catches code nothing executes, which is a narrower thing than code nothing checks.
+#
+# Twice over, at a hundred per cent. Five properties ran fifteen hundred examples through the
+# webhook parsers and asserted nothing, every one of them dying at the first guard; and the
+# gateway tests pinned twenty-two keyword assertions against a mock that would have accepted any
+# keyword at all. Both were covered the whole time, and the number did not move when either
+# was fixed.
 fail_under = 100
 show_missing = true
 skip_covered = true
@@ -134,34 +147,6 @@ warn_return_any = false
 # which is the property that makes this worth doing before the work is finished rather than after.
 [[tool.mypy.overrides]]
 module = [
-    "shannon.api.dependencies",
-    "shannon.commands.refresh",
-    "shannon.commands.workflow",
-    "shannon.container",
-    "shannon.db.stores.assignments",
-    "shannon.db.stores.channel_mappings",
-    "shannon.db.stores.identities",
-    "shannon.db.stores.installations",
-    "shannon.db.stores.repositories",
-    "shannon.db.stores.team_links",
-    "shannon.db.stores.thread_pointers",
-    "shannon.db.stores.tracked_items",
-    "shannon.db.stores.webhook_events",
-    "shannon.discord_bot.client",
-    "shannon.discord_bot.formatting",
-    "shannon.discord_bot.threads",
-    "shannon.github.app_auth",
-    "shannon.main",
-    "shannon.runtime.lifespan",
-    "shannon.runtime.supervision",
-    "shannon.services.delivery.worker",
-    "shannon.services.projects",
-    "shannon.services.sync.items",
-    "shannon.services.sync.manual",
-    "shannon.services.sync.policies",
-    "shannon.services.sync.refresh",
-    "shannon.services.sync.relocation",
-    "shannon.services.workflow",
     "tests.fakes.github",
     "tests.integration.conftest",
     "tests.integration.test_a_block_that_names_without_ringing",
@@ -176,7 +161,6 @@ module = [
     "tests.integration.test_delivery_queue",
     "tests.integration.test_delivery_worker",
     "tests.integration.test_issue_state_changes",
-    "tests.integration.test_issue_sync_service",
     "tests.integration.test_issue_webhook_create",
     "tests.integration.test_issue_webhook_update",
     "tests.integration.test_label_lines",
@@ -222,7 +206,6 @@ module = [
     "tests.unit.discord_bot.test_client",
     "tests.unit.discord_bot.test_commit_lines",
     "tests.unit.discord_bot.test_descriptions",
-    "tests.unit.discord_bot.test_issue_formatting",
     "tests.unit.discord_bot.test_responses",
     "tests.unit.discord_bot.test_review_comment_lines",
     "tests.unit.discord_bot.test_safe_text",
@@ -241,7 +224,6 @@ module = [
     "tests.unit.test_build_app",
     "tests.unit.test_config_secrecy",
     "tests.unit.test_container",
-    "tests.unit.test_properties",
     "tests.unit.test_stand_ins_match_what_they_replace",
     "tests.unit.test_the_commands_discord_will_accept",
     "tests.unit.test_the_shutdown_budget_fits_the_container",
@@ -256,46 +238,16 @@ include = ["shannon", "tests"]
 ignore = [
     # Not on this list because it is old. It is here because `FakeInteraction` cannot satisfy
     # `discord.Interaction`, which is a concrete generic class, so every command test in the
-    # project is in the same position and every one of them is listed below. The fix is the one
-    # the typing work already schedules: give the commands a narrow protocol naming what they
-    # actually read, which the fake then satisfies structurally and without a single cast.
+    # project is in the same position and every one of them is listed below.
+    #
+    # A narrow protocol naming what the commands actually read was tried and does not work.
+    # `Interaction.response` is a `CachedSlotProperty`, and while reading it resolves to
+    # `InteractionResponse`, pyright compares the descriptor itself when matching a protocol
+    # and reports `is_done` as absent. A read-only property member and a plain attribute member
+    # both fail the same way, so nothing that has to call `reply()` can be typed this way.
     "tests/unit/commands/test_people_commands.py",
     "tests/unit/commands/test_label_commands.py",
     "tests/unit/commands/test_conversation_commands.py",
-    "shannon/api/routes/webhooks.py",
-    "shannon/commands/link.py",
-    "shannon/commands/link_team.py",
-    "shannon/commands/mentions.py",
-    "shannon/commands/refresh.py",
-    "shannon/commands/regenerate.py",
-    "shannon/commands/register.py",
-    "shannon/commands/set_channel.py",
-    "shannon/commands/sync_link.py",
-    "shannon/commands/unregister.py",
-    "shannon/commands/workflow.py",
-    "shannon/container.py",
-    "shannon/db/base.py",
-    "shannon/db/stores/assignments.py",
-    "shannon/db/stores/identities.py",
-    "shannon/db/stores/installations.py",
-    "shannon/db/stores/team_links.py",
-    "shannon/db/stores/thread_pointers.py",
-    "shannon/db/stores/webhook_events.py",
-    "shannon/discord_bot/formatting.py",
-    "shannon/discord_bot/threads.py",
-    "shannon/github/app_auth.py",
-    "shannon/main.py",
-    "shannon/runtime/lifespan.py",
-    "shannon/services/delivery/queue.py",
-    "shannon/services/delivery/worker.py",
-    "shannon/services/projects.py",
-    "shannon/services/sync/items.py",
-    "shannon/services/sync/manual.py",
-    "shannon/services/sync/one_at_a_time.py",
-    "shannon/services/sync/policies.py",
-    "shannon/services/sync/refresh.py",
-    "shannon/services/sync/relocation.py",
-    "shannon/services/workflow.py",
     "tests/fakes/github.py",
     "tests/integration/conftest.py",
     "tests/integration/test_a_block_that_names_without_ringing.py",
@@ -310,7 +262,6 @@ ignore = [
     "tests/integration/test_delivery_queue.py",
     "tests/integration/test_delivery_worker.py",
     "tests/integration/test_issue_state_changes.py",
-    "tests/integration/test_issue_sync_service.py",
     "tests/integration/test_issue_webhook_create.py",
     "tests/integration/test_issue_webhook_update.py",
     "tests/integration/test_label_lines.py",
@@ -356,7 +307,6 @@ ignore = [
     "tests/unit/discord_bot/test_client.py",
     "tests/unit/discord_bot/test_commit_lines.py",
     "tests/unit/discord_bot/test_descriptions.py",
-    "tests/unit/discord_bot/test_issue_formatting.py",
     "tests/unit/discord_bot/test_responses.py",
     "tests/unit/discord_bot/test_review_comment_lines.py",
     "tests/unit/discord_bot/test_safe_text.py",
@@ -374,7 +324,6 @@ ignore = [
     "tests/unit/test_build_app.py",
     "tests/unit/test_config_secrecy.py",
     "tests/unit/test_container.py",
-    "tests/unit/test_properties.py",
     "tests/unit/test_stand_ins_match_what_they_replace.py",
     "tests/unit/test_the_commands_discord_will_accept.py",
     "tests/unit/test_the_shutdown_budget_fits_the_container.py",

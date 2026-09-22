@@ -1,16 +1,8 @@
 """The labels a repository has, remembered for a little while.
 
-Issue #104. Two things need this list and one of them needs it fast. The command checks a typed
-name against it before writing, because GitHub creates a label it has never seen rather than
-refusing and a typo would add one to the repository for good. The picker beside that field reads
-it on every keystroke, and Discord allows an autocomplete about three seconds to answer.
-
-So it is cached per repository. Ten characters typed is one call rather than ten, and a taxonomy
-does not change between two keystrokes. Short enough that a label added on GitHub shows up in the
-picker within the minute, which is the only thing the staleness costs.
-
-The clock is injected for the same reason it is everywhere else here: a test that has to sleep to
-prove an expiry is a test nobody runs.
+GitHub creates a label it has never seen rather than refusing, so a typed name is checked against
+this list before it is written. The picker beside that field reads it on every keystroke, and
+Discord allows an autocomplete about three seconds to answer.
 """
 
 from __future__ import annotations
@@ -23,8 +15,8 @@ from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
-# Long enough that typing a name is one call, short enough that a label made on GitHub a moment
-# ago can be used here without anybody wondering why it is missing.
+# Long enough that typing a name is one call, short enough that a label made on GitHub a
+# moment ago can be used here.
 LIFETIME = timedelta(minutes=2)
 
 
@@ -70,10 +62,9 @@ class RepositoryLabels:
     async def spelled(self, owner: str, name: str, wanted: str) -> str | None:
         """The repository's own spelling of this label, or None if it has no such label.
 
-        Its spelling rather than the one that was typed, which matters more than it looks. GitHub
-        matches a label name without regard to case, so writing `Bug` onto a repository that has
-        `bug` attaches the label it already had while the block, which compares case-folded, sees
-        no change. The command then reports something that did not happen.
+        GitHub matches a label name without regard to case, so writing `Bug` onto a repository
+        that has `bug` attaches the label it already had, while the block, which compares
+        case-folded, sees no change and the command reports something that did not happen.
         """
         asked = wanted.strip().casefold()
         for held in await self.names(owner, name):

@@ -1,10 +1,7 @@
-"""Turning transcript lines into a comment on an item. Issue #103.
+"""Turning transcript lines into a comment on an item.
 
-Deliberately thin, and deliberately ignorant of where the lines came from. It takes the `FoundItem`
-that `locate` hands every command run inside a thread rather than a conversation id, so it works
-just as well in a thread with no open conversation. That is what makes it the seam: the flusher is
-one producer of lines, and a later command that picks individual messages out of a thread is
-another, and neither is this module's business.
+Takes the `FoundItem` that `locate` hands every command run inside a thread, not a conversation
+id, so it works in a thread with no open conversation and the flusher is only one producer.
 """
 
 from __future__ import annotations
@@ -34,9 +31,8 @@ class TranscriptPublisher:
     async def publish(self, found: FoundItem, lines: Sequence[TranscriptLine]) -> None:
         """Put these lines on the item as a single comment.
 
-        One comment rather than one per line, which is the whole of why anything is buffered. A
-        ten-message exchange published a message at a time would bury the item and send everybody
-        watching it ten emails.
+        One comment rather than one per line: a ten-message exchange published a line at a time
+        sends everybody watching the item ten emails.
         """
         await self._github.add_comment(found.owner, found.name, found.number, render(lines))
         logger.info(

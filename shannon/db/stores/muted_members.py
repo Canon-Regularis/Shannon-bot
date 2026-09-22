@@ -1,8 +1,7 @@
 """Who this bot may notify, for the members who asked it not to.
 
 Read on the way out of every message that names somebody, and written by one command nobody but
-the member themselves runs. A row means that member asked to be left alone in that server; no row
-means they never asked, which is what everybody was before this existed.
+the member themselves runs. A row means that member asked to be left alone in that server.
 """
 
 from __future__ import annotations
@@ -26,22 +25,15 @@ class MutedMemberStore:
         """Which of these Discord accounts this bot is still allowed to notify.
 
         Answers who MAY rather than who may not, because the answer is handed straight to Discord
-        as the whole of what one message is permitted to notify. A list that had to be inverted on
-        the way there is one somebody eventually inverts twice.
+        as the whole of what one message is permitted to notify. Asked with the ids a message is
+        about to name, so the query is bounded by the item rather than by how many people in the
+        server have ever run the command; no ids is the ordinary case for a backlog mirror and
+        for a rebuild from a superseded delivery, which both render the people in plain text.
 
-        Asked with the ids a message is about to name rather than with the guild alone, so the
-        query is bounded by the item and not by how many people in the server have ever run the
-        command. An empty set of ids asks the database nothing, which is the ordinary case for a
-        backlog mirror and for a rebuild from a superseded delivery: both render the people in
-        plain text, so there is nobody to allow and nothing to look up.
-
-        Sorted, so a test asserting on the answer can write a literal instead of a set. Deduped,
-        which costs nothing and is not needed today, because `user_links` is unique on the Discord
-        account within a guild so one item's mentions cannot repeat one.
-
-        No cap. Discord refuses more than a hundred entries here, and every caller is far under:
-        GitHub allows ten assignees and fifteen requested reviewers, and a comment mentions at
-        most ten. A path that resolved a whole server would be the first to need one.
+        Deduped although `user_links` is unique on the Discord account within a guild, so one
+        item's mentions cannot repeat one; sorted so a test can assert on a literal. No cap:
+        Discord refuses more than a hundred entries here, and every caller is far under, since
+        GitHub allows ten assignees and fifteen requested reviewers and a comment mentions ten.
         """
         wanted = set(ids)
         if not wanted:
@@ -72,8 +64,8 @@ class MutedMemberStore:
     async def mute(self, *, guild_id: int, discord_user_id: int) -> None:
         """Record that they want to be left alone, however many times they say so.
 
-        The insert settles a repeat itself rather than reading first. Somebody clicking twice a
-        second apart is ordinary and must not be answered with an error about a constraint.
+        The insert settles a repeat itself rather than reading first: somebody clicking twice a
+        second apart must not be answered with an error about a constraint.
         """
         await self._session.execute(
             pg_insert(MutedMember)
@@ -82,8 +74,7 @@ class MutedMemberStore:
         )
 
     async def unmute(self, *, guild_id: int, discord_user_id: int) -> None:
-        """Let them be notified again. Matching nothing is the answer for somebody who never
-        asked to be left alone, not a failure to report."""
+        """Let them be notified again; matching nothing is not a failure to report."""
         await self._session.execute(
             delete(MutedMember).where(
                 MutedMember.discord_guild_id == guild_id,

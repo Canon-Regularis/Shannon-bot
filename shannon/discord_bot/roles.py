@@ -1,9 +1,4 @@
-"""The Discord role names a server has given each permission tier.
-
-Apart from `config` because splitting a comma-separated string and lowercasing it for matching
-is the permission system's business, not the environment's. `Settings` keeps the four strings it
-reads; what they mean is decided here.
-"""
+"""The Discord role names a server has given each permission tier."""
 
 from __future__ import annotations
 
@@ -26,8 +21,7 @@ class CommandRole(StrEnum):
 class ConfiguredRoles:
     """What each tier is called on this server.
 
-    No defaults. Restating "Admin" here as well as on `Settings` is exactly the drift that the
-    worker settings test exists to catch, so the strings have one home and this reads them.
+    No defaults here: the default names live on `Settings` alone, and a test catches the drift.
     """
 
     admin: str

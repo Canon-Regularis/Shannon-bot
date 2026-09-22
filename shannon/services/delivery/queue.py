@@ -6,12 +6,13 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.webhook_events import WebhookEventStore
 from shannon.domain.enums import DeliveryStatus
+from shannon.domain.json import JsonObject, is_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Delivery:
     id: int
     delivery_id: str
     event_type: str
-    payload: dict[str, Any]
+    payload: JsonObject
     attempts: int
 
     @property
@@ -33,20 +34,16 @@ class Delivery:
 
     @property
     def subject(self) -> str:
-        """What this delivery is about, for a log line somebody has to act on.
-
-        A delivery id identifies a row and nothing else. Told only that one cannot be handled,
-        an operator has to find the row and decode its payload before they know which repository
-        or which item to go and look at, and the row is gone once it ages out.
-        """
+        """What this delivery is about, for a log line somebody has to act on."""
         repository = self.payload.get("repository")
-        name = repository.get("full_name") if isinstance(repository, dict) else None
+        full_name = repository.get("full_name") if is_json_object(repository) else None
+        name = full_name if isinstance(full_name, str) else None
 
-        number = None
+        number: int | None = None
         for key in ("pull_request", "issue"):
             item = self.payload.get(key)
-            if isinstance(item, dict) and isinstance(item.get("number"), int):
-                number = item["number"]
+            if is_json_object(item) and isinstance(found := item.get("number"), int):
+                number = found
                 break
 
         where = f"{name}#{number}" if name and number else name
@@ -57,19 +54,17 @@ class Delivery:
 class DeliveryInbox(Protocol):
     """Writing a delivery down, which is all the webhook route ever does.
 
-    Kept apart from `DeliveryQueue` so the route cannot reach a delivery it has no business
-    touching. The route runs inside GitHub's ten second budget and the worker owns everything
-    after that; giving the two the same handle would only invite the boundary to be crossed.
+    Kept apart from `DeliveryQueue`: the route runs inside GitHub's ten second budget and the
+    worker owns everything after that.
     """
 
-    async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool: ...
+    async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool: ...
 
 
 class DeliveryQueue(Protocol):
     """Taking deliveries and seeing them through, which is all the worker ever does.
 
-    Every method here moves a delivery towards a terminal state or hands it back. `enqueue` is
-    deliberately absent: nothing that works the queue should be able to add to it.
+    `enqueue` is absent: nothing that works the queue should be able to add to it.
     """
 
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[Delivery]: ...
@@ -88,14 +83,13 @@ class DeliveryQueue(Protocol):
 class WebhookDeliveryQueue:
     """The delivery queue, backed by `webhook_events`.
 
-    Each call runs in its own session. Writing a delivery down has to be visible to a concurrent
-    delivery immediately, so it cannot ride along in whatever transaction is doing the work.
+    Each call runs in its own session, so a write is visible to a concurrent delivery at once.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
-    async def enqueue(self, delivery_id: str, event_type: str, payload: dict[str, Any]) -> bool:
+    async def enqueue(self, delivery_id: str, event_type: str, payload: JsonObject) -> bool:
         """Record a delivery, returning False if GitHub has sent it before."""
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         async with self._sessionmaker() as session, session.begin():
@@ -112,8 +106,8 @@ class WebhookDeliveryQueue:
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[Delivery]:
         async with self._sessionmaker() as session, session.begin():
             rows = await WebhookEventStore(session).lease(limit=limit, lease_for=lease_for)
-            # Copied out while the session is open, because the caller works on these long
-            # after the transaction that leased them has closed.
+            # Copied out while the session is open: the caller works on these long after the
+            # leasing transaction has closed.
             return [
                 Delivery(
                     id=row.id,

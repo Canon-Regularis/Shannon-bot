@@ -1,19 +1,14 @@
 """Following the App being installed, removed, paused or resumed.
 
-The only events this bot handles that are not about an item. Everything else changes what it has
-been told; these change what it is able to see at all, which is why they are worth acting on
-rather than answering `ignored`.
-
+The only events this bot handles that are not about an item: they change what it can see at all.
 What they maintain is the account-to-installation map, and that map is a cache with GitHub behind
-it. So a missed delivery costs a lookup rather than a broken mirror, and this handler can be
-simple: write down what the payload says, and stop.
+it, so a missed delivery costs a lookup rather than a broken mirror.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,8 +18,8 @@ from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 
 logger = logging.getLogger(__name__)
 
-# Somebody removed the App. `installation_repositories.removed` is deliberately NOT here: taking a
-# repository out of an installation leaves the installation itself standing, and forgetting it
+# Somebody removed the App. `installation_repositories.removed` is deliberately not here:
+# taking a repository out of an installation leaves the installation standing, and forgetting it
 # would break every other repository under that account.
 GONE = "deleted"
 SUSPENDED = "suspend"
@@ -39,17 +34,12 @@ class InstallationEvent:
     account_id: int | None
 
 
-def parse_installation_event(payload: Any) -> InstallationEvent | None:
+def parse_installation_event(payload: object) -> InstallationEvent | None:
     """The installation out of any delivery that carries one, or None for one that does not.
 
-    Written against the `installation` block rather than against a particular event, because every
-    App delivery carries that block - an `issues` one as much as an `installation` one - and the
-    same reading serves all of them. That is what lets a directory that missed a webhook repair
-    itself from ordinary traffic.
-
-    The account is required and the id is not. GitHub always sends both today; the id is allowed to
-    be absent because a row that records a login with no id is still useful, and one that records a
-    made-up id is not.
+    Every App delivery carries the `installation` block, an `issues` one as much as an
+    `installation` one, so a directory that missed a webhook repairs itself from ordinary traffic.
+    The account id is optional: a row recording a login with no id is still useful.
     """
     if not is_json_object(payload):
         return None
@@ -96,9 +86,9 @@ def build_installation_handler(sessionmaker: async_sessionmaker[AsyncSession]) -
                 )
                 return WebhookOutcome.PROCESSED
 
-            # Written before the suspension is applied, so a suspend for an account this bot has
-            # never seen still leaves a row behind rather than doing nothing at all. That happens
-            # whenever the App was installed while this process was down.
+            # Written before the suspension is applied, so a suspend for an account this
+            # bot never saw still leaves a row behind: the App was installed while this process
+            # was down.
             await store.remember(
                 installation_id=found.installation_id,
                 account_login=found.account_login,

@@ -2,20 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
 
-from sqlalchemy import Interval, cast, delete, func, literal, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
+from shannon.db.base import interval, rows_changed
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
-
-
-def _interval(value: timedelta) -> ColumnElement[timedelta]:
-    """A timedelta as something the database can add to a timestamp."""
-    return cast(literal(value), Interval)
+from shannon.domain.json import JsonObject
 
 
 class WebhookEventStore:
@@ -30,12 +25,12 @@ class WebhookEventStore:
         delivery_id: str,
         event_type: str,
         payload_hash: str,
-        payload: dict[str, Any],
+        payload: JsonObject,
     ) -> bool:
         """Write a delivery down, returning False if it was already here.
 
-        The insert carries its own conflict handling so two deliveries racing on the same id
-        cannot both win. A read-then-write check would let both through.
+        The insert handles the conflict itself, because a read-then-write check would let two
+        deliveries racing on the same id both through.
         """
         statement = (
             pg_insert(WebhookEvent)
@@ -55,14 +50,14 @@ class WebhookEventStore:
 
         return await self._revive(delivery_id, payload)
 
-    async def _revive(self, delivery_id: str, payload: dict[str, Any]) -> bool:
+    async def _revive(self, delivery_id: str, payload: JsonObject) -> bool:
         """Put a delivery that was given up on back on the queue, reporting whether it moved.
 
-        GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery just
-        reads as a duplicate and nothing happens. Any other state is left alone: a repeat of one
-        already processed is still a duplicate.
+        GitHub's Redeliver button reuses the delivery id, so without this a FAILED delivery reads
+        as a duplicate and nothing happens. Any other state is left alone.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             update(WebhookEvent)
             .where(
                 WebhookEvent.github_delivery_id == delivery_id,
@@ -76,19 +71,17 @@ class WebhookEventStore:
                 locked_until=None,
                 last_error=None,
             )
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return bool(result.rowcount)
+        return bool(changed)
 
     async def lease(self, *, limit: int, lease_for: timedelta) -> Sequence[WebhookEvent]:
         """Take up to `limit` deliveries to work on, in the order they arrived.
 
-        `SKIP LOCKED` means a second worker picks up different rows rather than blocking, so
-        running more than one stays correct even though only one runs today.
-
-        A payload is required, which excludes rows written before this table became a queue.
-        A row still PROCESSING past its lease is taken back, which is how work belonging to a
-        worker that died gets retried instead of sitting there forever.
+        `SKIP LOCKED` means a second worker picks up different rows rather than blocking. A
+        payload is required, which excludes rows written before this table became a queue, and a
+        row still PROCESSING past its lease is taken back, so work belonging to a worker that
+        died is retried instead of sitting there forever.
         """
         now = func.now()
         eligible = (
@@ -113,14 +106,13 @@ class WebhookEventStore:
         )
 
         # Claiming in the same statement that selects, so nothing can slip between the two.
-        # Every deadline in this table is written and read against the database clock; setting
-        # one from the application clock would have a worker on a drifted host hold its lease
-        # for longer or shorter than it believes.
+        # Every deadline in this table is written and read against the database clock; one set
+        # from the application clock would drift against the lease its worker believes it holds.
         claimed = (
             await self._session.scalars(
                 update(WebhookEvent)
                 .where(WebhookEvent.id.in_(eligible))
-                .values(status=DeliveryStatus.PROCESSING, locked_until=now + _interval(lease_for))
+                .values(status=DeliveryStatus.PROCESSING, locked_until=now + interval(lease_for))
                 .returning(WebhookEvent)
                 .execution_options(synchronize_session=False)
             )
@@ -132,8 +124,8 @@ class WebhookEventStore:
     async def release(self, event_ids: Sequence[int]) -> None:
         """Hand leased deliveries back without counting an attempt against them.
 
-        Nothing was tried, so this is not a failure. Leaving them locked instead would keep the
-        replacement process from touching them until the lease ran out.
+        Leaving them locked would keep the replacement process from touching them until the lease
+        ran out.
         """
         if not event_ids:
             return
@@ -145,29 +137,47 @@ class WebhookEventStore:
         )
 
     async def finish(self, event_id: int, status: DeliveryStatus) -> None:
+        """Record the outcome, on the row this worker still holds.
+
+        Guarded on PROCESSING the way `release` is. Unreachable today, because a lease is
+        fifteen minutes and a batch cannot outlive its own: `Settings._lease_fits_a_batch`
+        refuses a configuration where it could. Shorten the lease past that guard and this is
+        a worker writing an outcome onto a delivery another replica has already taken.
+        """
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(status=status, processed_at=func.now(), locked_until=None, last_error=None)
         )
 
     async def retry_later(self, event_id: int, *, error: str, delay: timedelta) -> None:
+        """Send it round again, on the row this worker still holds. See `finish`."""
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(
                 status=DeliveryStatus.PENDING,
                 attempts=WebhookEvent.attempts + 1,
-                next_attempt_at=func.now() + _interval(delay),
+                next_attempt_at=func.now() + interval(delay),
                 locked_until=None,
                 last_error=error,
             )
         )
 
     async def give_up(self, event_id: int, *, error: str) -> None:
+        """Stop trying, on the row this worker still holds. See `finish`."""
         await self._session.execute(
             update(WebhookEvent)
-            .where(WebhookEvent.id == event_id)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            )
             .values(
                 status=DeliveryStatus.FAILED,
                 attempts=WebhookEvent.attempts + 1,
@@ -180,18 +190,18 @@ class WebhookEventStore:
     async def prune(self, *, keep_for: timedelta) -> int:
         """Drop finished deliveries older than `keep_for`.
 
-        The bodies hold issue titles and comment text from private repositories, so they do not
-        sit here indefinitely. Anything still pending is left alone however old it is.
+        The bodies hold issue titles and comment text from private repositories. Anything still
+        pending is left alone however old it is.
         """
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             delete(WebhookEvent)
             .where(
                 WebhookEvent.status.in_(DeliveryStatus.terminal()),
-                WebhookEvent.processed_at < func.now() - _interval(keep_for),
+                WebhookEvent.processed_at < func.now() - interval(keep_for),
             )
-            # Without this the ORM cannot work out which loaded objects the DELETE hit, so it
-            # asks the database to hand every deleted primary key back. Nothing here holds
-            # those rows in a session, so there is nothing to synchronise.
-            .execution_options(synchronize_session=False)
+            # Without this the ORM asks the database to hand back every deleted primary key
+            # so it can tell which loaded objects the DELETE hit. Nothing here holds those rows.
+            .execution_options(synchronize_session=False),
         )
-        return result.rowcount or 0
+        return changed or 0

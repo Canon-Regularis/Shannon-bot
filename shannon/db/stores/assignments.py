@@ -8,6 +8,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import rows_changed
 from shannon.db.models import ItemAssignment
 from shannon.domain.enums import ActorRole
 from shannon.domain.models import Actor
@@ -17,11 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 class ItemAssignmentStore:
-    """Data access for who is attached to a tracked item and in what capacity.
+    """Logins are stored folded.
 
-    GitHub logins are stored lowercased. They are case insensitive on GitHub's side, and
-    without normalising them the unique constraint would happily accept both `Octocat` and
-    `octocat` for the same person.
+    GitHub treats them case insensitively, so without folding the unique constraint would accept
+    both `Octocat` and `octocat` for the same person.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -47,28 +47,19 @@ class ItemAssignmentStore:
     ) -> None:
         """Make the stored assignments for one role match GitHub.
 
-        People no longer on the item lose their row. People already there keep theirs, and with
-        it the `notified_at` that stops them being pinged twice.
-
-        `as_of` is when GitHub says this payload was current, and it is what a new row records as
-        the moment its request was made. Only on insert: a row that survives is the same request
-        it always was, and moving its stamp forward on every unrelated event would erase the one
-        thing that says how old it is.
-
-        The insert settles its own conflict because two callers regularly sync one item at once:
-        `/pr` runs while the worker is mid-delivery, GitHub sends several events for a new item
-        together, and a second replica leases in parallel. Doing nothing on conflict keeps the
-        other caller's row and whatever `notified_at` they have already claimed.
+        A surviving row keeps its `notified_at`, so one request never pings twice. `as_of` is
+        stamped on insert only: moving it forward on an unrelated event would erase how old the
+        request is. Two callers regularly sync one item at once, `/pr` against a mid-delivery
+        worker, several events for one new item, a second replica leasing in parallel, so the
+        insert does nothing on conflict and keeps the row and claim the other caller holds.
         """
-        # Keyed by login and carrying the account id beside it. The id is what the ping path
-        # checks a mention against, so it has to be recorded when the row is written, which is
-        # the only moment the payload carrying it is in hand.
+        # The id is what the ping path checks a mention against, and this payload is the only
+        # place it appears, so it has to be recorded as the row is written.
         wanted = {actor.login.lower(): actor.github_user_id for actor in actors}
         rows = await self._list_for(tracked_item_id, role)
         mine = self._match(wanted, rows)
 
-        # Whoever is left over is not on the item any more, under any name. Their names are
-        # freed here, before any rename below is allowed to take one.
+        # Deleting first frees these names, before any rename below is allowed to take one.
         kept = {row.id for row in mine.values() if row is not None}
         removed = sorted(
             row.github_username
@@ -85,9 +76,8 @@ class ItemAssignmentStore:
             )
 
         for login, row in mine.items():
-            # The payload knows who this login is. A row that predates the column, or one matched
-            # by name because neither side had an id, learns it here and stops being a guess from
-            # the next event onwards.
+            # A row that predates the column, or one matched by name, learns its account here
+            # and stops being a guess from the next event onwards.
             if row is not None and row.github_user_id is None and wanted[login] is not None:
                 row.github_user_id = wanted[login]
 
@@ -123,29 +113,15 @@ class ItemAssignmentStore:
     def _already_told_and_newer(row: ItemAssignment, as_of: datetime | None) -> bool:
         """Whether this payload is too old to be asked to remove this row.
 
-        GitHub stamps `pull_request.updated_at` to the second, and an item opened with a reviewer
-        already on it is two deliveries milliseconds apart carrying the same one. The staleness
-        guard reads equal as current on purpose, because several real changes share a second, so
-        neither delivery is turned away and whichever runs last is believed in full. The worker
-        runs them newest first often enough: one transient Discord error puts a delivery behind
-        the one after it, since the lease skips a row whose next attempt is in the future.
-
-        So the older payload, which was written before the reviewer was asked for, deletes the
-        row the newer one made. On its own that is a reviewers line the next delivery puts right.
-        What goes with the row is `notified_at`, and that is not recoverable: the next ordinary
-        event on the item, a label or an edit or the merge, puts the person back with nothing
-        saying they have already been told, and pings them a second time for a review nobody
-        asked for twice. On the merge it asks them to review something already merged.
-
-        Only for a row somebody has been pinged from, which is the half that cannot be taken
-        back. A row nobody has been told about can be deleted and re-added freely: it is put back
-        by the same next delivery and pinged once, which is the right number.
-
-        Equal counts as too old, because equal is exactly the case this exists for and there is
-        nothing in the two timestamps to separate them. The cost is a reviewer genuinely removed
-        in the same second they were asked for, who stays on the item until the next event says
-        otherwise. That is a metadata mistake against a duplicate notification, and this project
-        has already written down which of those it would rather make.
+        GitHub stamps `pull_request.updated_at` to the second, so two deliveries milliseconds
+        apart carry the same one, and the worker can run them newest first: a transient Discord
+        error puts a delivery behind the one after it, since the lease skips a row whose next
+        attempt is in the future. The older payload would then delete the row the newer one made,
+        taking `notified_at` with it, and the next ordinary event puts the person back and pings
+        them for a review nobody asked for twice. Only rows somebody has been pinged from, since
+        one nobody was told about is re-added by the next delivery and pinged once. Equal counts
+        as too old, at the cost of a reviewer removed in that same second staying until the next
+        event.
         """
         if row.notified_at is None or as_of is None or row.requested_at is None:
             return False
@@ -157,23 +133,12 @@ class ItemAssignmentStore:
     ) -> dict[str, ItemAssignment | None]:
         """Which stored row, if any, belongs to each person the payload names.
 
-        Somebody who renamed their GitHub account is the same person, and matching on the name
-        alone read them as one person leaving and another arriving: the row was deleted and a
-        fresh one inserted with `notified_at` empty, so the next ordinary event on the item
-        announced a review request nobody had re-made. Where the new name was already linked,
-        that told the same person twice for one request, which is the one thing `notified_at`
-        exists to stop.
-
-        So the account id goes first, for everybody who has one, before a single name is looked
-        at. A name match is what happens when the id cannot answer, and it must not take a row
-        the id has already spoken for.
-
-        A row carrying a different account under the name being asked about belongs to somebody
-        else, and the name is all the two have in common. It is left unmatched, which drops it,
-        because GitHub frees a login the moment it is left and a row saying otherwise is out of
-        date. Getting this wrong is not loud: the row survives, no later payload rewrites the id
-        on a login that already exists, and the item goes on addressing the account that left for
-        the rest of its life.
+        The account id matches first because a renamed account is the same person: on the name
+        alone the row is deleted and reinserted with `notified_at` empty, and the next ordinary
+        event announces a request nobody re-made, or tells the same person twice where the new
+        name was already on the item. A row holding a different account under the login being
+        asked about is somebody else, since GitHub frees a login the moment it is left, so it is
+        left unmatched and dropped rather than kept addressing an account that has gone.
         """
         by_id = {row.github_user_id: row for row in rows if row.github_user_id is not None}
         by_name = {row.github_username: row for row in rows}
@@ -206,26 +171,15 @@ class ItemAssignmentStore:
     async def _rename(self, renamed: dict[str, ItemAssignment], *, held: set[str]) -> None:
         """Give each row the name its account goes by now, in an order that cannot collide.
 
-        One column at a time, rather than dropping the row and writing a replacement. The
-        replacement carried the stamps forward in Python, which turned a rename into a read of
-        the whole row followed by a write of it, and anything another transaction committed in
-        between was reverted: a ping handed back, a review recorded, the stamp that stops
-        somebody being told twice. Nothing serialises those against this, deliberately, because
-        the notifier runs after the sync transaction has committed. A statement naming one column
-        has no such window.
-
-        The order is the whole difficulty. Two people on one item can swap names in a single
-        payload, because GitHub frees a name the moment it is left: one renames, the other takes
-        what they left, and both changes arrive on the next event. Writing a name another row is
-        still holding breaks the unique constraint, which raises out of the delivery and stops
-        the item mirroring at all until sixteen attempts have run out.
-
-        So a rename goes only when nothing is holding the name it wants. The deletions have
-        already run, and each rename frees its old name for the next, which is enough for any
-        chain of them. A closed loop, where two accounts have traded names outright, has no first
-        move: one of them is parked on a name GitHub cannot issue, since a login can neither
-        begin with a hyphen nor contain two in a row, and the row is renamed off it again before
-        this returns.
+        One column at a time, not a delete and a reinsert: the reinsert carried the stamps
+        forward in Python, so anything another transaction committed in between was reverted, and
+        nothing serialises the notifier against this because it runs after the sync transaction
+        commits. Two people on one item can swap names in a single payload, since GitHub frees a
+        name the moment it is left, and writing a name another row still holds breaks the unique
+        constraint and raises out of the delivery. So a rename goes only when nothing holds the
+        name it wants; a closed loop has no first move, so one row is parked on a `--swap-` name,
+        which GitHub cannot issue because a login can neither begin with a hyphen nor contain two
+        in a row.
         """
         while renamed:
             ready = sorted(login for login in renamed if login not in held)
@@ -258,16 +212,11 @@ class ItemAssignmentStore:
     ) -> dict[str, int | None]:
         """Take ownership of the pings nobody has sent yet, returning whose they are.
 
-        Stamping first and posting after is what stops the same person being pinged twice. Two
-        syncs of one item overlap whenever somebody runs /pr while an event for it is in
-        flight, and a delivery that fails after the post is retried from the top. Both of those
-        read the same pending rows if the read and the write are separate steps.
-
-        Answered as login to account id, because this is the one place a mention is built from a
-        stored name rather than from the payload in hand, and a name is not an identity: GitHub
-        frees one when it is renamed or deleted and lets anybody take it. Without the id beside
-        it, the ping is the mention a stranger inherits, and the ping is the one that notifies.
-        Null for a row written before the column existed.
+        Stamping and reading in one statement is what stops a double ping: two syncs of one item
+        overlap whenever somebody runs /pr while an event for it is in flight, and a delivery
+        that fails after the post is retried from the top. Answered as login to account id
+        because this is the one place a mention is built from a stored name rather than from the
+        payload in hand, and GitHub frees a renamed or deleted login for anybody to take.
         """
         claimed = (
             await self._session.execute(
@@ -276,9 +225,8 @@ class ItemAssignmentStore:
                     ItemAssignment.tracked_item_id == tracked_item_id,
                     ItemAssignment.role_type == role,
                     ItemAssignment.notified_at.is_(None),
-                    # A request the review already answered is not owed a ping, even if the ping
-                    # it was owed never went out. The reviewer failed to be told, then reviewed
-                    # it anyway; telling them afterwards is worse than not telling them at all.
+                    # A request the review already answered is not owed a ping, even if the
+                    # ping it was owed never went out.
                     ItemAssignment.fulfilled_at.is_(None),
                 )
                 .values(notified_at=func.now())
@@ -293,18 +241,11 @@ class ItemAssignmentStore:
     ) -> None:
         """Hand claimed pings back, for when the message did not go out after all.
 
-        By account id wherever the claim had one, because the login is not stable across the gap
-        this covers. The gap is the whole Discord post: the worker allows each delivery sixty
-        seconds and discord.py sleeps through a rate limit rather than failing, so a second
-        delivery carrying a rename has time to commit in the middle of it. Matching on the name
-        the claim went out under then found no row at all, and finding no row here means a ping
-        stamped as sent that nobody ever received, for good. Where two people on one item had
-        traded names it was worse than nothing: the hand-back cleared the stamp of whoever now
-        holds the released name, so one of them was told twice and the other never.
-
-        Falling back to the name for anybody the claim had no id for, which is a row written
-        before the column existed or an account GitHub no longer has. Folded, like every other
-        login this class matches on, because the column holds them folded.
+        By account id wherever the claim had one, because a rename can commit inside the gap this
+        covers: the worker allows each delivery sixty seconds and discord.py sleeps through a
+        rate limit rather than failing. Matching on the name the claim went out under then found
+        no row, leaving a ping stamped as sent that nobody ever received, or, where two people
+        had traded names, cleared the stamp of the wrong one.
         """
         if not people:
             return
@@ -336,30 +277,19 @@ class ItemAssignmentStore:
         """Record that the review this row asked for has been submitted.
 
         GitHub drops the reviewer from `requested_reviewers` on submit and sends no
-        `pull_request` event saying so. Do not delete the row instead: a retried delivery
-        replays a payload that still lists the reviewer, and would ping them to review what
-        they just approved. `reopen_if_newer` compares a later request against this stamp,
-        which is GitHub's clock, not ours.
-
-        Matched by account where the row knows one, because the two sides of this comparison are
-        further apart in time than they look. The row carries the name the reviewer had when
-        GitHub asked them; the review carries the name they have now. Nothing between the two
-        updates the row, since a rename reaches this bot on the next `pull_request` event and
-        submitting a review does not send one. So a reviewer who renamed closed nothing, and the
-        request stayed open with the ping still owed: the next ordinary event asked them to review
-        what they had already reviewed, which is the one thing this stamp exists to stop.
-
-        Never onto a request made since the review. This handler runs before its Discord post and
-        again on every retry of the delivery, so a re-request made during a review delivery's
-        backoff was closed a second time by the next attempt: the stamp read as an answered
-        request, and the next ordinary event with a later timestamp reopened it and pinged for an
-        ask nobody had made. `requested_at` is the row saying how old it is, on the same clock the
-        review's own timestamp is on.
+        `pull_request` event saying so. Do not delete the row instead: a retried delivery replays
+        a payload that still lists the reviewer and would ping them to review what they just
+        approved. Matched by account where the row knows one, because the row carries the name
+        the reviewer had when GitHub asked them and nothing updates it in between: a rename
+        reaches this bot on the next `pull_request` event, and submitting a review sends none.
+        Never onto a request made since the review, since this handler runs again on every retry
+        of the delivery and would otherwise close a re-request made during the backoff. Both
+        stamps are on GitHub's clock, not ours.
         """
         submitted = when or func.now()
         by_name = ItemAssignment.github_username == github_username.lower()
         # A deleted account arrives with no id, and a row written before the column existed has
-        # none either. Both fall back to the name, which is what they were matched on before.
+        # none either. Both fall back to the name.
         same_person = (
             by_name
             if account is None
@@ -368,7 +298,8 @@ class ItemAssignmentStore:
                 and_(ItemAssignment.github_user_id.is_(None), by_name),
             )
         )
-        result = await self._session.execute(
+        changed = await rows_changed(
+            self._session,
             update(ItemAssignment)
             .where(
                 ItemAssignment.tracked_item_id == tracked_item_id,
@@ -380,31 +311,22 @@ class ItemAssignmentStore:
                 ),
             )
             .values(fulfilled_at=submitted)
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
         )
-        return bool(result.rowcount)
+        return bool(changed)
 
     async def reopen_request(
         self, tracked_item_id: int, role: ActorRole, logins: Iterable[str], as_of: datetime | None
     ) -> Sequence[str]:
         """Hand back the ping on a request that has just been made again.
 
-        `reopen_if_newer` covers the request a review closed here, by measuring a later payload
-        against the stamp that closed it. This covers the one nothing here ever closed. GitHub
-        drops a team from `requested_teams` the moment any member submits, and sends no
-        `pull_request` event saying so, so the row survives with its ping already stamped. The
-        next ask of that team arrives with the list unchanged, `replace` leaves the row alone,
-        and the moment the whole feature exists for passes in silence. The same holds for a
-        person whose review event never reached us.
-
-        Only rows that were told, because a request nobody has been told about yet is already
-        owed its ping and clearing an empty stamp says nothing.
-
-        And only where the payload is newer than the request the row already holds, which is what
-        makes a replayed delivery harmless: it carries the timestamp it always did. Both sides of
-        that are GitHub's clock. A row with no stamp at all predates the column, and is reopened
-        rather than refused: one repeated ping during the deployment that adds it beats a
-        re-request that tells nobody for the life of every pull request already open.
+        GitHub drops a team from `requested_teams` the moment any member submits and sends no
+        `pull_request` event saying so, so the row survives with its ping already stamped, the
+        next ask of that team arrives with the list unchanged, and `replace` leaves it alone. The
+        same holds for a person whose review event never reached us; the request a review closed
+        here is `reopen_if_newer`'s. Only where the payload is newer than the request the row
+        holds, both on GitHub's clock, which is what makes a replayed delivery harmless. A row
+        with no stamp at all predates the column and is reopened rather than refused.
         """
         wanted = [login.lower() for login in logins]
         if not wanted or as_of is None:
@@ -433,13 +355,9 @@ class ItemAssignmentStore:
     ) -> Sequence[str]:
         """Reopen requests that a payload newer than the review asks for again.
 
-        This is what a person clicking re-request looks like from here: the item comes back with
-        the reviewer on it and a timestamp later than the review that closed the last request.
-        A payload older than the review is a delivery catching up, and is left alone.
-
-        Both stamps are cleared, because a reopened request has to be able to ping again, and
-        the row records that it is now a request of this payload's age rather than the one the
-        review closed.
+        A person clicking re-request brings the item back with the reviewer on it and a timestamp
+        later than the review that closed the last request. A payload older than the review is a
+        delivery catching up, and is left alone.
         """
         wanted = [login.lower() for login in logins]
         if not wanted or as_of is None:

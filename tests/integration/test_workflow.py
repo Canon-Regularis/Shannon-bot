@@ -65,14 +65,6 @@ def workflow(
 
 
 @pytest.fixture
-async def thread_id(registered: Repository, sync_service: ItemSyncService, pr_event) -> int:
-    """A pull request already mirrored, which is where these commands are run."""
-    result = await sync_service.sync(pr_event("opened"))
-    assert result.thread_id is not None
-    return result.thread_id
-
-
-@pytest.fixture
 async def issue_thread_id(
     registered: Repository, issue_service: ItemSyncService, issue_event
 ) -> int:

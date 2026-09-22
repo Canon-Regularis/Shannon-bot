@@ -107,6 +107,34 @@ def test_the_live_index_covers_exactly_the_live_statuses(migration_url: str) -> 
     assert named == {status.value for status in DeliveryStatus.live()}, definition
 
 
+def test_the_thread_lookups_have_an_index_to_use(migration_url: str) -> None:
+    """The indexes 0024 added, read out of the database rather than out of the models.
+
+    0004 dropped the first of these saying it would come back in the same revision as the query
+    that needed it. That query arrived eight days later and the index did not, and nothing was
+    watching, so the promise was the only record and it was in a migration nobody reopens. This
+    is the record now: the index, and the query it is for.
+
+    The partial one needs reading out of `pg_indexes` for the reason the test above gives -
+    Alembic's comparison ignores a WHERE clause, so a predicate that stopped matching the query
+    would leave the schema diff answering with nothing.
+    """
+    command.upgrade(alembic_config(migration_url), "head")
+
+    wanted = {
+        # `locate`, so every workflow command and every `/label` autocomplete keystroke.
+        "ix_tracked_items_discord_thread_id": "(discord_thread_id)",
+        # `forget_channel`, once per channel Discord deletes.
+        "ix_tracked_items_discord_channel_id": "(discord_channel_id)",
+        # `open_for_thread`, once per captured message.
+        "ix_logged_conversations_open_thread": "(discord_thread_id) WHERE (stopped_at IS NULL)",
+    }
+    for name, shape in wanted.items():
+        definition = asyncio.run(_index_definition(migration_url, name))
+        assert definition is not None, f"{name} is not there"
+        assert definition.endswith(shape), definition
+
+
 def test_migrations_roll_back(migration_url: str) -> None:
     config = alembic_config(migration_url)
     command.upgrade(config, "head")

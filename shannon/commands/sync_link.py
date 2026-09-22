@@ -6,6 +6,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
+from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -30,16 +31,13 @@ async def run_sync_link(
 
     Each keeps its own parameter name, because that is what somebody types in Discord.
     """
-    if interaction.guild_id is None:
-        await reply(interaction, "Run this inside a server channel.")
-        return
-    if not gate.allows(interaction.user, SYNC_ROLES):
-        await reply(interaction, gate.denial(name, SYNC_ROLES))
+    guild_id = await in_a_server(interaction, name, gate, SYNC_ROLES)
+    if guild_id is None:
         return
 
     await defer(interaction)
     try:
-        outcome = await service.sync_link(guild_id=interaction.guild_id, link=link)
+        outcome = await service.sync_link(guild_id=guild_id, link=link)
     except ShannonError as error:
         logger.warning("/%s could not finish: %s", name, error.message)
         await reply(interaction, reply_for(error, noun=noun))
@@ -69,7 +67,9 @@ def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand
             interaction, pr_link, name="pr", noun="pull request", service=service, gate=gate
         )
 
-    return pr
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
+    return pr  # pyright: ignore[reportUnknownVariableType]
 
 
 def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand:
@@ -81,4 +81,6 @@ def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> SlashComm
             interaction, issue_link, name="issue", noun="issue", service=service, gate=gate
         )
 
-    return issue
+    # `app_commands.command()` leaves the command's binding type unknown, and
+    # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
+    return issue  # pyright: ignore[reportUnknownVariableType]

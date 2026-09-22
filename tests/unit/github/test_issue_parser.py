@@ -1,21 +1,12 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
-
 import pytest
 
 from shannon.domain.enums import ObjectType, Priority
 from shannon.github.webhooks.events import ISSUE_ACTIONS
 from shannon.github.webhooks.issues import parse_issue_event
 from tests.support import github_payloads as payloads
-
-FIXTURES = Path(__file__).parents[2] / "fixtures" / "payloads"
-
-
-def load(name: str) -> dict[str, Any]:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+from tests.support.github_payloads import load
 
 
 @pytest.mark.parametrize("action", sorted(ISSUE_ACTIONS))

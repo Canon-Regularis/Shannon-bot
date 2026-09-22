@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
@@ -228,7 +228,7 @@ class ItemSyncService:
             # methods away. The same reasoning put `thread_id is None` in the guard inside
             # `_settle_a_lock_still_owed`, where the comment says the case cannot happen either.
             if decision.outcome is SyncOutcome.STALE and decision.tracked_item_id is not None:
-                await self._reopen_what_this_one_asked_for(decision.tracked_item_id, snapshot)
+                await self._reopen_new_requests(decision.tracked_item_id, snapshot)
                 await self._settle_a_lock_still_owed(decision.tracked_item_id, decision.thread_id)
             return decision
         state = decision
@@ -400,9 +400,7 @@ class ItemSyncService:
             displaced=written.displaced,
         )
 
-    async def _reopen_what_this_one_asked_for(
-        self, tracked_item_id: int, snapshot: TrackedSnapshot
-    ) -> None:
+    async def _reopen_new_requests(self, tracked_item_id: int, snapshot: TrackedSnapshot) -> None:
         """Hand back the ping on a request this payload made, even where it is out of date.
 
         A request made again is the one fact that arrives on exactly one delivery and nowhere
@@ -473,7 +471,7 @@ class ItemSyncService:
         if found is None or thread_id is None or found[0].discord_thread_locked is True:
             return
         item, guild_id = found
-        if not self._policy.shut_by_the_row(status=item.status, github_state=item.github_state):
+        if not self._policy.shut_for_state(status=item.status, github_state=item.github_state):
             return
         await self._shut(tracked_item_id, thread_id, guild_id=guild_id)
 
@@ -530,7 +528,7 @@ class ItemSyncService:
     ) -> None:
         """Its own transaction, because the Discord call it records happens outside one."""
         async with self._sessionmaker() as session, session.begin():
-            await ThreadPointerStore(session).note_what_the_block_showed(
+            await ThreadPointerStore(session).note_shown_labels(
                 tracked_item_id, thread_id=thread_id, shown=shown
             )
 
@@ -633,7 +631,9 @@ class ItemSyncService:
             applied=item.last_delivery_id,
         )
 
-        if superseded and item.discord_thread_id is not None:
+        # `item is not None` is what `superseded` already implies; it is written out because the
+        # checker cannot carry that through the local, and everything read below is the row.
+        if item is not None and superseded and item.discord_thread_id is not None:
             logger.info(
                 "ignoring a stale %s.%s for %s#%s",
                 object_type.value,
@@ -737,7 +737,7 @@ class ItemSyncService:
                 private=snapshot.repository.private,
             )
 
-        roles = self._policy.assignments(snapshot)
+        roles: Mapping[ActorRole, Sequence[Actor]] = self._policy.assignments(snapshot)
         if superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
             # no reason to believe the payload about anything else: adopting it would put back a
@@ -806,12 +806,7 @@ class ItemSyncService:
         # and the empty mention map the superseded branch leaves behind is what stops the rebuild
         # pinging whoever was on the item at the time.
         shown = (
-            replace(
-                snapshot,
-                title=item.title,
-                state=item.github_state,
-                html_url=item.github_url,
-            )
+            snapshot.corrected(title=item.title, state=item.github_state, html_url=item.github_url)
             if superseded
             else snapshot
         )

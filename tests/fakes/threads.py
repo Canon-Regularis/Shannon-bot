@@ -258,3 +258,17 @@ class FakeThreadGateway:
         thread = self.threads[thread_id]
         assert thread.metadata_message_id is not None
         return thread.messages[thread.metadata_message_id]
+
+
+def post_failing_for(thread_id, real_post):
+    """A `post` that raises for one thread and behaves for every other.
+
+    What a thread somebody deleted between two deliveries looks like from here.
+    """
+
+    async def post(**kwargs):
+        if kwargs["thread_id"] == thread_id:
+            raise ThreadNotFoundError("somebody deleted the thread")
+        return await real_post(**kwargs)
+
+    return post

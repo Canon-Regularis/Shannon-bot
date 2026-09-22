@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +25,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
-from shannon.domain.models import Label, TrackedSnapshot
+from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.github import labels
 from shannon.github.client import GitHubClient
 from shannon.services.labels import RepositoryLabels
@@ -33,9 +33,6 @@ from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
 
 logger = logging.getLogger(__name__)
-
-# Owner, name, number.
-Fetcher = Callable[[str, str, int], Awaitable[TrackedSnapshot]]
 
 # A pull request is only finished once somebody has said it is ready to merge. The requirement
 # is about the order of a review, not about bookkeeping: marking a pull request done skips the
@@ -175,7 +172,7 @@ class ItemWorkflow:
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found)
         snapshot = await self._fetch(found)
-        self._refuse_a_status_that_will_not_hold(found, snapshot, status)
+        self._refuse_conflicting_status(found, snapshot, status)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -212,7 +209,7 @@ class ItemWorkflow:
                     # Touching the lock anyway is not a stale write that rights itself. Locking
                     # shuts a thread against a state the row no longer holds, and for a pull
                     # request nothing lifts one: `PullRequestPolicy.locked` answers None on every
-                    # sync and `shut_by_the_row` wants a DONE the row has moved off, so no
+                    # sync and `shut_for_state` wants a DONE the row has moved off, so no
                     # webhook, sync or `/pr` reopens it. Unlocking is no safer, because the
                     # writer that moved it may have shut the thread on purpose a moment ago.
                     #
@@ -432,7 +429,7 @@ class ItemWorkflow:
                 "GitHub labels to set. Move its card on the board instead."
             )
 
-    def _refuse_a_status_that_will_not_hold(
+    def _refuse_conflicting_status(
         self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
     ) -> None:
         """Refuse, rather than write a status that something else is going to overwrite.
@@ -727,7 +724,7 @@ def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> Tracke
     kept = [label for label in snapshot.labels if label.name.casefold() not in gone]
     if change.add and change.add.casefold() not in {label.name.casefold() for label in kept}:
         kept.append(Label(name=change.add))
-    return replace(snapshot, labels=tuple(kept))
+    return snapshot.relabelled(tuple(kept))
 
 
 async def locate(sessionmaker: async_sessionmaker[AsyncSession], thread_id: int) -> FoundItem:

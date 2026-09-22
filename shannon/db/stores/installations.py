@@ -1,21 +1,23 @@
 """Which GitHub App installation covers which account.
 
-Read on the way to every GitHub call, so that the request carries a token scoped to the account it
-is about rather than one credential that can see everything. Written by the `installation` webhooks
-and repaired from any delivery that mentions one.
-
-A cache with a fallback rather than a source of truth. GitHub is authoritative and can always be
-asked, so a row that is missing or stale costs one request. That is the whole reason this table can
-be written from webhooks without a reconciliation job behind it.
+Read on the way to every GitHub call, so the request carries a token scoped to the account it is
+about. A cache rather than a source of truth: GitHub is authoritative and can always be asked, so
+a missing or stale row costs one request and no reconciliation job stands behind this table.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.base import rows_changed
 from shannon.db.models import GitHubInstallation
+
+# The first key of the per-account advisory lock. Postgres keeps two-integer keys apart
+# from single-bigint ones, and `UserLinkStore` uses the latter; the other two-integer
+# space in this project leads with `_ONE_ITEM_AT_A_TIME`, so all three stay apart.
+_ONE_ACCOUNT_AT_A_TIME = 8_532
 
 
 class InstallationStore:
@@ -27,15 +29,15 @@ class InstallationStore:
     async def for_owner(self, account_login: str) -> GitHubInstallation | None:
         """The installation covering an account, or None if none is known here.
 
-        None means "ask GitHub", not "not installed". The caller has a way to find out for
-        certain, and treating an empty cache as a refusal would make a missed webhook look
-        exactly like an App nobody ever installed.
+        None means "ask GitHub", not "not installed": treating an empty cache as a refusal
+        would make a missed webhook look exactly like an App nobody ever installed.
         """
-        return await self._session.scalar(
+        found: GitHubInstallation | None = await self._session.scalar(
             select(GitHubInstallation).where(
                 GitHubInstallation.account_login == account_login.strip().lower()
             )
         )
+        return found
 
     async def remember(
         self,
@@ -48,17 +50,21 @@ class InstallationStore:
         """Write down what GitHub just said, replacing whatever was there.
 
         Two unique constraints reach this row and only one can be named in an `ON CONFLICT`, so
-        the other is cleared first. That is not belt and braces: an account can be uninstalled and
-        reinstalled, which keeps the login and issues a NEW installation id, and an App can be
-        transferred between accounts, which keeps the id and changes the login. Settling only the
-        id would leave the old login's row pointing at an installation that no longer exists, and
-        the next lookup by that login would mint against it and fail.
+        the other is cleared first: a reinstall keeps the login and issues a NEW installation id,
+        and a transfer keeps the id and changes the login. `account_id` is only overwritten when
+        this caller has one, since it is the only thing that tells a rename apart from somebody
+        taking a freed name.
 
-        `account_id` is only overwritten when this caller actually has one. A payload without an
-        account block would otherwise erase an id learned from a better-informed one, and that id
-        is the only thing that tells a rename apart from somebody taking a freed name.
+        Two steps against two constraints cannot be made atomic by `ON CONFLICT`, which
+        names one of them, and a retry loop only has the retries colliding instead. So an
+        advisory lock per account, exactly as `UserLinkStore.link` takes one per guild and
+        for the same reason. Keyed on the login rather than the installation id, because
+        the login is what two writers contend for: a reinstall keeps it and brings a new id.
         """
         login = account_login.strip().lower()
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_ONE_ACCOUNT_AT_A_TIME, func.hashtext(login)))
+        )
         await self._session.execute(
             delete(GitHubInstallation).where(
                 GitHubInstallation.account_login == login,
@@ -72,7 +78,9 @@ class InstallationStore:
             "account_id": account_id,
             "suspended": suspended,
         }
-        settled = {"account_login": login, "suspended": suspended}
+        # Declared because the conditional key below is an int, and the literal alone would fix
+        # the value type at `str | bool`.
+        settled: dict[str, object] = {"account_login": login, "suspended": suspended}
         if account_id is not None:
             settled["account_id"] = account_id
 
@@ -87,25 +95,11 @@ class InstallationStore:
     async def forget(self, installation_id: int) -> bool:
         """Drop an installation somebody uninstalled, answering whether there was one.
 
-        The answer is used rather than ignored: GitHub sends `installation.deleted` to every
-        subscriber, including one that never held a row for it, and a log line claiming to have
-        removed something that was not there is a log line that wastes somebody's afternoon.
+        GitHub sends `installation.deleted` to every subscriber, including one that never held
+        a row for it, so the answer decides whether anything is logged as removed.
         """
-        result = await self._session.execute(
-            delete(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id)
+        changed = await rows_changed(
+            self._session,
+            delete(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id),
         )
-        return bool(result.rowcount)
-
-    async def set_suspended(self, installation_id: int, *, suspended: bool) -> None:
-        """Record that an installation was paused or resumed.
-
-        Kept rather than deleted on suspension, because the two are different answers. A suspended
-        installation still exists and its account is still bound; what has happened is that
-        somebody turned the App off and can turn it back on, and a token mint will fail until they
-        do. Deleting the row would report that as never having been installed.
-        """
-        found = await self._session.scalar(
-            select(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id)
-        )
-        if found is not None:
-            found.suspended = suspended
+        return bool(changed)

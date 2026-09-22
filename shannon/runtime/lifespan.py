@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -25,12 +26,12 @@ from shannon.runtime.supervision import (
     why,
 )
 from shannon.services.delivery.worker import ReadyCheck
+from shannon.services.verification import GitHubIdentityVerification
 
 logger = logging.getLogger(__name__)
 
-# How long the startup database check waits before giving up. Long enough for a cold connection
-# and a first query on a loaded server, short enough that an orchestrator sees a process that
-# failed to start rather than one that never answers.
+# Long enough for a cold connection and a first query on a loaded server, short enough that an
+# orchestrator sees a process that failed to start rather than one that never answers.
 STARTUP_CHECK_SECONDS = 15.0
 
 
@@ -38,20 +39,29 @@ class ProcessParts(Protocol):
     """What owning the process needs of the wiring, and nothing else.
 
     Container satisfies this by shape, so starting and stopping does not depend on the
-    composition root or on everything it happens to hold.
+    composition root.
     """
 
-    engine: AsyncEngine
-    worker: RunsDeliveries
-    poller: PollsABoard
-    conversations: ReloadsConversations
-    flusher: FlushesTranscripts
+    # A mutable protocol member is invariant, so `Container.conversations: ConversationLog` would
+    # be refused where the narrower `ReloadsConversations` is asked for; hence read-only.
+    @property
+    def engine(self) -> AsyncEngine: ...
+    @property
+    def worker(self) -> RunsDeliveries: ...
+    @property
+    def poller(self) -> PollsABoard: ...
+    @property
+    def conversations(self) -> ReloadsConversations: ...
+    @property
+    def flusher(self) -> FlushesTranscripts: ...
+    @property
+    def verification(self) -> GitHubIdentityVerification | None: ...
 
     async def aclose(self) -> None: ...
 
 
 class RunsDeliveries(Protocol):
-    """The worker as the lifespan sees it: something to start and something to ask to stop."""
+    """The delivery worker as the lifespan sees it."""
 
     async def run_forever(self, wait_for_ready: ReadyCheck | None = None) -> None: ...
 
@@ -59,14 +69,14 @@ class RunsDeliveries(Protocol):
 
 
 class PollsABoard(Protocol):
-    """The project poller as the lifespan sees it, which is the worker's shape exactly.
+    """The project poller as the lifespan sees it.
 
-    A board is asked rather than delivered, because GitHub sends no project webhook for a
-    personal account, so this is a second long-lived task beside the worker rather than another
-    handler behind the queue.
+    GitHub sends no project webhook for a personal account, so a board is polled by a second
+    long-lived task rather than handled behind the queue.
     """
 
-    enabled: bool
+    @property
+    def enabled(self) -> bool: ...
 
     async def run_forever(self) -> None: ...
 
@@ -74,20 +84,16 @@ class PollsABoard(Protocol):
 
 
 class ReloadsConversations(Protocol):
-    """Filling the set of threads being captured, which has to happen before the gateway is up.
-
-    Named here rather than importing the service, for the same reason as the two above.
-    """
+    """Filling the set of threads being captured."""
 
     async def reload(self) -> None: ...
 
 
 class FlushesTranscripts(Protocol):
-    """The flusher as the lifespan sees it, which is the worker's shape without the `enabled`.
+    """The transcript flusher as the lifespan sees it.
 
-    A board is opt-in, so the poller carries a flag and the lifespan branches on it. Publishing a
-    conversation is available in every deployment: the flag would be a constant, and the branch
-    would be one nothing could ever take the other way.
+    Unlike a board, publishing a conversation is on in every deployment, so there is no
+    `enabled` flag to branch on.
     """
 
     async def run_forever(self) -> None: ...
@@ -96,10 +102,10 @@ class FlushesTranscripts(Protocol):
 
 
 class Gateway(Protocol):
-    """The three things this process does to the Discord connection.
+    """The Discord connection as this process uses it.
 
     Named here rather than importing the client, so starting and stopping the process does not
-    depend on discord.py. The lifespan tests already stand a fake in its place.
+    depend on discord.py.
     """
 
     async def start(self, token: str) -> None: ...
@@ -111,46 +117,35 @@ class Gateway(Protocol):
     def gateway_is_up(self) -> bool:
         """Whether Discord can be reached right now, which is not what `is_ready` answers.
 
-        `is_ready` reports whether the cache has ever been filled. It is set once and cleared
-        only by `close`, so a connection that came up and later died still reads as ready, and
-        the health check built on it could never report the one failure it was written for.
+        `is_ready` reports whether the cache has ever been filled: it is set once and cleared
+        only by `close`, so a connection that came up and later died still reads as ready.
         """
         ...
 
     async def close(self) -> None: ...
 
 
-async def require_a_working_database(engine: AsyncEngine) -> None:
+async def require_database(engine: AsyncEngine) -> None:
     """Prove the database answers and has been migrated before the port opens.
 
-    Building an engine connects to nothing, so without this a wrong password or a database that
-    has never been migrated still reaches "startup complete" and passes a health check, while
-    every delivery is accepted and then fails behind it. Failing here stops the process with
-    something an operator can act on.
-
-    Deadlined, because nothing else here is. asyncpg's sixty seconds bound the handshake and not
-    the query, so a server that accepts the connection and then goes quiet, whether a primary that
-    fails over once the socket is up, a black-holed route, or anything holding the table, leaves
-    this waiting for as long as the kernel keeps retrying. Uvicorn opens no listening socket until
-    startup returns and reads a signal only afterwards, so for all of that the process serves
-    nothing, answers no health check, and cannot be asked to stop.
+    Building an engine connects to nothing, so without this a wrong password or an unmigrated
+    database still reaches "startup complete" and passes a health check while every delivery
+    fails behind it. Deadlined because asyncpg's sixty seconds bound the handshake and not the
+    query, and uvicorn opens no listening socket until startup returns: a server that accepts the
+    connection and then goes quiet would leave the process unable to serve or to be stopped.
     """
     async with asyncio.timeout(STARTUP_CHECK_SECONDS), engine.connect() as connection:
-        # Reading alembic_version proves the database answers and that migrations have been
-        # applied at least once. It does not prove they are at head; doing that would mean
-        # loading the Alembic environment into the running app, which is not worth it for a
-        # check whose job is to catch a wrong URL or a database nobody has migrated at all.
+        # Proves migrations have been applied at least once, not that they are at head: checking
+        # head would mean loading the Alembic environment into the running app.
         await connection.execute(text("SELECT 1 FROM alembic_version LIMIT 1"))
 
 
 def gateway_ready(bot: Gateway, bot_task: asyncio.Task[None]) -> ReadyCheck:
     """Wait for the gateway, and give up if the bot stops trying to reach it.
 
-    `wait_until_ready` waits on an event that is only ever set once a connection succeeds, so a
-    bad token or a refused login leaves it waiting for the rest of the process's life. A worker
-    parked there never leases anything: the endpoint goes on accepting deliveries, the queue
-    grows, pruning never runs, and nothing says why. Failing instead stops the worker loudly and
-    leaves the deliveries pending for a process that can actually reach Discord.
+    `wait_until_ready` waits on an event only ever set once a connection succeeds, so a bad token
+    leaves it waiting for the rest of the process's life while the endpoint goes on accepting
+    deliveries that no worker ever leases.
     """
 
     async def connected() -> None:
@@ -170,8 +165,6 @@ def gateway_ready(bot: Gateway, bot_task: asyncio.Task[None]) -> ReadyCheck:
 
 @dataclass(slots=True)
 class _Running:
-    """The tasks this process started, and the flag that says whether it asked them to end."""
-
     shutdown: Shutdown
     worker_task: asyncio.Task[None]
     bot_task: asyncio.Task[None] | None
@@ -188,63 +181,54 @@ async def _start(
 ) -> _Running:
     """Bring up the gateway and the worker, in that order.
 
-    The worker waits for the gateway rather than racing it. The endpoint accepts deliveries from
-    the moment the port is open, which is the point, but acting on one before Discord is
-    connected only wastes an attempt.
+    The worker waits for the gateway rather than racing it: acting on a delivery before Discord
+    is connected only wastes an attempt.
 
-    `halt` is what the two tasks that carry the point of the process do when they end without
-    being asked to. The poller does not, because a process with no poller still mirrors
-    everything the webhooks bring it.
+    Only the bot and the worker pass `halt`. A process whose poller or flusher died still mirrors
+    everything the webhooks bring it, and what the flusher has not published waits in the table
+    until a process with a working one picks it up.
     """
     shutdown = Shutdown()
     bot_task: asyncio.Task[None] | None = None
     ready: ReadyCheck | None = None
 
-    # Before the gateway, not after. A message cannot arrive before the connection is up, so this
-    # is the last moment at which the set can be filled without a race, and the database has
-    # already been proved to answer. A conversation left out here is one armed in the database and
-    # captured by nothing, and the only sign would be a transcript that stopped at the last deploy.
+    # Before the gateway, not after: a message cannot arrive before the connection is up, so this
+    # is the last moment the set can be filled without a race. A conversation left out is one
+    # armed in the database and captured by nothing.
     await container.conversations.reload()
 
     token = settings.discord_token.get_secret_value()
     if token:
         bot_task = asyncio.create_task(bot.start(token))
-        # discord.py reconnects on its own, so this task ending at all means it gave up: a
-        # refused token, a close code it cannot come back from. The worker only waits for the
-        # gateway once, at the start, so a connection lost after that leaves it leasing
-        # deliveries that every one of them fails.
+        # discord.py reconnects on its own, so this task ending at all means it gave up. The
+        # worker waits for the gateway only once, at the start, so a connection lost after that
+        # leaves it leasing deliveries that all fail.
         bot_task.add_done_callback(report_exit("Discord bot", shutdown, halt))
         ready = gateway_ready(bot, bot_task)
     else:
-        # Handy for poking the webhook endpoint locally, and loud enough that nobody deploys
-        # like this by accident.
         logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
 
     worker_task = asyncio.create_task(container.worker.run_forever(ready))
     worker_task.add_done_callback(report_exit("delivery worker", shutdown, halt))
 
-    # No `halt`, for the poller's reason below: a process with no flusher still mirrors
-    # everything the webhooks bring it, and still accepts what people say into a logged thread.
-    # What is captured waits in the table until a process with a working flusher picks it up.
     flusher_task = asyncio.create_task(container.flusher.run_forever())
     flusher_task.add_done_callback(report_exit("transcript flusher", shutdown))
 
-    # Only when a board was configured. Starting a task that returns at once would have the done
-    # callback report the poller as having stopped, on every boot, for everybody not using one.
+    # Starting a task that returns at once would have the done callback report the poller as
+    # stopped, on every boot, for everybody not using a board.
     poller_task: asyncio.Task[None] | None = None
     if container.poller.enabled:
         poller_task = asyncio.create_task(container.poller.run_forever())
         poller_task.add_done_callback(report_exit("project poller", shutdown))
 
-    # A worker that dies takes the whole point of the process with it, and the endpoint would go
-    # on answering 200 to deliveries nothing will act on. /health is what makes that visible.
+    # /health reads these: a dead worker leaves the endpoint answering 200 to deliveries nothing
+    # will act on.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
     liveness.poller_task = poller_task
     liveness.flusher_task = flusher_task
-    # Asked only when there is a bot. Safe at any point in a client's life: it reads a flag the
-    # client keeps from its own connect and disconnect events, and `is_ready` behind it checks
-    # the sentinel before the event.
+    # Safe at any point in a client's life: it reads a flag the client keeps from its own connect
+    # and disconnect events, and `is_ready` behind it checks the sentinel before the event.
     liveness.gateway_is_ready = bot.gateway_is_up if bot_task is not None else None
     return _Running(
         shutdown=shutdown,
@@ -258,14 +242,12 @@ async def _start(
 async def _close(
     bot: Gateway, container: ProcessParts, settings: Settings, running: _Running
 ) -> None:
-    """Take everything down, reporting a step that fails rather than abandoning the rest."""
     # Set before anything stops, so the done callbacks can tell a task that failed from one that
     # was told to finish.
     running.shutdown.asked = True
 
-    # Asked to stop rather than cancelled, so the delivery in hand finishes and the rest of its
-    # batch goes back on the queue instead of sitting locked for the whole lease while the
-    # replacement process polls an empty one.
+    # Asked to stop rather than cancelled, so the delivery in hand finishes and the rest of the
+    # batch goes back on the queue instead of sitting locked for the whole lease.
     container.worker.stop()
     container.poller.stop()
     container.flusher.stop()
@@ -277,8 +259,8 @@ async def _close(
         "stop the project poller",
         stop(running.poller_task, grace=settings.worker_shutdown_grace_seconds),
     )
-    # Asked rather than cancelled, like the two above: a comment half sent is one that may land
-    # with nothing recording that it did, and the batch would then publish twice.
+    # Asked rather than cancelled: a comment half sent may land with nothing recording that it
+    # did, and the batch would then publish twice.
     await safely(
         "stop the transcript flusher",
         stop(running.flusher_task, grace=settings.worker_shutdown_grace_seconds),
@@ -294,11 +276,11 @@ def build_lifespan(
     container: ProcessParts,
     settings: Settings,
     halt: Callable[[], None] = ask_the_process_to_stop,
-):
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @contextlib.asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         try:
-            await require_a_working_database(container.engine)
+            await require_database(container.engine)
         except Exception as error:
             logger.error(
                 "cannot reach the database, or it has never been migrated: %s. "
@@ -310,8 +292,8 @@ def build_lifespan(
         probes = build_probe_engine(container.engine)
         liveness = ProcessLiveness(probes)
         app.state.liveness = liveness
-        # The OAuth callback reads this rather than being handed it, because it is entered from
-        # outside this process rather than called by anything inside it.
+        # The OAuth callback reads this off app state: it is entered from outside the process
+        # rather than called by anything inside it.
         app.state.verification = container.verification
 
         running = await _start(bot, container, settings, liveness, halt)

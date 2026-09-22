@@ -31,19 +31,14 @@ class ChannelMappingService:
         fallbacks: Mapping[ObjectType, ObjectType] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
-        # Where each kind's threads go when nobody has mapped a channel for it, which is only
-        # read to answer where the ones already open are. Handed in rather than known here: the
-        # sync policies decide it, and two copies of a product rule is one too many.
+        # Where each kind's threads go when nobody has mapped a channel for it, read only to say
+        # where the ones already open are. Handed in because the sync policies decide it.
         self._fallbacks = dict(fallbacks or {})
 
     async def assign(
         self, *, guild_id: int, object_type: ObjectType, channel_id: int
     ) -> ChannelAssignment:
-        """Bind one object type to one channel, replacing whatever it pointed at before.
-
-        Raises NotRegisteredError when the guild has no repository, because a mapping without
-        one has nothing to hang off.
-        """
+        """Bind one object type to one channel, replacing whatever it pointed at before."""
         async with self._sessionmaker() as session, session.begin():
             repository = await RepositoryStore(session).get_by_guild(guild_id)
             if repository is None:
@@ -54,11 +49,8 @@ class ChannelMappingService:
             fallback = self._fallbacks.get(object_type)
             if existing is None and fallback is not None:
                 # Where this kind's threads have actually been going. `/register` maps pull
-                # requests and nothing else, so on most servers the first `/set_channel issues`
-                # finds no issue row at all, and answering from that row alone said nothing
-                # about the issue threads sitting in the pull request channel. That clause is
-                # the whole reason this field exists: without it an admin tidying a server goes
-                # looking for threads that never went anywhere.
+                # requests and nothing else, so the first `/set_channel issues` finds no issue
+                # row, and the reply would say nothing about the issue threads already open.
                 existing = await mappings.get(repository.id, fallback)
             replaced = existing.discord_channel_id if existing else None
 

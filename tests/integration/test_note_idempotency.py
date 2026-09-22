@@ -21,7 +21,7 @@ from shannon.discord_bot.errors import (
 )
 from shannon.domain.enums import DeliveryStatus
 from tests.fakes.github import FakeGitHubClient
-from tests.fakes.threads import FakeThreadGateway
+from tests.fakes.threads import FakeThreadGateway, post_failing_for
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
@@ -190,12 +190,7 @@ async def test_a_comment_on_a_deleted_thread_lands_once_the_thread_is_rebuilt(
         first_thread = threads.created[0].thread_id
         real_post = threads.post
 
-        async def the_thread_is_gone(**kwargs):
-            if kwargs["thread_id"] == first_thread:
-                raise ThreadNotFoundError("somebody deleted the thread")
-            return await real_post(**kwargs)
-
-        threads.post = the_thread_is_gone
+        threads.post = post_failing_for(first_thread, real_post)
         await post(client, "issue_comment", a_comment(), delivery="comment-1")
         await container.worker.run_once()
 
@@ -225,12 +220,7 @@ async def test_a_comment_on_a_deleted_issue_thread_is_rebuilt_the_same_way(
         first_thread = threads.created[0].thread_id
         real_post = threads.post
 
-        async def the_thread_is_gone(**kwargs):
-            if kwargs["thread_id"] == first_thread:
-                raise ThreadNotFoundError("somebody deleted the thread")
-            return await real_post(**kwargs)
-
-        threads.post = the_thread_is_gone
+        threads.post = post_failing_for(first_thread, real_post)
         await post(
             client, "issue_comment", payloads.issue_comment_event("created"), delivery="comment-1"
         )

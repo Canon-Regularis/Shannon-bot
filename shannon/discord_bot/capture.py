@@ -1,11 +1,7 @@
 """Deciding whether a Discord message belongs in a transcript, and reducing it to plain values.
 
-Issue #103. This is the only place in the project that touches `discord.Message`, and it exists so
-that stays true: the services take `CapturedMessage` and know nothing about discord.py, the same
-way `ThreadGateway` keeps it out of everything that writes.
-
-Every rule here is a skip but one, and the one is `_said` below. It is discord.py's own
-transform, reimplemented because discord.py's version throws away the thing issue #121 needs.
+The only place in the project that touches `discord.Message`: the services take
+`CapturedMessage` and know nothing about discord.py.
 """
 
 from __future__ import annotations
@@ -19,17 +15,15 @@ import discord
 
 from shannon.db.models import DISPLAY_NAME_WIDTH, TRANSCRIPT_LINE_WIDTH
 
-# The two kinds that are somebody talking. Everything else Discord calls a message is the system
-# narrating: "X started a thread", a pin, a channel rename, a join. Transcribing those would put
-# Discord's own furniture into a GitHub comment.
+# The two kinds that are somebody talking. Every other Discord message type is the system
+# narrating: "X started a thread", a pin, a channel rename, a join.
 SAID_BY_A_PERSON = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
-# Discord's syntax for the three things a message can point at, and the same pattern
-# `clean_content` reads in discord.py's `message.py`. Fifteen to twenty digits is a snowflake.
+# Discord's mention syntax, the pattern `clean_content` reads in discord.py's `message.py`.
+# Fifteen to twenty digits is a snowflake.
 _POINTS_AT = re.compile(r"<(@[!&]?|#)([0-9]{15,20})>")
 
-# What discord.py writes for something it cannot resolve, kept word for word so a thread reads
-# the way it did before issue #121.
+# What discord.py writes for something it cannot resolve, kept word for word.
 DELETED_USER = "@deleted-user"
 DELETED_ROLE = "@deleted-role"
 DELETED_CHANNEL = "#deleted-channel"
@@ -45,26 +39,19 @@ class CapturedMessage:
     author_display_name: str
     content: str
     said_at: datetime
-    # Who this message tagged, by Discord id, with the name each had when it was said. No
-    # default, so nothing can build one of these and quietly leave out the half issue #121
-    # turns on.
+    # Who this message tagged, by Discord id, with the name each had when it was said.
     mentions: Mapping[int, str]
 
 
 def from_a_person(message: discord.Message) -> bool:
     """Whether somebody said this, as opposed to a bot or Discord itself.
 
-    The bot check is doing more work than it looks. This bot's own mirrored GitHub comments live
-    in the very threads being captured, so without it every comment arriving from GitHub would be
-    transcribed straight back to GitHub, and each round would carry the last one with it.
-
-    Separate statements rather than one condition, so each reason stands on its own and a test can
-    prove it by itself.
+    Without the bot check, this bot's own mirrored GitHub comments in the threads being captured
+    would be transcribed straight back to GitHub, each round carrying the last one with it.
     """
     if message.author.bot:
         return False
-    # Surer than the flag above for something posted through a webhook, which carries a synthetic
-    # author that does not always read as a bot.
+    # A webhook post carries a synthetic author that does not always read as a bot.
     if message.webhook_id is not None:
         return False
     return message.type in SAID_BY_A_PERSON
@@ -73,14 +60,9 @@ def from_a_person(message: discord.Message) -> bool:
 def has_words(message: discord.Message) -> bool:
     """Whether there is any text to write down.
 
-    False for an attachment on its own, a sticker on its own and a poll, all of which arrive
-    carrying nothing. It is also what a message content intent granted in name only looks like,
-    which is why the caller says so once rather than passing over it quietly: a botched grant and
-    a thread where people only post pictures are identical from here.
-
-    Asked of the raw content, which is where an unpaid intent actually shows up and which is
-    what `_said` reads. The two agreed about emptiness when this asked `clean_content`, so it
-    is one fewer attribute to stand in for rather than a change of behaviour.
+    False for an attachment, a sticker or a poll on its own, all of which arrive carrying
+    nothing. A message content intent granted in name only is indistinguishable from here, which
+    is why the caller says so once. Asked of the raw content, where an unpaid intent shows up.
     """
     return bool(message.content.strip())
 
@@ -88,26 +70,20 @@ def has_words(message: discord.Message) -> bool:
 def _said(message: discord.Message) -> tuple[str, dict[int, str]]:
     """What was typed, with every tag of a person kept as an id, and who those people are.
 
-    `clean_content` in all but one respect, and that respect is the whole of issue #121: it turns
-    `<@123>` into `@DisplayName` and throws the id away. The id is the only thing `/link` knows
-    somebody by, so by the time a comment is rendered there was nothing left to look up.
+    `clean_content` in all but one respect: it turns `<@123>` into `@DisplayName` and throws the
+    id away, and the id is the only thing `/link` knows somebody by.
 
-    **`message.mentions` is the authority and the text is only a pointer into it.** Discord builds
-    that list itself, off the payload, so an id written in the content that Discord did not read as
-    a mention is not one and reads as `@deleted-user`, exactly as it does now. That is also what
-    makes the token pointless to forge: typing `<@123>` IS mentioning 123, and it rings them here
-    as well as there, so there is nothing to be had by typing it rather than clicking a name. The
-    equivalence holds only for Discord's own syntax, which is why nothing invented goes into the
-    token: a shape Discord does not parse would ping on GitHub having pinged nobody here.
+    `message.mentions` is the authority and the text is only a pointer into it, so an id written
+    in the content that Discord did not read as a mention resolves to `@deleted-user`. The token
+    cannot be forged: typing `<@123>` is mentioning 123, and it rings them here as well as on
+    GitHub. Only Discord's own syntax goes into the token, because a shape Discord does not parse
+    would ping on GitHub having pinged nobody here.
 
-    Roles and channels resolve the way `clean_content` resolves them and are deliberately
-    unchanged, because issue #121 is about people. `get_channel_or_thread` is the public twin of
-    the `_resolve_channel` discord.py reaches for. discord.py's `role_mentions` fallback is dropped
-    rather than copied: that list is built by calling `get_role` on each mentioned id, so it can
-    hold nothing `get_role` does not.
-
-    Its closing `escape_mentions` is dropped too. That defuses `@everyone` for Discord, and nothing
-    sends this text back to Discord; `github.safe_text` covers the one direction it travels.
+    Roles and channels resolve as `clean_content` resolves them, through the public twin of the
+    `_resolve_channel` discord.py reaches for. Its `role_mentions` fallback is dropped because
+    that list is built by calling `get_role` on each mentioned id, so it can hold nothing
+    `get_role` does not. Its closing `escape_mentions` is dropped too: that defuses `@everyone`
+    for Discord, and nothing sends this text back to Discord.
     """
     tagged = {member.id: member for member in message.mentions}
     named: dict[int, str] = {}
@@ -122,9 +98,8 @@ def _said(message: discord.Message) -> tuple[str, dict[int, str]]:
             named[found] = member.display_name[:DISPLAY_NAME_WIDTH]
             # Normalised to one shape, so the render has one token to look for rather than two.
             return f"<@{found}>"
-        # A thread being logged is always in a server. Answered rather than asserted, because the
-        # type says this can be None and a transcript is not worth raising over in the handler
-        # that runs for every message in every server.
+        # A thread being logged is always in a server; the type says otherwise, and a
+        # transcript is not worth raising over in the handler that runs for every message.
         if guild is None:
             return DELETED_ROLE if kind == "@&" else DELETED_CHANNEL
         if kind == "@&":
@@ -139,14 +114,10 @@ def _said(message: discord.Message) -> tuple[str, dict[int, str]]:
 def captured(message: discord.Message) -> CapturedMessage:
     """Reduce a message to what a transcript needs.
 
-    What this produces is still not safe to publish. `github.safe_text` is what closes that, at the
-    point the comment is rendered, and since issue #121 it is also what decides which of the tags
-    kept here becomes a live GitHub mention.
-
-    The map is built from the substitutions `_said` actually made rather than from
-    `message.mentions` wholesale, and that is not tidiness. A reply carries the author it answers
-    in `mentions` with no token anywhere in the text, so taking that list whole would tag somebody
-    on GitHub for every reply in a thread.
+    The output is not safe to publish; `github.safe_text` closes that when the comment is
+    rendered, and also decides which of the tags kept here becomes a live GitHub mention. The map
+    holds only the substitutions `_said` made: a reply carries the author it answers in
+    `mentions` with no token in the text, so the whole list would tag somebody for every reply.
     """
     content, named = _said(message)
     return CapturedMessage(

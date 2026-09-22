@@ -556,6 +556,43 @@ class TestTheCallbackRoute:
         assert response.status_code == 500
 
 
+class TestClearingOutTheLinks:
+    """`consume` marks a link spent and leaves the row; an unfollowed one is never touched.
+
+    So the table only grew. The pruner existed and was tested against the store directly, which
+    is exactly why nobody noticed it had no caller: the delivery worker's hourly sweep is what
+    calls it now, and this is the seam between the two.
+    """
+
+    async def test_a_link_long_past_use_is_dropped(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        handler, _ = github_says()
+        await IdentityVerificationStore(db_session).issue(
+            state="stale", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(days=-3)
+        )
+        await db_session.commit()
+
+        async with verifying(db_sessionmaker, handler) as verification:
+            assert await verification.prune(keep_for=timedelta(days=1)) == 1
+
+        assert await IdentityVerificationStore(db_session).consume("stale") is None
+
+    async def test_a_link_somebody_could_still_follow_is_left_alone(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        handler, _ = github_says()
+        await IdentityVerificationStore(db_session).issue(
+            state="live", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(minutes=10)
+        )
+        await db_session.commit()
+
+        async with verifying(db_sessionmaker, handler) as verification:
+            assert await verification.prune(keep_for=timedelta(days=1)) == 0
+
+        assert await IdentityVerificationStore(db_session).consume("live") == (GUILD, ALICE)
+
+
 def _state(link: str) -> str:
     return link.partition("state=")[2]
 
