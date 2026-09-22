@@ -43,6 +43,7 @@ from shannon.discord_bot.formatting import (
     format_commits_left,
     format_force_push,
     format_label_change,
+    format_ready_for_review,
     format_review,
     format_review_comment,
     format_reviewer_ping,
@@ -94,6 +95,7 @@ from shannon.services.sync.policies import (
     TicketPolicy,
     channel_fallbacks,
 )
+from shannon.services.sync.ready_lines import ReadyLine
 from shannon.services.sync.refresh import RepositoryRefresh
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
@@ -441,10 +443,16 @@ def _event_router(
     # two above have already said their piece by the time it starts.
     #
     # It goes to the issue handler as well, and does nothing there: an issue has no `synchronize`
-    # action, which is the first thing it checks.
+    # action, which is the first thing it checks. The ready line is in the same position for the
+    # same reason, and checks the same thing first.
     announce = _every(
         LabelLine(sessionmaker, threads, render=format_label_change, shut_again=shut_again),
         StateLine(sessionmaker, threads, render=format_state_change, shut_again=shut_again),
+        # Issue #132. Above the commit line for the reason the commit line is last: this one
+        # rings people, and whether GitHub is reachable should not decide whether the reviewers
+        # were told. Its claim is spent by the time a later failure retries the delivery, so the
+        # retry finds it said and stays quiet.
+        ReadyLine(sessionmaker, threads, render=format_ready_for_review, shut_again=shut_again),
         CommitLine(
             sessionmaker,
             threads,

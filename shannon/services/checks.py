@@ -14,19 +14,17 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.repositories import RepositoryStore
-from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
-from shannon.discord_bot.threads import Notify, PostsToThread
+from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import ItemNotReadyError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, CheckReport, CheckRun, PullRequestSnapshot
 from shannon.github.webhooks.checks import CheckSuiteEvent
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
+from shannon.services.audience import reachable
 from shannon.services.sync.announcements import ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
 
@@ -214,13 +212,20 @@ class CheckSuiteAnnouncer:
         guild_id: int,
     ) -> bool:
         people, teams = _who_to_tell(item, report)
-        mentions, roles, notify = await self._resolve(guild_id, people, teams)
+        async with self._sessionmaker() as session:
+            audience = await reachable(session, guild_id=guild_id, people=people, teams=teams)
         await self._line.say_once(
             tracked_item_id=tracked_item_id,
             thread_id=thread_id,
             note_key=report.note_key,
-            panel=self._render(report, people=people, teams=teams, mentions=mentions, roles=roles),
-            notify=notify,
+            panel=self._render(
+                report,
+                people=people,
+                teams=teams,
+                mentions=audience.mentions,
+                roles=audience.roles,
+            ),
+            notify=audience.notify,
         )
         logger.info(
             "checks on %s#%s: %s of %s passed",
@@ -230,29 +235,6 @@ class CheckSuiteAnnouncer:
             report.total,
         )
         return True
-
-    async def _resolve(
-        self, guild_id: int, people: tuple[Actor, ...], teams: tuple[Actor, ...]
-    ) -> tuple[dict[str, int], dict[str, int], Notify]:
-        """Names into mentions, and the allow-list that decides which of them ring.
-
-        The ids travel with the logins because GitHub frees a login when an account is renamed or
-        deleted, and without the id a mention meant for one person reaches whoever took the name.
-        Roles are absent from the allow-list on purpose: Discord rings everybody holding a role and
-        a member cannot opt out of one.
-        """
-        async with self._sessionmaker() as session:
-            mentions = await UserLinkStore(session).resolve_many(
-                guild_id=guild_id,
-                people={person.login: person.github_user_id for person in people},
-            )
-            roles = await TeamLinkStore(session).resolve_many(
-                guild_id=guild_id, people=dict.fromkeys((team.login for team in teams), None)
-            )
-            notify = await MutedMemberStore(session).may_be_pinged(
-                guild_id=guild_id, ids=mentions.values()
-            )
-        return dict(mentions), dict(roles), notify
 
 
 def _who_to_tell(

@@ -31,7 +31,7 @@ async def test_an_action_no_longer_acted_on_never_reaches_the_handler() -> None:
     router = EventRouter()
     router.register("pull_request", handler)
 
-    outcome = await router.dispatch("pull_request", "ready_for_review", {})
+    outcome = await router.dispatch("pull_request", "milestoned", {})
 
     assert outcome is WebhookOutcome.IGNORED
     assert handler.calls == [], "the handler was given an action the bot had stopped acting on"

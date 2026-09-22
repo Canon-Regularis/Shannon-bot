@@ -406,6 +406,44 @@ def _headed(heading: str, under: str, accent: Accent) -> Panel:
     return Panel(blocks=tuple(blocks), accent=accent)
 
 
+# Issue #132. A heading, like the state changes above and for the same reason: leaving draft is
+# the moment a pull request starts asking for somebody's time, and that is worth finding by
+# scrolling. Green because it is the colour the card turns in the same breath, and the two
+# disagreeing would be the reader's problem rather than this module's.
+_READY_HEADING = "### 🟢 Ready for review"
+
+
+def format_ready_for_review(
+    initiator: Actor | None,
+    *,
+    people: Sequence[Actor] = (),
+    teams: Sequence[Actor] = (),
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> Panel:
+    """A pull request taken out of draft, naming who did it and ringing who it now waits on.
+
+    The people go in the block directly under the heading, for the reason the check results give
+    at more length: a panel over budget drops blocks from the end, and an allow-list only PERMITS
+    a notification while the `<@id>` text is what delivers one.
+
+    The sentence is said whether or not anybody is named, the same bargain the check line makes.
+    A pull request with nobody on it still left draft, and a line reading only that is what that
+    looks like.
+
+    The initiator is the only untrusted text here and goes through `as_plain_text` like every
+    other login; the rest is this module's own words.
+    """
+    named = " ".join(
+        [
+            *(_person(person, mentions) for person in people),
+            *(_role(team.login, roles) for team in teams),
+        ]
+    )
+    said = f"**{_account(initiator)}** marked this pull request ready for review."
+    return _headed(_READY_HEADING, f"{named} {said}".strip(), Accent.OPEN)
+
+
 def format_comment(
     snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,
@@ -822,7 +860,7 @@ def format_commit(commit: Commit) -> Panel:
     why, then how much. The body is left out rather than rendered blank when the commit has none,
     which is most of them.
     """
-    said = f"{_COMMIT_MARK} **{_committer(commit.author)}** has committed {_subject(commit)}"
+    said = f"{_COMMIT_MARK} **{_account(commit.author)}** has committed {_subject(commit)}"
     # Unquoted since issue #113. The rule above it does the separating the `> ` markers were
     # doing, and doing badly.
     body = clipped(commit.description, limit=COMMIT_MESSAGE_LIMIT)
@@ -843,7 +881,7 @@ def format_force_push(pusher: Actor | None) -> Panel:
     reports nothing ahead at all and silence would be the alternative.
     """
     return _line(
-        f"{_FORCE_PUSH_MARK} **{_committer(pusher)}** force-pushed this branch, so the commits it "
+        f"{_FORCE_PUSH_MARK} **{_account(pusher)}** force-pushed this branch, so the commits it "
         "replaced are not announced.",
         Accent.NEUTRAL,
     )
@@ -862,7 +900,7 @@ def format_commits_left(count: int) -> Panel:
     return Panel.of_text(f"-# {count} earlier {were} not announced.")
 
 
-def _committer(actor: Actor | None) -> str:
+def _account(actor: Actor | None) -> str:
     """The account that wrote a commit, or the word for not knowing.
 
     GitHub answers with no account whenever the committing address is registered to nobody, which
