@@ -23,8 +23,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from shannon.db.models import MirroredNote, WebhookEvent
-from shannon.domain.enums import DeliveryStatus
-from shannon.services.transcripts.lines import MARKER, TranscriptLine, render
+from shannon.domain.enums import DeliveryStatus, ObjectType
+from shannon.services.transcripts.lines import MARKER, Relay, TranscriptLine, render
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import DeliveryClient, deliver, registered_stack
@@ -46,10 +46,11 @@ async def tracked(
 
 def a_transcript() -> str:
     return render(
+        Relay(object_type=ObjectType.ISSUE, number=7, guild_id=1, thread_id=2),
         [
             TranscriptLine("alice", AT, "got the repro, it is the label cache"),
             TranscriptLine("bob", AT, "nice, want me to take it?"),
-        ]
+        ],
     )
 
 

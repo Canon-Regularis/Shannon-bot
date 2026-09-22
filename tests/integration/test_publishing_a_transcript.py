@@ -217,7 +217,7 @@ class TestTheOrdinaryPath:
         clock[0] = AT + QUIET
         published = TranscriptPublisher(github).publish
 
-        async def publish_while_somebody_carries_on_typing(found, lines):
+        async def publish_while_somebody_carries_on_typing(found, lines, *, thread_id):
             await log.capture(
                 CapturedMessage(
                     thread_id=logging_thread,
@@ -229,7 +229,7 @@ class TestTheOrdinaryPath:
                     mentions={},
                 )
             )
-            await published(found, lines)
+            await published(found, lines, thread_id=thread_id)
 
         monkeypatch.setattr(flusher._publisher, "publish", publish_while_somebody_carries_on_typing)
 
@@ -264,7 +264,9 @@ class TestWhoSaidIt:
 
         await flusher.flush_once()
 
-        assert "[alice-gh](https://github.com/alice-gh)" in github.comments[0][2]
+        # Linked once in the participants row, under the name the thread showed them by,
+        # rather than beside every line they spoke.
+        assert "[alice](https://github.com/alice-gh)" in github.comments[0][2]
 
     async def test_somebody_it_does_not_is_named_by_their_discord_name(
         self,
