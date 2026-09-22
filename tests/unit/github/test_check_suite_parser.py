@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from shannon.github.webhooks.checks import heads_a_pull_request, parse_check_suite_event
-from shannon.github.webhooks.events import CHECK_SUITE_ACTIONS
+from shannon.github.webhooks.checks import (
+    CheckSuiteEvent,
+    heads_a_pull_request,
+    parse_check_suite_event,
+)
+from shannon.github.webhooks.events import CHECK_SUITE_ACTIONS, WebhookOutcome
+from shannon.services.checks import build_check_suite_handler
 from tests.support import github_payloads as payloads
 
 pytestmark = pytest.mark.unit
@@ -142,3 +147,52 @@ class TestWhatIsWorthRecording:
             recorded = heads_a_pull_request(body)
             parsed = parse_check_suite_event("completed", body) is not None
             assert recorded == parsed, body
+
+
+class TestTheHandlerTheRouterRegisters:
+    """The arm reached when the parser refuses, which the route no longer produces.
+
+    Since the route learned to decline a suite naming no pull request, a refused body is not
+    written down and never reaches here from a live delivery. It is still reachable, and has to
+    stay: the route asks before a delivery is recorded and the worker dispatches it minutes or a
+    deploy later, so a suite queued under an older build arrives here with nothing to act on.
+    """
+
+    async def test_a_body_the_parser_refuses_is_ignored_rather_than_raised(self) -> None:
+        handle = build_check_suite_handler(_NeverAsked(), lambda action, payload: None)
+
+        assert await handle("completed", {}) is WebhookOutcome.IGNORED
+
+    async def test_a_body_it_reads_goes_to_the_announcer(self) -> None:
+        announcer = _Announces(said=True)
+
+        handle = build_check_suite_handler(announcer, parse_check_suite_event)
+        outcome = await handle("completed", payloads.check_suite_event())
+
+        assert outcome is WebhookOutcome.PROCESSED
+        assert announcer.calls == 1
+
+    async def test_an_announcer_with_nothing_to_say_is_ignored(self) -> None:
+        """Two suites on one commit are two deliveries and one message between them."""
+        announcer = _Announces(said=False)
+
+        handle = build_check_suite_handler(announcer, parse_check_suite_event)
+
+        assert await handle("completed", payloads.check_suite_event()) is WebhookOutcome.IGNORED
+
+
+class _Announces:
+    def __init__(self, *, said: bool) -> None:
+        self._said = said
+        self.calls = 0
+
+    async def announce(self, event: CheckSuiteEvent) -> bool:
+        self.calls += 1
+        return self._said
+
+
+class _NeverAsked:
+    """The announcer for the refused body, which must not be reached at all."""
+
+    async def announce(self, event: CheckSuiteEvent) -> bool:
+        raise AssertionError("the parser refused this body, so nothing should be announced")

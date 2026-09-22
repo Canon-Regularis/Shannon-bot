@@ -64,6 +64,16 @@ class Renders(Protocol):
 Parses = Callable[[str, JsonObject], CheckSuiteEvent | None]
 
 
+class Announces(Protocol):
+    """Saying what CI did, and whether there was anything to say.
+
+    The handler below asks only this, the way it asks only `Parses` of the parser, so the
+    two halves of the seam the router registers are stated the same way.
+    """
+
+    async def announce(self, event: CheckSuiteEvent) -> bool: ...
+
+
 class CheckSuiteAnnouncer:
     """Says what CI did, once per set of results, to whoever it is about."""
 
@@ -262,7 +272,7 @@ def _who_to_tell(
     return tuple(people.values()), ()
 
 
-def build_check_suite_handler(announcer: CheckSuiteAnnouncer, parse: Parses) -> EventHandler:
+def build_check_suite_handler(announcer: Announces, parse: Parses) -> EventHandler:
     """The seam the router registers, shaped like the other two handler builders.
 
     `arrived` is taken and ignored: two suites on one commit are two deliveries that must produce
