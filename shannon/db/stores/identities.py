@@ -2,12 +2,14 @@
 
 Two halves of one round trip: `IdentityVerificationStore` holds the outstanding links and is the
 only thread back from an unauthenticated callback to the person who asked for it,
-`VerifiedIdentityStore` holds what GitHub said once they followed one. Only `/unregister` reads
-any of it. Separate from `user_links`, which records what somebody typed about themselves.
+`VerifiedIdentityStore` holds what GitHub said once they followed one. Separate from
+`user_links`, which records what somebody typed about themselves: one is a claim and the other is
+something GitHub vouched for, and telling them apart is the whole point of keeping both.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
@@ -73,6 +75,20 @@ class IdentityVerificationStore:
         return changed or 0
 
 
+@dataclass(frozen=True, slots=True)
+class ProvedAccount:
+    """The GitHub account somebody proved they hold, and when they proved it.
+
+    The id as well as the login, because the id is the part that lasts: GitHub reassigns a freed
+    name, so a proof answered by name alone cannot be held against a stored link without asking
+    which account that name means today.
+    """
+
+    login: str
+    github_user_id: int
+    verified_at: datetime
+
+
 class VerifiedIdentityStore:
     """Who a Discord account proved to be on GitHub, and how long ago."""
 
@@ -109,19 +125,32 @@ class VerifiedIdentityStore:
             )
         )
 
-    async def fresh(
-        self, *, guild_id: int, discord_user_id: int, newer_than: datetime
-    ) -> str | None:
-        """The login this person proved recently, or None if they have not proved one lately.
+    async def proved(
+        self, *, guild_id: int, discord_user_id: int, newer_than: datetime | None = None
+    ) -> ProvedAccount | None:
+        """The account this person proved they hold, or None if they never proved one.
 
-        How recent counts as recent is the caller's policy. Filtering here rather than handing
-        back a stale row stops a caller unbinding a repository on a year-old proof.
+        How recent counts as recent is the caller's policy, and there are two of them. Unbinding a
+        repository wants a proof from minutes ago, because the row permits something irreversible
+        and holding an account an hour ago says little about now. Asking whether a link was ever
+        proved at all wants no bound: the question is whether anybody ever vouched for it, and a
+        proof from last year answers that as well as one from this morning.
+
+        Filtering here rather than handing back a stale row is what stops the first caller acting
+        on the second caller's answer.
         """
-        found: str | None = await self._session.scalar(
-            select(VerifiedIdentity.github_login).where(
-                VerifiedIdentity.discord_guild_id == guild_id,
-                VerifiedIdentity.discord_user_id == discord_user_id,
-                VerifiedIdentity.verified_at >= newer_than,
-            )
+        wanted = select(VerifiedIdentity).where(
+            VerifiedIdentity.discord_guild_id == guild_id,
+            VerifiedIdentity.discord_user_id == discord_user_id,
         )
-        return found
+        if newer_than is not None:
+            wanted = wanted.where(VerifiedIdentity.verified_at >= newer_than)
+
+        row = await self._session.scalar(wanted)
+        if row is None:
+            return None
+        return ProvedAccount(
+            login=row.github_login,
+            github_user_id=row.github_user_id,
+            verified_at=row.verified_at,
+        )

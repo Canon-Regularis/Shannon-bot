@@ -7,9 +7,12 @@ hands out a one-time link and the second finishes the job.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from shannon.commands.unregister import build_unregister_command
+from shannon.db.stores.identities import ProvedAccount
 from shannon.domain.errors import NotProvenError, NotRegisteredError, RepositoryMismatchError
 from shannon.services.unregistration import UnregisterOutcome
 from tests.fakes.discord_objects import FakeInteraction
@@ -24,11 +27,17 @@ REPO = "acme/widget"
 class FakeVerification:
     def __init__(self, *, configured: bool = True, proved: str | None = "octocat") -> None:
         self.configured = configured
+        # Still a login, because that is what every test here is about saying. The account it
+        # stands for is built below, so no test has to name an id it does not care about.
         self.proved = proved
         self.links_handed_out = 0
 
-    async def already_proved(self, *, guild_id: int, discord_user_id: int) -> str | None:
-        return self.proved
+    async def proved_just_now(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
+        if self.proved is None:
+            return None
+        return ProvedAccount(
+            login=self.proved, github_user_id=583231, verified_at=datetime(2026, 9, 17, tzinfo=UTC)
+        )
 
     async def link_for(self, *, guild_id: int, discord_user_id: int) -> str:
         self.links_handed_out += 1

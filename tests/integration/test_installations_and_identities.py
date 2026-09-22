@@ -19,7 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import GitHubInstallation, IdentityVerification
-from shannon.db.stores.identities import IdentityVerificationStore, VerifiedIdentityStore
+from shannon.db.stores.identities import (
+    IdentityVerificationStore,
+    ProvedAccount,
+    VerifiedIdentityStore,
+)
 from shannon.db.stores.installations import InstallationStore
 from tests.support.db import blocked_on_a_row
 
@@ -306,13 +310,13 @@ class TestWhatGitHubVouchedFor:
     async def test_somebody_who_never_proved_anything_has_nothing(
         self, db_session: AsyncSession
     ) -> None:
-        found = await VerifiedIdentityStore(db_session).fresh(
+        found = await VerifiedIdentityStore(db_session).proved(
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
 
         assert found is None
 
-    async def test_a_recent_proof_comes_back_as_the_login(self, db_session: AsyncSession) -> None:
+    async def test_a_recent_proof_comes_back_as_the_account(self, db_session: AsyncSession) -> None:
         store = VerifiedIdentityStore(db_session)
         await store.remember(
             guild_id=GUILD,
@@ -322,11 +326,11 @@ class TestWhatGitHubVouchedFor:
             verified_at=NOW,
         )
 
-        found = await store.fresh(
+        found = await store.proved(
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
 
-        assert found == "octocat"
+        assert found == ProvedAccount(login="octocat", github_user_id=583231, verified_at=NOW)
 
     async def test_a_stale_proof_reads_as_none_rather_than_as_an_old_row(
         self, db_session: AsyncSession
@@ -343,7 +347,7 @@ class TestWhatGitHubVouchedFor:
             verified_at=NOW - timedelta(hours=2),
         )
 
-        found = await store.fresh(
+        found = await store.proved(
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
 
@@ -369,10 +373,10 @@ class TestWhatGitHubVouchedFor:
             verified_at=NOW,
         )
 
-        found = await store.fresh(
+        found = await store.proved(
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
-        assert found == "hubot"
+        assert found == ProvedAccount(login="hubot", github_user_id=100, verified_at=NOW)
 
     async def test_one_person_proving_says_nothing_about_another(
         self, db_session: AsyncSession
@@ -386,7 +390,7 @@ class TestWhatGitHubVouchedFor:
             verified_at=NOW,
         )
 
-        found = await store.fresh(
+        found = await store.proved(
             guild_id=GUILD, discord_user_id=BOB, newer_than=NOW - timedelta(minutes=15)
         )
 
@@ -406,8 +410,61 @@ class TestWhatGitHubVouchedFor:
             verified_at=NOW,
         )
 
-        found = await store.fresh(
+        found = await store.proved(
             guild_id=2, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
 
         assert found is None
+
+
+class TestAProofThatDoesNotGoStale:
+    """The same row read without a window, which is a different question. Issue #133 follow-up.
+
+    Unbinding a repository asks whether somebody is at the keyboard now. Asking whether a stored
+    link was ever more than somebody's say-so is not time-limited: a proof from last year answers
+    it as well as one from this morning, and treating it as expired would quietly mark every
+    long-standing member unproved.
+    """
+
+    async def test_a_proof_far_past_any_window_still_answers(
+        self, db_session: AsyncSession
+    ) -> None:
+        store = VerifiedIdentityStore(db_session)
+        await store.remember(
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            github_login="octocat",
+            github_user_id=583231,
+            verified_at=NOW - timedelta(days=400),
+        )
+
+        assert await store.proved(guild_id=GUILD, discord_user_id=ALICE) == ProvedAccount(
+            login="octocat", github_user_id=583231, verified_at=NOW - timedelta(days=400)
+        )
+
+    async def test_the_same_row_reads_as_stale_when_a_window_is_given(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Both answers off one row, which is what makes the two callers safe to keep apart."""
+        store = VerifiedIdentityStore(db_session)
+        await store.remember(
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            github_login="octocat",
+            github_user_id=583231,
+            verified_at=NOW - timedelta(days=400),
+        )
+
+        found = await store.proved(
+            guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
+        )
+
+        assert found is None
+
+    async def test_somebody_who_never_proved_anything_has_nothing_either_way(
+        self, db_session: AsyncSession
+    ) -> None:
+        assert (
+            await VerifiedIdentityStore(db_session).proved(guild_id=GUILD, discord_user_id=ALICE)
+            is None
+        )
