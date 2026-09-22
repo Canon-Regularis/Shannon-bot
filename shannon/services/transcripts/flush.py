@@ -30,11 +30,19 @@ logger = logging.getLogger(__name__)
 # thread trickling a message inside each quiet gap never goes quiet and waits for the line count.
 LONGEST_A_LINE_WAITS = timedelta(minutes=10)
 
-# How many lines one comment carries: a ceiling, not a target.
+# How many lines are enough to publish on. A trigger rather than a cap: the claim takes whatever
+# is waiting, so a tick that finds more than this carries more than this, and `fit_body` is what
+# stands behind that rather than this number.
 MOST_LINES = 40
 
-# And the same in characters, well under GitHub's own 65536 limit on a comment body; `fit_body`
-# is the backstop beneath it.
+# And the same in characters. Counted raw, on what people typed, while the limit it is keeping
+# clear of is on the rendered body, so the two are not the same number and the gap is the
+# transcript's own markup: 458 characters of frame once, then 27 a message.
+#
+# Measured against issue #131's format, 40000 raw characters render to between 41.6k and 55k
+# depending on how many messages they are split across, so the margin under GitHub's 65536 is
+# real at any shape. `fit_body` is the backstop beneath that, and it now keeps room for the
+# frame, so a transcript too long to fit loses messages rather than the tag closing the fold.
 BODY_BUDGET = 40000
 
 # How long a claim is believed before it is taken to belong to a process that died holding it.
@@ -212,7 +220,7 @@ class TranscriptFlusher:
             return
 
         try:
-            await self._publisher.publish(found, lines)
+            await self._publisher.publish(found, lines, thread_id=batch.discord_thread_id)
         except ShannonError as error:
             await self._failed(batch, through, error)
             return
