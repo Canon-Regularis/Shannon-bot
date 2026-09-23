@@ -14,17 +14,15 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.stores.repositories import RepositoryStore
-from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ObjectType
-from shannon.domain.errors import ItemNotReadyError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, CheckReport, CheckRun, PullRequestSnapshot
 from shannon.github.webhooks.checks import CheckSuiteEvent
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.services.audience import reachable
+from shannon.services.audience import author_and_assignees, reachable
+from shannon.services.locating import ItemInThread, in_its_thread
 from shannon.services.sync.announcements import ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
 
@@ -114,7 +112,6 @@ class CheckSuiteAnnouncer:
         found = await self._locate(event, number)
         if found is None:
             return False
-        tracked_item_id, thread_id, guild_id = found
 
         item = await self._github.get_pull_request(owner, name, number)
         if item.head_sha != event.head_sha:
@@ -142,38 +139,17 @@ class CheckSuiteAnnouncer:
         if report is None:
             return False
 
-        return await self._say(event, item, report, tracked_item_id, thread_id, guild_id)
+        return await self._say(event, item, report, found)
 
-    async def _locate(self, event: CheckSuiteEvent, number: int) -> tuple[int, int, int] | None:
+    async def _locate(self, event: CheckSuiteEvent, number: int) -> ItemInThread | None:
         async with self._sessionmaker() as session:
-            repository = await RepositoryStore(session).get_by_github_id(
-                event.repository.github_repo_id
+            return await in_its_thread(
+                session,
+                repository=event.repository,
+                number=number,
+                object_type=ObjectType.PR,
+                about="a check suite",
             )
-            if repository is None:
-                logger.info(
-                    "a check suite arrived for %s, which is not registered to any guild",
-                    event.repository.full_name,
-                )
-                return None
-
-            item = await TrackedItemStore(session).get_by_number(
-                repository_id=repository.id, number=number, object_type=ObjectType.PR
-            )
-            if item is None:
-                logger.info(
-                    "checks on %s#%s are not tracked here, ignoring",
-                    event.repository.full_name,
-                    number,
-                )
-                return None
-
-            if item.discord_thread_id is None:
-                # Retried rather than dropped: a suite can finish while the `opened` delivery
-                # that builds the thread is still behind a Discord outage, and nothing revisits a
-                # "nothing to do".
-                raise ItemNotReadyError(f"{event.repository.full_name}#{number} has no thread yet")
-
-            return item.id, item.discord_thread_id, repository.discord_guild_id
 
     async def _report(self, event: CheckSuiteEvent, owner: str, name: str) -> CheckReport | None:
         """Every check on the commit, or None if there is nothing worth saying about them.
@@ -207,16 +183,14 @@ class CheckSuiteAnnouncer:
         event: CheckSuiteEvent,
         item: PullRequestSnapshot,
         report: CheckReport,
-        tracked_item_id: int,
-        thread_id: int,
-        guild_id: int,
+        found: ItemInThread,
     ) -> bool:
         people, teams = _who_to_tell(item, report)
         async with self._sessionmaker() as session:
-            audience = await reachable(session, guild_id=guild_id, people=people, teams=teams)
+            audience = await reachable(session, guild_id=found.guild_id, people=people, teams=teams)
         await self._line.say_once(
-            tracked_item_id=tracked_item_id,
-            thread_id=thread_id,
+            tracked_item_id=found.tracked_item_id,
+            thread_id=found.thread_id,
             note_key=report.note_key,
             panel=self._render(
                 report,
@@ -249,9 +223,7 @@ def _who_to_tell(
         return (), ()
     if report.passed:
         return tuple(item.reviewers), tuple(item.reviewer_teams)
-    author = (item.author,) if item.author else ()
-    people = {person.login.lower(): person for person in (*author, *item.assignees)}
-    return tuple(people.values()), ()
+    return author_and_assignees(item), ()
 
 
 def build_check_suite_handler(announcer: Announces, parse: Parses) -> EventHandler:
