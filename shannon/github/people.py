@@ -22,10 +22,14 @@ class PeopleChange:
 
     login: str
     refusal: str | None = None
+    # Whether the item already reads the way the command asked for. Not a refusal: a repeat takes
+    # no action, which is what `/label` and the status commands have always answered, and this
+    # was the one place in the project that called the same thing a failure (#147).
+    already: bool = False
 
     @property
     def wanted(self) -> bool:
-        return self.refusal is None
+        return self.refusal is None and not self.already
 
 
 def reviewer_change(login: str, snapshot: PullRequestSnapshot, *, adding: bool) -> PeopleChange:
@@ -39,7 +43,7 @@ def reviewer_change(login: str, snapshot: PullRequestSnapshot, *, adding: bool) 
             login,
             f"{login} opened this pull request, so GitHub will not ask them to review it.",
         )
-    return _held(login, snapshot.reviewers, adding=adding, asked="asked to review this")
+    return _held(login, snapshot.reviewers, adding=adding)
 
 
 def assignee_change(login: str, snapshot: TrackedSnapshot, *, adding: bool) -> PeopleChange:
@@ -48,7 +52,7 @@ def assignee_change(login: str, snapshot: TrackedSnapshot, *, adding: bool) -> P
     No test of whether GitHub would accept the account at all: that is `can_be_assigned`, which
     needs the network, since a snapshot says who is on an item and never who could be.
     """
-    return _held(login, snapshot.assignees, adding=adding, asked="assigned to this")
+    return _held(login, snapshot.assignees, adding=adding)
 
 
 # GitHub's whole ladder, as it answers rather than as its settings page reads: it folds
@@ -90,18 +94,16 @@ def assignment_refusal(login: str, full_name: str, permission: str) -> str:
     )
 
 
-def _held(login: str, people: Iterable[Actor], *, adding: bool, asked: str) -> PeopleChange:
-    """Refuse a change that has already happened, in either direction.
+def _held(login: str, people: Iterable[Actor], *, adding: bool) -> PeopleChange:
+    """Whether the item already reads the way it was asked to, in either direction.
 
-    Adding twice is a 422, and removing somebody who was never there is a 404 the client
-    swallows and so reports as success for nothing.
+    Still worked out here rather than asked of GitHub: adding twice is a 422, and removing
+    somebody who was never there is a 404 the client swallows and so reports as success for
+    nothing. What changed is what it is called, and with it the sentence: the command words
+    a repeat in the Discord mention it was given rather than in the GitHub login.
     """
     on_it = any(_is(login, person) for person in people)
-    if adding and on_it:
-        return PeopleChange(login, f"{login} has already been {asked}.")
-    if not adding and not on_it:
-        return PeopleChange(login, f"{login} has not been {asked}.")
-    return PeopleChange(login)
+    return PeopleChange(login, already=adding == on_it)
 
 
 def _is(login: str, person: Actor | None) -> bool:

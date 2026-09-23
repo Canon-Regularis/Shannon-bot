@@ -99,6 +99,9 @@ class PeopleOutcome:
     number: int
     role: ActorRole
     added: bool
+    # Whether anything was written. False when the item already read this way, which is not a
+    # failure and is reported as an ordinary success that changed nothing (#147).
+    changed: bool = True
     # Whether GitHub has ever vouched that this Discord member holds this account. Carried out to
     # the reply rather than logged, because the person who needs to know is the one reading it:
     # an unproved link is one somebody typed, and this is the only place anybody finds out.
@@ -164,9 +167,17 @@ class ItemPeople:
         if change.refusal is not None:
             raise WorkflowRefusedError(change.refusal)
 
-        await self._write(found, acting, role=role, adding=adding)
-
-        logger.info("%s %s on %s#%s", login, _said(role, adding), found.full_name, found.number)
+        if change.already:
+            logger.info(
+                "%s was already %s on %s#%s",
+                login,
+                _said(role, adding),
+                found.full_name,
+                found.number,
+            )
+        else:
+            await self._write(found, acting, role=role, adding=adding)
+            logger.info("%s %s on %s#%s", login, _said(role, adding), found.full_name, found.number)
         return PeopleOutcome(
             login=login,
             # Off the snapshot rather than the row, which the rename guard above has just proved
@@ -175,6 +186,7 @@ class ItemPeople:
             number=found.number,
             role=role,
             added=adding,
+            changed=not change.already,
             proved=acting.proved,
         )
 

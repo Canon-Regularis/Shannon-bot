@@ -16,6 +16,7 @@ from shannon.commands.people import (
     build_unrequest_review_command,
 )
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.responses import SUCCEEDED
 from shannon.domain.enums import ActorRole
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.github.errors import GitHubNotFoundError, GitHubRefusedError
@@ -31,10 +32,20 @@ WHO = 4242
 
 
 def outcome(
-    *, role: ActorRole = ActorRole.ASSIGNEE, added: bool = True, proved: bool = True
+    *,
+    role: ActorRole = ActorRole.ASSIGNEE,
+    added: bool = True,
+    changed: bool = True,
+    proved: bool = True,
 ) -> PeopleOutcome:
     return PeopleOutcome(
-        login="alice", full_name="acme/widget", number=7, role=role, added=added, proved=proved
+        login="alice",
+        full_name="acme/widget",
+        number=7,
+        role=role,
+        added=added,
+        changed=changed,
+        proved=proved,
     )
 
 
@@ -247,7 +258,10 @@ class TestWhatItRefuses:
         ("error", "expected"),
         [
             (NotAnItemThreadError("Run this inside the thread of a tracked item."), "tracked item"),
-            (WorkflowRefusedError("alice has already been asked to review this."), "already been"),
+            (
+                WorkflowRefusedError("acme/widget#7 is an issue, and an issue has no reviewers."),
+                "no reviewers",
+            ),
             (RepositoryMismatchError("acme/widget is not that repository any more."), "any more"),
             (
                 GitHubRefusedError("Reviews may only be requested from collaborators."),
@@ -301,3 +315,68 @@ class TestWhatItRefuses:
 
         with pytest.raises(RuntimeError, match="a bug"):
             await command.callback(interaction, member)
+
+
+class TestARepeatThatChangedNothing:
+    """Issue #147. Putting somebody on an item they are already on is a repeat, not a failure.
+
+    `/label` and the eight status commands have always answered a repeat in green and said what
+    the item already reads; this was the one place in the project that answered the same thing in
+    red, through an exception, because the check was written as a refusal GitHub would have made.
+    """
+
+    async def test_somebody_already_on_it(self) -> None:
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(changed=False))
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.mark == SUCCEEDED, "a repeat was answered as a failure"
+        assert interaction.said == f"<@{WHO}> is already on acme/widget#7, so nothing changed."
+
+    async def test_somebody_who_was_never_on_it(self) -> None:
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(added=False, changed=False)),
+            command_name="unassign",
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.said == f"<@{WHO}> is not on acme/widget#7, so nothing changed."
+
+    async def test_a_review_already_asked_for(self) -> None:
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(role=ActorRole.REVIEWER, changed=False)),
+            command_name="request_review",
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.said == (
+            f"<@{WHO}> has already been asked for a review on acme/widget#7, so nothing changed."
+        )
+
+    async def test_a_review_that_was_never_asked_for(self) -> None:
+        command, interaction, _, member = run_it(
+            service=StubAssignment(
+                result=outcome(role=ActorRole.REVIEWER, added=False, changed=False)
+            ),
+            command_name="unrequest_review",
+        )
+
+        await command.callback(interaction, member)
+
+        assert interaction.said == (
+            f"<@{WHO}> has not been asked for a review on acme/widget#7, so nothing changed."
+        )
+
+    async def test_nothing_is_said_about_an_unproved_link(self) -> None:
+        """The note reads "this went out on somebody's word for it", and nothing went out."""
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(changed=False, proved=False))
+        )
+
+        await command.callback(interaction, member)
+
+        assert "run /link" not in interaction.reply
