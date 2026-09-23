@@ -18,7 +18,14 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shannon.db.base import Base, TimestampMixin, varchar_enum
-from shannon.domain.enums import ActorRole, DeliveryStatus, ObjectType, Priority, Status
+from shannon.domain.enums import (
+    ActorRole,
+    DeliveryStatus,
+    ObjectType,
+    Priority,
+    Status,
+    VerificationPurpose,
+)
 from shannon.domain.json import JsonObject
 
 _LIVE_STATUSES = ", ".join(f"'{status.value}'" for status in DeliveryStatus.live())
@@ -355,8 +362,10 @@ class GitHubInstallation(TimestampMixin, Base):
 class IdentityVerification(TimestampMixin, Base):
     """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
 
-    `/unregister` destroys a binding and everything mirrored under it, and `/link` checks only
-    that a login EXISTS, so a Discord role alone cannot authorise it. Rows here outlive the
+    Two commands hand these out and they are finished differently, which is what `purpose` is
+    for: `/link` is done the moment the link is followed, and `/unregister` destroys a binding
+    and everything mirrored under it, so it waits to be run again where there is somebody to
+    report the answer to. Rows here outlive the
     unbinding they authorised: this table is keyed by guild, not by repository. The callback GitHub
     redirects to is unauthenticated, so `state` is CSRF token and session identifier at once.
     Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the database.
@@ -373,6 +382,15 @@ class IdentityVerification(TimestampMixin, Base):
     state: Mapped[str] = mapped_column(String(64), nullable=False)
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Which command handed this out, because the callback cannot tell and has to answer the
+    # browser with a next step. No Python-side default: both callers name a purpose, and a
+    # default here would be a way for a third one to forget. The server default exists for the
+    # ALTER and for a process still running the old code, not so that anything reads it.
+    purpose: Mapped[VerificationPurpose] = mapped_column(
+        varchar_enum(VerificationPurpose, "verification_purpose"),
+        nullable=False,
+        server_default=text("'LINK'"),
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

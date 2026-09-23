@@ -29,6 +29,25 @@ async def reply(interaction: discord.Interaction, message: str | Panel) -> None:
         await _as_text(interaction, content or "")
 
 
+async def in_the_channel(interaction: discord.Interaction, message: str) -> None:
+    """The one message this bot sends that everybody in the channel can see.
+
+    `EPHEMERAL` above is the rule and this is its single exception, which is argued rather than
+    excused. An acknowledgement is not signal, and that is why every other reply is private. This
+    one is not an acknowledgement: it is addressed to somebody who did not run the command and is
+    not watching for a reply, and an ephemeral message reaches exactly one person — the one who
+    already knows. A private reply here would be the bot telling somebody it had asked a question
+    it had not asked.
+
+    `ephemeral=False` is passed rather than left out, although it is discord.py's own default, so
+    that the exception is visible where it happens and not only where it is defined.
+
+    No `is_done` branch, unlike `reply`: its one caller neither defers nor answers first, because
+    a public message can only ever be an interaction's first response.
+    """
+    await interaction.response.send_message(_fitted(message), ephemeral=False)
+
+
 def done(message: str) -> Panel:
     """A command that worked, in green."""
     return Panel(blocks=(Block(BlockKind.HEADING, _fitted(message)),), accent=Accent.OPEN)

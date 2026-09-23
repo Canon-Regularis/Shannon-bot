@@ -138,7 +138,7 @@ def _said(outcome: PeopleOutcome, discord_user_id: int) -> str:
 # once people have had the chance.
 _UNPROVED = (
     "\n-# Nobody has proved that account belongs to them, so this went out on somebody's word "
-    "for it. They can run /verify to settle it."
+    "for it. They can run /link to settle it."
 )
 
 

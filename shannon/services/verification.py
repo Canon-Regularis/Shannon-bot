@@ -12,6 +12,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,6 +22,7 @@ from shannon.db.stores.identities import (
     ProvedAccount,
     VerifiedIdentityStore,
 )
+from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
 from shannon.github.responses import json_object
 
@@ -39,18 +41,35 @@ PROOF_LIFETIME = timedelta(minutes=15)
 STATE_BYTES = 32
 
 
+class BindsProvedAccounts(Protocol):
+    """Recording a GitHub account against a Discord one, where GitHub has vouched for it.
+
+    Declared here because this is where it is now consumed: following a link is what links
+    somebody, so the service that spends the link is the thing that needs to write the row.
+    """
+
+    async def bind(
+        self, *, guild_id: int, discord_user_id: int, login: str, github_user_id: int
+    ) -> str: ...
+
+
 class VerificationError(ShannonError):
     """The round trip could not be completed, for a reason worth telling somebody about."""
 
 
 @dataclass(frozen=True, slots=True)
 class Verified:
-    """Who GitHub says somebody is, and which Discord account asked."""
+    """Who GitHub says somebody is, which Discord account asked, and what that finishes.
+
+    The purpose rides along because the callback route is the one place that has to tell a
+    browser what to do next, and it has nothing else to decide that from.
+    """
 
     guild_id: int
     discord_user_id: int
     login: str
     github_user_id: int
+    purpose: VerificationPurpose
 
 
 class GitHubIdentityVerification:
@@ -59,6 +78,7 @@ class GitHubIdentityVerification:
     def __init__(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
+        links: BindsProvedAccounts,
         *,
         client_id: str,
         client_secret: str,
@@ -68,6 +88,7 @@ class GitHubIdentityVerification:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessionmaker = sessionmaker
+        self._links = links
         self._client_id = client_id
         self._client_secret = client_secret
         self._oauth_url = oauth_url.rstrip("/")
@@ -110,11 +131,18 @@ class GitHubIdentityVerification:
                 guild_id=guild_id, discord_user_id=discord_user_id
             )
 
-    async def link_for(self, *, guild_id: int, discord_user_id: int) -> str:
+    async def link_for(
+        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+    ) -> str:
         """A one-time authorize URL for this person in this server.
 
         No `scope` parameter: a GitHub App's user token with the default empty scope can call
         `GET /user`, which is the whole of what the callback needs.
+
+        The URL is a bearer credential, and the invariant that makes it safe is the caller's to
+        keep: whoever opens it is recorded as `discord_user_id`, so every caller passes the id of
+        the person in front of it and never one taken from an argument. Handing somebody a link
+        issued for another member is handing them that member's identity.
         """
         state = secrets.token_urlsafe(STATE_BYTES)
         async with self._sessionmaker() as session, session.begin():
@@ -122,6 +150,7 @@ class GitHubIdentityVerification:
                 state=state,
                 guild_id=guild_id,
                 discord_user_id=discord_user_id,
+                purpose=purpose,
                 lifetime=LINK_LIFETIME,
             )
 
@@ -133,38 +162,59 @@ class GitHubIdentityVerification:
         )
 
     async def redeem(self, *, state: str, code: str) -> Verified:
-        """Spend a link and answer who followed it.
+        """Spend a link, answer who followed it, and finish what the link was for.
 
         The state is consumed first and in one statement, so two clicks on one link race in the
         database rather than in Python and exactly one wins. Expired, already used and never
         issued give the same message: telling them apart would confirm a guessed state was real.
+
+        The proof is recorded before anything is decided with it, and unconditionally. That
+        ordering is what keeps `/unregister` untouched by this: it wants the proof and nothing
+        else, so the write below is strictly additional rather than a branch it has to survive.
+
+        A link finishes the job it was handed out for. `/link` is done here, because there is
+        nothing left to ask: GitHub has just said which account this is and the person is holding
+        the browser rather than Discord. `/unregister` is not, because what it does next is
+        irreversible and needs somebody to report the answer to.
+
+        If the bind fails after the state is spent, the proof stands and the link does not. The
+        person runs the command again and gets a new one; the row they would have written is
+        written then. Worth knowing rather than discovering.
         """
         async with self._sessionmaker() as session, session.begin():
             spent = await IdentityVerificationStore(session).consume(state)
         if spent is None:
             raise VerificationError(
-                "That link has expired or has already been used. Run /unregister again."
+                "That link has expired or has already been used. Run the command in Discord again."
             )
 
-        guild_id, discord_user_id = spent
         token = await self._exchange(code)
         login, github_user_id = await self._whoami(token)
 
         async with self._sessionmaker() as session, session.begin():
             await VerifiedIdentityStore(session).remember(
-                guild_id=guild_id,
-                discord_user_id=discord_user_id,
+                guild_id=spent.guild_id,
+                discord_user_id=spent.discord_user_id,
                 github_login=login,
                 github_user_id=github_user_id,
                 verified_at=self._now(),
             )
 
-        logger.info("discord:%s proved they are github:%s", discord_user_id, login)
+        if spent.purpose is VerificationPurpose.LINK:
+            await self._links.bind(
+                guild_id=spent.guild_id,
+                discord_user_id=spent.discord_user_id,
+                login=login,
+                github_user_id=github_user_id,
+            )
+
+        logger.info("discord:%s proved they are github:%s", spent.discord_user_id, login)
         return Verified(
-            guild_id=guild_id,
-            discord_user_id=discord_user_id,
+            guild_id=spent.guild_id,
+            discord_user_id=spent.discord_user_id,
             login=login,
             github_user_id=github_user_id,
+            purpose=spent.purpose,
         )
 
     async def prune(self, *, keep_for: timedelta) -> int:
@@ -199,7 +249,9 @@ class GitHubIdentityVerification:
             # GitHub's reason is not echoed: it is written for a developer debugging an OAuth
             # app, and it can carry the code back out into a page.
             logger.warning("the oauth exchange failed: %s", payload.get("error") or "no token")
-            raise VerificationError("GitHub would not complete the sign-in. Try /unregister again.")
+            raise VerificationError(
+                "GitHub would not complete the sign-in. Try the command in Discord again."
+            )
         return token
 
     async def _whoami(self, token: str) -> tuple[str, int]:
@@ -211,5 +263,7 @@ class GitHubIdentityVerification:
         login = payload.get("login")
         github_user_id = payload.get("id")
         if not isinstance(login, str) or not login or not isinstance(github_user_id, int):
-            raise VerificationError("GitHub would not say who signed in. Try /unregister again.")
+            raise VerificationError(
+                "GitHub would not say who signed in. Try the command in Discord again."
+            )
         return login, github_user_id

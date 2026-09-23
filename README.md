@@ -201,14 +201,16 @@ and there is nothing wrong: wait, or restart the Discord client, which usually s
 /register <github_repo_link>          binds the repository, PR threads land in this channel
 /set_channel issues #channel          where issue threads go
 /set_channel project tickets #channel only if a board is being mirrored
-/link <github_username> @member        once per person, so pings become mentions
-/verify                               each person, once, to prove the link is theirs
+/link                                 each person, once: open the link and that is it
 /link_team <team> @role               so a review asked of a team reaches somebody
 ```
 
 Only `/register` has to come first. Issues fall back to the pull request channel until they are
 given one of their own; project tickets do not, so a board stays unmirrored until `/set_channel`
 names a channel for them.
+
+`/link @member` posts a public note asking that person to run it, and links nobody: the only
+account this bot will connect is the one somebody has just signed into.
 
 The role given to `/link_team` needs **Allow Anyone To @mention This Role** turned on in its
 settings. Discord notifies a role's members only when that is set or the sender holds Mention
@@ -343,7 +345,7 @@ at the door.
 | `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/unregister`. Empty makes `/unregister` refuse rather than hand out a broken link |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
 | `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App |
-| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/verify` refuses every assignment; until then the reply says the link is unproved. Ignored where the OAuth round trip is not configured |
+| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with user Projects: Read-only. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
@@ -411,14 +413,13 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
-| `/link <github_username> [member]` | Admin, Project Manager | Connects a GitHub login to a Discord account so pings become mentions. The login is checked against GitHub, because one that does not exist is recorded happily and then silently reaches nobody |
-| `/verify` | Anyone | Run it, open the GitHub link, run it again. GitHub says who signed in and the bot writes that as your link, so nobody types a login and nobody can be bound to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed: a proof beats a claim. The one other command with no gate, for the reason `/mentions` has none |
+| `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
 | `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
-| `/mentions [state]` | Anyone | Whether this bot's messages notify you in this server. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
+| `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you`, which is a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and point at the `/set_*` command that owns them |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
@@ -426,7 +427,7 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
 | `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
 
-Guild only, replies always ephemeral. Role names are configured strings, matched case
+Guild only, and replies are ephemeral with one exception: `/link @member` posts its note where that person can see it, because it is addressed to them and they are not the one watching for a reply. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
@@ -437,9 +438,16 @@ turn off your own pings is a request nobody makes twice. It reaches everything t
 except a role: `@org/team` pings the whole Discord role and Discord gives nobody a way to leave
 one person out of one.
 
-Linking is a project manager's job, both halves of it. Claiming your own account used to be
-ungated, on the reasoning that it is yours to claim, and nothing checked that it was: GitHub is
-never asked, so anybody could take any login and receive every mention meant for it in this server.
+Connecting your own GitHub account needs no role. It used to, on the reasoning that a login
+nobody checked is a claim anybody could make — which was true while somebody typed one: GitHub was
+asked whether the name existed and never whose it was, so anybody could take any login and receive
+every mention meant for it. Nothing is typed now. GitHub says which account signed in, and a gate
+would only stop somebody proving who they are.
+
+Asking somebody else to connect theirs is a project manager's job, because that half pings a
+member in public and a bot that will ping anybody on anybody's say-so is a spam tool. It hands out
+no link: the authorisation URL records whoever it was issued for, so one shown to anybody but that
+person is that person's identity in whoever's hands hold it.
 
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single
@@ -523,7 +531,7 @@ rather than abandoning the rest.
 | `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and can always be asked, so a missing row costs one request |
-| `identity_verifications` | Outstanding one-time links from `/unregister`. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once |
+| `identity_verifications` | Outstanding one-time links. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once, and `purpose` is the only record of which command sent them |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
 | `logged_messages` | What has been said in a logged thread and not yet reached GitHub. Deleted as soon as the comment carrying it lands, because these rows hold what people said |
@@ -533,7 +541,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0024`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0025`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

@@ -28,7 +28,6 @@ from shannon.commands.register import build_register_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.unregister import build_unregister_command
-from shannon.commands.verify import build_verify_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
 from shannon.db.session import build_engine, build_sessionmaker
@@ -662,6 +661,7 @@ def _commands(
     relocation: ThreadRelocation,
     installations: InstallationTokens,
     verification: GitHubIdentityVerification,
+    links: UserLinkingService,
     people: ItemPeople,
     conversations: ConversationLog,
     *,
@@ -686,14 +686,11 @@ def _commands(
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
         build_regenerate_command(regenerate, gate),
-        build_link_command(UserLinkingService(sessionmaker, github), gate),
+        build_link_command(verification, gate),
         build_link_team_command(TeamLinkingService(sessionmaker), gate),
-        # The two with no gate, which is visible at a glance and is the point. See
-        # `_permissions.UNGATED`. `/verify` is handed the same linking service as `/link` above
-        # and the same verification as `/unregister`, because it is the two halves of those in
-        # one: GitHub says who somebody is, and the answer is written down as their link.
+        # The only one with no gate at all, which is visible at a glance and is the point.
+        # See `_permissions.UNGATED`.
         build_mentions_command(MentionPreferences(sessionmaker)),
-        build_verify_command(UserLinkingService(sessionmaker, github), verification),
         # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
         # service, which decides from the thread whether that means a reviewer or an assignee.
         build_assign_command(people, gate),
@@ -756,8 +753,13 @@ def build_container(
         base_url=settings.github_api_url,
         timeout=settings.github_timeout_seconds,
     )
+    # Built here rather than in `_commands`, where it used to be constructed twice, because
+    # the verification service needs it too: following a one-time link is what writes a link
+    # row now, so the thing that spends the link is the thing that has to be able to write one.
+    links = UserLinkingService(sessionmaker)
     verification = GitHubIdentityVerification(
         sessionmaker,
+        links,
         client_id=settings.github_app_client_id,
         client_secret=settings.github_app_client_secret.get_secret_value(),
         oauth_url=settings.github_oauth_url,
@@ -833,6 +835,7 @@ def build_container(
             _relocation(sessionmaker, github, threads),
             tokens,
             verification,
+            links,
             _people(
                 sessionmaker,
                 github,

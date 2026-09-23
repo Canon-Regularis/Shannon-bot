@@ -19,6 +19,7 @@ from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
+from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
 from shannon.services.unregistration import UnregisterOutcome
 
@@ -40,7 +41,9 @@ class VerifiesIdentity(Protocol):
         self, *, guild_id: int, discord_user_id: int
     ) -> ProvedAccount | None: ...
 
-    async def link_for(self, *, guild_id: int, discord_user_id: int) -> str: ...
+    async def link_for(
+        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+    ) -> str: ...
 
 
 class UnregistersRepositories(Protocol):
@@ -83,7 +86,9 @@ def build_unregister_command(
             )
             if proved is None:
                 link = await verification.link_for(
-                    guild_id=guild_id, discord_user_id=interaction.user.id
+                    guild_id=guild_id,
+                    discord_user_id=interaction.user.id,
+                    purpose=VerificationPurpose.UNREGISTER,
                 )
                 await reply(
                     interaction,

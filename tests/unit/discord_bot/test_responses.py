@@ -8,6 +8,10 @@ so that a command doing otherwise fails visibly rather than by leaving somebody 
 Since issue #116 `reply` also picks between the two SHAPES a reply can take. A card carries no
 content at all, and discord.py takes the absence of content as the sentinel that selects the
 components overload, so each shape is its own call rather than a keyword on one.
+
+And since issue #144 it pins that they are private. `EPHEMERAL` had been a constant nothing
+asserted: the fakes took the keyword into `**_` and threw it away, so flipping it to False would
+have published every command reply in this project and passed the entire suite.
 """
 
 from __future__ import annotations
@@ -97,3 +101,52 @@ class TestAReplyThatIsACard:
 
         assert card.length() == MESSAGE_LIMIT
         assert card.text.endswith("…")
+
+
+class TestNobodyElseSeesAReply:
+    """`EPHEMERAL = True`, held against all four paths a reply can take.
+
+    Thread traffic is the signal and an acknowledgement is not, which is the whole argument for
+    the constant. Several replies also quote back what somebody typed, and one of them hands out
+    a one-time authorisation link, so a public reply is not merely noise: it is a credential in
+    the channel.
+    """
+
+    async def test_an_immediate_reply_is_private(self) -> None:
+        interaction = FakeInteraction()
+
+        await reply(interaction, "done")
+
+        assert interaction.ephemerally == [True]
+
+    async def test_a_reply_after_a_defer_is_private_too(self) -> None:
+        """The followup path, which is the one almost every command actually takes: they defer
+        before talking to GitHub and answer afterwards."""
+        interaction = FakeInteraction()
+        await defer(interaction)
+
+        await reply(interaction, "done")
+
+        assert interaction.ephemerally == [True]
+
+    async def test_a_card_is_private_on_both_paths(self) -> None:
+        """A card goes out through a different discord.py overload from a string, so it is a
+        different call with its own keyword to forget."""
+        immediate = FakeInteraction()
+        deferred = FakeInteraction()
+        await defer(deferred)
+
+        await reply(immediate, done("Registered acme/widget."))
+        await reply(deferred, done("Registered acme/widget."))
+
+        assert immediate.ephemerally == [True]
+        assert deferred.ephemerally == [True]
+
+    async def test_the_defer_itself_is_private(self) -> None:
+        """Discord shows a public "thinking" message for a defer that is not, so this one leaks
+        before the reply it precedes has been written."""
+        interaction = FakeInteraction()
+
+        await defer(interaction)
+
+        assert interaction.response.deferred_ephemerally is True

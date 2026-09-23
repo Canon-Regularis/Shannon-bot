@@ -29,28 +29,54 @@ def _said(content: str | None, view: object) -> str:
 
 
 class FakeResponse:
+    """What an interaction was answered with, and whether anybody else could see it.
+
+    `ephemeral` defaults to False here rather than to this project's True, and the difference
+    matters: discord.py's own default is False, so a call that forgets the keyword sends a public
+    message. Defaulting to True would record what the caller meant instead of what Discord would
+    have done, which is the one thing a stand-in must never do.
+    """
+
     def __init__(self) -> None:
         self.deferred = False
+        self.deferred_ephemerally = False
         self.messages: list[str] = []
+        self.ephemerally: list[bool] = []
 
     def is_done(self) -> bool:
         return self.deferred or bool(self.messages)
 
-    async def defer(self, **_: Any) -> None:
+    async def defer(self, *, ephemeral: bool = False, **_: Any) -> None:
         self.deferred = True
+        self.deferred_ephemerally = ephemeral
 
     async def send_message(
-        self, content: str | None = None, *, view: object = None, **_: Any
+        self,
+        content: str | None = None,
+        *,
+        view: object = None,
+        ephemeral: bool = False,
+        **_: Any,
     ) -> None:
         self.messages.append(_said(content, view))
+        self.ephemerally.append(ephemeral)
 
 
 class FakeFollowup:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.ephemerally: list[bool] = []
 
-    async def send(self, content: str | None = None, *, view: object = None, **_: Any) -> None:
+    async def send(
+        self,
+        content: str | None = None,
+        *,
+        view: object = None,
+        ephemeral: bool = False,
+        **_: Any,
+    ) -> None:
         self.messages.append(_said(content, view))
+        self.ephemerally.append(ephemeral)
 
 
 @dataclass
@@ -204,6 +230,17 @@ class FakeInteraction:
     @property
     def replies(self) -> list[str]:
         return self.response.messages + self.followup.messages
+
+    @property
+    def ephemerally(self) -> list[bool]:
+        """Whether each reply was private, in the order `replies` gives them.
+
+        Kept as a second list rather than folded into `replies`, which around a hundred tests read
+        as plain strings. Until issue #144 nothing in this suite could see this at all: the keyword
+        landed in `**_` and was thrown away, so a change that made every command reply public would
+        have passed the whole suite without a murmur.
+        """
+        return self.response.ephemerally + self.followup.ephemerally
 
     @property
     def reply(self) -> str:

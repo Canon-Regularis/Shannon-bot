@@ -14,6 +14,13 @@
 # Usage:
 #   docker compose -f compose.prod.yaml up -d
 #   docker compose -f compose.prod.yaml pull && docker compose -f compose.prod.yaml up -d
+#
+# That second line upgrades the app and NOT the proxy. The Caddyfile is bind mounted, so changing
+# it is not a change to the caddy container's config and compose leaves it alone; worse, Docker
+# binds a single file by inode and `git pull` replaces the file, so the container goes on reading
+# the old one. `scripts/deploy.sh` recreates caddy for that reason, and by hand it is:
+#
+#   docker compose -f compose.prod.yaml up -d --force-recreate caddy
 
 services:
   db:

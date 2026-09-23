@@ -2,22 +2,41 @@
 
 A public route reached by a browser rather than by GitHub's servers, carrying no signature and no
 credential of its own: the `state` in the query string is the entire proof that this callback
-belongs to the person who ran `/unregister` a moment ago. The permission check and the unbinding
-happen when they run the command again, where there is somebody to report the answer to.
+belongs to the person who ran the command a moment ago. What happens next depends on which command
+that was, which the row records and this page reads.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Final
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 
+from shannon.domain.enums import VerificationPurpose
 from shannon.services.verification import GitHubIdentityVerification, VerificationError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
+
+# What the browser is told, by what the link was for. Until issue #144 the row carried no such
+# thing, so this page could only say "run the command again" and leave which one to the reader:
+# naming the wrong one sends somebody to a command they are not allowed to run.
+#
+# A mapping rather than a branch, because it has to be total and a branch cannot be made to show
+# that it is. A purpose with no page here is a KeyError in front of somebody who has just signed
+# in, so a test holds the two sets against each other instead.
+FINISHED: Final[dict[VerificationPurpose, str]] = {
+    VerificationPurpose.LINK: (
+        "Signed in as {login}.\n\nThat server has your GitHub account on record now. "
+        "There is nothing else to run."
+    ),
+    VerificationPurpose.UNREGISTER: (
+        "Signed in as {login}.\n\nGo back to Discord and run /unregister again to finish."
+    ),
+}
 
 
 @router.get("/github/callback", response_class=PlainTextResponse)
@@ -53,9 +72,4 @@ async def github_callback(request: Request, code: str = "", state: str = "") -> 
             status_code=status.HTTP_400_BAD_REQUEST, detail=refusal.message
         ) from refusal
 
-    # Which command to run again is not named, because this row does not record which one issued
-    # the link, and two of them use this now. Saying the wrong one would send somebody to a
-    # command they cannot run.
-    return PlainTextResponse(
-        f"Signed in as {verified.login}.\n\nGo back to Discord and run the command again to finish."
-    )
+    return PlainTextResponse(FINISHED[verified.purpose].format(login=verified.login))

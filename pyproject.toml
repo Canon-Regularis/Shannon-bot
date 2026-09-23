@@ -293,7 +293,6 @@ ignore = [
     "tests/support/webhooks.py",
     "tests/unit/api/test_health.py",
     "tests/unit/commands/test_command_errors.py",
-    "tests/unit/commands/test_link_command.py",
     "tests/unit/commands/test_link_team_command.py",
     "tests/unit/commands/test_mentions_command.py",
     "tests/unit/commands/test_permission_tables.py",
