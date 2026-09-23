@@ -114,13 +114,21 @@ class VerificationPurpose(StrEnum):
     """Which command asked for a one-time link, and so what spending it finishes.
 
     The callback is a browser arriving unauthenticated, so the row is the only record of what the
-    person was in the middle of. `/link` is finished by the click itself; `/unregister` is
-    deliberately not, because the permission check and the unbinding both need somebody to report
-    the answer to.
+    person was in the middle of. `/link` is finished by the click itself; `/register` and
+    `/unregister` deliberately are not, because the permission check and the thing it permits both
+    need somebody to report the answer to.
+
+    What this does NOT reach is the proof. `redeem` writes to `verified_identities` before it looks
+    at the purpose, and that table has no purpose column, so a proof minted by one command
+    satisfies `proved_just_now` for another within its fifteen minutes. That is survivable rather
+    than intended: every authorisation here is re-derived from GitHub per call, so what a crossed
+    proof costs is the deliberateness of having come back from the browser for this particular
+    thing, not the permission itself.
 
     Values come and go without a migration: the column is a plain varchar with no constraint,
     which is what `varchar_enum` buys.
     """
 
     LINK = "LINK"
+    REGISTER = "REGISTER"
     UNREGISTER = "UNREGISTER"
