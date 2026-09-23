@@ -25,6 +25,7 @@ from shannon.domain.models import (
     IssueSnapshot,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewSnapshot,
 )
 from shannon.github import mapping
 from shannon.github.errors import (
@@ -137,7 +138,22 @@ class ReadsChecks(Protocol):
     ) -> Sequence[CheckRun] | None: ...
 
 
-class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, Protocol):
+class ReadsReviews(Protocol):
+    """Every review on one pull request, which is all the approval round-up needs.
+
+    Asked of GitHub rather than remembered, because nothing here can remember it correctly: a
+    review is rewritten in place when it is dismissed, and `pull_request_review.dismissed` is not
+    an action this bot subscribes to. A stored verdict would go stale with nothing saying so.
+
+    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
+    """
+
+    async def list_reviews(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewSnapshot] | None: ...
+
+
+class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, ReadsReviews, Protocol):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module
@@ -569,6 +585,38 @@ class HttpGitHubClient:
                 label = row.get("name") if is_json_object(row) else None
                 if isinstance(label, str) and label:
                     found.append(label)
+        return found
+
+    async def list_reviews(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewSnapshot] | None:
+        """Every review submitted on one pull request, oldest first as GitHub sends them.
+
+        Read rather than assembled from the webhooks that arrive, because the two disagree: a
+        dismissed review is the same row with a different state, and `dismissed` is not an action
+        this bot subscribes to, so a tally kept here would go on counting an approval that had
+        been taken back.
+
+        Paged, because a pull request argued over for a week runs past one page and a half-read
+        list is the shape that reports agreement nobody reached.
+
+        A resolved repository rather than an owner and a name, because `mapping.review` wants one
+        for the snapshots it builds and the caller already holds it, which is the reason
+        `ListsOpenItems` takes one.
+        """
+        found: list[ReviewSnapshot] = []
+        path = f"{_repository(repository.owner, repository.name)}/pulls/{number}/reviews"
+        try:
+            async for body in self.get_pages(path, owner=repository.owner, per_page=LIST_PAGE_SIZE):
+                for row in body if is_json_list(body) else []:
+                    review = mapping.review(row, repository, item_number=number)
+                    if review is not None:
+                        found.append(review)
+        except GitHubNotFoundError:
+            # A pull request that is gone is gone, so retrying the delivery sixteen times over two
+            # hours would spend them all on the same answer. Distinct from the empty list, which
+            # is a pull request nobody has reviewed yet.
+            return None
         return found
 
     async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
