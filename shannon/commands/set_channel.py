@@ -28,6 +28,10 @@ CHOICES = [
     app_commands.Choice(name="project tickets", value=ObjectType.TICKET.value),
 ]
 
+# What to call each kind in a sentence, taken off the choices so there is one list of names and
+# the one somebody picked from is the one they are read back.
+_NAMES = {ObjectType(choice.value): choice.name for choice in CHOICES}
+
 
 class RelocatesThreads(Protocol):
     """Giving the threads a changed mapping left behind ones in the channel it now names."""
@@ -82,7 +86,7 @@ def build_set_channel_command(
 
         head = (
             f"{object_type.name.capitalize()} for {assignment.repository_name} will now "
-            f"appear in <#{channel.id}>."
+            f"appear in <#{channel.id}>.{_stayed(assignment)}"
         )
 
         # The mapping is written by this point, so a failed relocation still has to report the
@@ -106,6 +110,25 @@ def build_set_channel_command(
     # `app_commands.command()` leaves the command's binding type unknown, and
     # `discord_bot/slash.py` says why `Any` is the only truthful thing to put in.
     return set_channel  # pyright: ignore[reportUnknownVariableType]
+
+
+def _stayed(assignment: ChannelAssignment) -> str:
+    """Which kinds were left where they were, said before anything about what moved.
+
+    A kind with no channel of its own went to this one, so setting this one used to take its
+    threads along; it now gets a channel of its own instead, at the one it was already using
+    (#134). That is a durable change the admin did not ask for, and an unsaid one would surface
+    later as this bot ignoring a mapping they never knew they had.
+
+    Not "the threads already open stay", which would be half the truth: new ones stay too, which
+    is the point, so the sentence names the command that moves them rather than implying time
+    will.
+    """
+    return "".join(
+        f" {_NAMES[kept.object_type].capitalize()} stay in <#{kept.discord_channel_id}> "
+        f"until /set_channel {_NAMES[kept.object_type]} moves them."
+        for kept in assignment.pinned
+    )
 
 
 def _said(outcome: RelocationOutcome) -> str:

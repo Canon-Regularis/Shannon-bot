@@ -17,10 +17,10 @@ from shannon.domain.models import Actor
 from shannon.domain.time import as_utc
 from shannon.services.channels import ChannelMappingService
 from shannon.services.sync.items import SyncOutcome, build_item_sync
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, channel_fallbacks
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import blocked_on_a_row
+from tests.support.db import blocked_on_a_row, register_repository
 
 pytestmark = pytest.mark.integration
 
@@ -96,7 +96,7 @@ async def test_two_people_running_set_channel_at_once_leave_one_mapping(
     db_session: AsyncSession,
 ) -> None:
     """Both find nothing mapped, and a read-then-write would have both insert."""
-    service = ChannelMappingService(db_sessionmaker)
+    service = ChannelMappingService(db_sessionmaker, channel_fallbacks())
 
     results = await asyncio.gather(
         *(
@@ -119,6 +119,43 @@ async def test_two_people_running_set_channel_at_once_leave_one_mapping(
     ).all()
     assert len(mappings) == 1
     assert mappings[0].discord_channel_id in (100, 200, 300)
+
+
+async def test_two_people_setting_the_pull_request_channel_at_once_pin_one_row(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """Issue #134. Each of these gives issues a row of their own before moving pull requests, and
+    all three read the pull request channel before any of them has moved it.
+
+    So the answer has to be 99, the channel the issue threads are actually in, and not whichever
+    caller happened to win. A pin that could land on one of the channels being set would be the
+    bug it exists to prevent, arrived at through a race instead of through a second run.
+
+    Registered by hand rather than through the `registered` fixture, which maps issues and would
+    leave nothing to pin.
+    """
+    await register_repository(db_session, channel_id=99)
+    service = ChannelMappingService(db_sessionmaker, channel_fallbacks())
+
+    results = await asyncio.gather(
+        *(
+            service.assign(guild_id=1, object_type=ObjectType.PR, channel_id=channel)
+            for channel in (100, 200, 300)
+        ),
+        return_exceptions=True,
+    )
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert failures == [], f"a concurrent /set_channel raised: {failures}"
+    db_session.expire_all()
+    issues = (
+        await db_session.scalars(
+            select(ChannelMapping).where(ChannelMapping.object_type == ObjectType.ISSUE)
+        )
+    ).all()
+    assert len(issues) == 1, "the pin inserted more than once"
+    assert issues[0].discord_channel_id == 99, "issues were pinned to a channel they were never in"
 
 
 async def test_two_syncs_adding_the_same_reviewer_at_once_do_not_collide(
