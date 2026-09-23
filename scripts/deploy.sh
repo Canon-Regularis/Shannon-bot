@@ -67,7 +67,11 @@ while [ $# -gt 0 ]; do
     --rollback) DO_ROLLBACK=1 ;;
     --force)    FORCE=1 ;;
     --no-wait)  SKIP_QUIET=1 ;;
-    -h|--help)  sed -n "2,28p" "$0" | sed "s/^#\\{0,1\\} \\{0,1\\}//"; exit 0 ;;
+    # The header block at the top of this file, found rather than counted. It read `2,28p` until
+    # a commit added two lines to that block, at which point --help quietly began stopping
+    # mid-sentence: the text moved and the number did not. Reading until the comments stop cannot
+    # go wrong the same way again.
+    -h|--help)  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     -*)         die "unknown option: $1" ;;
     *)          TARGET_REF="$1" ;;
   esac
@@ -193,6 +197,50 @@ fi
 # Caddyfile and this script are all that commit's. This script is running from a file git is about
 # to rewrite, so it hands over to a copy rather than reading on past the edit.
 if [ "$(git rev-parse HEAD)" != "$TARGET_COMMIT" ]; then
+  # Which of the dirty files this checkout would actually tread on. git already refuses over
+  # these, in its own words — "Your local changes would be overwritten by checkout" — which
+  # names the file and not one thing about why a deploy box has a modified file at all.
+  #
+  # The one that has happened: the setup runbook said `chmod +x scripts/deploy.sh` while git
+  # carried this file at 100644, so the exec bit was an uncommitted modification for as long as
+  # the box existed. It cost nothing for months, because git only refuses over a dirty path the
+  # target actually changes and no deploy had ever changed this script. The first one that did
+  # stopped here, halfway through a deploy, with git's sentence and nothing to act on.
+  #
+  # Intersected with what the checkout rewrites rather than run over the whole tree, so this is
+  # git's own rule with a better sentence on it. A dirty file the target does not touch has
+  # never blocked a deploy, and a deploy is not the moment to start policing it.
+  dirty="$(git diff --name-only HEAD)"
+  blocking="$(printf "%s" "$dirty" |
+    grep -Fxf <(git diff --name-only HEAD "$TARGET_COMMIT") || true)"
+  if [ -n "$blocking" ]; then
+    die "the clone in $STACK_DIR has local changes to files this deploy rewrites:
+
+$(printf "%s\n" "$blocking" | sed "s/^/      /")
+
+    The checkout would overwrite them, so git refuses and so does this.
+
+    Read them before deciding:
+        git -C $STACK_DIR diff
+    A mode line and no hunks is the exec bit, which is safe to discard. Anything else is
+    something a person typed on this box, and the box is the only place it exists.
+
+    Discard the box's copy and run this again:
+        git -C $STACK_DIR checkout -- .
+
+    Nothing has been changed."
+  fi
+
+  # Everything else the box has changed, which this checkout leaves alone and which git would
+  # therefore never mention. Said out loud anyway, because the file it matters for is the
+  # Caddyfile: it is bind-mounted, caddy is force-recreated a few steps below, and an edit made
+  # to it during an incident goes live at that moment without appearing in any deploy's output.
+  # One line here is cheaper than working out a year later where a rule nobody wrote came from.
+  if [ -n "$dirty" ]; then
+    info "changed in the clone, though not in this deploy's way:" \
+      "$(printf "%s" "$dirty" | tr "\n" " ")"
+  fi
+
   say "Checking out $TARGET_COMMIT"
   git checkout --quiet --detach "$TARGET_COMMIT"
 fi
