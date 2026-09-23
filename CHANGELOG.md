@@ -6152,3 +6152,47 @@ feature end to end rather than assuming a predecessor the file never recorded.
   live ones cannot have their issuer recovered, so they default to the linking half, which is the
   safe guess in both directions: a `/verify` link labelled that way is labelled correctly, and an
   `/unregister` one still records its proof and still finds it on the second run.
+
+## Setting one kind's channel moves that kind alone
+
+- **`/set_channel pull requests` took the issue threads with it.** Closes #134. `/register` maps
+  pull requests and nothing else, so on a fresh server issues have no row of their own and resolve
+  through the fallback to the pull request channel. That made where issues go a thing *derived*
+  from the pull request row rather than recorded, so re-pointing pull requests really did change
+  where issue threads belonged, and the relocation was right to sweep them along. Every layer
+  agreed with every other; the model underneath them was what was wrong.
+- **So the fix is not to relocate less.** Leaving the borrowed kind behind while its destination
+  moved would have split issue threads across two channels, which is the bug relocation was built
+  to solve, reintroduced for the kind nobody named — the exact failure the old test's docstring
+  warned about. What is gone is the deriving. Before a kind's row moves, every kind borrowing its
+  channel is given that channel outright, so nothing's destination changes but the one named, and
+  relocation reduces to the kind it was asked about.
+- **The pin is an insert that does nothing on conflict, and that is load-bearing.** A relocation
+  stops at ten and tells the admin to run the command again. An upsert would re-pin on that second
+  run, to the channel just set, and drag every issue after all — the same bug, surfacing only on
+  the second invocation, which is about as hard to find as bugs get. It also settles the race with
+  somebody running `/set_channel issues` at the same moment, where an explicit choice already
+  inserted has to win over an implicit one.
+- **Written before the row moves, in the same transaction.** A transaction sees its own writes, so
+  pinning after the upsert would copy the channel being set instead of the one being left. The
+  test asserts the stored row rather than where the threads ended up, because nothing moves on the
+  run that gets this wrong: it is the *next* one that takes everything.
+- **The reply names what stayed.** The pin is a durable mapping the admin never asked for, and an
+  unsaid one surfaces months later as this bot apparently ignoring a fallback they still believe
+  is in force. Not "the threads already open stay", which is half the truth — new ones stay too,
+  which is the point — so the sentence names the command that moves them rather than implying
+  time will.
+- **Tickets were never moving, and the report said they were.** Only *draft* cards are tickets;
+  a board card wrapping a real issue is stored as an issue, and a server with no ticket channel
+  cannot mirror a draft card at all. So everything the board had put into Discord was an issue,
+  and what looked like tickets being dragged about was the fallback doing what it was built to do.
+  The reply is what made it unreadable: it counts threads and never names a kind.
+- **No backfill, deliberately.** The pin reads the truth at the one moment it matters, because it
+  and the change it protects against are the same transaction — including on a server whose issues
+  were already swept, where it reads the channel they were swept to. An eager migration would
+  strip the documented fallback from every server at once, including ones whose admins never ran
+  the command and have no way to undo it, there being no unmap.
+- **Considered and left alone.** A relocation half-finished under the old behaviour leaves
+  stragglers that `/set_channel pull requests` can no longer collect; `/set_channel issues` does,
+  in one run. And a pin to a channel since deleted in Discord is no worse than the row it was
+  copied from, which names the same dead channel.

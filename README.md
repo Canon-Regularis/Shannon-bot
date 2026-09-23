@@ -209,6 +209,11 @@ Only `/register` has to come first. Issues fall back to the pull request channel
 given one of their own; project tickets do not, so a board stays unmirrored until `/set_channel`
 names a channel for them.
 
+That fallback lasts until either kind's channel is set. `/set_channel pull requests` elsewhere
+gives issues a channel of its own first, at the one they were already using, so they stay where
+they are rather than following the pull requests; the reply says so and names the command that
+moves them. Setting one kind's channel moves that kind's threads and no others.
+
 `/link @member` posts a public note asking that person to run it, and links nobody: the only
 account this bot will connect is the one somebody has just signed into.
 
@@ -408,7 +413,7 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | --- | --- | --- |
 | `/register <github_repo_link>` | Admin, Project Manager | Binds a repository to this server and points PR threads at the current channel. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
 | `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
-| `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. Ten per run; the reply says how many are left |
+| `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
