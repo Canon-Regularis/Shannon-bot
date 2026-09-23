@@ -6100,3 +6100,55 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **A pull request flipped ready, drafted and ready again rings its audience three times.** The
   key is per delivery, and that is right rather than a leak: the ask was made, withdrawn, and
   made again.
+
+## One command to link, and GitHub decides which account
+
+- **`/link` and `/verify` were the same command with different amounts of evidence.** One recorded
+  a login somebody typed and asked GitHub only whether anybody held it — never whose it was — and
+  the other asked, and wrote the answer. Two commands, one of which could be wrong about who
+  somebody is, and nothing but the second one to tell them apart afterwards. Closes #144.
+- **Nobody types a login any more.** The account written down is whatever `GET /user` answered for
+  whoever signed in, so a typo connects nothing and a stranger's name cannot be connected by
+  mistake. The argument that let somebody be wrong is gone rather than validated harder.
+- **Following the link is the whole of it.** There is no second run: the row is written inside
+  `redeem`, where GitHub's answer is. What made that possible is one column — a pending
+  authorisation now records which command asked for it, because the callback is a browser arriving
+  with nothing but a state and the page could only ever say "run the command again" and leave
+  which one to the reader.
+- **`/unregister` is untouched, by construction rather than by care.** The proof is recorded first
+  and unconditionally, and only then does the purpose decide whether anything else happens. That
+  command still waits to be run a second time, because what it does next is irreversible and needs
+  somebody to report the answer to; a browser page is not that.
+- **`/link @member` used to hand out a link for somebody else, and now hands out nothing.** The
+  authorisation URL is a bearer credential: the row records the person it was issued for, not the
+  person who opens it, so a link issued for a member and shown to whoever asked for it is that
+  member's identity. Naming somebody now posts a note in the channel asking them to run it
+  themselves, and the only link that exists is the one in their own reply.
+- **Which makes the gate uneven, and that is deliberate.** Connecting your own account needs no
+  role, because GitHub decides which account it is and a gate would only stop somebody proving who
+  they are. Asking somebody else pings them in public, and a bot that will ping anybody on
+  anybody's say-so is a spam tool, so that half keeps the tier that speaks for the server.
+  `UNGATED` stays a list of commands anybody may run whatever they type, and `/link`'s own tests
+  hold the tier instead.
+- **The one message this bot sends that anybody but its caller can see.** Every reply until now was
+  ephemeral, on the reasoning that thread traffic is the signal and an acknowledgement is not. A
+  note addressed to somebody who did not run the command is not an acknowledgement, and an
+  ephemeral one would reach exactly one person: the one who already knows.
+- **That rule had never been asserted.** The test fakes took `ephemeral` into `**_` and threw it
+  away, so flipping the constant would have published every command reply in this project and
+  passed the whole suite. It is pinned now across all four paths a reply can take, and the four
+  tests were run against a flipped constant to be sure they fail.
+- **`SHANNON_REQUIRE_PROVED_LINKS` has an end date now.** Every link written from here carries the
+  same account id the proof does, from the same `GET /user` inside the same `redeem`, so an
+  unproved link is a row written before this shipped rather than a thing that keeps being made.
+- **What the typed login took with it.** `UserLinkingService` had a method that validated a name
+  and asked GitHub whether it existed, an error type for when it did not, and a row in the reply
+  table for that error. All three are gone, and the class is down to writing an answer that has
+  already been given. `LooksUpUsers` stays on the client with a note saying nothing consumes it:
+  it is correct and tested, the next feature that starts from a name will want it, and an orphan
+  with no note on it is what rots.
+- **Migration 0025 backfills nothing, and the reason is the table.** A link is followable for ten
+  minutes and a spent one survives a day; nothing ever reads a spent row again. The ten minutes of
+  live ones cannot have their issuer recovered, so they default to the linking half, which is the
+  safe guess in both directions: a `/verify` link labelled that way is labelled correctly, and an
+  `/unregister` one still records its proof and still finds it on the second run.
