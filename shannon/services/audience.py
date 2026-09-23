@@ -17,7 +17,7 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.threads import Notify
-from shannon.domain.models import Actor
+from shannon.domain.models import Actor, PullRequestSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +33,25 @@ class Audience:
     mentions: dict[str, int]
     roles: dict[str, int]
     notify: Notify
+
+
+def author_and_assignees(item: PullRequestSnapshot) -> tuple[Actor, ...]:
+    """Who a pull request waits on once the reviewing is done.
+
+    Two callers and one answer: a CI result that did not pass, and every review asked for having
+    come back approving. Opposite news, same pair, because both are the moment a pull request
+    stops being the reviewers' problem and becomes its author's.
+
+    Deduped by lowered login, because GitHub keeps the author and the assignee lists apart and
+    somebody on both would otherwise be named twice in one sentence and rung twice for one event.
+
+    The author goes FIRST, which is deliberately the opposite of the draft switch's order. There
+    the author is added last so an author who is also assigned keeps the place the assignee list
+    gave them; here they are the person who has to act on the news, so they lead.
+    """
+    author = (item.author,) if item.author else ()
+    people = {person.login.lower(): person for person in (*author, *item.assignees)}
+    return tuple(people.values())
 
 
 async def reachable(

@@ -42,6 +42,16 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   and archived out of the channel, and opened again if the item is. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
+- **Every review in, and approving.** When the last person a pull request was waiting on approves
+  it, its thread says so and rings the author and the assignees, who are who it waits on next. Read
+  from GitHub at the moment it is asked rather than tallied from what has arrived: a review is
+  rewritten in place when it is dismissed, and that is not an event this bot receives, so anything
+  counted here would go on counting an approval somebody had taken back. A comment left after an
+  approval does not clear it, the way GitHub's own rule does not. Said once per commit, so a push
+  that invalidates the approvals and a fresh round says it again, and not said at all while
+  anybody asked has still to answer — including a team, since no payload says who is in one.
+  Withdrawing the last outstanding request says it too: at that moment everybody remaining has
+  approved and no further review is coming, so nothing else would ever notice.
 - **The draft switch.** A draft rings nobody on purpose: GitHub runs CI on one like any other
   pull request, but nobody has been asked to look yet, and the card is grey rather than green to
   say so. Both moments that changes now post a header naming whoever pressed the button, and both

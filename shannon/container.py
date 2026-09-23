@@ -42,6 +42,7 @@ from shannon.discord_bot.formatting import (
     format_comment,
     format_commit,
     format_commits_left,
+    format_everyone_approved,
     format_force_push,
     format_label_change,
     format_ready_for_review,
@@ -78,7 +79,11 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.people import ItemPeople
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
-from shannon.services.reviews import ReviewRequestLedger, is_worth_a_message
+from shannon.services.reviews import (
+    EveryoneApprovedLine,
+    ReviewRequestLedger,
+    is_worth_a_message,
+)
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.commit_lines import CommitLine
 from shannon.services.sync.draft_lines import DRAFTED, READY, DraftSwitchLine
@@ -446,6 +451,16 @@ def _event_router(
     # It goes to the issue handler as well, and does nothing there: an issue has no `synchronize`
     # action, which is the first thing it checks. The ready line is in the same position for the
     # same reason, and checks the same thing first.
+    # Issue #155. Built once and hung off both routes: an approval arrives on the review one
+    # and a withdrawn request on this one, and they share the claim on the head they agreed on,
+    # so whichever moment comes second finds it taken.
+    approved = EveryoneApprovedLine(
+        sessionmaker,
+        threads,
+        github=github,
+        render=format_everyone_approved,
+        shut_again=shut_again,
+    )
     announce = _every(
         LabelLine(sessionmaker, threads, render=format_label_change, shut_again=shut_again),
         StateLine(sessionmaker, threads, render=format_state_change, shut_again=shut_again),
@@ -471,6 +486,11 @@ def _event_router(
             render=format_back_to_draft,
             shut_again=shut_again,
         ),
+        # Withdrawing the last outstanding request is the other moment every remaining review
+        # is an approval, and no review is coming to notice it. Above the commit line for the
+        # reason the draft switch is: this one rings people, and whether GitHub is reachable
+        # should not decide whether they were told.
+        approved,
         CommitLine(
             sessionmaker,
             threads,
@@ -494,7 +514,14 @@ def _event_router(
     router.register(
         "pull_request_review",
         build_note_handler(
-            reviews, parse_review_event, then=ReviewRequestLedger(sessionmaker).fulfilled
+            reviews,
+            parse_review_event,
+            then=ReviewRequestLedger(sessionmaker).fulfilled,
+            # Issue #155, and on the far side of the post from the ledger above. Which side a
+            # hook goes on is decided by what it is: closing a request is database work and must
+            # not be made to depend on GitHub, while a round-up read as being about the approval
+            # it counts has to land underneath it.
+            after=approved.after_a_review,
         ),
     )
     # No ledger on this one. The review wrapping these is what closes the request they answer,
