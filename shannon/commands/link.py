@@ -33,7 +33,7 @@ from discord import app_commands
 from shannon.commands._guards import NOT_IN_A_SERVER
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, in_the_channel, reply
+from shannon.discord_bot.responses import defer, in_the_channel, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import VerificationPurpose
 
@@ -87,13 +87,13 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
         # and there is only a tier on one branch of this. `/mentions` does the same.
         guild_id = interaction.guild_id
         if guild_id is None:
-            await reply(interaction, NOT_IN_A_SERVER)
+            await reply(interaction, refused(NOT_IN_A_SERVER))
             return
 
         # Above the branch, because neither half works without it: a deployment that cannot run
         # the round trip cannot link anybody, so asking somebody to go and try is no kinder.
         if not verification.configured:
-            await reply(interaction, NOT_CONFIGURED)
+            await reply(interaction, refused(NOT_CONFIGURED))
             return
 
         # On identity rather than on presence. Naming yourself is a self-link, or somebody who
@@ -110,8 +110,11 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
         )
         await reply(
             interaction,
-            "Open this link and sign in to GitHub. That is the whole of it: clicking it "
-            f"connects whichever account you sign in as, and there is no second command.\n{url}",
+            owed(
+                "Open this link and sign in to GitHub. That is the whole of it: clicking it "
+                "connects whichever account you sign in as, and there is no second "
+                f"command.\n{url}"
+            ),
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather
@@ -129,13 +132,14 @@ async def _ask_them(
     link issued for somebody else is that person's identity in whoever's hands hold the URL.
     """
     if not gate.allows(interaction.user, REGISTER_ROLES):
-        await reply(interaction, gate.denial("link", REGISTER_ROLES))
+        await reply(interaction, refused(gate.denial("link", REGISTER_ROLES)))
         return
 
     try:
         await in_the_channel(
             interaction,
-            f"<@{member.id}> — run /link here to connect your GitHub account. You will get a "
+            f"<@{member.id}> — this server mirrors GitHub, and connecting your account is how "
+            "its messages reach you by name. Run /link here to do it: you will get a "
             "private link to sign in with, and clicking it is the whole of it.",
         )
     except discord.HTTPException as refusal:
@@ -143,4 +147,4 @@ async def _ask_them(
         # one refusal this command has to answer for. Left to the tree's handler it would read
         # as "Something went wrong here", and the person owed an explanation would get none.
         logger.warning("could not ask %s to link in the channel: %s", member.id, refusal)
-        await reply(interaction, CANNOT_POST)
+        await reply(interaction, refused(CANNOT_POST))

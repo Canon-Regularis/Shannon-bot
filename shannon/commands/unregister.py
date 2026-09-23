@@ -17,7 +17,7 @@ from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.responses import defer, done, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
@@ -73,9 +73,11 @@ def build_unregister_command(
             # not told how the deployment is configured.
             await reply(
                 interaction,
-                "This bot cannot verify who you are on GitHub, so it will not unregister "
-                "anything. An admin needs to set the GitHub App's client secret and this "
-                "deployment's public URL.",
+                refused(
+                    "This bot cannot verify who you are on GitHub, so it will not "
+                    "unregister anything. An admin needs to set the GitHub App's client "
+                    "secret and this deployment's public URL."
+                ),
             )
             return
 
@@ -92,8 +94,10 @@ def build_unregister_command(
                 )
                 await reply(
                     interaction,
-                    "First, prove to GitHub that you can administer this repository. Open this "
-                    f"link, then run /unregister again:\n{link}",
+                    owed(
+                        "First, prove to GitHub that you can administer this repository. "
+                        f"Open this link, then run /unregister again:\n{link}"
+                    ),
                 )
                 return
 

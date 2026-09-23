@@ -73,7 +73,8 @@ async def run(
 
 
 def said(interaction: FakeInteraction) -> str:
-    return (interaction.followup.messages + interaction.response.messages)[0]
+    """The sentence, without the outcome mark `FakeInteraction.said` strips."""
+    return interaction.said
 
 
 async def test_a_team_is_pointed_at_a_role() -> None:

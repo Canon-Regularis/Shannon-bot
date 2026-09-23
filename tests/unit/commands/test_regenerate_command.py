@@ -93,7 +93,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.calls == []
 
     async def test_with_no_channel_at_all(self) -> None:
@@ -103,7 +103,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction)
 
-        assert interaction.reply == "Run this inside the item's thread."
+        assert interaction.said == "Run this inside the item's thread."
         assert service.calls == []
 
     async def test_the_thread_it_acts_on_is_the_one_it_was_run_in(self) -> None:
@@ -122,7 +122,7 @@ class TestWhatItSays:
 
         await command.callback(interaction)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             f"Redrew acme/widget#7 from GitHub: <#{THREAD}>. Nobody was pinged."
         )
 
@@ -174,7 +174,7 @@ class TestWhatItSays:
 
         await command.callback(interaction)
 
-        assert interaction.reply.endswith("Nobody was pinged.")
+        assert interaction.said.endswith("Nobody was pinged.")
 
 
 class TestWhatItRefuses:
@@ -203,7 +203,7 @@ class TestWhatItRefuses:
 
         await command.callback(interaction)
 
-        assert interaction.reply == "GitHub could not find that item."
+        assert interaction.said == "GitHub could not find that item."
 
     async def test_discord_refusing_is_reported_rather_than_raised(self) -> None:
         command, interaction, _ = run_it(

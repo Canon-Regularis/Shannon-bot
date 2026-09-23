@@ -6,7 +6,8 @@ import discord
 from discord import app_commands
 
 from shannon.commands._guards import NOT_IN_A_SERVER
-from shannon.discord_bot.responses import defer, reply
+from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.responses import defer, done, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 
 
@@ -60,7 +61,7 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
         interaction: discord.Interaction, state: app_commands.Choice[str] | None = None
     ) -> None:
         if interaction.guild_id is None:
-            await reply(interaction, NOT_IN_A_SERVER)
+            await reply(interaction, refused(NOT_IN_A_SERVER))
             return
 
         await defer(interaction)
@@ -76,7 +77,10 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
                 wanted=wanted,
             )
 
-        await reply(interaction, _ON if wanted else _OFF + _ROLES_STILL_REACH_YOU)
+        said = _ON if wanted else _OFF + _ROLES_STILL_REACH_YOU
+        # Reading the setting carries no mark. The three of them say what became of a change
+        # and this made none; a tick on an answer to a question would be claiming one.
+        await reply(interaction, Panel.of_text(said) if state is None else done(said))
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather
     # than a suppression over the whole file.

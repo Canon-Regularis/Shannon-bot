@@ -88,7 +88,7 @@ class TestWhatItSays:
 
         interaction = await run(service)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             f"{FULL_NAME} has no open items right now, so there was nothing to mirror."
         )
 
@@ -97,16 +97,43 @@ class TestWhatItSays:
 
         interaction = await run(service)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             f"Nothing to mirror. All 43 open items on {FULL_NAME} already have a thread."
         )
+
+    async def test_one_already_mirrored_reads_as_one(self) -> None:
+        """ "All 1 open items ... already have a thread" was reachable, and is three disagreements
+        in one sentence (#147)."""
+        service = StubRefresh(outcome=an_outcome(already=1))
+
+        interaction = await run(service)
+
+        assert interaction.said == (
+            f"Nothing to mirror. The one open item on {FULL_NAME} already has a thread."
+        )
+
+    async def test_one_mirrored_reads_as_one(self) -> None:
+        service = StubRefresh(outcome=an_outcome(mirrored=1, already=0))
+
+        interaction = await run(service)
+
+        assert interaction.said.startswith(f"Mirrored 1 open item from {FULL_NAME},")
+
+    async def test_one_that_failed_agrees_with_its_verb(self) -> None:
+        """`/set_channel` computed this and `/refresh` hardcoded "are", so a single failure read
+        "1 could not be mirrored ... and are among those"."""
+        service = StubRefresh(outcome=an_outcome(mirrored=2, already=0, failed=1, left=1))
+
+        interaction = await run(service)
+
+        assert "1 could not be mirrored just now and is among those" in interaction.said
 
     async def test_a_clean_run_counts_both_halves_and_says_nobody_was_pinged(self) -> None:
         service = StubRefresh(outcome=an_outcome(mirrored=7, already=31))
 
         interaction = await run(service)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             f"Mirrored 7 open items from {FULL_NAME}, and left alone the 31 that already had a "
             "thread. Nobody was pinged."
         )
@@ -257,7 +284,7 @@ class TestWhoMayRunIt:
         interaction = await run(service, guild_id=None)
 
         assert service.calls == []
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
 
 
 class TestWhenItCannotFinish:
@@ -274,7 +301,7 @@ class TestWhenItCannotFinish:
 
         interaction = await run(service)
 
-        assert interaction.reply == "This server has no repository yet."
+        assert interaction.said == "This server has no repository yet."
 
     async def test_a_spent_rate_limit_says_how_long_to_wait(self) -> None:
         service = StubRefresh(error=GitHubRateLimitError("spent", retry_after=600))

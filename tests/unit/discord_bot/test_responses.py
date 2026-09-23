@@ -12,12 +12,26 @@ components overload, so each shape is its own call rather than a keyword on one.
 And since issue #144 it pins that they are private. `EPHEMERAL` had been a constant nothing
 asserted: the fakes took the keyword into `**_` and threw it away, so flipping it to False would
 have published every command reply in this project and passed the entire suite.
+
+Issue #147 took the string away. `reply` accepts a `Panel` and nothing else, so a reply carrying
+no outcome mark is not a thing that can be written rather than a thing nobody happens to write,
+and both type checkers hold it. A panel with no accent still goes out as content, which is the
+one path a command takes when it reports rather than acts.
 """
 
 from __future__ import annotations
 
-from shannon.discord_bot.panels import Accent
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.panels import Accent, Panel
+from shannon.discord_bot.responses import (
+    OWED,
+    REFUSED,
+    SUCCEEDED,
+    defer,
+    done,
+    owed,
+    refused,
+    reply,
+)
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from tests.fakes.discord_objects import FakeInteraction
 
@@ -36,7 +50,7 @@ async def test_deferring_twice_does_not_answer_twice() -> None:
 
 async def test_deferring_something_already_answered_is_left_alone() -> None:
     interaction = FakeInteraction()
-    await reply(interaction, "done")
+    await reply(interaction, Panel.of_text("done"))
 
     await defer(interaction)
 
@@ -48,7 +62,7 @@ async def test_a_reply_after_a_defer_goes_through_the_followup() -> None:
     interaction = FakeInteraction()
     await defer(interaction)
 
-    await reply(interaction, "done")
+    await reply(interaction, Panel.of_text("done"))
 
     assert interaction.followup.messages == ["done"]
     assert interaction.response.messages == []
@@ -59,10 +73,10 @@ async def test_an_over_long_reply_is_cut_rather_than_refused() -> None:
     what was typed back. Refusing here would lose the refusal itself."""
     interaction = FakeInteraction()
 
-    await reply(interaction, "x" * (MESSAGE_LIMIT + 500))
+    await reply(interaction, Panel.of_text("x" * (MESSAGE_LIMIT + 500)))
 
     sent = interaction.response.messages[0]
-    assert len(sent) == MESSAGE_LIMIT
+    assert len(sent) == MESSAGE_LIMIT, "a panel with no accent is cut against the panel budget"
     assert sent.endswith("…")
 
 
@@ -74,7 +88,7 @@ class TestAReplyThatIsACard:
 
         await reply(interaction, done("Registered acme/widget."))
 
-        assert interaction.response.messages == ["Registered acme/widget."]
+        assert interaction.response.messages == [f"{SUCCEEDED} Registered acme/widget."]
         assert interaction.followup.messages == []
 
     async def test_one_sent_after_a_defer_goes_through_the_followup(self) -> None:
@@ -83,16 +97,17 @@ class TestAReplyThatIsACard:
 
         await reply(interaction, done("Registered acme/widget."))
 
-        assert interaction.followup.messages == ["Registered acme/widget."]
+        assert interaction.followup.messages == [f"{SUCCEEDED} Registered acme/widget."]
         assert interaction.response.messages == []
 
     async def test_a_command_that_worked_is_green(self) -> None:
         assert done("Registered acme/widget.").accent == Accent.OPEN
 
     async def test_it_is_a_card_rather_than_a_string(self) -> None:
-        """A plain panel would be sent as content, which is the whole point of the distinction:
-        the one-sentence replies stay strings and these do not."""
+        """A panel with an accent is sent as components and one without is sent as content, so
+        the distinction survives `reply` taking nothing but panels (#147)."""
         assert not done("Registered acme/widget.").is_plain
+        assert Panel.of_text("Mentions are on.").is_plain
 
     async def test_an_over_long_card_is_cut_the_same_way_a_string_is(self) -> None:
         """The same argument, at the same place. A command quoting a long argument back can
@@ -115,7 +130,7 @@ class TestNobodyElseSeesAReply:
     async def test_an_immediate_reply_is_private(self) -> None:
         interaction = FakeInteraction()
 
-        await reply(interaction, "done")
+        await reply(interaction, Panel.of_text("done"))
 
         assert interaction.ephemerally == [True]
 
@@ -125,7 +140,7 @@ class TestNobodyElseSeesAReply:
         interaction = FakeInteraction()
         await defer(interaction)
 
-        await reply(interaction, "done")
+        await reply(interaction, Panel.of_text("done"))
 
         assert interaction.ephemerally == [True]
 
@@ -150,3 +165,37 @@ class TestNobodyElseSeesAReply:
         await defer(interaction)
 
         assert interaction.response.deferred_ephemerally is True
+
+
+class TestTheThreeOutcomesAReplyCanHave:
+    """Issue #147. Every command reply is one of three things, and says which before it is read.
+
+    Asserted here and nowhere else. The constructors are the only place a mark is put on, so a
+    hundred command tests repeating these three characters would pin nothing the three below do
+    not, and would have to be rewritten together if a mark ever changed.
+    """
+
+    def test_a_command_that_worked_is_ticked_and_green(self) -> None:
+        card = done("Registered acme/widget.")
+
+        assert card.text == f"{SUCCEEDED} Registered acme/widget."
+        assert card.accent == Accent.OPEN
+
+    def test_something_still_owed_is_warned_and_amber(self) -> None:
+        """A rate limit that comes right on its own, a link nobody has followed yet, and a
+        command whose second half did not land. None is a failure and none is finished."""
+        card = owed("Open this link and sign in to GitHub.")
+
+        assert card.text == f"{OWED} Open this link and sign in to GitHub."
+        assert card.accent == Accent.MEDIUM
+
+    def test_something_refused_is_crossed_and_red(self) -> None:
+        card = refused("Run this inside a server channel.")
+
+        assert card.text == f"{REFUSED} Run this inside a server channel."
+        assert card.accent == Accent.FAILED
+
+    def test_the_three_marks_are_different(self) -> None:
+        """Two the same would make the bar the only thing telling them apart, which is what the
+        marks were added to stop being true."""
+        assert len({SUCCEEDED, OWED, REFUSED}) == 3

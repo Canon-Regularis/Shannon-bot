@@ -8,7 +8,8 @@ from shannon.discord_bot.errors import (
     DiscordGatewayError,
     DiscordPermissionError,
 )
-from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
+from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.responses import owed, refused
 from shannon.domain.errors import (
     DuplicateRegistrationError,
     ItemNotReadyError,
@@ -124,10 +125,14 @@ _COMES_RIGHT: tuple[type[ShannonError], ...] = (
 
 
 def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
-    """The refusal for an error, or the catch-all if it is not one we know about."""
+    """The refusal for an error, or the catch-all if it is not one we know about.
+
+    Which of the two marks it carries is the split `_COMES_RIGHT` already makes: an error that
+    comes right on its own is something still owed rather than something refused, and telling
+    those apart before either sentence is read is the whole point of the pair.
+    """
     said = words_for(error, noun=noun)
-    tone = Accent.MEDIUM if isinstance(error, _COMES_RIGHT) else Accent.FAILED
-    return Panel(blocks=(Block(BlockKind.HEADING, said),), accent=tone)
+    return owed(said) if isinstance(error, _COMES_RIGHT) else refused(said)
 
 
 def words_for(error: BaseException, *, noun: str = "item") -> str:

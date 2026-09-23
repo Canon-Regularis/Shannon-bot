@@ -98,7 +98,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction, "bug")
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.calls == []
 
     async def test_with_no_channel_at_all(self) -> None:
@@ -106,7 +106,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction, "bug")
 
-        assert interaction.reply == "Run this inside the item's thread."
+        assert interaction.said == "Run this inside the item's thread."
         assert service.calls == []
 
     async def test_unlabel_takes_the_other_direction(self) -> None:
@@ -123,14 +123,14 @@ class TestWhatItSays:
 
         await command.callback(interaction, "bug")
 
-        assert interaction.reply == "Put `bug` on acme/widget#7."
+        assert interaction.said == "Put `bug` on acme/widget#7."
 
     async def test_a_label_taken_off(self) -> None:
         command, interaction, _ = run_it(removing=True)
 
         await command.callback(interaction, "bug")
 
-        assert interaction.reply == "Took `bug` off acme/widget#7."
+        assert interaction.said == "Took `bug` off acme/widget#7."
 
     async def test_it_names_the_spelling_the_repository_uses(self) -> None:
         """Typed `BUG`, wrote `bug`. Saying back what somebody typed would hide the one thing
@@ -147,7 +147,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, "bug")
 
-        assert interaction.reply == "acme/widget#7 already has the label `bug`, so nothing changed."
+        assert interaction.said == "acme/widget#7 already has the label `bug`, so nothing changed."
 
     async def test_one_the_item_does_not_have(self) -> None:
         command, interaction, _ = run_it(
@@ -157,7 +157,7 @@ class TestWhatItSays:
         await command.callback(interaction, "bug")
 
         assert (
-            interaction.reply == "acme/widget#7 does not have the label `bug`, so nothing changed."
+            interaction.said == "acme/widget#7 does not have the label `bug`, so nothing changed."
         )
 
 
