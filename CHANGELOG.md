@@ -6297,3 +6297,69 @@ feature end to end rather than assuming a predecessor the file never recorded.
   help, since the link was minted for the repository the sender wanted. This is true of
   `/unregister` today and this change does not alter it; closing it needs the callback page to name
   what is being authorised and to write the proof only on a confirmed reply.
+
+## Saying so when everybody asked has approved
+
+- **The last approval on a pull request now rings its author and its assignees.** Closes #155. They
+  are who it waits on once the reviewing is done, which is the same pair a failed CI run tells and
+  for the same reason, so the two now read that off one function rather than two copies of three
+  lines.
+- **The condition was not answerable from anything this bot stored.** Worth setting out, because it
+  is the whole of why this is shaped as it is. No verdict is kept anywhere: `fulfilled_at` records
+  that somebody answered and never what they said, so a request for changes and an approval are
+  the same row. The roster is lossy too, since GitHub drops a reviewer from the requested list the
+  moment they submit *anything* and the row goes with it on the next delivery. And a team's request
+  is closed by GitHub dropping the slug, which no payload attributes to a member.
+- **So it asks GitHub, and only ever on an approval.** Two reads, both off the pull request in
+  front of it: every review ever submitted, reduced to the latest verdict per person, and the item
+  itself for who is still outstanding. Anything else was a guess wearing a timestamp.
+- **A dismissed approval is the reason it is read rather than remembered.** Dismissing rewrites the
+  review in place, and `dismissed` is not an action this bot subscribes to — so a tally kept from
+  the events that arrive would go on counting an approval that had been taken back, permanently,
+  with nothing saying so. The same reduction handles it for free: the row comes back with its new
+  state and the latest verdict is no longer an approval.
+- **A comment does not clear an approval.** Somebody approves and then answers a question in the
+  thread; GitHub wraps that answer in a review carrying no verdict. Counting it would leave a pull
+  request reading as unreviewed by the person who had just approved it, which is GitHub's own rule
+  and now this bot's. The set names what is SKIPPED rather than what counts, so a state GitHub adds
+  later blocks the announcement instead of being read as agreement: silently quiet is a better
+  failure than silently wrong.
+- **Every verdict in an empty mapping is an approval, and that nearly shipped.** The obvious
+  condition — every latest verdict approving — is vacuously true of a pull request nobody has
+  reviewed, so a bare comment on one would have announced agreement nobody had reached. Two guards
+  rather than one: the incoming review has to be an approval, and the reduction has to be
+  non-empty. The first also keeps both GitHub calls off the ordinary review, which on a busy
+  repository is most of them.
+- **Once per approved commit.** The claim keys on the head the condition was evaluated against, so
+  a push that invalidates the approvals and a fresh round says it again — and not on the commit the
+  review named, which diverges the moment somebody approves a commit the branch has moved past and
+  would announce twice for one agreed state. A pull request with no head commit at all says
+  nothing and logs why, because the key would otherwise collapse to a constant and the thread
+  would fall silent for every later round with nothing explaining it.
+- **A count rather than the approvers.** Each of them is already named one message above by the
+  line that mirrored their review, and naming them again would do it through a live mention map,
+  ringing whoever approved last about their own approval.
+- **Its own mark.** Not the tick the CI line uses: both land within a minute of each other on a
+  healthy pull request, and one mark meaning both "the build is green" and "the reviewing is done"
+  is exactly what a reader would then have to untangle.
+- **A second hook on the review route, on the far side of the post from the first.** Which side a
+  hook goes on is decided by what it is. Closing a review request is database work and stays
+  before, so a GitHub outage cannot cost the review line itself; a round-up is read as being about
+  the approval it counts, so it has to land underneath it. What the gate between them actually
+  tests is whether the item is tracked, not whether a message went out — a note the mirror's own
+  predicate declined still reaches the second hook, which is a coupling rather than a guarantee
+  and now has a test saying so.
+- **Both moments, not just the obvious one.** Withdrawing the last outstanding review request is
+  the other way the condition becomes true: Alice approves while Bob is still asked, the author
+  then cancels Bob's request, and at that instant everybody remaining has approved with no further
+  review coming to notice it. The two routes share one predicate and one claim on the head they
+  agreed about, so whichever comes second finds it taken rather than saying it twice.
+- **A login is escaped on its way into a message.** `_person` handed one straight through while
+  `_account` beside it did not, and six renderers read the first. No login GitHub issues today
+  holds a markdown character, so nothing visible changes — what changes is that it is a rule of
+  this bot's rather than an assumption about GitHub's.
+- **One place finds an item's thread.** The note mirror, the check announcer and the approval
+  round-up each had the same two reads and the same two log lines, differing only in the noun for
+  what had arrived, which is how a fourth copy gets written rather than a third reused. What the
+  callers genuinely disagreed about turned out to be nothing: two already raised on an item with
+  no thread yet so the delivery is retried, and the third had no reason not to.

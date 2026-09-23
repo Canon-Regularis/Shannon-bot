@@ -14,6 +14,7 @@ from shannon.domain.models import (
     Label,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewSnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
 
@@ -133,6 +134,11 @@ class FakeGitHubClient:
         # the test forgot to stock the fake, and it comes back empty so the test says so.
         self.check_runs: dict[str, Sequence[CheckRun] | None] = {}
         self.check_run_calls: list[tuple[str, str]] = []
+        # Reviews on a pull request, keyed by (owner/name, number). Issue #155. A key holding
+        # None is a pull request GitHub no longer has, which is a different answer from a missing
+        # key: that one is a test that forgot to stock the fake, and it comes back empty.
+        self.reviews: dict[tuple[str, int], Sequence[ReviewSnapshot] | None] = {}
+        self.review_calls: list[tuple[str, int]] = []
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -252,6 +258,15 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return self.check_runs.get(sha, [])
+
+    async def list_reviews(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewSnapshot] | None:
+        key = (repository.full_name.lower(), number)
+        self.review_calls.append(key)
+        if self.error is not None:
+            raise self.error
+        return self.reviews.get(key, [])
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
         # Refused before it is recorded, unlike the label writes below. `comments` is read as

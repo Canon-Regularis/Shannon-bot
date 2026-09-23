@@ -9,6 +9,7 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
+from shannon.domain.models import RepositorySnapshot
 from shannon.github.client import MAX_PAGES, HttpGitHubClient
 from shannon.github.errors import (
     GitHubAuthError,
@@ -1497,3 +1498,102 @@ class TestListingARepositoryLabels:
 
         assert len(asked) == 2
         assert found == ["bug", "last"]
+
+
+class TestEveryReviewOnAPullRequest:
+    """Issue #155. Read from GitHub rather than tallied from the webhooks that arrive.
+
+    A dismissed review is the same row with a different state and `dismissed` is not an action
+    this bot subscribes to, so a tally kept here would go on counting an approval somebody had
+    taken back.
+    """
+
+    def _repository(self) -> RepositorySnapshot:
+        return RepositorySnapshot(
+            github_repo_id=1,
+            owner="Canon-Regularis",
+            name="Shannon-bot",
+            html_url="https://github.com/Canon-Regularis/Shannon-bot",
+        )
+
+    def _row(self, review_id: int, state: str, login: str = "monalisa") -> dict[str, object]:
+        return {
+            "id": review_id,
+            "state": state,
+            "user": {"login": login, "id": 200},
+            "body": "",
+            "html_url": "https://github.com/x/y/pull/7#pullrequestreview-1",
+            "submitted_at": "2026-08-11T11:00:00Z",
+        }
+
+    async def test_it_asks_the_reviews_endpoint_for_that_pull_request(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_reviews(self._repository(), 7)
+
+        assert seen == ["/repos/Canon-Regularis/Shannon-bot/pulls/7/reviews"]
+
+    async def test_a_page_of_rows_becomes_snapshots(self) -> None:
+        """The REST API sends the state uppercased and webhooks send it lowercased, which is
+        what `ReviewSnapshot.verdict` exists to flatten."""
+        handler = responds(200, [self._row(1, "APPROVED"), self._row(2, "CHANGES_REQUESTED")])
+
+        async with client_with(handler) as client:
+            found = await client.list_reviews(self._repository(), 7)
+
+        assert found is not None
+        assert [review.verdict for review in found] == ["approved", "changes_requested"]
+        assert [review.review_id for review in found] == [1, 2]
+
+    async def test_it_follows_the_link_header(self) -> None:
+        """A pull request argued over for a week runs past one page, and a half-read list is the
+        shape that reports agreement nobody reached."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            index = calls["n"]
+            calls["n"] += 1
+            headers = (
+                {"Link": '<https://api.github.com/next?after=cursor>; rel="next"'}
+                if index == 0
+                else {}
+            )
+            return httpx.Response(
+                200, content=json.dumps([self._row(index + 1, "APPROVED")]), headers=headers
+            )
+
+        async with client_with(handler) as client:
+            found = await client.list_reviews(self._repository(), 7)
+
+        assert found is not None
+        assert [review.review_id for review in found] == [1, 2]
+
+    async def test_a_body_that_is_not_a_list_is_read_as_nothing(self) -> None:
+        """GitHub answers this one with an array rather than an object holding one, so a body
+        shaped like the check-runs endpoint means something has changed rather than nothing."""
+        async with client_with(responds(200, {})) as client:
+            assert await client.list_reviews(self._repository(), 7) == []
+
+    async def test_a_row_without_an_id_is_dropped_and_the_rest_kept(self) -> None:
+        handler = responds(200, [{"state": "APPROVED"}, self._row(2, "APPROVED")])
+
+        async with client_with(handler) as client:
+            found = await client.list_reviews(self._repository(), 7)
+
+        assert found is not None
+        assert [review.review_id for review in found] == [2]
+
+    async def test_a_pull_request_github_does_not_have_answers_none(self) -> None:
+        """Distinct from the empty list, which is a pull request nobody has reviewed. A 404 is
+        final, so retrying the delivery for two hours would spend every attempt on it."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            assert await client.list_reviews(self._repository(), 7) is None
+
+    async def test_a_pull_request_nobody_has_reviewed_answers_an_empty_list(self) -> None:
+        async with client_with(responds(200, [])) as client:
+            assert await client.list_reviews(self._repository(), 7) == []

@@ -52,6 +52,7 @@ def handler_over(
     ran: list[object],
     *,
     declining: bool = True,
+    afterwards: list[object] | None = None,
 ):
     """The review path, built by hand so the predicate can be taken away again.
 
@@ -69,7 +70,17 @@ def handler_over(
         shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         worth_posting=is_worth_a_message if declining else None,
     )
-    return build_note_handler(mirror, parse_review_event, then=then)
+
+    async def after(snapshot: object) -> None:
+        if afterwards is not None:
+            afterwards.append(snapshot)
+
+    return build_note_handler(
+        mirror,
+        parse_review_event,
+        then=then,
+        after=after if afterwards is not None else None,
+    )
 
 
 class TestWhatIsDeclined:
@@ -213,3 +224,73 @@ class TestWhatHappensAnyway:
         payload["pull_request"]["number"] = 999
 
         assert await handler("submitted", payload) == "ignored"
+
+
+class TestWhatRunsAfterThePost:
+    """Issue #155. The second hook, on the far side of the post from the first.
+
+    Which side a hook goes on is decided by what it is. Closing a review request is database work
+    and goes before, so a GitHub outage cannot cost the review line itself. Saying something in
+    the thread goes after, or it lands above the note it is about.
+    """
+
+    async def test_it_runs_once_the_note_is_in_the_thread(
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        afterwards: list[object] = []
+        handler = handler_over(db_sessionmaker, threads, [], afterwards=afterwards)
+        posted = len(threads.posts)
+
+        outcome = await handler("submitted", payloads.pull_request_review_event())
+
+        assert outcome == "processed"
+        assert len(afterwards) == 1
+        assert len(threads.posts) == posted + 1, "it ran before the note it is about"
+
+    async def test_it_does_not_run_where_nothing_was_posted(
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """A free gate rather than a courtesy. The mirror answers False for an item this server
+        does not track, so a review on one costs no GitHub calls at all."""
+        afterwards: list[object] = []
+        handler = handler_over(db_sessionmaker, threads, [], afterwards=afterwards)
+        payload = payloads.pull_request_review_event()
+        payload["pull_request"]["number"] = 999
+
+        assert await handler("submitted", payload) == "ignored"
+        assert afterwards == []
+
+    async def test_a_declined_note_still_runs_it(
+        self,
+        tracked: AsyncClient,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The gate is coarser than it looks, and this is the test that says so.
+
+        A review the mirror's predicate declines is `processed` rather than `ignored`, because
+        the ledger behind it still ran — so the mirror answers True and `after` is reached for a
+        note that never reached the thread. A hook that speaks under one therefore cannot assume
+        there is one, and has to decide for itself.
+
+        Harmless for the only hook there is: it is gated on the review being an approval, and a
+        declined note is a `commented` review with no body. Pinned here so the day somebody adds
+        a second hook, the shape of the gate is a test rather than a surprise.
+        """
+        afterwards: list[object] = []
+        handler = handler_over(db_sessionmaker, threads, [], afterwards=afterwards)
+        posted = len(threads.posts)
+
+        outcome = await handler(
+            "submitted", payloads.pull_request_review_event(state="commented", body="")
+        )
+
+        assert outcome == "processed"
+        assert len(threads.posts) == posted, "the predicate stopped declining"
+        assert len(afterwards) == 1, "the gate is on the mirror's answer, not on a message"
