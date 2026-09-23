@@ -82,6 +82,7 @@ from shannon.services.people import ItemPeople, PutsPeopleOnItems
 from shannon.services.projects import ReadsBoards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.sync.announcements import AnnouncesInThread
+from shannon.services.sync.draft_lines import DraftSwitchLine
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -102,7 +103,6 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
-from shannon.services.sync.ready_lines import ReadyLine
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.state_lines import StateLine
@@ -209,7 +209,7 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # real-only shape `(Notifier, ActorNotifier)` already has.
     (AnnouncesInThread, LabelLine),
     (AnnouncesInThread, StateLine),
-    (AnnouncesInThread, ReadyLine),
+    (AnnouncesInThread, DraftSwitchLine),
 ]
 
 
