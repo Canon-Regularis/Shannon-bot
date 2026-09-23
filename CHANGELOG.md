@@ -6046,3 +6046,57 @@ to set the project number will find it.
   published transcript writes into a GitHub comment all still run off links nobody proved. Those
   name somebody; this path acts as them. A mention going to the wrong person is a mistake, and a
   stranger appearing as an assignee is the bot asserting something untrue on a real repository.
+
+## Both halves of the draft switch
+
+Closes #132, #139 and #140. The first of those shipped without an entry here, so this covers the
+feature end to end rather than assuming a predecessor the file never recorded.
+
+- **A pull request leaving draft told nobody, and looked like a draft afterwards.**
+  `ready_for_review` was not a supported action, so the delivery was turned away at the endpoint
+  and nothing behind it ran. Two things followed. The card kept the grey it was painted as a
+  draft until some unrelated delivery happened along, so one that went ready and then sat quiet
+  read as a draft in the channel indefinitely. And the ask a draft defers never arrived: a draft
+  rings nobody deliberately — the CI announcer refuses to notify on one, and the card is grey to
+  say the same thing quietly — and nothing was watching for the moment that stops being true.
+- **`converted_to_draft` was listed in the same breath**, so the card could be repainted. With
+  only one half of the switch a pull request keeps the colour of whichever state it was last told
+  about, which is the same bug pointing the other way.
+- **Not a notifier, and the reason is the one migration 0021 exists for.**
+  `item_assignments.notified_at` answers once for the life of a row, so a reviewer asked while
+  the pull request was still a draft has already spent theirs and the ledger would tell nobody. A
+  claim in `mirrored_notes` is what makes this say a thing once, the same bargain the CI
+  announcer struck.
+- **The author is told when somebody else marks their pull request ready.** Closes #139. The
+  audience was reviewers and assignees, and GitHub refuses a review request from the person who
+  opened a pull request, so the author was never in either list unless somebody had assigned
+  them. The rule stays about the initiator rather than becoming about the author: whoever pressed
+  the button is dropped because they know, which leaves a self-marking author out without
+  mentioning authors at all, and dropping the author instead would get the interesting case
+  backwards — a maintainer marking somebody else's work ready is exactly when its author wants
+  telling.
+- **Going back into draft says so.** Closes #140, and reverses a decision taken in as many words
+  when the other half shipped: that a line announcing it would ring the very people it was
+  withdrawing the ask from. The objection was right about the mechanism and wrong about the
+  balance. Somebody reviewing a pull request that has gone back into draft is spending time on
+  work that is not asking for it, and the alternative to being told is finding out by opening it.
+- **A team is named there, not rung.** The one thing the two halves do differently. A role
+  mention reaches everybody holding the role whatever the allow-list says — `notify` controls
+  users and nothing else — and Discord gives nobody a way to leave one person out of one. Asking
+  a team to look is worth waking them for; telling them to stop looking is not. So a linked team
+  is a role mention on the way out of draft and its plain name on the way back.
+- **Reviewers hear the withdrawal too**, although the issue asked only for assignees and the
+  author. They are the people who were asked to spend time on it, so they are the ones with
+  something to stop doing.
+- **One class, built twice, rather than one with a branch in it.** The two halves differ in four
+  values: the action they answer, the key they claim, the words they post, and whether a team
+  becomes a role mention. A branch inside one instance would sit between which action arrived and
+  which words go under which key, which is the one mistake here that is both silent and
+  permanent — a sentence posted under the other half's key is claimed, and never said again.
+- **Both lines go stale the same way.** A late summons is false once the pull request is a draft
+  again; a late stand-down is false once it is asking again. Each is false loudly, because each
+  rings people, so both sit behind the same staleness guard rather than posting on a superseded
+  delivery the way a tag line deliberately does.
+- **A pull request flipped ready, drafted and ready again rings its audience three times.** The
+  key is per delivery, and that is right rather than a leak: the ask was made, withdrawn, and
+  made again.

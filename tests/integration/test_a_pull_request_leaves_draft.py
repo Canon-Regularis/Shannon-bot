@@ -31,9 +31,9 @@ from shannon.discord_bot.threads import Notify
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.sync.announcements import Arrival
+from shannon.services.sync.draft_lines import READY, DraftSwitchLine
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.policies import PullRequestPolicy
-from shannon.services.sync.ready_lines import ReadyLine
 from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -113,9 +113,10 @@ def handler(sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadG
     return build_item_handler(
         build_item_sync(sessionmaker, threads, PullRequestPolicy()),
         parse_pull_request_event,
-        announce=ReadyLine(
+        announce=DraftSwitchLine(
             sessionmaker,
             threads,
+            half=READY,
             render=format_ready_for_review,
             shut_again=KeepsThreadsShut(sessionmaker, threads),
         ),
@@ -258,7 +259,12 @@ class TestWhoIsTold:
         self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
     ) -> None:
         """They know: they pressed it. Dropped by who acted rather than by who wrote the pull
-        request, so a maintainer marking somebody else's work ready still tells its author."""
+        request, which is the distinction the whole rule turns on.
+
+        Both halves are visible here at once. `monalisa` pressed it and is the only reviewer, so
+        she is named and not rung; `octocat` wrote it, never touched it, and is told. Nobody had
+        to assign him for that to happen, which is what issue #139 changed.
+        """
         await link_account(db_session, "monalisa", MONALISA)
 
         async with registered_stack(db_engine, db_session, threads) as http_client:
@@ -275,14 +281,39 @@ class TestWhoIsTold:
             )
 
         assert lines(threads) == [
-            (f"{HEADING}\n**monalisa** marked this pull request ready for review.", ())
+            (f"{HEADING}\noctocat **monalisa** marked this pull request ready for review.", ())
         ]
 
     async def test_an_author_who_did_not_press_it_is_still_told(
         self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
     ) -> None:
         """The case the initiator rule exists for, and the one an author rule would get backwards:
-        `bigboss` marks `octocat`'s pull request ready, and `octocat` is who wants telling."""
+        `bigboss` marks `octocat`'s pull request ready, and `octocat` is who wants telling.
+
+        Nobody is assigned and nobody is asked to review, so the author is the only person the
+        line can reach. Before issue #139 this test passed by planting the author in `assignees`,
+        which proved the initiator rule and nothing whatever about authors.
+        """
+        await link_account(db_session, "octocat", 111)
+
+        async with registered_stack(db_engine, db_session, threads) as http_client:
+            await opened_as_a_draft(http_client)
+            await deliver(
+                http_client,
+                "pull_request",
+                ready(sender="bigboss", requested_reviewers=[], assignees=[]),
+                delivery="p1",
+            )
+
+        assert lines(threads) == [
+            (f"{HEADING}\n<@111> **bigboss** marked this pull request ready for review.", (111,))
+        ]
+
+    async def test_an_author_who_is_also_assigned_is_named_once(
+        self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """The author reaches the set by two roads now, and a person named twice in one sentence
+        reads as two people. Deduped on the login, like everybody else."""
         await link_account(db_session, "octocat", 111)
 
         async with registered_stack(db_engine, db_session, threads) as http_client:
@@ -300,6 +331,29 @@ class TestWhoIsTold:
 
         assert lines(threads) == [
             (f"{HEADING}\n<@111> **bigboss** marked this pull request ready for review.", (111,))
+        ]
+
+    async def test_a_pull_request_whose_author_has_gone_still_names_the_rest(
+        self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """GitHub sends a null `user` for a deleted account, the same way it does for a sender.
+        The reviewers are still waiting on it whoever opened it."""
+        await link_account(db_session, "monalisa", MONALISA)
+
+        async with registered_stack(db_engine, db_session, threads) as http_client:
+            await opened_as_a_draft(http_client)
+            await deliver(
+                http_client,
+                "pull_request",
+                ready(sender="bigboss", user=None, assignees=[]),
+                delivery="p1",
+            )
+
+        assert lines(threads) == [
+            (
+                f"{HEADING}\n<@{MONALISA}> **bigboss** marked this pull request ready for review.",
+                (MONALISA,),
+            )
         ]
 
     async def test_a_muted_member_is_named_but_not_rung(
@@ -383,16 +437,21 @@ class TestWhoIsTold:
             await deliver(http_client, "pull_request", payload, delivery="p1")
 
         assert said(threads) == [
-            f"{HEADING}\nmonalisa **Unknown** marked this pull request ready for review."
+            f"{HEADING}\nmonalisa octocat **Unknown** marked this pull request ready for review."
         ]
 
 
 class TestWhenItIsSaid:
-    async def test_going_back_into_draft_says_nothing(
+    async def test_the_ready_half_says_nothing_about_going_back_into_draft(
         self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
-        """The other half of the switch is supported so the card can be repainted, and is silent.
-        A line announcing it would ring the very people it was withdrawing the ask from."""
+        """A claim about this half's gate, not about the bot: the other action has had a line of
+        its own since issue #140, and it is posted by a second instance wired beside this one.
+
+        Worth keeping and worth the careful name. `said()` here filters on the ready heading, so
+        this test cannot see the other half's line and would go on passing whatever it said. It
+        proves that one instance answers one action, which is what makes two of them safe.
+        """
         threads = FakeThreadGateway()
         handle = handler(db_sessionmaker, threads)
 
@@ -500,9 +559,10 @@ class TestWhatItIsNotFor:
         snapshot = parse_issue_event("opened", payloads.issue_event("opened"))
         assert snapshot is not None
 
-        await ReadyLine(
+        await DraftSwitchLine(
             db_sessionmaker,
             threads,
+            half=READY,
             render=format_ready_for_review,
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         ).say(
@@ -527,9 +587,10 @@ class TestWhatItIsNotFor:
         snapshot = parse_pull_request_event("ready_for_review", ready())
         assert snapshot is not None
 
-        await ReadyLine(
+        await DraftSwitchLine(
             db_sessionmaker,
             threads,
+            half=READY,
             render=format_ready_for_review,
             shut_again=KeepsThreadsShut(db_sessionmaker, threads),
         ).say(

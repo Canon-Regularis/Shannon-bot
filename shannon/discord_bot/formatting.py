@@ -444,6 +444,51 @@ def format_ready_for_review(
     return _headed(_READY_HEADING, f"{named} {said}".strip(), Accent.OPEN)
 
 
+# Issue #140. The other half of the switch, which issue #132 decided to keep quiet. Grey for the
+# reason the one above is green: it is the colour the card turns in the same breath, and the two
+# disagreeing would be the reader's problem rather than this module's.
+#
+# A mark nothing else here uses, and one that makes no colour claim of its own, so it neither
+# collides with the priority dots nor argues with the bar beside it. It says unfinished, which is
+# the whole of what a draft is.
+_DRAFTED_HEADING = "### 🚧 Back to draft"
+
+
+def format_back_to_draft(
+    initiator: Actor | None,
+    *,
+    people: Sequence[Actor] = (),
+    teams: Sequence[Actor] = (),
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> Panel:
+    """A pull request put back into draft, naming who did it and telling who was waiting on it.
+
+    Its own renderer rather than a flag on the one above, for the reason `format_team_ping` gives
+    at more length: getting the syntax of a mention wrong is silent, and a flag is the shape that
+    lets it happen.
+
+    `roles` is accepted and never read, which is the point of taking it. A team is named here in
+    plain text however it is linked, because a role mention rings everybody holding the role and
+    Discord gives nobody a way to leave one person out of one: asking a team to look is worth
+    that, and telling them to stop looking is not worth waking them for. The caller already hands
+    this an empty mapping, so ignoring the parameter is belt and braces — but the failure it
+    guards against is invisible when it is written and unmutable when it is read, which is the
+    asymmetry that earns the second layer.
+
+    That it takes the argument at all is what lets both halves share one `Renderer`, and one
+    protocol is what lets one announcer class serve both.
+    """
+    named = " ".join(
+        [
+            *(_person(person, mentions) for person in people),
+            *(_role(team.login, None) for team in teams),
+        ]
+    )
+    said = f"**{_account(initiator)}** converted this pull request to draft."
+    return _headed(_DRAFTED_HEADING, f"{named} {said}".strip(), Accent.DRAFT)
+
+
 def format_comment(
     snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,

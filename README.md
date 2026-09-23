@@ -42,12 +42,16 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   and archived out of the channel, and opened again if the item is. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
-- **Leaving draft.** A draft rings nobody on purpose: GitHub runs CI on one like any other pull
-  request, but nobody has been asked to look yet, and the card is grey rather than green to say
-  so. Taking it out of draft is the moment that stops being true, so it posts a header naming
-  whoever pressed the button and ringing everybody the pull request now waits on: its reviewers,
-  its review teams and its assignees, once each, minus the person who pressed it. Going back into
-  draft repaints the card and says nothing, since it asks nobody for anything.
+- **The draft switch.** A draft rings nobody on purpose: GitHub runs CI on one like any other
+  pull request, but nobody has been asked to look yet, and the card is grey rather than green to
+  say so. Both moments that changes now post a header naming whoever pressed the button, and both
+  reach everybody GitHub still lists on the item: its author, its assignees, its reviewers and
+  its review teams, once each, minus the person who pressed it, because they know. Going out of
+  draft is an ask. Going back in withdraws one, which is worth telling the people who were about
+  to answer it rather than leaving them to find out by opening it. A review asked of a team is a
+  role mention on the way out and the team's plain name on the way back, since Discord rings
+  everybody holding a role and gives nobody a way to leave one person out of one: worth it to ask,
+  not worth it to stand down.
 - **Commits.** A push to an open pull request posts a message per commit: who wrote it, its
   subject, its message capped at 250 characters, and the additions, deletions and files changed.
   Ten per push, newest first, with a footnote counting anything left over. Merge commits and

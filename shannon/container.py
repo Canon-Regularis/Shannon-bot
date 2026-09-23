@@ -38,6 +38,7 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.formatting import (
     format_assignee_ping,
+    format_back_to_draft,
     format_check_results,
     format_comment,
     format_commit,
@@ -81,6 +82,7 @@ from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.reviews import ReviewRequestLedger, is_worth_a_message
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.commit_lines import CommitLine
+from shannon.services.sync.draft_lines import DRAFTED, READY, DraftSwitchLine
 from shannon.services.sync.items import (
     ItemSyncService,
     Notifier,
@@ -96,7 +98,6 @@ from shannon.services.sync.policies import (
     TicketPolicy,
     channel_fallbacks,
 )
-from shannon.services.sync.ready_lines import ReadyLine
 from shannon.services.sync.refresh import RepositoryRefresh
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
@@ -453,7 +454,24 @@ def _event_router(
         # rings people, and whether GitHub is reachable should not decide whether the reviewers
         # were told. Its claim is spent by the time a later failure retries the delivery, so the
         # retry finds it said and stays quiet.
-        ReadyLine(sessionmaker, threads, render=format_ready_for_review, shut_again=shut_again),
+        DraftSwitchLine(
+            sessionmaker,
+            threads,
+            half=READY,
+            render=format_ready_for_review,
+            shut_again=shut_again,
+        ),
+        # Issue #140, and the same class built a second time rather than a branch inside the
+        # first, which is the bargain `ItemNoteMirror` above strikes for the same reason: the
+        # words, the key and the treatment of teams are all this differs by, and all three are
+        # what it takes injected. The two actions are disjoint, so at most one ever speaks.
+        DraftSwitchLine(
+            sessionmaker,
+            threads,
+            half=DRAFTED,
+            render=format_back_to_draft,
+            shut_again=shut_again,
+        ),
         CommitLine(
             sessionmaker,
             threads,
