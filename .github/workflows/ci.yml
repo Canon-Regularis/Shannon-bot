@@ -101,6 +101,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The only file mode in this repository that matters, so the only one checked. The server
+      # runs scripts/deploy.sh directly. Committed non-executable it needs a chmod on the box,
+      # and that chmod is a modification to a tracked file which git then refuses to overwrite,
+      # so the first deploy that changes the script aborts at the checkout. That has happened,
+      # it cost a deploy, and nothing in CI noticed the bit was missing in the first place.
+      - name: deploy.sh stays executable
+        run: |
+          mode="$(git ls-files -s scripts/deploy.sh | cut -d" " -f1)"
+          [ "$mode" = "100755" ] || {
+            echo "::error file=scripts/deploy.sh::mode is $mode, must be 100755 or the server cannot run it"
+            exit 1
+          }
+
       # Pinned to the floor rather than left to resolve. Both checkers are configured for 3.12,
       # and a checker run on a newer interpreter quietly stops enforcing the version this project
       # says it supports.

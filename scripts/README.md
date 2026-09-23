@@ -34,7 +34,6 @@ git fetch origin
 # decide before going on; --force after that discards the box's copy.
 git checkout --detach origin/main
 
-chmod +x scripts/deploy.sh
 ./scripts/deploy.sh
 ```
 
@@ -42,6 +41,13 @@ chmod +x scripts/deploy.sh
 checkout leaves it alone, and the named volumes are keyed on the compose project name, which comes
 from the directory name. **Leave the directory called `shannon`.** Rename it and compose starts an
 empty Postgres beside the real one; `deploy.sh` refuses to run rather than let that happen.
+
+`deploy.sh` arrives executable, because git carries the bit. A `chmod +x scripts/deploy.sh` used
+to stand in the block above, and it was the line that eventually stopped a deploy: the script was
+committed non-executable, so the chmod was a real modification to a tracked file and it sat in the
+clone for as long as the box existed. git will not overwrite a dirty file, so the first deploy that
+changed `deploy.sh` aborted at the checkout and said so in git's words rather than anybody's. Do
+not put it back.
 
 Making it a clone fixes a gap the manual process had: `compose.prod.yaml` and `Caddyfile` are
 versioned with the code, and `pull && up -d` never updated them. They were whatever was copied

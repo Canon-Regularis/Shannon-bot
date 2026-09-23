@@ -1,0 +1,12 @@
+# Line endings, pinned rather than left to whoever committed.
+#
+# This project is written on Windows, where git's core.autocrlf does the right thing only while it
+# stays turned on. One commit made with it off would put CRLF into a blob, and the file that
+# cannot survive that is scripts/deploy.sh: the server runs it directly, and bash answers
+# `bad interpreter: /usr/bin/env bash^M`, which names neither the file nor the cause.
+*         text=auto
+
+# Spelled out for the two the server executes or parses, so they do not depend on text=auto's
+# guess about what counts as text.
+*.sh      text eol=lf
+Caddyfile text eol=lf

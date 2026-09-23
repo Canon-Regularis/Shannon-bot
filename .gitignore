@@ -32,3 +32,10 @@ requirements.audit.txt
 .vscode/
 *.swp
 .DS_Store
+
+# Written into the clone on the server by scripts/deploy.sh: the flock target, and the tag to go
+# back to. They are facts about one box rather than about the code, and a deploy that has just
+# refused sends somebody to read `git status` in that directory — which is the worst moment to
+# hand them two untracked files that are not the problem.
+.deploy.lock
+.deploy-previous-tag
