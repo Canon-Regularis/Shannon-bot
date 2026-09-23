@@ -26,7 +26,9 @@
 #     string is a changed container config, and an unchanged one is not.
 #   - /opt/shannon is a git clone rather than a handful of files copied there once, so
 #     compose.prod.yaml and the Caddyfile arrive from the same commit as the image. They are
-#     versioned with the code and the old process never updated them.
+#     versioned with the code and the old process never updated them. Arriving in the clone is
+#     not the same as reaching the process that reads them, which is why caddy is recreated
+#     below rather than left to compose.
 
 set -euo pipefail
 
@@ -290,9 +292,33 @@ fi
 say "Starting $TARGET_COMMIT"
 compose up -d || info "compose up reported an error; the verification below decides"
 
+# Caddy is recreated by hand, every time, because nothing else will do it.
+#
+# The Caddyfile is versioned and arrives with the checkout above, and `compose up -d` leaves the
+# container alone: the image is the same and the mount is the same, and a bind-mounted file's
+# CONTENTS changing is not a change to a container's config. That is the same rule that makes the
+# app restart — a moved tag string IS a config change — working the other way round.
+#
+# Worse than stale, and this is the part that cost days: Docker binds a single file by inode, and
+# `git checkout` replaces the file rather than editing it. So after a pull the container is still
+# reading the old, now-unlinked inode. `caddy reload` does not help and reports success anyway,
+# because it re-reads a path inside the container that no longer tracks the host. Recreating is
+# what re-resolves the mount.
+#
+# Unconditional rather than only when the file changed. Comparing would mean asking the container
+# what it can see, which is the thing in question, and this costs a few seconds in the middle of
+# a deploy that is already restarting the app. The certificates are in a named volume, so nothing
+# is re-requested from Let's Encrypt.
+compose up -d --force-recreate caddy ||
+  info "could not recreate caddy; a proxy rule shipped in this commit may not be live"
+
 # ---------------------------------------------------------------------------------------------
-# Verify against the public URL, the same path GitHub and everyone else uses, so it proves Caddy
-# and the certificate as well as the app.
+# Verify against the public URL, the same path GitHub and everyone else uses, so it proves the
+# certificate and that Caddy is up, as well as the app.
+#
+# Not that Caddy is forwarding correctly, which is a different claim and is checked separately
+# after this succeeds. `/health` was forwarded by every config this proxy has ever run, so it
+# cannot tell a working routing table from one missing everything else.
 
 verify() {
   local want="$1" timeout="$2" deadline
@@ -308,9 +334,37 @@ verify() {
   return 1
 }
 
+# Whether the proxy forwards a route that is not `/health`.
+#
+# `verify` above proves the app is up and that ONE path reaches it. That is not the same claim: an
+# allowlist that forwards `/health` and nothing else passes it forever, which is exactly what
+# happened to `/oauth/*`. Every layer reported success — the pull, the compose up, even a manual
+# `caddy reload` — over a config that was never live, and this was the check that could have said
+# so and did not.
+#
+# A 404 is the tell, because it is what the Caddyfile's catch-all answers. Anything else means the
+# request reached the app, including the 400 this path gives when it is opened with no parameters
+# and the 500 a deployment with no OAuth configured gives. Which of those it is, is the app's
+# business rather than this script's.
+proxy_reaches() {
+  local code
+  code="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "https://${HOSTNAME_VALUE}$1" \
+    2>/dev/null || echo 000)"
+  [ "$code" != "404" ] && [ "$code" != "000" ]
+}
+
 say "Verifying"
 if verify "$TARGET_COMMIT" "$VERIFY_TIMEOUT_SECONDS"; then
-  say "Deployed $TARGET_COMMIT"
+  if proxy_reaches /oauth/github/callback; then
+    say "Deployed $TARGET_COMMIT"
+  else
+    say "Deployed $TARGET_COMMIT, but the proxy is not forwarding everything"
+    info "https://${HOSTNAME_VALUE}/oauth/github/callback answered 404, which is Caddy's"
+    info "catch-all rather than this bot. /link and /unregister hand out links to that path,"
+    info "so both are broken until it is fixed. Check the Caddyfile has a handle block for it"
+    info "and recreate the container:"
+    info "    docker compose -f $COMPOSE_FILE up -d --force-recreate caddy"
+  fi
   info "$HEALTH_BODY"
   exit 0
 fi
