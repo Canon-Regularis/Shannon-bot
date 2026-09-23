@@ -110,11 +110,7 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
         )
         await reply(
             interaction,
-            owed(
-                "Open this link and sign in to GitHub. That is the whole of it: clicking it "
-                "connects whichever account you sign in as, and there is no second "
-                f"command.\n{url}"
-            ),
+            owed(f"Open this link and sign in to GitHub.\n{url}"),
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather

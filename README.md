@@ -198,7 +198,7 @@ and there is nothing wrong: wait, or restart the Discord client, which usually s
 **Then, in the server, in this order.**
 
 ```text
-/register <github_repo_link>          binds the repository, PR threads land in this channel
+/register <github_repo_link>          twice: prove you administer it, then bind it here
 /set_channel issues #channel          where issue threads go
 /set_channel project tickets #channel only if a board is being mirrored
 /link                                 each person, once: open the link and that is it
@@ -347,10 +347,10 @@ at the door.
 | `SHANNON_GITHUB_APP_CLIENT_ID` | empty | The App's client id. Used as the JWT issuer and as the OAuth `client_id`, so one value serves both |
 | `SHANNON_GITHUB_APP_PRIVATE_KEY` | empty | The `.pem` GitHub issued, newlines written as `
 `. Signs the JWT that is traded for an installation token |
-| `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/unregister`. Empty makes `/unregister` refuse rather than hand out a broken link |
+| `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/link`, `/register` and `/unregister`. Empty makes all three refuse rather than hand out a broken link, which since issue #135 means a deployment without it cannot bind a repository at all |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
-| `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App |
-| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured |
+| `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
+| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with user Projects: Read-only. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
@@ -411,7 +411,7 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/register <github_repo_link>` | Admin, Project Manager | Binds a repository to this server and points PR threads at the current channel. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
+| `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
 | `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |

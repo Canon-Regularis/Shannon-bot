@@ -33,6 +33,10 @@ FINISHED: Final[dict[VerificationPurpose, str]] = {
         "Signed in as {login}.\n\nThat server has your GitHub account on record now. "
         "There is nothing else to run."
     ),
+    VerificationPurpose.REGISTER: (
+        "Signed in as {login}.\n\nGo back to Discord and run /register again, with the same "
+        "repository link, to finish."
+    ),
     VerificationPurpose.UNREGISTER: (
         "Signed in as {login}.\n\nGo back to Discord and run /unregister again to finish."
     ),

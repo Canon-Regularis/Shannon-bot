@@ -9,25 +9,66 @@ from discord import app_commands
 from shannon.commands._guards import NOT_IN_A_SERVER
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
+from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, refused, reply
+from shannon.discord_bot.responses import defer, done, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
+from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
 from shannon.services.registration import RegistrationResult
 
 logger = logging.getLogger(__name__)
+
+NOT_CONFIGURED = (
+    "This bot cannot check who you are on GitHub, so it will not bind a repository to this "
+    "server. An admin needs to set the GitHub App's client secret and this deployment's public "
+    "URL."
+)
 
 
 class RegistersRepositories(Protocol):
     """Binding a GitHub repository to this server."""
 
     async def register(
-        self, *, guild_id: int, channel_id: int, link: str
+        self, *, guild_id: int, channel_id: int, link: str, login: str
     ) -> RegistrationResult: ...
 
 
-def build_register_command(service: RegistersRepositories, gate: PermissionGate) -> SlashCommand:
+class VerifiesIdentity(Protocol):
+    """Proving which GitHub account somebody holds, right now.
+
+    `proved_just_now` rather than ever: binding a repository discloses everything in it to a
+    Discord channel, so what matters is that the person is at the keyboard having just come back
+    from the browser, not that they once were.
+    """
+
+    @property
+    def configured(self) -> bool: ...
+
+    async def proved_just_now(
+        self, *, guild_id: int, discord_user_id: int
+    ) -> ProvedAccount | None: ...
+
+    async def link_for(
+        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+    ) -> str: ...
+
+
+def build_register_command(
+    service: RegistersRepositories, verification: VerifiesIdentity, gate: PermissionGate
+) -> SlashCommand:
+    """Two runs, for the reason `/unregister` takes two. Issue #135.
+
+    A Discord role said who could bind a repository, and a guild administrator holds that role
+    automatically in every server this bot was invited to. So anybody who administered any server
+    could mirror any repository the App is installed on — including a private one they had no
+    GitHub relationship with — into a channel of their choosing.
+
+    The role gate stays, and stays first: minting a link writes an unauthenticated row, and
+    somebody who could not run the command anyway is not told how the deployment is configured.
+    """
+
     @app_commands.command(
         name="register", description="Bind a GitHub repository to this Discord server"
     )
@@ -46,13 +87,38 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
         if refusal is not None:
             await reply(interaction, refused(f"Threads cannot be opened here. {refusal}"))
             return
+        # Above the browser trip rather than after it: sending somebody to GitHub and then
+        # refusing them on something already known is a round trip spent for nothing.
+        if not verification.configured:
+            await reply(interaction, refused(NOT_CONFIGURED))
+            return
 
         await defer(interaction)
         try:
+            proved = await verification.proved_just_now(
+                guild_id=interaction.guild_id, discord_user_id=interaction.user.id
+            )
+            if proved is None:
+                link = await verification.link_for(
+                    guild_id=interaction.guild_id,
+                    discord_user_id=interaction.user.id,
+                    purpose=VerificationPurpose.REGISTER,
+                )
+                await reply(
+                    interaction,
+                    owed(
+                        "First, prove to GitHub that you administer this repository. Open this "
+                        "link, then run /register again with the same repository "
+                        f"link:\n{link}"
+                    ),
+                )
+                return
+
             result = await service.register(
                 guild_id=interaction.guild_id,
                 channel_id=interaction.channel_id,
                 link=github_repo_link,
+                login=proved.login,
             )
         except ShannonError as error:
             logger.warning("register failed: %s", error.message)

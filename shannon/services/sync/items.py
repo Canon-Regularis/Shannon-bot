@@ -763,9 +763,10 @@ class ItemSyncService:
                 item.last_delivery_id = arrived
 
         # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
-        # and `/link` lets anybody bind a name to their own account without GitHub being asked
-        # whether it is theirs, so a member can claim `security` and the account map cannot tell
-        # that from the real thing.
+        # so somebody may genuinely hold the user account `security` while a team of that name
+        # also exists, and proving one says nothing about the other. Before issue #144 a member
+        # could simply claim the name; now they can hold it, and the account map still cannot
+        # tell a person from a team.
         #
         # Belt and braces, and worth saying which is which. The renderer is what actually keeps a
         # claimed slug out of a thread: it names teams plainly and never looks one up here. This

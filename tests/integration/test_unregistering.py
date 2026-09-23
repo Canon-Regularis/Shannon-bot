@@ -703,8 +703,22 @@ class TestWhatTheBrowserIsToldNext:
         assert "nothing else to run" in said
         assert "again" not in said, "the click is the whole of it now"
 
-    async def test_both_pages_name_the_account_that_signed_in(self) -> None:
-        """Somebody who typed the wrong login into `/link` years ago finds out here."""
+    async def test_binding_is_told_to_come_back_with_the_same_link(self) -> None:
+        """Issue #135. `/register` reads the repository off its argument rather than off a stored
+        row, so the second run has to be given the same one, and the page is where somebody finds
+        that out. Coming back with a different link is refused by the permission check with no
+        way to tell why."""
+        said = oauth.FINISHED[VerificationPurpose.REGISTER]
+
+        assert "/register again" in said
+        assert "same" in said and "link" in said
+
+    async def test_every_page_names_the_account_that_signed_in(self) -> None:
+        """Somebody who typed the wrong login into `/link` years ago finds out here.
+
+        Over the whole mapping rather than a list, so a purpose added later is enrolled by
+        existing rather than by somebody remembering to add it.
+        """
         for said in oauth.FINISHED.values():
             assert said.format(login="octocat").startswith("Signed in as octocat.")
 
