@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     # Whether a link nobody proved may be used to write to GitHub. `/link` records a login an
     # admin typed and nobody checked, so a wrong one acts on a real repository under somebody
-    # else's name. Off by default, because turning it on before people have run `/verify` refuses
+    # else's name. Off by default, because turning it on before people have run `/link` refuses
     # every assignment in the server; until then an unproved link still works and the reply says
     # so. Ignored where the round trip is not configured at all, since refusing a command nobody
     # could satisfy is only a way to break it.

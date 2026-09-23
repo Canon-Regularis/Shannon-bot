@@ -18,33 +18,59 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.base import interval, rows_changed
 from shannon.db.models import IdentityVerification, VerifiedIdentity
+from shannon.domain.enums import VerificationPurpose
+
+
+@dataclass(frozen=True, slots=True)
+class SpentLink:
+    """Whose one-time link was just spent, and what spending it finishes.
+
+    A value object rather than the tuple this used to be. Two ids and an enum read as nothing at
+    all positionally, and the two ids are both integers, so a call site that swapped them would
+    bind the wrong person and fail nowhere.
+    """
+
+    guild_id: int
+    discord_user_id: int
+    purpose: VerificationPurpose
 
 
 class IdentityVerificationStore:
-    """The one-time links handed out by `/unregister`, and the single use of each."""
+    """The one-time links the two commands that need one hand out, and the single use of each."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def issue(
-        self, *, state: str, guild_id: int, discord_user_id: int, lifetime: timedelta
+        self,
+        *,
+        state: str,
+        guild_id: int,
+        discord_user_id: int,
+        purpose: VerificationPurpose,
+        lifetime: timedelta,
     ) -> None:
         """Hand out a link that expires a fixed time from now.
 
         The moment is computed by the database, because `consume` expires a row against `now()`
         and a row stamped by the application would be compared against a different clock.
+
+        The purpose is written now because it cannot be worked out later: the callback is a
+        browser arriving with nothing but the state, and what it should say next depends on which
+        command sent the person away.
         """
         await self._session.execute(
             pg_insert(IdentityVerification).values(
                 state=state,
                 discord_guild_id=guild_id,
                 discord_user_id=discord_user_id,
+                purpose=purpose,
                 expires_at=func.now() + interval(lifetime),
             )
         )
 
-    async def consume(self, state: str) -> tuple[int, int] | None:
-        """Spend a link, answering whose it was, or None if it cannot be spent.
+    async def consume(self, state: str) -> SpentLink | None:
+        """Spend a link, answering whose it was and what it finishes, or None if it cannot be spent.
 
         Filter, stamp and answer in one statement, so two clicks on the same link race in
         Postgres and exactly one of them wins. One answer for expired, already used and never
@@ -59,10 +85,16 @@ class IdentityVerificationStore:
                 IdentityVerification.expires_at > func.now(),
             )
             .values(consumed_at=func.now())
-            .returning(IdentityVerification.discord_guild_id, IdentityVerification.discord_user_id)
+            .returning(
+                IdentityVerification.discord_guild_id,
+                IdentityVerification.discord_user_id,
+                IdentityVerification.purpose,
+            )
         )
         found = spent.first()
-        return (found[0], found[1]) if found is not None else None
+        if found is None:
+            return None
+        return SpentLink(guild_id=found[0], discord_user_id=found[1], purpose=found[2])
 
     async def prune(self, *, keep_for: timedelta) -> int:
         """Drop links that are long past being usable."""

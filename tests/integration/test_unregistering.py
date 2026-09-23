@@ -25,8 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.api.routes import oauth
 from shannon.db.models import Repository, TrackedItem, VerifiedIdentity
-from shannon.db.stores.identities import IdentityVerificationStore
-from shannon.domain.enums import ObjectType
+from shannon.db.stores.identities import IdentityVerificationStore, SpentLink
+from shannon.domain.enums import ObjectType, VerificationPurpose
 from shannon.domain.errors import NotProvenError, NotRegisteredError, RepositoryMismatchError
 from shannon.services.unregistration import RepositoryUnregistrationService
 from shannon.services.verification import (
@@ -85,6 +85,23 @@ def github_says(
     return handler, seen
 
 
+class RecordingLinks:
+    """Where a redeemed `/link` writes, for tests that are about the other half.
+
+    Real enough to prove the call was or was not made, and no further: what it writes is the
+    subject of `test_linking_through_github.py`, and this file is about unbinding.
+    """
+
+    def __init__(self) -> None:
+        self.bound: list[tuple[int, int, str, int]] = []
+
+    async def bind(
+        self, *, guild_id: int, discord_user_id: int, login: str, github_user_id: int
+    ) -> str:
+        self.bound.append((guild_id, discord_user_id, login, github_user_id))
+        return login.lower()
+
+
 @asynccontextmanager
 async def verifying(
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -93,10 +110,12 @@ async def verifying(
     clock: Clock | None = None,
     client_secret: str = "shh",
     public_base_url: str = "https://shannon.example.com",
+    links: RecordingLinks | None = None,
 ) -> AsyncIterator[GitHubIdentityVerification]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         yield GitHubIdentityVerification(
             sessionmaker,
+            links or RecordingLinks(),
             client_id="Iv23liAbC",
             client_secret=client_secret,
             oauth_url="https://github.com",
@@ -113,7 +132,9 @@ class TestHandingOutTheLink:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
         assert link.startswith("https://github.com/login/oauth/authorize?")
         assert "client_id=Iv23liAbC" in link
@@ -127,7 +148,9 @@ class TestHandingOutTheLink:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
         assert "scope=" not in link
 
@@ -139,7 +162,9 @@ class TestHandingOutTheLink:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
         assert "redirect_uri=https://shannon.example.com/oauth/github/callback" in link
 
@@ -149,8 +174,12 @@ class TestHandingOutTheLink:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            first = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
-            second = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            first = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
+            second = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
         assert first != second
 
@@ -172,7 +201,9 @@ class TestRedeemingIt:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             verified = await verification.redeem(state=_state(link), code="abc")
 
         assert (verified.login, verified.github_user_id) == ("octocat", 583231)
@@ -187,7 +218,9 @@ class TestRedeemingIt:
         handler, _ = github_says(token="gho_secret_value")
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             await verification.redeem(state=_state(link), code="abc")
 
         rows = (await db_session.scalars(select(VerifiedIdentity))).all()
@@ -204,7 +237,9 @@ class TestRedeemingIt:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             await verification.redeem(state=_state(link), code="abc")
 
             proved = await verification.proved_just_now(guild_id=GUILD, discord_user_id=ALICE)
@@ -220,7 +255,9 @@ class TestRedeemingIt:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler, clock=clock) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             await verification.redeem(state=_state(link), code="abc")
             clock.at = NOW + timedelta(days=400)
 
@@ -238,7 +275,9 @@ class TestRedeemingIt:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler, clock=clock) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             await verification.redeem(state=_state(link), code="abc")
             clock.at = NOW + PROOF_LIFETIME + timedelta(seconds=1)
 
@@ -250,7 +289,9 @@ class TestRedeemingIt:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             state = _state(link)
             await verification.redeem(state=state, code="abc")
 
@@ -274,7 +315,11 @@ class TestRedeemingIt:
         self, db_session: AsyncSession, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         await IdentityVerificationStore(db_session).issue(
-            state="old", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(minutes=-1)
+            state="old",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.UNREGISTER,
+            lifetime=timedelta(minutes=-1),
         )
         await db_session.commit()
         handler, _ = github_says()
@@ -292,7 +337,9 @@ class TestRedeemingIt:
         handler, _ = github_says(token=None)
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
             with pytest.raises(VerificationError, match="would not complete the sign-in"):
                 await verification.redeem(state=_state(link), code="wrong")
@@ -307,7 +354,9 @@ class TestRedeemingIt:
             return httpx.Response(200, content=b"<html>an outage page</html>")
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
             with pytest.raises(VerificationError, match="would not complete the sign-in"):
                 await verification.redeem(state=_state(link), code="abc")
@@ -319,7 +368,9 @@ class TestRedeemingIt:
             return httpx.Response(200, content=json.dumps(["not", "an", "object"]))
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
             with pytest.raises(VerificationError, match="would not complete the sign-in"):
                 await verification.redeem(state=_state(link), code="abc")
@@ -331,7 +382,9 @@ class TestRedeemingIt:
         handler, _ = github_says(**missing)
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
 
             with pytest.raises(VerificationError, match="would not say who signed in"):
                 await verification.redeem(state=_state(link), code="abc")
@@ -490,7 +543,9 @@ class TestTheCallbackRoute:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             async with _browser(verification) as client:
                 response = await client.get(
                     "/oauth/github/callback", params={"code": "abc", "state": _state(link)}
@@ -506,7 +561,9 @@ class TestTheCallbackRoute:
         handler, _ = github_says()
 
         async with verifying(db_sessionmaker, handler) as verification:
-            link = await verification.link_for(guild_id=GUILD, discord_user_id=ALICE)
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.UNREGISTER
+            )
             state = _state(link)
             async with _browser(verification) as client:
                 response = await client.get(
@@ -587,7 +644,11 @@ class TestClearingOutTheLinks:
     ) -> None:
         handler, _ = github_says()
         await IdentityVerificationStore(db_session).issue(
-            state="stale", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(days=-3)
+            state="stale",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.UNREGISTER,
+            lifetime=timedelta(days=-3),
         )
         await db_session.commit()
 
@@ -601,14 +662,51 @@ class TestClearingOutTheLinks:
     ) -> None:
         handler, _ = github_says()
         await IdentityVerificationStore(db_session).issue(
-            state="live", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(minutes=10)
+            state="live",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.UNREGISTER,
+            lifetime=timedelta(minutes=10),
         )
         await db_session.commit()
 
         async with verifying(db_sessionmaker, handler) as verification:
             assert await verification.prune(keep_for=timedelta(days=1)) == 0
 
-        assert await IdentityVerificationStore(db_session).consume("live") == (GUILD, ALICE)
+        assert await IdentityVerificationStore(db_session).consume("live") == SpentLink(
+            GUILD, ALICE, VerificationPurpose.UNREGISTER
+        )
+
+
+class TestWhatTheBrowserIsToldNext:
+    """The page has to name a next step, and until issue #144 it could not.
+
+    Two commands share this callback and the row recorded neither, so it told everybody to "run
+    the command again" and left which one to them. Naming the wrong one sends somebody to a
+    command they are not allowed to run; naming none leaves the person who has just finished
+    `/link` looking for a second step that does not exist.
+    """
+
+    async def test_every_purpose_has_a_page(self) -> None:
+        """Totality held here rather than by a branch, because the cost of missing one is a
+        KeyError in front of somebody who has just signed in to GitHub."""
+        assert set(oauth.FINISHED) == set(VerificationPurpose)
+
+    async def test_unbinding_is_told_to_go_back_and_run_it_again(self) -> None:
+        """The half that deliberately does not finish on the click: the permission check and the
+        unbinding both need somebody to report the answer to, and a browser page is not that."""
+        assert "/unregister again" in oauth.FINISHED[VerificationPurpose.UNREGISTER]
+
+    async def test_linking_is_told_there_is_nothing_else_to_run(self) -> None:
+        said = oauth.FINISHED[VerificationPurpose.LINK]
+
+        assert "nothing else to run" in said
+        assert "again" not in said, "the click is the whole of it now"
+
+    async def test_both_pages_name_the_account_that_signed_in(self) -> None:
+        """Somebody who typed the wrong login into `/link` years ago finds out here."""
+        for said in oauth.FINISHED.values():
+            assert said.format(login="octocat").startswith("Signed in as octocat.")
 
 
 def _state(link: str) -> str:

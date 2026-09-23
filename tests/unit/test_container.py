@@ -132,7 +132,6 @@ class TestWhatItWiresUp:
             "unlabel",
             "unregister",
             "unrequest_review",
-            "verify",
         ]
 
     async def test_the_router_handles_every_event_the_webhook_accepts(self) -> None:

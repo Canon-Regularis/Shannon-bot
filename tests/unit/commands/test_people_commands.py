@@ -186,7 +186,7 @@ class TestWhatItSays:
         await command.callback(interaction, member)
 
         assert interaction.reply.startswith(f"Assigned <@{WHO}> to acme/widget#7.")
-        assert "run /verify" in interaction.reply
+        assert "run /link" in interaction.reply
 
     async def test_a_proved_one_says_nothing_extra(self) -> None:
         """A note under every reply is a note nobody reads, and almost every link will be proved

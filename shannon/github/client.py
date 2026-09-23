@@ -100,7 +100,14 @@ class ListsOpenItems(LooksUpRepository, Protocol):
 
 
 class LooksUpUsers(Protocol):
-    """Asking who holds a GitHub login, which is all `/link` needs."""
+    """Asking who holds a GitHub login, by the id that outlasts it.
+
+    Nothing in `shannon/` consumes this today. `/link` did, back when it took a login somebody
+    typed and had to find out whether anybody held it; issue #144 took the typing away, so the
+    question stopped being asked. Kept rather than deleted because it is a correct, tested thing
+    the client can do and the next feature that starts from a name will want it, and because an
+    orphan with no note on it is what rots. `user_id` below is its only implementation.
+    """
 
     async def user_id(self, login: str) -> int | None: ...
 

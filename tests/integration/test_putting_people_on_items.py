@@ -689,7 +689,7 @@ class TestALinkNobodyProved:
 
     So a wrong one acts on a real repository as somebody who has nothing to do with the member
     named in the command. Warned about by default and refused once the server has had the chance
-    to run `/verify`, because refusing on the day this ships would stop every assignment at once.
+    to run `/link`, because refusing on the day this ships would stop every assignment at once.
     """
 
     async def test_an_unproved_link_still_works_and_says_so(
@@ -724,7 +724,7 @@ class TestALinkNobodyProved:
     ) -> None:
         service = people_service(db_sessionmaker, github, FakeProof(), require_proved=True)
 
-        with pytest.raises(WorkflowRefusedError, match="run /verify"):
+        with pytest.raises(WorkflowRefusedError, match="run /link"):
             await service.assign(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
 
         assert github.people_calls == []
@@ -758,7 +758,7 @@ class TestALinkNobodyProved:
         github.issues[(REPO_FULL, 12)] = replace(issue_event("opened"), assignees=(NEWBIE,))
         service = people_service(db_sessionmaker, github, FakeProof(), require_proved=True)
 
-        with pytest.raises(WorkflowRefusedError, match="run /verify"):
+        with pytest.raises(WorkflowRefusedError, match="run /link"):
             await service.unassign(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
 
         assert github.people_calls == []
@@ -772,7 +772,7 @@ class TestALinkNobodyProved:
         threads: FakeThreadGateway,
     ) -> None:
         """The escape hatch, and it is load-bearing. Without a public URL the round trip cannot
-        run, so `/verify` refuses too; enforcing there would leave every member holding a link
+        run, so `/link` refuses too; enforcing there would leave every member holding a link
         they have no way to prove and a command that will not act on it."""
         service = people_service(
             db_sessionmaker, github, FakeProof(configured=False), require_proved=True
@@ -819,7 +819,7 @@ class TestALinkNobodyProved:
         github.logins = {1234: "newbie"}
         service = people_service(db_sessionmaker, github, proof, require_proved=True)
 
-        with pytest.raises(WorkflowRefusedError, match="run /verify"):
+        with pytest.raises(WorkflowRefusedError, match="run /link"):
             await service.assign(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
 
     async def test_a_row_from_before_the_id_column_cannot_be_proved(

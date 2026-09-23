@@ -13,6 +13,7 @@ import pytest
 
 from shannon.commands.unregister import build_unregister_command
 from shannon.db.stores.identities import ProvedAccount
+from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import NotProvenError, NotRegisteredError, RepositoryMismatchError
 from shannon.services.unregistration import UnregisterOutcome
 from tests.fakes.discord_objects import FakeInteraction
@@ -31,6 +32,7 @@ class FakeVerification:
         # stands for is built below, so no test has to name an id it does not care about.
         self.proved = proved
         self.links_handed_out = 0
+        self.purposes: list[VerificationPurpose] = []
 
     async def proved_just_now(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
         if self.proved is None:
@@ -39,8 +41,11 @@ class FakeVerification:
             login=self.proved, github_user_id=583231, verified_at=datetime(2026, 9, 17, tzinfo=UTC)
         )
 
-    async def link_for(self, *, guild_id: int, discord_user_id: int) -> str:
+    async def link_for(
+        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+    ) -> str:
         self.links_handed_out += 1
+        self.purposes.append(purpose)
         return "https://github.com/login/oauth/authorize?state=abc"
 
 

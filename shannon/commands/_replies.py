@@ -26,7 +26,7 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubRefusedError,
 )
-from shannon.services.linking import InvalidGitHubTeamError, InvalidGitHubUsernameError
+from shannon.services.linking import InvalidGitHubTeamError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.sync.one_at_a_time import ItemBusyError
 from shannon.services.transcripts.log import (
@@ -87,7 +87,6 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (RepositoryMismatchError, "{message}"),
     (DuplicateRegistrationError, "{message}"),
     (SyncFailedError, "{message}"),
-    (InvalidGitHubUsernameError, "{message}"),
     (InvalidGitHubTeamError, "{message}"),
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),

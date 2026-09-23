@@ -18,7 +18,7 @@ import pytest
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
 from shannon.commands.conversations import LogsConversations
-from shannon.commands.link import LinksAccounts
+from shannon.commands.link import ProvesIdentity
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.people import PutsSomebodyOnAnItem
@@ -114,7 +114,7 @@ from shannon.services.unregistration import (
     ReadsPermissions,
     RepositoryUnregistrationService,
 )
-from shannon.services.verification import GitHubIdentityVerification
+from shannon.services.verification import BindsProvedAccounts, GitHubIdentityVerification
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.handlers import RecordingHandler
@@ -187,7 +187,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (FlushesTranscripts, TranscriptFlusher),
     (SaysThings, FakeGitHubClient),
     (SaysThings, HttpGitHubClient),
-    (LinksAccounts, UserLinkingService),
+    (BindsProvedAccounts, UserLinkingService),
+    (ProvesIdentity, GitHubIdentityVerification),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
     (ResolvesMentions, TeamLinkStore),

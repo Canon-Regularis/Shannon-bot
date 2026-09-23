@@ -22,9 +22,11 @@ from shannon.db.models import GitHubInstallation, IdentityVerification
 from shannon.db.stores.identities import (
     IdentityVerificationStore,
     ProvedAccount,
+    SpentLink,
     VerifiedIdentityStore,
 )
 from shannon.db.stores.installations import InstallationStore
+from shannon.domain.enums import VerificationPurpose
 from tests.support.db import blocked_on_a_row
 
 pytestmark = pytest.mark.integration
@@ -242,23 +244,41 @@ class TestTwoWritersOfOneAccount:
 class TestTheOneTimeLink:
     async def test_a_link_can_be_spent_once(self, db_session: AsyncSession) -> None:
         store = IdentityVerificationStore(db_session)
-        await store.issue(state="s1", guild_id=GUILD, discord_user_id=ALICE, lifetime=LIVE)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
 
-        assert await store.consume("s1") == (GUILD, ALICE)
+        assert await store.consume("s1") == SpentLink(GUILD, ALICE, VerificationPurpose.LINK)
 
     async def test_and_not_twice(self, db_session: AsyncSession) -> None:
         """The whole reason `consume` is one statement. A read followed by a write leaves a window
         where two clicks both see an unspent row, and the loser unbinds a repository on a link
         that had already been used."""
         store = IdentityVerificationStore(db_session)
-        await store.issue(state="s1", guild_id=GUILD, discord_user_id=ALICE, lifetime=LIVE)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
         await store.consume("s1")
 
         assert await store.consume("s1") is None
 
     async def test_an_expired_link_cannot_be_spent(self, db_session: AsyncSession) -> None:
         store = IdentityVerificationStore(db_session)
-        await store.issue(state="s1", guild_id=GUILD, discord_user_id=ALICE, lifetime=-LIVE)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=-LIVE,
+        )
 
         assert await store.consume("s1") is None
 
@@ -267,12 +287,24 @@ class TestTheOneTimeLink:
 
     async def test_spending_one_link_leaves_another_alone(self, db_session: AsyncSession) -> None:
         store = IdentityVerificationStore(db_session)
-        await store.issue(state="s1", guild_id=GUILD, discord_user_id=ALICE, lifetime=LIVE)
-        await store.issue(state="s2", guild_id=GUILD, discord_user_id=BOB, lifetime=LIVE)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
+        await store.issue(
+            state="s2",
+            guild_id=GUILD,
+            discord_user_id=BOB,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
 
         await store.consume("s1")
 
-        assert await store.consume("s2") == (GUILD, BOB)
+        assert await store.consume("s2") == SpentLink(GUILD, BOB, VerificationPurpose.LINK)
 
     async def test_a_spent_link_is_stamped_rather_than_deleted(
         self, db_session: AsyncSession
@@ -280,7 +312,13 @@ class TestTheOneTimeLink:
         """Kept so that a second click can be told apart from a state that never existed, which is
         the difference between a helpful page and a confusing one."""
         store = IdentityVerificationStore(db_session)
-        await store.issue(state="s1", guild_id=GUILD, discord_user_id=ALICE, lifetime=LIVE)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
 
         await store.consume("s1")
 
@@ -293,14 +331,24 @@ class TestTheOneTimeLink:
     async def test_pruning_drops_links_long_past_use(self, db_session: AsyncSession) -> None:
         store = IdentityVerificationStore(db_session)
         await store.issue(
-            state="old", guild_id=GUILD, discord_user_id=ALICE, lifetime=timedelta(days=-3)
+            state="old",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=timedelta(days=-3),
         )
-        await store.issue(state="live", guild_id=GUILD, discord_user_id=BOB, lifetime=LIVE)
+        await store.issue(
+            state="live",
+            guild_id=GUILD,
+            discord_user_id=BOB,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
 
         removed = await store.prune(keep_for=timedelta(days=1))
 
         assert removed == 1
-        assert await store.consume("live") == (GUILD, BOB)
+        assert await store.consume("live") == SpentLink(GUILD, BOB, VerificationPurpose.LINK)
 
     async def test_pruning_an_empty_table_removes_nothing(self, db_session: AsyncSession) -> None:
         assert await IdentityVerificationStore(db_session).prune(keep_for=timedelta(days=1)) == 0
@@ -468,3 +516,47 @@ class TestAProofThatDoesNotGoStale:
             await VerifiedIdentityStore(db_session).proved(guild_id=GUILD, discord_user_id=ALICE)
             is None
         )
+
+
+class TestWhichCommandAskedForIt:
+    """The callback is a browser arriving with nothing but a state, so the row is the only record
+    of what the person was in the middle of. Issue #144."""
+
+    async def test_the_purpose_survives_the_round_trip(self, db_session: AsyncSession) -> None:
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.UNREGISTER,
+            lifetime=LIVE,
+        )
+
+        assert await store.consume("s1") == SpentLink(GUILD, ALICE, VerificationPurpose.UNREGISTER)
+
+    async def test_two_links_for_one_person_keep_their_own_purposes(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Somebody part way through one command can start the other, and spending either must
+        not tell the page what the other was for."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="linking",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
+        await store.issue(
+            state="unbinding",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.UNREGISTER,
+            lifetime=LIVE,
+        )
+
+        first = await store.consume("unbinding")
+        second = await store.consume("linking")
+
+        assert first is not None and first.purpose is VerificationPurpose.UNREGISTER
+        assert second is not None and second.purpose is VerificationPurpose.LINK

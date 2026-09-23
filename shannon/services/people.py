@@ -273,7 +273,7 @@ class ItemPeople:
         """Whether an unproved link refuses rather than warns.
 
         Both halves, because the setting on its own is not enough. A deployment with no public
-        URL cannot run the round trip, so `/verify` refuses there too, and turning this on would
+        URL cannot run the round trip, so `/link` refuses there too, and turning this on would
         leave every member of that server holding a link they have no way to prove and a command
         that will not act on it.
         """
@@ -297,7 +297,7 @@ class ItemPeople:
             raise WorkflowRefusedError(
                 f"Nobody has proved that {login} is the GitHub account of the person being put "
                 "on this item, so this bot will not act as them. Whoever holds that account can "
-                "run /verify to settle it."
+                "run /link to settle it."
             )
 
         if role is ActorRole.REVIEWER:

@@ -74,3 +74,19 @@ class DeliveryStatus(StrEnum):
     @classmethod
     def terminal(cls) -> tuple[DeliveryStatus, ...]:
         return tuple(status for status in cls if status not in cls.live())
+
+
+class VerificationPurpose(StrEnum):
+    """Which command asked for a one-time link, and so what spending it finishes.
+
+    The callback is a browser arriving unauthenticated, so the row is the only record of what the
+    person was in the middle of. `/link` is finished by the click itself; `/unregister` is
+    deliberately not, because the permission check and the unbinding both need somebody to report
+    the answer to.
+
+    Values come and go without a migration: the column is a plain varchar with no constraint,
+    which is what `varchar_enum` buys.
+    """
+
+    LINK = "LINK"
+    UNREGISTER = "UNREGISTER"

@@ -27,7 +27,6 @@ from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
 from shannon.services.sync.policies import PullRequestPolicy
-from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import build_stack
@@ -447,12 +446,15 @@ class TestAskingATeamAgain:
 
 
 class TestATeamIsNotAPerson:
-    """A slug and a login are separate namespaces on GitHub, and one of them is claimable here.
+    """A slug and a login are separate namespaces on GitHub, and one of them is reachable here.
 
-    `/link` binds a GitHub name to a Discord account with no gate when somebody claims it for
-    themselves, and GitHub is never asked whether the name is theirs. So a member can link
-    `security` to themselves, and if a team slug were ever looked up in the account map they
-    would appear as, and be pinged as, the `security` team on every pull request in the server.
+    This used to rest on `/link` taking somebody's word for a name. It does not any more, and the
+    hole it guards is unchanged and now easier to state: proving you hold the user account
+    `security` is a fact about a person, and it says nothing whatever about the team of that name.
+    The two live in different namespaces, so both can exist and somebody can genuinely own one of
+    them. If a team slug were ever looked up in the account map, that person would appear as, and
+    be pinged as, the `security` team on every pull request in the server — on the strength of a
+    proof about something else entirely.
     """
 
     async def test_a_team_is_never_rendered_as_a_linked_person(
@@ -464,8 +466,8 @@ class TestATeamIsNotAPerson:
     ) -> None:
         from shannon.services.linking import UserLinkingService
 
-        await UserLinkingService(db_sessionmaker, FakeGitHubClient()).link(
-            guild_id=1, github_username="security", discord_user_id=424242
+        await UserLinkingService(db_sessionmaker).bind(
+            guild_id=1, discord_user_id=424242, login="security", github_user_id=424242
         )
 
         await notifying.sync(asked_of("security"))
@@ -485,8 +487,8 @@ class TestATeamIsNotAPerson:
         """The ping reads the team map, which only /link_team writes, and that one is gated."""
         from shannon.services.linking import UserLinkingService
 
-        await UserLinkingService(db_sessionmaker, FakeGitHubClient()).link(
-            guild_id=1, github_username="security", discord_user_id=424242
+        await UserLinkingService(db_sessionmaker).bind(
+            guild_id=1, discord_user_id=424242, login="security", github_user_id=424242
         )
 
         await notifying.sync(asked_of("security"))
