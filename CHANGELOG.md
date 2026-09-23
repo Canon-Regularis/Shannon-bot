@@ -6196,3 +6196,104 @@ feature end to end rather than assuming a predecessor the file never recorded.
   stragglers that `/set_channel pull requests` can no longer collect; `/set_channel issues` does,
   in one run. And a pin to a channel since deleted in Discord is no worse than the row it was
   copied from, which names the same dead channel.
+
+## One vocabulary for everything this bot says
+
+- **Twenty-five commands each worded their replies their own way.** Closes #147. The per-command
+  tests pin what each one says and none of them can see what the others say, so the inconsistencies
+  were not bugs anybody could have caught — they were invisible by construction. Thirty-three of
+  them, and the issue's own list named `/set_medium_priority`, which has never existed: the command
+  is `set_med_priority`, and `/set_done` was missing from the list entirely.
+- **A status stopped being shouted at people.** `READY_FOR_MERGE` was interpolated straight into a
+  reply and into the item card, because `.value` is the display string, the GitHub label name and
+  the varchar in `tracked_items` all at once. It is three things and none of them is a sentence, so
+  the display form is now its own table. The label and the column are untouched, and a test proves
+  they can never be the same string: unifying them would have `/set_ready_for_merge` write a brand
+  new `Ready for merge` label onto the repository, which nothing here can take off again.
+- **Three marks, and one place that puts them on.** A tick for done, a warning for something still
+  owed, a cross for something refused. `reply` takes a panel and nothing else now, so a reply
+  carrying no mark is not a thing this project can express rather than a thing nobody happens to
+  write — both type checkers hold it, which is a stronger promise than a test. Twenty refusals used
+  to arrive as bare uncoloured text because they came from a guard rather than from the error
+  table; half the tone in this project was decided at the call site, and there was no one place
+  that could be made consistent.
+- **What became of `/set_channel`'s half-failure.** It writes the mapping and then moves the
+  threads, and a failure after the first half used to read as a failure of both. It is amber now:
+  it happened, and something is still owed. So are the two one-time links, which are neither
+  finished nor refused until somebody follows them.
+- **`/mentions` reading the setting carries no mark at all**, because it changed nothing and a tick
+  on the answer to a question would be claiming it had.
+- **One verb family for a thing going on an item and coming off it**, one way to name a follow-up
+  command, one way to quote a name somebody typed, and no sentence that opens with a mention — a
+  channel mention renders lowercase, so those sentences had no capital first word.
+- **Sixteen refusals quoted with Python's repr**, eleven of them in the link parser, every one
+  reaching a person through the broken-link reply. They are code spans now, which is what this
+  project already used for a label. That needed `code_span` to move from `discord_bot/safe_text`,
+  which imports discord.py, into `domain/text`, which is where the zero-width space it depends on
+  already lived: a link that would not parse is quoted back by the parser, and the parser has no
+  business depending on the gateway.
+- **One open pull requests was reachable**, and `/refresh` hardcoded a plural verb in a sentence
+  `/set_channel` already computed. Counts agree with their nouns and their verbs now.
+- **Putting somebody on an item twice is not a failure.** It was the one place in the project that
+  answered a repeat in red, through an exception, because the check was written as a refusal GitHub
+  would have made. `/label` and the eight status commands have always answered in green and said
+  what the item already reads; this now does too, and names the person as the Discord member the
+  command was given rather than as the GitHub login. GitHub is still never asked, because a second
+  request is a 422 it would refuse.
+- **And a test that holds the rules, since nothing did.** Eight checks read off the source with
+  `ast` rather than a regex, because an f-string's literal runs are a `JoinedStr` and a repr is a
+  conversion flag, so both are exact. The one that pays for the file asserts that every command
+  named in a sentence is one the container installs — which is the mistake the issue itself made.
+  Three of the eight were theatre on the first run, matching docstrings and mention builders, and
+  were narrowed to strings a person actually reads.
+
+## Only somebody who administers a repository may bind it
+
+- **A Discord role decided who could mirror a private repository into a channel.** Closes #135.
+  `/register` checked one thing, and a guild administrator holds that role automatically in every
+  server this bot was invited to. So anybody who administered any server could bind any repository
+  the GitHub App is installed on, and everything in it followed: titles, bodies, every comment and
+  review, inline file paths and line numbers, commit messages, CI logs. `/unregister` has always
+  demanded proved GitHub admin. The command that granted access asked for nothing; the one that
+  took it away asked for everything.
+- **The issue named `/link`, and `/link` was not the hole.** Worth writing down, because it looks
+  like one. A link grants no visibility at all: `user_links` is read only to turn a login into a
+  mention, always after the message content is fixed, so everyone who can read the channel sees the
+  same bytes whether they are linked or not. And since #144 a linked stranger is linked to their
+  own real login, which never appears on the repository's items. What they gain is nothing.
+- **Two runs now, the same shape `/unregister` takes.** The proof is deliberately not bound to the
+  repository: it asserts who somebody is, and what they may do is asked of GitHub on every call.
+  Binding it would only stop somebody binding a repository they genuinely administer.
+- **No migration, and that is worth stating because it looks like one.** The purpose column is a
+  plain varchar with no constraint, so adding a third value is the whole schema change. Spending it
+  needed no new branch either — the new purpose falls through the one that was already there.
+- **A bug this fix would have made worse, fixed on the way.** Both the permission check and the
+  repository read resolve their token through the installations table, and that row was written
+  inside the transaction that binds — after the repository had already been read. On an owner no
+  webhook ever wrote, the first `/register` read the repository anonymously: a public one worked by
+  luck and a private one answered 404 and was reported as a repository that does not exist. An
+  anonymous collaborators call is a guaranteed 404, which reads as no access, so every first
+  registration for a fresh owner would have refused somebody who does administer it. The row is
+  written first now, and stays written even when the answer is no.
+- **A link with no account id behind it stops becoming a ping.** Those rows are logins somebody
+  typed before `/link` asked GitHub whose they were, so an admin could write any login against any
+  Discord account and that account received every mention meant for the real holder. A working
+  mention and a misdirected one look identical in a thread, so the only safe reading of no evidence
+  is no mention. Nothing is deleted; running `/link` writes the id and it comes back. **Count them
+  before upgrading** — the rows in `user_links` whose `github_user_id` is null — because everybody
+  in that count stops being pinged until they re-link, and nothing tells them so.
+- **The other null is deliberately not the same rule.** A login written inside a comment body
+  carries no id and there is nowhere to get one, so refusing there would stop every body-mention
+  resolving for everybody, proved or not. The row having evidence is the question; the payload
+  having none is not.
+- **Existing registrations are not re-validated, and nothing pretends otherwise.** Nothing records
+  who ran `/register`, so there is no honest migration to write — and the property that matters
+  already holds: whoever actually administers a wrongly-bound repository can take it back today,
+  because `/unregister` already demands exactly this.
+- **Considered and not closed.** A forwarded authorisation URL. The link is minted for whoever ran
+  the command, and GitHub's consent screen names the App rather than the repository, the server or
+  the Discord account — so somebody who administers the repository can be asked to click a link
+  that proves them to a server they have never seen. Binding the repository to the row does not
+  help, since the link was minted for the repository the sender wanted. This is true of
+  `/unregister` today and this change does not alter it; closing it needs the callback page to name
+  what is being authorised and to write the proof only on a confirmed reply.

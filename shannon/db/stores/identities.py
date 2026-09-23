@@ -170,6 +170,13 @@ class VerifiedIdentityStore:
 
         Filtering here rather than handing back a stale row is what stops the first caller acting
         on the second caller's answer.
+
+        What it does not filter on is WHICH command asked. `identity_verifications` records that
+        and `redeem` writes the proof before it looks, so this table has no purpose column and a
+        proof minted by one command satisfies another within its window. Deliberate rather than
+        missed: what a proof carries is identity, and every authorisation built on one asks GitHub
+        again about the repository in front of it. What a crossed proof costs is the deliberateness
+        of having come back from the browser for this particular thing.
         """
         wanted = select(VerifiedIdentity).where(
             VerifiedIdentity.discord_guild_id == guild_id,

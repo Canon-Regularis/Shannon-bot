@@ -1,8 +1,9 @@
 """Finding out who somebody actually is on GitHub, rather than who they say they are.
 
-`/link` records an unverified claim: any guild administrator can link themselves to the repository
-owner's login, so this asks GitHub instead. The user access token is used once and never written
-down - one lasts eight hours and carries a six-month refresh token.
+This is where the asking happens, and three commands now depend on it. `/link` is finished by the
+answer; `/register` and `/unregister` take it as evidence and then ask GitHub a second question,
+about what that account may do to the repository. The user access token is used once and never
+written down - one lasts eight hours and carries a six-month refresh token.
 """
 
 from __future__ import annotations
