@@ -119,7 +119,15 @@ CURRENT_TAG="$(sed -n "s/^SHANNON_IMAGE_TAG=//p" "$ENV_FILE" | tail -n 1)"
 read_health() {
   local body code
   body="$(mktemp)"
-  code="$(curl -sS -o "$body" -w "%{http_code}" --max-time 10 "$HEALTH_URL" 2>/dev/null || echo 000)"
+  # `|| true` on the assignment rather than `|| echo 000` inside it, which is what this was and
+  # which reported `http 000000` for a box that could not be reached: curl prints the 000 itself
+  # through -w before it exits non-zero, so the echo appended a second one. The escape is still
+  # needed in some form, because under `set -e` an assignment takes the exit status of its
+  # substitution, and a refused connection would end the deploy here instead of being reported
+  # as unreachable and retried.
+  code="$(curl -sS -o "$body" -w "%{http_code}" --max-time 10 "$HEALTH_URL" 2>/dev/null)" || true
+  # Nothing at all on stdout means curl never ran, which -w has no way to report.
+  [ -n "$code" ] || code=000
   HEALTH_CODE="$code"
   if [ "$code" = "200" ] || [ "$code" = "503" ]; then
     HEALTH_VERSION="$(jq -r ".version // \"unknown\"" <"$body" 2>/dev/null || echo unknown)"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,3 +46,41 @@ class ChannelMappingStore:
             .returning(ChannelMapping)
         )
         return (await self._session.scalars(statement)).one()
+
+    async def pin(
+        self, *, repository_id: int, object_type: ObjectType, copying: ObjectType
+    ) -> ChannelMapping | None:
+        """Give a kind a row of its own at the channel it has been borrowing. Issue #134.
+
+        `/register` maps pull requests and nothing else, so issue threads open in the pull
+        request channel until somebody maps one for them. That makes where issues go a thing
+        derived from the pull request row rather than recorded, and re-pointing pull requests
+        took every issue thread along with them. This writes down what was already true, so
+        that the two stop being the same answer.
+
+        `DO NOTHING` rather than the `DO UPDATE` above, and the difference is load-bearing. A
+        relocation stops at its cap and tells the admin to run `/set_channel` again; an update
+        would re-pin on that second run, to the channel just set, and drag every issue after
+        all — the same bug, surfacing only on the second invocation. It also settles the race
+        with `/set_channel issues` running at the same moment, where an explicit choice already
+        inserted has to win over this one.
+
+        Answers with the row it wrote, or `None` in the two cases where it wrote nothing: the
+        kind already had a channel of its own, or the kind being copied has none, which means
+        there are no threads anywhere to preserve.
+        """
+        borrowed = select(
+            literal(repository_id),
+            literal(object_type.value),
+            ChannelMapping.discord_channel_id,
+        ).where(
+            ChannelMapping.repository_id == repository_id,
+            ChannelMapping.object_type == copying,
+        )
+        statement = (
+            pg_insert(ChannelMapping)
+            .from_select(["repository_id", "object_type", "discord_channel_id"], borrowed)
+            .on_conflict_do_nothing(constraint="uq_channel_mappings_repo_type")
+            .returning(ChannelMapping)
+        )
+        return (await self._session.scalars(statement)).one_or_none()

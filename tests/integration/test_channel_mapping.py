@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import ChannelMapping, Repository
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
-from shannon.services.channels import ChannelMappingService
+from shannon.services.channels import ChannelMappingService, PinnedKind
 from shannon.services.sync.policies import channel_fallbacks
 from tests.support.db import register_repository
 
@@ -116,3 +116,95 @@ class TestAKindThatHasBeenBorrowingAnotherChannel:
         )
 
         assert assignment.replaced is None
+
+
+async def mapped(session: AsyncSession, object_type: ObjectType) -> int | None:
+    """The channel one kind's row names, or None when it has no row of its own."""
+    session.expire_all()
+    return await session.scalar(
+        select(ChannelMapping.discord_channel_id).where(ChannelMapping.object_type == object_type)
+    )
+
+
+class TestPinningTheKindsThatBorrowThisChannel:
+    """Issue #134. `/register` maps pull requests and nothing else, so issue threads open in the
+    pull request channel until somebody maps one for them.
+
+    That made where issues go a thing derived from the pull request row rather than recorded, and
+    `/set_channel pull requests` therefore moved every issue thread along with the pull requests.
+    Correctly, on its own terms: their destination really had changed. So the fix is not to stop
+    moving them, it is to stop their destination changing — the borrower is given a row of its
+    own, at the channel it is in, before the lender's row moves.
+    """
+
+    async def test_the_borrower_gets_a_row_of_its_own_at_the_channel_it_was_in(
+        self, db_session: AsyncSession, channels: ChannelMappingService
+    ) -> None:
+        await register_repository(db_session, channel_id=100)
+
+        assignment = await channels.assign(guild_id=1, object_type=ObjectType.PR, channel_id=200)
+
+        assert await mapped(db_session, ObjectType.ISSUE) == 100, "issues followed pull requests"
+        assert await mapped(db_session, ObjectType.PR) == 200
+        assert assignment.pinned == (PinnedKind(ObjectType.ISSUE, 100),)
+
+    async def test_a_borrower_that_already_has_a_channel_is_left_alone(
+        self, registered: Repository, db_session: AsyncSession, channels: ChannelMappingService
+    ) -> None:
+        """The fixture maps issues to 98, so there is nothing implicit left to write down."""
+        assignment = await channels.assign(guild_id=1, object_type=ObjectType.PR, channel_id=200)
+
+        assert await mapped(db_session, ObjectType.ISSUE) == 98
+        assert assignment.pinned == ()
+
+    async def test_running_it_again_does_not_re_pin_to_the_new_channel(
+        self, db_session: AsyncSession, channels: ChannelMappingService
+    ) -> None:
+        """A relocation stops at its cap and the reply says to run `/set_channel` again, so a
+        second run is ordinary rather than exotic.
+
+        This is what makes the pin an insert that does nothing on conflict rather than the upsert
+        beside it: an upsert would move issues to the channel just set, on the second run only,
+        and the bug would come back wearing a disguise.
+        """
+        await register_repository(db_session, channel_id=100)
+
+        await channels.assign(guild_id=1, object_type=ObjectType.PR, channel_id=200)
+        again = await channels.assign(guild_id=1, object_type=ObjectType.PR, channel_id=200)
+
+        assert await mapped(db_session, ObjectType.ISSUE) == 100, "the second run re-pinned"
+        assert again.pinned == ()
+
+    async def test_setting_the_channel_it_is_already_in_still_pins(
+        self, db_session: AsyncSession, channels: ChannelMappingService
+    ) -> None:
+        """Nothing appears to happen, and something durable does. The alternative is to pin only
+        when the channel differs, which leaves this run silent and pins on some later one."""
+        await register_repository(db_session, channel_id=100)
+
+        await channels.assign(guild_id=1, object_type=ObjectType.PR, channel_id=100)
+
+        assert await mapped(db_session, ObjectType.ISSUE) == 100
+
+    async def test_a_kind_that_lends_to_nobody_pins_nothing(
+        self, registered: Repository, db_session: AsyncSession, channels: ChannelMappingService
+    ) -> None:
+        """Only pull requests are borrowed from, so setting issues writes one row and no more."""
+        assignment = await channels.assign(guild_id=1, object_type=ObjectType.ISSUE, channel_id=501)
+
+        assert await mapped(db_session, ObjectType.TICKET) is None
+        assert assignment.pinned == ()
+
+
+def test_no_kind_lends_a_channel_it_is_itself_borrowing() -> None:
+    """The pin goes one level deep, which is the whole graph today: issues borrow from pull
+    requests and pull requests borrow from nobody.
+
+    A chain would need it to recurse, and a half-pinned chain is exactly the silent wrong answer
+    this issue was about, so a future link fails here rather than in production.
+    """
+    fallbacks = channel_fallbacks()
+
+    assert not set(fallbacks.values()) & set(fallbacks), (
+        f"a kind both lends and borrows, so pinning one level is no longer enough: {fallbacks}"
+    )

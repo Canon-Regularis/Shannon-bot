@@ -9,7 +9,7 @@ from discord import app_commands
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
-from shannon.services.channels import ChannelAssignment
+from shannon.services.channels import ChannelAssignment, PinnedKind
 from shannon.services.sync.relocation import RelocationOutcome
 from tests.fakes.discord_objects import (
     FakeGuildPermissions,
@@ -21,9 +21,16 @@ from tests.unit.commands.conftest import default_gate, project_manager
 
 
 class StubChannels:
-    def __init__(self, *, replaced: int | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        replaced: int | None = None,
+        error: Exception | None = None,
+        pinned: tuple[PinnedKind, ...] = (),
+    ) -> None:
         self.replaced = replaced
         self.error = error
+        self.pinned = pinned
         self.calls: list[dict[str, object]] = []
 
     async def assign(
@@ -39,6 +46,7 @@ class StubChannels:
             object_type=object_type,
             discord_channel_id=channel_id,
             replaced=self.replaced,
+            pinned=self.pinned,
         )
 
 
@@ -134,6 +142,8 @@ async def test_replacing_a_mapping_says_how_many_threads_moved() -> None:
 
     assert "7 threads already open moved there too" in interaction.reply
     assert "links to its replacement and is locked" in interaction.reply
+    # Two claims in one: the named kind's own threads are not said to have stayed, and nothing
+    # was pinned here, so the sentence about a kind left behind has not leaked in either.
     assert "stay in" not in interaction.reply
 
 
@@ -296,3 +306,41 @@ def test_nothing_this_bot_mirrors_is_left_off_the_list() -> None:
     from shannon.commands.set_channel import CHOICES
 
     assert {c.value for c in CHOICES} == {kind.value for kind in ObjectType}
+
+
+class TestAKindLeftWhereItWas:
+    """`/set_channel pull requests` gives issues a channel of its own, at the one they had been
+    borrowing, so that they stop following pull requests around (#134).
+
+    That is a durable mapping the admin never asked for. Unsaid, it surfaces much later as this
+    bot apparently ignoring a fallback they still believe is in force.
+    """
+
+    async def test_it_names_the_kind_the_channel_and_the_way_to_move_it(self) -> None:
+        service = StubChannels(pinned=(PinnedKind(ObjectType.ISSUE, 98),))
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(service).callback(interaction, choice("PR"), text_channel())
+
+        assert "Issues stay in <#98>" in interaction.reply
+        assert "/set_channel issues moves them" in interaction.reply
+
+    async def test_it_says_so_even_when_the_move_failed(self) -> None:
+        """The pin is written inside `assign`, which succeeded; only the relocation after it
+        did not. Reporting just the failure would leave the durable half unmentioned."""
+        service = StubChannels(pinned=(PinnedKind(ObjectType.ISSUE, 98),))
+        relocation = StubRelocation(error=NotRegisteredError("gone"))
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(service, relocation).callback(interaction, choice("PR"), text_channel())
+
+        assert "Issues stay in <#98>" in interaction.reply
+        assert "left where they are" in interaction.reply
+
+    async def test_nothing_pinned_adds_no_sentence(self) -> None:
+        """The commonest case by far: every kind already has a channel of its own."""
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(StubChannels()).callback(interaction, choice("PR"), text_channel())
+
+        assert "stay in" not in interaction.reply
