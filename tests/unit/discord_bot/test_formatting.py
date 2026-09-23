@@ -92,8 +92,8 @@ def test_values_come_from_the_snapshot() -> None:
 def test_new_pull_requests_show_not_reviewed_and_unset() -> None:
     fields = lines(format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED))
 
-    assert fields["Status"] == "NOT_REVIEWED"
-    assert fields["Priority"] == "UNSET"
+    assert fields["Status"] == "Not reviewed"
+    assert fields["Priority"] == "None"
 
 
 def test_labels_are_listed_under_tags() -> None:
@@ -160,8 +160,8 @@ def test_missing_timestamp_reads_unknown() -> None:
 def test_status_and_priority_are_taken_from_the_caller() -> None:
     fields = lines(format_pull_request(SNAPSHOT, status=Status.IN_REVIEW, priority=Priority.HIGH))
 
-    assert fields["Status"] == "IN_REVIEW"
-    assert fields["Priority"] == "HIGH"
+    assert fields["Status"] == "In review"
+    assert fields["Priority"] == "High"
 
 
 def test_output_is_stable_for_the_same_input() -> None:

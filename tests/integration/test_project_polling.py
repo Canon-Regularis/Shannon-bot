@@ -161,7 +161,7 @@ class TestReadingABoard:
         assert block.splitlines() == [
             "**Ticket Name:** Write the poller",
             f"**GitHub Link:** https://github.com/users/Canon-Regularis/projects/{PROJECT}",
-            "**Status:** IN_REVIEW",
+            "**Status:** In review",
         ]
 
     async def test_the_column_becomes_the_status(
@@ -1304,7 +1304,7 @@ class TestProgressRecordedForAStepThatFailed:
 
         assert await poller.run_once() == 1, "the card was written off without being moved"
         block = threads.metadata_of(threads.created[0].thread_id)
-        assert "**Status:** IN_REVIEW" in block, "the thread still shows the old status"
+        assert "**Status:** In review" in block, "the thread still shows the old status"
 
     async def test_a_card_whose_thread_is_gone_does_not_come_round_for_ever(
         self, mirrored_pr: int, poller_for, threads: FakeThreadGateway, github_client

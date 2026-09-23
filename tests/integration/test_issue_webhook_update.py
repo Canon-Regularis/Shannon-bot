@@ -76,7 +76,7 @@ async def test_a_priority_label_change_reaches_the_metadata(
     )
 
     metadata = threads.metadata_of(threads.created[0].thread_id)
-    assert "**Priority:** LOW" in metadata
+    assert "**Priority:** Low" in metadata
     assert "**Tags:** `bug`, `priority: low`" in metadata
 
     db_session.expunge_all()
@@ -217,8 +217,8 @@ async def test_removing_a_priority_label_resets_the_priority(
         payloads.issue_event("labeled", labels=[{"name": "priority: high"}]),
         delivery="i1",
     )
-    assert "**Priority:** HIGH" in threads.metadata_of(threads.created[0].thread_id)
+    assert "**Priority:** High" in threads.metadata_of(threads.created[0].thread_id)
 
     await deliver(tracked, "issues", payloads.issue_event("unlabeled", labels=[]), delivery="i2")
 
-    assert "**Priority:** UNSET" in threads.metadata_of(threads.created[0].thread_id)
+    assert "**Priority:** None" in threads.metadata_of(threads.created[0].thread_id)

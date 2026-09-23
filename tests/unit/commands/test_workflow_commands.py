@@ -55,7 +55,8 @@ async def run(name: str, service: StubWorkflow, member: FakeMember) -> FakeInter
 
 
 def said(interaction: FakeInteraction) -> str:
-    return (interaction.followup.messages + interaction.response.messages)[0]
+    """The sentence, without the outcome mark `FakeInteraction.said` strips."""
+    return interaction.said
 
 
 def test_every_command_the_requirements_name_is_built() -> None:
@@ -115,7 +116,7 @@ async def test_the_reply_names_the_item_and_what_it_became() -> None:
 
     interaction = await run("set_in_review", service, member_with("Project Manager"))
 
-    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now IN_REVIEW."
+    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now In review."
 
 
 async def test_a_repeat_says_so_rather_than_claiming_a_change() -> None:
@@ -123,7 +124,7 @@ async def test_a_repeat_says_so_rather_than_claiming_a_change() -> None:
 
     interaction = await run("set_backlog", service, member_with("Project Manager"))
 
-    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is already BACKLOG."
+    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is already Backlog."
 
 
 async def test_finishing_says_the_thread_is_locked() -> None:
@@ -133,7 +134,7 @@ async def test_finishing_says_the_thread_is_locked() -> None:
 
     interaction = await run("set_done", service, member_with("Project Manager"))
 
-    assert said(interaction).endswith("is now DONE, and this thread is locked.")
+    assert said(interaction).endswith("is now Done, and this thread is locked.")
 
 
 async def test_a_lock_discord_refused_says_what_did_happen_as_well() -> None:
@@ -157,7 +158,7 @@ async def test_a_lock_discord_refused_says_what_did_happen_as_well() -> None:
     interaction = await run("set_done", service, member_with("Project Manager"))
 
     answer = said(interaction)
-    assert answer.startswith("Canon-Regularis/Shannon-bot#7 is DONE")
+    assert answer.startswith("Canon-Regularis/Shannon-bot#7 is Done")
     assert "could not be locked" in answer
     assert "Manage Threads" in answer
 
@@ -202,7 +203,7 @@ async def test_a_priority_reply_reads_as_a_priority() -> None:
 
     interaction = await run("set_high_priority", service, member_with("Project Manager"))
 
-    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now HIGH priority."
+    assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now High priority."
 
 
 async def test_it_refuses_outside_a_server() -> None:

@@ -139,7 +139,7 @@ async def test_the_metadata_is_written_before_the_thread_locks(
 
     metadata = threads.metadata_of(result.thread_id)
     assert "**State:** Closed" in metadata
-    assert "**Status:** DONE" in metadata
+    assert "**Status:** Done" in metadata
 
 
 async def test_reopening_unlocks_the_thread_and_resets_the_status(
@@ -179,7 +179,7 @@ async def test_reopening_updates_the_metadata(
 
     metadata = threads.metadata_of(result.thread_id)
     assert "**State:** Open" in metadata
-    assert "**Status:** NOT_REVIEWED" in metadata
+    assert "**Status:** Not reviewed" in metadata
 
 
 async def test_no_state_change_ever_opens_a_second_thread(

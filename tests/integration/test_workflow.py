@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import ItemNotReadyError
 from shannon.github.errors import GitHubUnavailableError
 from shannon.services import workflow as workflow_module
@@ -190,7 +190,7 @@ class TestSettingAStatus:
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert (
-            "IN_REVIEW"
+            "In review"
             in threads.threads[thread_id].messages[threads.threads[thread_id].metadata_message_id]
         )
 
@@ -207,7 +207,7 @@ class TestFinishing:
     async def test_a_pull_request_has_to_be_ready_for_merge_first(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
     ) -> None:
-        with pytest.raises(WorkflowRefusedError, match="READY_FOR_MERGE"):
+        with pytest.raises(WorkflowRefusedError, match="Ready for merge"):
             await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
         assert github.label_calls == [], "a refused command still wrote to GitHub"
@@ -231,7 +231,7 @@ class TestFinishing:
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
         thread = threads.threads[thread_id]
-        assert "DONE" in thread.messages[thread.metadata_message_id]
+        assert "Done" in thread.messages[thread.metadata_message_id]
 
     async def test_an_open_issue_is_sent_to_close_it_instead(
         self, workflow: ItemWorkflow, issue_thread_id: int
@@ -629,7 +629,7 @@ class TestWhatAReviewFound:
         assert outcome.locked is False
         assert outcome.lock_refused is True
         assert "DONE" in github.label_calls[-1][-1], github.label_calls
-        assert "DONE" in threads.metadata_of(thread_id)
+        assert "Done" in threads.metadata_of(thread_id)
 
     async def test_anything_else_that_fails_still_fails_the_whole_command(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
@@ -1027,7 +1027,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
         # Both callers have to be able to tell this from the ordinary repeat that had nothing to
         # do. A person is told where the item actually is, and the board poller counts the card
         # as not moved and leaves the column unwritten, which is what brings it round again.
-        assert Status.IN_REVIEW.value in str(refusal.value), (
+        assert spoken(Status.IN_REVIEW) in str(refusal.value), (
             f"it did not say where the item had gone: {refusal.value}"
         )
 

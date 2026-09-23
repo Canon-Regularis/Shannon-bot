@@ -60,8 +60,8 @@ async def test_the_thread_opens_with_the_full_metadata_block(
     assert "**GitHub Link:** https://github.com/Canon-Regularis/Shannon-bot/issues/12" in metadata
     assert "**Author:** octocat" in metadata
     assert "**Assignees:** hubot" in metadata
-    assert "**Status:** NOT_REVIEWED" in metadata
-    assert "**Priority:** HIGH" in metadata
+    assert "**Status:** Not reviewed" in metadata
+    assert "**Priority:** High" in metadata
     assert "**Tags:** `priority: high`" in metadata
     assert "**Last Updated:**" in metadata
     assert "Reviewers" not in metadata
