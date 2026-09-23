@@ -80,7 +80,7 @@ class TestTurningThemOn:
         interaction = await run(StubPreferences(wanted=False), "on")
 
         assert (
-            interaction.reply == "Mentions are on. This bot will notify you about items you are on."
+            interaction.said == "Mentions are on. This bot will notify you about items you are on."
         )
 
 
@@ -91,7 +91,7 @@ class TestAskingWithoutSetting:
         interaction = await run(service)
 
         assert service.set == [], "asking changed it"
-        assert interaction.reply.startswith("Mentions are on.")
+        assert interaction.said.startswith("Mentions are on.")
 
     async def test_no_argument_reports_off(self) -> None:
         service = StubPreferences(wanted=False)
@@ -99,7 +99,7 @@ class TestAskingWithoutSetting:
         interaction = await run(service)
 
         assert service.set == []
-        assert interaction.reply.startswith("Mentions are off.")
+        assert interaction.said.startswith("Mentions are off.")
         assert "Discord role" in interaction.reply
 
 
@@ -135,5 +135,5 @@ class TestWhoMayRunIt:
 
         interaction = await run(service, "off", guild_id=None)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.set == []

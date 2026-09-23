@@ -156,7 +156,7 @@ class ItemPeople:
             if not isinstance(snapshot, PullRequestSnapshot):
                 raise WorkflowRefusedError(
                     f"{found.full_name}#{found.number} is an issue, and an issue has no reviewers. "
-                    "Use /assign to put somebody on it instead."
+                    "Run /assign to put somebody on it instead."
                 )
             change = people.reviewer_change(login, snapshot, adding=adding)
         else:
@@ -200,8 +200,8 @@ class ItemPeople:
             )
         if claimed is None:
             raise WorkflowRefusedError(
-                f"<@{discord_user_id}> has no GitHub account linked in this server, so there is "
-                "nothing to put on the item. Run /link for them first."
+                f"Nobody has linked a GitHub account for <@{discord_user_id}> in this server, so "
+                "there is nothing to put on the item. Run /link for them first."
             )
         login = await self._as_github_names_it(found, claimed, discord_user_id)
         return ActingAs(

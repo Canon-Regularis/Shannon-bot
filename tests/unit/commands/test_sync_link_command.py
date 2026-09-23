@@ -77,7 +77,7 @@ async def test_a_new_item_reports_the_thread_as_opened(
     interaction = await run(service, member_with("Developer"), link=link, build=build)
 
     assert service.calls == [{"guild_id": 1, "link": link}]
-    assert interaction.reply.startswith("Opened the thread for Canon-Regularis/Shannon-bot#7")
+    assert interaction.said.startswith("Opened the thread for Canon-Regularis/Shannon-bot#7")
     assert "<#555>" in interaction.reply
 
 
@@ -87,7 +87,7 @@ async def test_a_missing_item_names_the_right_kind(build, name: str, noun: str, 
 
     interaction = await run(service, member_with("Developer"), build=build)
 
-    assert interaction.reply == f"GitHub could not find that {noun}."
+    assert interaction.said == f"GitHub could not find that {noun}."
 
 
 @pytest.mark.parametrize(("build", "name", "noun", "path"), KINDS)
@@ -123,7 +123,7 @@ async def test_an_existing_item_reports_the_thread_as_updated() -> None:
 
     interaction = await run(service, member_with("Developer"))
 
-    assert interaction.reply.startswith("Updated the thread for Canon-Regularis/Shannon-bot#7")
+    assert interaction.said.startswith("Updated the thread for Canon-Regularis/Shannon-bot#7")
 
 
 async def test_an_invalid_link_is_reported() -> None:
@@ -152,7 +152,7 @@ async def test_an_unregistered_server_is_told_to_register_first() -> None:
 
     interaction = await run(service, member_with("Developer"))
 
-    assert interaction.reply == "This server has no repository yet. Run /register first."
+    assert interaction.said == "This server has no repository yet. Run /register first."
 
 
 async def test_a_link_to_another_repository_is_refused() -> None:
@@ -162,7 +162,7 @@ async def test_a_link_to_another_repository_is_refused() -> None:
 
     interaction = await run(service, member_with("Developer"))
 
-    assert interaction.reply == "This server is registered to a/b, not c/d."
+    assert interaction.said == "This server is registered to a/b, not c/d."
 
 
 async def test_a_github_failure_is_reported_rather_than_raised() -> None:
@@ -172,7 +172,7 @@ async def test_a_github_failure_is_reported_rather_than_raised() -> None:
 
     interaction = await run(service, member_with("Developer"))
 
-    assert interaction.reply == "GitHub's rate limit is spent. Try again in about 10 minutes."
+    assert interaction.said == "GitHub's rate limit is spent. Try again in about 10 minutes."
 
 
 async def test_a_discord_failure_is_reported_rather_than_raised() -> None:
@@ -219,7 +219,7 @@ async def test_running_outside_a_guild_is_refused() -> None:
     await command(service).callback(interaction, "x")
 
     assert service.calls == []
-    assert interaction.reply == "Run this inside a server channel."
+    assert interaction.said == "Run this inside a server channel."
 
 
 async def test_the_command_defers_before_doing_slow_work() -> None:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import discord
 
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import reply
+from shannon.discord_bot.responses import refused, reply
 from shannon.discord_bot.roles import CommandRole
 
 NOT_IN_A_SERVER = "Run this inside a server channel."
@@ -34,10 +34,10 @@ async def in_a_server(
 ) -> int | None:
     """The guild a permitted caller ran this in, or None having said why not."""
     if interaction.guild_id is None:
-        await reply(interaction, NOT_IN_A_SERVER)
+        await reply(interaction, refused(NOT_IN_A_SERVER))
         return None
     if not gate.allows(interaction.user, roles):
-        await reply(interaction, gate.denial(command, roles))
+        await reply(interaction, refused(gate.denial(command, roles)))
         return None
     return interaction.guild_id
 
@@ -56,6 +56,6 @@ async def in_a_thread(
     if guild_id is None:
         return None
     if interaction.channel_id is None:
-        await reply(interaction, NOT_IN_A_THREAD)
+        await reply(interaction, refused(NOT_IN_A_THREAD))
         return None
     return InAThread(guild_id=guild_id, channel_id=interaction.channel_id)

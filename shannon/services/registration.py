@@ -78,13 +78,13 @@ class RepositoryRegistrationService:
             existing = await repositories.get_by_guild(guild_id)
             if existing is not None:
                 raise DuplicateRegistrationError(
-                    f"This server is already registered to {existing.repo_name}"
+                    f"This server is already registered to {existing.repo_name}."
                 )
 
             elsewhere = await repositories.get_by_github_id(snapshot.github_repo_id)
             if elsewhere is not None:
                 raise DuplicateRegistrationError(
-                    f"{snapshot.full_name} is already registered to another server"
+                    f"{snapshot.full_name} is already registered to another server."
                 )
 
             try:

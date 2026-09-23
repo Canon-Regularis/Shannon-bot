@@ -10,7 +10,7 @@ from shannon.commands._guards import NOT_IN_A_SERVER
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.responses import defer, done, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.errors import ShannonError
@@ -35,16 +35,16 @@ def build_register_command(service: RegistersRepositories, gate: PermissionGate)
     @app_commands.guild_only()
     async def register(interaction: discord.Interaction, github_repo_link: str) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
-            await reply(interaction, NOT_IN_A_SERVER)
+            await reply(interaction, refused(NOT_IN_A_SERVER))
             return
         if not gate.allows(interaction.user, REGISTER_ROLES):
-            await reply(interaction, gate.denial("register", REGISTER_ROLES))
+            await reply(interaction, refused(gate.denial("register", REGISTER_ROLES)))
             return
         # The channel this was run in becomes the home for pull request threads. Refusing here
         # is the last chance to say so: the sync path hits it hours later with nobody to tell.
         refusal = why_threads_will_not_open(interaction.channel)
         if refusal is not None:
-            await reply(interaction, f"Threads cannot be opened here. {refusal}")
+            await reply(interaction, refused(f"Threads cannot be opened here. {refusal}"))
             return
 
         await defer(interaction)

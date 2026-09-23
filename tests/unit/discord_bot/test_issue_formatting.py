@@ -91,7 +91,7 @@ def test_values_come_from_the_snapshot() -> None:
     assert fields["GitHub Link"] == "https://github.com/Canon-Regularis/Shannon-bot/issues/12"
     assert fields["Author"] == "octocat"
     assert fields["Assignees"] == "hubot"
-    assert fields["Priority"] == "HIGH"
+    assert fields["Priority"] == "High"
     assert fields["Tags"] == "`bug`, `priority: high`"
 
 
@@ -101,7 +101,7 @@ def test_a_closed_issue_reads_closed_and_done() -> None:
     fields = lines(format_issue(closed, status=Status.DONE))
 
     assert fields["State"] == "Closed"
-    assert fields["Status"] == "DONE"
+    assert fields["Status"] == "Done"
 
 
 def test_empty_people_and_tags_read_cleanly() -> None:
@@ -112,7 +112,7 @@ def test_empty_people_and_tags_read_cleanly() -> None:
     assert fields["Author"] == "None"
     assert fields["Assignees"] == "None"
     assert fields["Tags"] == "None"
-    assert fields["Priority"] == "UNSET"
+    assert fields["Priority"] == "None"
 
 
 def test_linked_accounts_render_as_mentions() -> None:

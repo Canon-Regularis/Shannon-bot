@@ -14,7 +14,7 @@ from shannon.discord_bot.errors import (
     DiscordPermissionError,
 )
 from shannon.discord_bot.panels import Accent
-from shannon.discord_bot.responses import reply
+from shannon.discord_bot.responses import REFUSED, done, refused, reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.errors import ItemNotReadyError, NotInstalledError, NotRegisteredError
 from shannon.github.errors import (
@@ -144,11 +144,15 @@ class TestTheColourOfARefusal:
     def test_one_somebody_has_to_put_right_is_red(self, error: Exception) -> None:
         assert reply_for(error).accent == Accent.FAILED
 
-    def test_the_words_are_the_ones_the_table_gives_and_nothing_else(self) -> None:
-        """The bar is the whole of what the card adds, which is why no call site moved."""
+    def test_the_words_are_the_ones_the_table_gives_behind_the_mark(self) -> None:
+        """The bar and the mark are the whole of what the card adds to the table's sentence.
+
+        Both are added in one place, so a refusal cannot word its own tone; what the table says
+        arrives verbatim behind it (#147).
+        """
         error = NotRegisteredError("Run /register first.")
 
-        assert reply_for(error).text == words_for(error)
+        assert reply_for(error).text == f"{REFUSED} {words_for(error)}"
 
 
 class TestTheBackstop:
@@ -160,7 +164,7 @@ class TestTheBackstop:
 
         await bot.tree.on_error(interaction, wrapped(RuntimeError("pool exhausted")))
 
-        assert interaction.reply == UNEXPECTED
+        assert interaction.said == UNEXPECTED
 
     async def test_a_known_error_that_escaped_gets_its_real_message(self) -> None:
         bot = ShannonBot(explain_error=reply_for)
@@ -168,7 +172,7 @@ class TestTheBackstop:
 
         await bot.tree.on_error(interaction, wrapped(NotRegisteredError("Run /register first.")))
 
-        assert interaction.reply == "Run /register first."
+        assert interaction.said == "Run /register first."
 
     async def test_an_interaction_that_has_gone_away_is_not_worth_raising_over(self) -> None:
         """The handler raising would log a second traceback and still tell nobody."""
@@ -199,17 +203,27 @@ class TestARepliesThatWouldNotFit:
     async def test_an_enormous_reply_is_trimmed_to_discord_s_limit(self) -> None:
         interaction = FakeInteraction()
 
-        await reply(interaction, "x" * 5000)
+        await reply(interaction, refused("x" * 5000))
 
         assert len(interaction.reply) <= MESSAGE_LIMIT
-        assert interaction.reply.endswith("…")
+        assert interaction.said.endswith("…")
+
+    async def test_the_mark_is_inside_what_gets_trimmed(self) -> None:
+        """Cut after the mark goes on rather than before, or a reply exactly at the limit grows
+        by two characters on its way out and Discord refuses the whole thing."""
+        interaction = FakeInteraction()
+
+        await reply(interaction, refused("x" * MESSAGE_LIMIT))
+
+        assert interaction.mark == REFUSED
+        assert len(interaction.reply) <= MESSAGE_LIMIT
 
     async def test_an_ordinary_reply_is_untouched(self) -> None:
         interaction = FakeInteraction()
 
-        await reply(interaction, "Registered owner/repo.")
+        await reply(interaction, done("Registered owner/repo."))
 
-        assert interaction.reply == "Registered owner/repo."
+        assert interaction.said == "Registered owner/repo."
 
 
 def test_a_repository_the_app_cannot_see_says_so_instead_of_saying_it_is_missing() -> None:

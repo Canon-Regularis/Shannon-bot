@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.errors import ShannonError
+from shannon.domain.text import code_span
 from shannon.github.mentions import is_team_slug
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ class TeamLinkingService:
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> str:
         slug = github_team.strip().lstrip("@")
         if not is_team_slug(slug):
-            raise InvalidGitHubTeamError(f"{github_team!r} is not a GitHub team.")
+            raise InvalidGitHubTeamError(f"{code_span(github_team)} is not a GitHub team.")
 
         async with self._sessionmaker() as session, session.begin():
             await TeamLinkStore(session).link(

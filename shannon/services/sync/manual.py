@@ -15,6 +15,7 @@ from shannon.domain.errors import (
     UnparseableLinkError,
 )
 from shannon.domain.models import Fetcher, RepositoryRef
+from shannon.domain.text import code_span
 from shannon.github.client import GitHubClient, LooksUpRepository
 from shannon.github.errors import GitHubNotFoundError
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
@@ -129,7 +130,7 @@ class ManualSync:
         if ref.number is None:
             # The link parsers guarantee a number, so this is a contract breach rather than
             # user error. Not an assert: those vanish under `python -O`.
-            raise UnparseableLinkError(f"{link!r} has no {self._noun} number")
+            raise UnparseableLinkError(f"{code_span(link)} has no {self._noun} number.")
 
         snapshot = await self._fetch(ref.owner, ref.name, ref.number)
 

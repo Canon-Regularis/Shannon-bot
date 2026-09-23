@@ -150,5 +150,5 @@ def _did(outcome: PeopleOutcome, discord_user_id: int) -> str:
             return f"Asked {who} for a review on {item}."
         return f"Withdrew the review request from {who} on {item}."
     if outcome.added:
-        return f"Assigned {who} to {item}."
-    return f"Took {who} off the assignees on {item}."
+        return f"Put {who} on {item}."
+    return f"Took {who} off {item}."

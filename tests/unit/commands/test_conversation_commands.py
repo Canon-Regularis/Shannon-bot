@@ -94,7 +94,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.started == []
 
     async def test_with_no_channel_at_all(self) -> None:
@@ -102,7 +102,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction)
 
-        assert interaction.reply == "Run this inside the item's thread."
+        assert interaction.said == "Run this inside the item's thread."
         assert service.started == []
 
 
@@ -114,7 +114,7 @@ class TestWhenTheDeploymentCannotReadMessages:
 
         await command.callback(interaction)
 
-        assert interaction.reply == NOT_CAPTURING
+        assert interaction.said == NOT_CAPTURING
         assert service.started == []
 
     async def test_stopping_still_works(self) -> None:
@@ -135,7 +135,7 @@ class TestWhatItSays:
 
         await command.callback(interaction)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             "Logging this thread to acme/widget#7. Everyone in the thread has been told."
         )
 
@@ -144,7 +144,7 @@ class TestWhatItSays:
 
         await command.callback(interaction)
 
-        assert interaction.reply == (
+        assert interaction.said == (
             "Stopped logging this thread to acme/widget#7. Anything still waiting will be "
             "published."
         )

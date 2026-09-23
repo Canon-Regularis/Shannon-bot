@@ -125,7 +125,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.calls == []
 
     async def test_with_no_channel_at_all(self) -> None:
@@ -134,7 +134,7 @@ class TestWhereItHasToBeRun:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == "Run this inside the item's thread."
+        assert interaction.said == "Run this inside the item's thread."
         assert service.calls == []
 
     async def test_it_acts_on_the_thread_it_was_run_in(self) -> None:
@@ -164,7 +164,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == f"Assigned <@{WHO}> to acme/widget#7."
+        assert interaction.said == f"Put <@{WHO}> on acme/widget#7."
 
     async def test_somebody_taken_off_the_assignees(self) -> None:
         command, interaction, _, member = run_it(
@@ -173,7 +173,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == f"Took <@{WHO}> off the assignees on acme/widget#7."
+        assert interaction.said == f"Took <@{WHO}> off acme/widget#7."
 
     async def test_a_change_made_on_a_link_nobody_proved_says_so(self) -> None:
         """`/link` records a login an admin typed and GitHub was never asked whose it is, so this
@@ -185,7 +185,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply.startswith(f"Assigned <@{WHO}> to acme/widget#7.")
+        assert interaction.said.startswith(f"Put <@{WHO}> on acme/widget#7.")
         assert "run /link" in interaction.reply
 
     async def test_a_proved_one_says_nothing_extra(self) -> None:
@@ -195,7 +195,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == f"Assigned <@{WHO}> to acme/widget#7."
+        assert interaction.said == f"Put <@{WHO}> on acme/widget#7."
 
     async def test_a_review_asked_for(self) -> None:
         """Said differently from an assignment, because they are different lists and somebody can
@@ -207,7 +207,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == f"Asked <@{WHO}> for a review on acme/widget#7."
+        assert interaction.said == f"Asked <@{WHO}> for a review on acme/widget#7."
 
     async def test_a_review_withdrawn(self) -> None:
         command, interaction, _, member = run_it(
@@ -217,7 +217,7 @@ class TestWhatItSays:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == f"Withdrew the review request from <@{WHO}> on acme/widget#7."
+        assert interaction.said == f"Withdrew the review request from <@{WHO}> on acme/widget#7."
 
     async def test_the_person_is_named_as_the_mention_that_was_picked(self) -> None:
         """Not the GitHub login it resolved to. Both are true, and the one somebody chose out of a
@@ -283,7 +283,7 @@ class TestWhatItRefuses:
 
         await command.callback(interaction, member)
 
-        assert interaction.reply == "GitHub could not find that item."
+        assert interaction.said == "GitHub could not find that item."
 
     async def test_discord_refusing_is_reported_rather_than_raised(self) -> None:
         command, interaction, _, member = run_it(

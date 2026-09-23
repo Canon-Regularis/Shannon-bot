@@ -10,7 +10,7 @@ from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import words_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.responses import defer, done, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.discord_bot.threads import why_threads_will_not_open
 from shannon.domain.enums import ObjectType
@@ -70,7 +70,9 @@ def build_set_channel_command(
             return
         refusal = why_threads_will_not_open(channel)
         if refusal is not None:
-            await reply(interaction, f"<#{channel.id}> cannot hold threads. {refusal}")
+            await reply(
+                interaction, refused(f"Threads cannot be opened in <#{channel.id}>. {refusal}")
+            )
             return
 
         await defer(interaction)
@@ -81,7 +83,10 @@ def build_set_channel_command(
                 channel_id=channel.id,
             )
         except NotRegisteredError as error:
-            await reply(interaction, error.message)
+            # Through the reply table like every other error rather than around it, which is
+            # what reading `error.message` here had been doing: the same refusal arrived red
+            # from /refresh and uncoloured from here.
+            await reply(interaction, refused(words_for(error, noun="repository")))
             return
 
         head = (
@@ -101,8 +106,10 @@ def build_set_channel_command(
             logger.warning("/set_channel could not move the threads: %s", error.message)
             await reply(
                 interaction,
-                f"{head} The threads already open were left where they are. "
-                f"{words_for(error, noun='repository')}",
+                owed(
+                    f"{head} The threads already open were left where they are. "
+                    f"{words_for(error, noun='repository')}"
+                ),
             )
         else:
             await reply(interaction, done(f"{head}{_said(outcome)}"))

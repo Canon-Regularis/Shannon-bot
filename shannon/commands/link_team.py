@@ -10,7 +10,7 @@ from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.responses import defer, done, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 
@@ -41,7 +41,7 @@ def build_link_team_command(service: LinksTeams, gate: PermissionGate) -> SlashC
         if role.is_default():
             # `@everyone` is a role Discord gives every member, and pinging it is what the
             # mention rules in the client exist to make impossible.
-            await reply(interaction, "Pick a real role. Everyone is not a review team.")
+            await reply(interaction, refused("Pick a real role. Everyone is not a review team."))
             return
 
         await defer(interaction)

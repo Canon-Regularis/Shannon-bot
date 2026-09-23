@@ -19,7 +19,7 @@ from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import ShannonError
 from shannon.services.workflow import WorkflowOutcome
 
@@ -63,7 +63,7 @@ def build_workflow_commands(service: MovesItems, gate: PermissionGate) -> tuple[
 def _status_command(
     name: str, status: Status, service: MovesItems, gate: PermissionGate
 ) -> SlashCommand:
-    @app_commands.command(name=name, description=f"Mark this item {_spoken(status.value)}")
+    @app_commands.command(name=name, description=f"Mark this item {spoken(status).lower()}")
     @app_commands.guild_only()
     async def run(interaction: discord.Interaction) -> None:
         await _act(
@@ -71,7 +71,7 @@ def _status_command(
             name,
             gate,
             lambda thread_id: service.set_status(thread_id=thread_id, status=status),
-            said=status.value,
+            said=spoken(status),
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
@@ -83,7 +83,7 @@ def _priority_command(
     name: str, priority: Priority, service: MovesItems, gate: PermissionGate
 ) -> SlashCommand:
     @app_commands.command(
-        name=name, description=f"Give this item {priority.value.lower()} priority"
+        name=name, description=f"Give this item {spoken(priority).lower()} priority"
     )
     @app_commands.guild_only()
     async def run(interaction: discord.Interaction) -> None:
@@ -92,7 +92,7 @@ def _priority_command(
             name,
             gate,
             lambda thread_id: service.set_priority(thread_id=thread_id, priority=priority),
-            said=f"{priority.value} priority",
+            said=f"{spoken(priority)} priority",
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
@@ -144,7 +144,3 @@ def _said(outcome: WorkflowOutcome, said: str) -> str:
     if outcome.locked:
         return f"{item} is now {said}, and this thread is locked."
     return f"{item} is now {said}."
-
-
-def _spoken(status: str) -> str:
-    return status.replace("_", " ").lower()

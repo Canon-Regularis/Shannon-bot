@@ -47,7 +47,7 @@ async def run_sync_link(
             interaction,
             done(
                 f"{verb} the thread for {outcome.full_name}#{outcome.number}: "
-                f"<#{outcome.thread_id}>"
+                f"<#{outcome.thread_id}>."
             ),
         )
 

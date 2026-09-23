@@ -60,8 +60,8 @@ async def test_the_thread_opens_with_the_full_metadata_block(
     assert "**Author:** octocat" in metadata
     assert "**Assignees:** hubot" in metadata
     assert "**Reviewers:** monalisa" in metadata
-    assert "**Status:** NOT_REVIEWED" in metadata
-    assert "**Priority:** UNSET" in metadata
+    assert "**Status:** Not reviewed" in metadata
+    assert "**Priority:** None" in metadata
     assert "**Tags:** `backend`" in metadata
     assert "**Last Updated:**" in metadata
 

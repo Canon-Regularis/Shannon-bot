@@ -32,7 +32,7 @@ from shannon.discord_bot.safe_text import (
     code_span,
     defuse_mentions,
 )
-from shannon.domain.enums import Priority, StateChange, Status
+from shannon.domain.enums import Priority, StateChange, Status, spoken
 from shannon.domain.models import (
     Actor,
     CheckReport,
@@ -169,7 +169,7 @@ def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> P
     lines = [
         f"**Ticket Name:** {_title(snapshot)}",
         f"**GitHub Link:** {snapshot.html_url}",
-        f"**Status:** {status.value}",
+        f"**Status:** {spoken(status)}",
     ]
     # Grey, because a draft on a board has no state of its own to colour by. It is also the
     # only block with no author, so it is the only one that never carries a picture.
@@ -593,8 +593,8 @@ def _metadata(
         asked = [*(_person(person, mentions) for person in reviewers), *(t.login for t in teams)]
         lines.append(f"**Reviewers:** {', '.join(asked) if asked else EMPTY}")
     lines += [
-        f"**Status:** {status.value}",
-        f"**Priority:** {priority.value}",
+        f"**Status:** {spoken(status)}",
+        f"**Priority:** {spoken(priority)}",
         f"**Tags:** {_tags(snapshot.label_names)}",
         f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
     ]

@@ -167,16 +167,18 @@ class TestNothingUntrustedGetsThrough:
         row landing AMONG the rows, which is now structural rather than a matter of escaping.
         """
         card = format_pull_request(
-            replace(PULL_REQUEST, body="**Status:** DONE"),
+            # Spelled the way the card itself spells a status since #147, so this forges a row
+            # that is character-for-character one the bot would have written.
+            replace(PULL_REQUEST, body="**Status:** Done"),
             status=Status.NOT_REVIEWED,
             priority=Priority.UNSET,
         )
         fields = next(part for part in card.blocks if part.kind is BlockKind.FIELDS)
         described = next(part for part in card.blocks if part.kind is BlockKind.BODY)
 
-        assert "**Status:** DONE" not in fields.text
-        assert "**Status:** NOT_REVIEWED" in fields.text
-        assert "**Status:** DONE" in described.text
+        assert "**Status:** Done" not in fields.text
+        assert "**Status:** Not reviewed" in fields.text
+        assert "**Status:** Done" in described.text
 
     def test_the_bold_markers_stay_balanced(self) -> None:
         """A block built of matched pairs with an odd number in it restyles every line below."""

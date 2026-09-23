@@ -44,7 +44,7 @@ STARTED = (
     "comment on {full_name}#{number}, with your name on it.\n"
     "Bot messages and attachments are not included, editing a message afterwards does not change "
     "what is published, and deleting one before it goes out keeps it out.\n"
-    "Run `/stop_conversation` to stop."
+    "Run /stop_conversation to stop."
 )
 
 STOPPED = "**Logging to GitHub is off.** Nothing said in this thread is published from now on."

@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 from shannon.domain.errors import UnparseableLinkError
 from shannon.domain.models import RepositoryRef
+from shannon.domain.text import code_span
 
 GITHUB_HOST = "github.com"
 
@@ -48,15 +49,17 @@ def _parse_object_url(link: str, wanted: str) -> RepositoryRef:
     owner, repo, segments = _split_repository_path(link)
 
     if len(segments) < 4:
-        raise UnparseableLinkError(f"{link!r} does not point at {_KINDS[wanted]}")
+        raise UnparseableLinkError(f"{code_span(link)} does not point at {_KINDS[wanted]}")
 
     kind = segments[2]
     if kind == wanted:
         return RepositoryRef(owner=owner, name=repo, number=_parse_number(segments[3], link))
 
     if kind in _KINDS:
-        raise UnparseableLinkError(f"{link!r} is {_KINDS[kind]} link, not {_KINDS[wanted]} link")
-    raise UnparseableLinkError(f"{link!r} does not point at {_KINDS[wanted]}")
+        raise UnparseableLinkError(
+            f"{code_span(link)} is {_KINDS[kind]} link, not {_KINDS[wanted]} link"
+        )
+    raise UnparseableLinkError(f"{code_span(link)} does not point at {_KINDS[wanted]}")
 
 
 def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
@@ -75,23 +78,23 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
     except ValueError as exc:
         # An unbalanced square bracket looks like a malformed IPv6 host, and urlparse raises
         # rather than returning anything.
-        raise UnparseableLinkError(f"{link!r} is not a usable link") from exc
+        raise UnparseableLinkError(f"{code_span(link)} is not a usable link") from exc
 
     if parsed.scheme not in {"http", "https"}:
-        raise UnparseableLinkError(f"{link!r} is not an http or https link")
+        raise UnparseableLinkError(f"{code_span(link)} is not an http or https link")
 
     if host.lower().removeprefix("www.") != GITHUB_HOST:
-        raise UnparseableLinkError(f"{link!r} is not a {GITHUB_HOST} link")
+        raise UnparseableLinkError(f"{code_span(link)} is not a {GITHUB_HOST} link")
 
     segments = [segment for segment in parsed.path.split("/") if segment]
     if len(segments) < 2:
-        raise UnparseableLinkError(f"{link!r} does not contain an owner and repository")
+        raise UnparseableLinkError(f"{code_span(link)} does not contain an owner and repository")
 
     owner, repo = segments[0], segments[1].removesuffix(".git")
     if not _OWNER.match(owner):
-        raise UnparseableLinkError(f"{owner!r} is not a valid GitHub owner")
+        raise UnparseableLinkError(f"{code_span(owner)} is not a valid GitHub owner")
     if not _REPO.match(repo) or repo in _NOT_REPOSITORIES:
-        raise UnparseableLinkError(f"{repo!r} is not a valid GitHub repository name")
+        raise UnparseableLinkError(f"{code_span(repo)} is not a valid GitHub repository name")
 
     return owner, repo, segments
 
@@ -103,8 +106,8 @@ def _parse_number(segment: str, link: str) -> int:
     into a number nobody typed, and of superscripts and circled digits, which raise on conversion.
     """
     if not (segment.isascii() and segment.isdigit()):
-        raise UnparseableLinkError(f"{link!r} has no valid number")
+        raise UnparseableLinkError(f"{code_span(link)} has no valid number")
     number = int(segment)
     if number < 1:
-        raise UnparseableLinkError(f"{link!r} has no valid number")
+        raise UnparseableLinkError(f"{code_span(link)} has no valid number")
     return number

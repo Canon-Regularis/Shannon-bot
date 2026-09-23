@@ -9,6 +9,7 @@ import discord
 from discord import Message, MessageType, ui
 
 from shannon.discord_bot import layout
+from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
 
 
 def _said(content: str | None, view: object) -> str:
@@ -77,6 +78,11 @@ class FakeFollowup:
     ) -> None:
         self.messages.append(_said(content, view))
         self.ephemerally.append(ephemeral)
+
+
+# The three an outcome can carry, so a reply with none is told from one with an unexpected
+# first word rather than having its first word eaten.
+_MARKS = frozenset({SUCCEEDED, OWED, REFUSED})
 
 
 @dataclass
@@ -246,3 +252,23 @@ class FakeInteraction:
     def reply(self) -> str:
         assert len(self.replies) == 1, f"expected one reply, got {self.replies}"
         return self.replies[0]
+
+    @property
+    def mark(self) -> str:
+        """Which of the three outcome marks the one reply opens with. Issue #147.
+
+        Empty for the one reply that carries none: `/mentions` reading back what it found did
+        not change anything, and a tick on the answer to a question would be claiming it had.
+        """
+        head = self.reply.split(" ", 1)[0]
+        return head if head in _MARKS else ""
+
+    @property
+    def said(self) -> str:
+        """The one reply with its outcome mark taken off.
+
+        A wording assertion is about the sentence. Every reply now opens with one of three marks,
+        and repeating those three characters in a hundred assertions would say nothing that
+        `mark` does not say once, on its own, where it is the thing under test.
+        """
+        return self.reply[len(self.mark) :].lstrip() if self.mark else self.reply

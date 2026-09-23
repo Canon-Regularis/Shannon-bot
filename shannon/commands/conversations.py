@@ -16,7 +16,7 @@ from shannon.commands._guards import in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, reply
+from shannon.discord_bot.responses import defer, done, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
 
@@ -83,7 +83,7 @@ async def _act(
     if where is None:
         return
     if not capturing:
-        await reply(interaction, NOT_CAPTURING)
+        await reply(interaction, refused(NOT_CAPTURING))
         return
 
     starting = command == "log_conversation"

@@ -131,7 +131,7 @@ class TestConnectingYourOwn:
 
         await fire(command, interaction)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert verification.issued_for == []
 
     async def test_a_deployment_that_cannot_verify_anybody_says_so(self) -> None:
@@ -232,5 +232,5 @@ class TestAskingSomebodyElse:
 
         await fire(command, interaction, somebody_else())
 
-        assert interaction.reply == CANNOT_POST
+        assert interaction.said == CANNOT_POST
         assert interaction.ephemerally == [True]

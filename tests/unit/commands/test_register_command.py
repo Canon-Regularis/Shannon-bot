@@ -101,7 +101,7 @@ async def test_a_missing_repository_is_reported_plainly() -> None:
 
     interaction = await run(service, project_manager())
 
-    assert interaction.reply == "GitHub could not find that repository."
+    assert interaction.said == "GitHub could not find that repository."
 
 
 async def test_a_guild_that_already_registered_is_told_so() -> None:
@@ -111,7 +111,7 @@ async def test_a_guild_that_already_registered_is_told_so() -> None:
 
     interaction = await run(service, project_manager())
 
-    assert interaction.reply == "This server is already registered to owner/other"
+    assert interaction.said == "This server is already registered to owner/other"
 
 
 async def test_a_repository_bound_elsewhere_is_told_so() -> None:
@@ -138,7 +138,7 @@ async def test_github_trouble_is_reported_rather_than_raised(error: Exception) -
 
     interaction = await run(service, project_manager())
 
-    assert interaction.reply == words_for(error)
+    assert interaction.said == words_for(error)
     assert "GitHub" in interaction.reply
 
 
@@ -157,7 +157,7 @@ async def test_running_outside_a_guild_is_refused() -> None:
     await command(service).callback(interaction, LINK)
 
     assert service.calls == []
-    assert interaction.reply == "Run this inside a server channel."
+    assert interaction.said == "Run this inside a server channel."
 
 
 async def test_the_command_defers_before_doing_slow_work() -> None:

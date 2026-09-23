@@ -6,7 +6,7 @@ import re
 
 import discord
 
-from shannon.domain.text import ZERO_WIDTH_SPACE, lines_within
+from shannon.domain.text import ZERO_WIDTH_SPACE, code_span, lines_within
 
 EMPTY = "None"
 
@@ -118,25 +118,6 @@ def as_plain_text(text: str) -> str:
     return defuse_mentions(discord.utils.escape_markdown(unlinked, ignore_links=False))
 
 
-_BACKTICK_RUN = re.compile(r"``+")
-
-
-def code_span(text: str) -> str:
-    """Wrap a label in a code span that its own backticks cannot break out of.
-
-    GitHub allows a backtick in a label name, and Discord parts company with the spec on the usual
-    answer: three backticks open a code BLOCK, not a longer inline span. So the fence never grows
-    past two, and runs inside the text are broken up with a zero-width space instead.
-    """
-    text = _BACKTICK_RUN.sub(lambda run: ZERO_WIDTH_SPACE.join(run.group(0)), text)
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * (longest + 1)
-    # A space keeps a leading or trailing backtick from merging with the fence. Markdown strips
-    # one space from each end when rendering.
-    padding = " " if text.startswith("`") or text.endswith("`") else ""
-    return f"{fence}{padding}{text}{padding}{fence}"
-
-
 def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
     """Trim to a limit on a line boundary.
 
@@ -154,3 +135,8 @@ def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
     if not kept:
         return message[:budget] + TRUNCATED
     return "\n".join(kept) + TRUNCATED
+
+
+# Re-exported rather than defined here: quoting a name somebody typed is text arithmetic with no
+# Discord in it, and `github/` needs it too without taking a dependency on discord.py (#147).
+__all__ = ["code_span"]

@@ -86,7 +86,7 @@ class TestWhoMayEvenAsk:
 
         await command.callback(interaction, repo)
 
-        assert interaction.reply == "Run this inside a server channel."
+        assert interaction.said == "Run this inside a server channel."
         assert service.calls == []
 
     async def test_somebody_with_no_role_is_refused(self) -> None:
@@ -185,7 +185,7 @@ class TestWhatItRefuses:
 
         await command.callback(interaction, repo)
 
-        assert interaction.reply == "This server has no repository."
+        assert interaction.said == "This server has no repository."
 
     async def test_a_name_that_does_not_match_what_is_registered(self) -> None:
         """The confirmation. It is irreversible and it cascades, so making somebody name the thing

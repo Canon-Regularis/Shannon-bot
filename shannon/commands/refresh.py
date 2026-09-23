@@ -17,11 +17,12 @@ from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
 
 logger = logging.getLogger(__name__)
 
-# What the counts are counting, in the reply.
+# What the counts are counting, in the reply, singular and plural. Both, because every one
+# of these is used after a number and "Mirrored 1 open pull requests" was reachable (#147).
 _KINDS = {
-    RefreshScope.EVERYTHING: "open items",
-    RefreshScope.PULL_REQUESTS: "open pull requests",
-    RefreshScope.ISSUES: "open issues",
+    RefreshScope.EVERYTHING: ("open item", "open items"),
+    RefreshScope.PULL_REQUESTS: ("open pull request", "open pull requests"),
+    RefreshScope.ISSUES: ("open issue", "open issues"),
 }
 
 # Discord shows the description, the value is what reaches the callback, and the choices appear
@@ -79,30 +80,37 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
     return refresh  # pyright: ignore[reportUnknownVariableType]
 
 
-def _said(outcome: RefreshOutcome, kind: str) -> str:
+def _said(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
     """The counts, as a sentence somebody can act on.
 
     The failures are inside `left` rather than beside it, and are named separately only so nobody
     reads a shortfall as a miscount.
+
+    Every number here is followed by the thing it counts, so both spellings are needed: one of
+    each was reachable and read "Mirrored 1 open pull requests" (#147).
     """
+    one, many = kinds
     if outcome.mirrored == 0 and outcome.left == 0:
         if outcome.already == 0:
-            return f"{outcome.full_name} has no {kind} right now, so there was nothing to mirror."
+            return f"{outcome.full_name} has no {many} right now, so there was nothing to mirror."
+        if outcome.already == 1:
+            return f"Nothing to mirror. The one {one} on {outcome.full_name} already has a thread."
         return (
-            f"Nothing to mirror. All {outcome.already} {kind} on {outcome.full_name} already "
+            f"Nothing to mirror. All {outcome.already} {many} on {outcome.full_name} already "
             "have a thread."
         )
 
     said = (
-        f"Mirrored {outcome.mirrored} {kind} from {outcome.full_name}, and left alone the "
-        f"{outcome.already} that already had a thread."
+        f"Mirrored {outcome.mirrored} {one if outcome.mirrored == 1 else many} from "
+        f"{outcome.full_name}, and left alone the {outcome.already} that already had a thread."
     )
     if outcome.left:
         is_are = "is" if outcome.left == 1 else "are"
         said += f" {outcome.left} {is_are} still untracked, so run /refresh again to carry on."
     if outcome.failed:
+        is_are = "is" if outcome.failed == 1 else "are"
         said += (
-            f" {outcome.failed} could not be mirrored just now and are among those still "
-            "untracked; the log says why."
+            f" {outcome.failed} could not be mirrored just now and {is_are} among those "
+            "still untracked; the log says why."
         )
     return f"{said} {_QUIET}"

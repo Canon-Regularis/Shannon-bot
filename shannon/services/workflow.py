@@ -23,9 +23,10 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
-from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
 from shannon.domain.models import Fetcher, Label, TrackedSnapshot
+from shannon.domain.text import code_span
 from shannon.github import labels
 from shannon.github.client import GitHubClient
 from shannon.services.labels import RepositoryLabels
@@ -223,10 +224,10 @@ class ItemWorkflow:
                     # ordinary treatment: said to whoever ran it, and left for the next poll.
                     raise ItemMovedError(
                         f"{found.full_name}#{found.number} is "
-                        f"{moved_to.value if moved_to is not None else 'no longer tracked'} now, "
-                        f"not {status.value}: somebody moved it while this was running, so its "
-                        f"thread was left alone. Run this again if you still want it "
-                        f"{status.value}."
+                        f"{spoken(moved_to) if moved_to is not None else 'no longer tracked'} "
+                        f"now, not {spoken(status)}: somebody moved it while this was "
+                        f"running, so its thread was left alone. Run this again if you still "
+                        f"want it {spoken(status)}."
                     )
 
                 lock = await self._set_lock(thread_id, wants_lock, guild_id=found.guild_id)
@@ -383,11 +384,11 @@ class ItemWorkflow:
         reserved = labels.reserved_as(name)
         if reserved is None:
             return
-        instead = f"Use /{_OWNED_BY[reserved]} instead."
+        instead = f"Run /{_OWNED_BY[reserved]} instead."
         if isinstance(reserved, Status):
-            raise WorkflowRefusedError(f"{name!r} is a workflow status here. {instead}")
+            raise WorkflowRefusedError(f"{code_span(name)} is a workflow status here. {instead}")
         raise WorkflowRefusedError(
-            f"{name!r} already means {reserved.value} priority here. {instead}"
+            f"{code_span(name)} already means {spoken(reserved)} priority here. {instead}"
         )
 
     async def _spelling_the_repository_uses(self, found: FoundItem, name: str) -> str:
@@ -411,8 +412,8 @@ class ItemWorkflow:
         shown = ", ".join(known[:_ENOUGH_TO_SHOW])
         rest = len(known) - _ENOUGH_TO_SHOW
         raise WorkflowRefusedError(
-            f"{found.full_name} has no label called {name!r}. It has: {shown}"
-            + (f", and {rest} more." if rest > 0 else ".")
+            f"{found.full_name} has no label called {code_span(name)}. It has: {shown}"
+            + (f", and {rest} more." if rest > 1 else ", and one more." if rest == 1 else ".")
         )
 
     def _refuse_a_kind_it_cannot_move(self, found: FoundItem) -> None:
@@ -444,11 +445,12 @@ class ItemWorkflow:
             if snapshot.closed and status is not Status.DONE:
                 raise WorkflowRefusedError(
                     f"That issue is closed on GitHub, which is what makes it "
-                    f"{Status.DONE.value}. Reopen it there to give it another status."
+                    f"{spoken(Status.DONE)}. Reopen it there to give it another status."
                 )
             if not snapshot.closed and status is Status.DONE:
                 raise WorkflowRefusedError(
-                    "Close the issue on GitHub to mark it done; that locks the thread too."
+                    f"Close the issue on GitHub to mark it {spoken(Status.DONE).lower()}; "
+                    "that locks the thread too."
                 )
             return
 
@@ -457,8 +459,8 @@ class ItemWorkflow:
         # its own gets tried again.
         if status is Status.DONE and found.status not in (DONE_NEEDS, Status.DONE):
             raise WorkflowRefusedError(
-                f"A pull request has to be {DONE_NEEDS.value} before it can be marked "
-                f"{Status.DONE.value}. This one is {found.status.value}."
+                f"A pull request has to be {spoken(DONE_NEEDS)} before it can be marked "
+                f"{spoken(Status.DONE)}. This one is {spoken(found.status)}."
             )
 
     async def _fetch(self, found: FoundItem) -> TrackedSnapshot:

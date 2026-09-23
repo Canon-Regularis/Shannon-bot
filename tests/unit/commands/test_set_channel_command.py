@@ -197,7 +197,7 @@ async def test_a_relocation_that_failed_still_reports_the_mapping_as_written() -
         interaction, choice("ISSUE"), text_channel(4242)
     )
 
-    assert interaction.reply.startswith("Issues for Canon-Regularis/Shannon-bot will now appear")
+    assert interaction.said.startswith("Issues for Canon-Regularis/Shannon-bot will now appear")
     assert "were left where they are" in interaction.reply
 
 
@@ -207,7 +207,7 @@ async def test_it_names_the_new_channel_and_the_kind_of_item() -> None:
 
     await command(service).callback(interaction, choice("ISSUE"), text_channel(4242))
 
-    assert interaction.reply.startswith("Issues for Canon-Regularis/Shannon-bot will now appear")
+    assert interaction.said.startswith("Issues for Canon-Regularis/Shannon-bot will now appear")
     assert "<#4242>" in interaction.reply
 
 
@@ -261,7 +261,7 @@ async def test_a_channel_that_cannot_hold_threads_is_refused() -> None:
     await command(service).callback(interaction, choice("ISSUE"), voice)
 
     assert service.calls == []
-    assert "cannot hold threads" in interaction.reply
+    assert "Threads cannot be opened in <#5555>." in interaction.said
 
 
 async def test_an_unregistered_server_is_told_to_register_first() -> None:
@@ -272,7 +272,7 @@ async def test_an_unregistered_server_is_told_to_register_first() -> None:
 
     await command(service).callback(interaction, choice("ISSUE"), text_channel())
 
-    assert interaction.reply == "This server has no repository yet. Run /register first."
+    assert interaction.said == "This server has no repository yet. Run /register first."
 
 
 async def test_running_outside_a_guild_is_refused() -> None:
@@ -282,7 +282,7 @@ async def test_running_outside_a_guild_is_refused() -> None:
     await command(service).callback(interaction, choice("ISSUE"), text_channel())
 
     assert service.calls == []
-    assert interaction.reply == "Run this inside a server channel."
+    assert interaction.said == "Run this inside a server channel."
 
 
 def test_every_kind_this_bot_mirrors_can_be_given_a_channel() -> None:
