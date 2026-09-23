@@ -489,6 +489,60 @@ def format_back_to_draft(
     return _headed(_DRAFTED_HEADING, f"{named} {said}".strip(), Accent.DRAFT)
 
 
+# Issue #155. A heading, like the state changes and the two draft lines above, and for the same
+# reason: the moment a pull request stops waiting on anybody is one somebody scrolls a thread
+# looking for.
+#
+# Not the tick, which is `_CHECKS_PASSED` below. One mark meaning both "CI is green" and "the
+# review is finished" is precisely the confusion a reader has to untangle when both land a minute
+# apart, which on a healthy pull request is the ordinary case rather than the unlucky one. A
+# chequered flag says the run is over, which is the whole of what this means, and like the draft
+# mark it makes no colour claim of its own, so it neither collides with the priority dots nor
+# argues with the bar beside it.
+_APPROVED_HEADING = "### 🏁 Approved"
+
+
+def format_everyone_approved(
+    approvals: int,
+    *,
+    people: Sequence[Actor] = (),
+    teams: Sequence[Actor] = (),
+    mentions: Mapping[str, int] | None = None,
+    roles: Mapping[str, int] | None = None,
+) -> Panel:
+    """Every review asked for has come back approving, said to the people who now have to act.
+
+    A count rather than the approvers. Each of them is already named in this thread one message
+    above, by the line that mirrored their review; naming them again would say nothing new, and
+    it would do it through a live mention map, so the last approver would be rung about their own
+    approval.
+
+    The people named are the author and the assignees, for the reason the check-failure line
+    names the same pair: they are who a pull request waits on once the reviewing is done. Whoever
+    approved last is not dropped the way the draft switch drops whoever pressed the button —
+    there the initiator knows what they just did, and here the news is about everybody else's
+    reviews rather than their own.
+
+    `teams` and `roles` are accepted and go through `_role` like the ready line's, so this
+    matches the shape the other two audience-taking renderers use. The caller hands an empty
+    sequence, because the audience is people.
+
+    The sentence is said whether or not anybody is named, the bargain the check line and the
+    ready line both make. A pull request whose author's account is gone and which nobody was
+    assigned still stopped waiting on its reviewers, and a line reading only that is what that
+    looks like.
+    """
+    named = " ".join(
+        [
+            *(_person(person, mentions) for person in people),
+            *(_role(team.login, roles) for team in teams),
+        ]
+    )
+    reviews = "review" if approvals == 1 else "reviews"
+    said = f"{approvals} {reviews}, all of them approving, and nobody is still being waited on."
+    return _headed(_APPROVED_HEADING, f"{named} {said}".strip(), Accent.PASSED)
+
+
 def format_comment(
     snapshot: ItemNote,
     mentions: Mapping[str, int] | None = None,
@@ -738,8 +792,16 @@ def _people(actors: Iterable[Actor], mentions: Mapping[str, int] | None) -> str:
 
 
 def _person(actor: Actor, mentions: Mapping[str, int] | None) -> str:
+    """A live mention where this server knows the account, and the plain login where it does not.
+
+    Escaped on the way out, like `_account` and like every other field this module did not write
+    itself. No login GitHub issues today holds a markdown character, so this changes nothing that
+    can be seen — but the six renderers reading this were the one place in the module where that
+    was an assumption about GitHub rather than a rule of this bot's, and the rule is cheaper to
+    keep than the assumption is to re-check.
+    """
     discord_user_id = (mentions or {}).get(actor.login.lower())
-    return f"<@{discord_user_id}>" if discord_user_id else actor.login
+    return f"<@{discord_user_id}>" if discord_user_id else as_plain_text(actor.login)
 
 
 def _tags(names: Iterable[str]) -> str:
