@@ -1,4 +1,4 @@
-"""What every command test needs: a gate, and members holding a role.
+"""What every command test needs: a gate, members holding a role, and a GitHub proof.
 
 Each of the four command test files built these from scratch, and the member builder had four
 spellings between them.
@@ -6,12 +6,47 @@ spellings between them.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from shannon.config import Settings
+from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
+from shannon.domain.enums import VerificationPurpose
 from tests.fakes.discord_objects import FakeGuildPermissions, FakeMember, FakeRole
+
+
+class FakeVerification:
+    """A deployment that can ask GitHub who somebody is, and a person who has just been asked.
+
+    Shared since issue #135, when `/register` grew the same two-run shape `/unregister` has. The
+    defaults are the happy path on purpose: every test that is not about proving anything then
+    reads as though the proof were not there.
+    """
+
+    def __init__(self, *, configured: bool = True, proved: str | None = "octocat") -> None:
+        self.configured = configured
+        # Still a login, because that is what every test here is about saying. The account it
+        # stands for is built below, so no test has to name an id it does not care about.
+        self.proved = proved
+        self.links_handed_out = 0
+        self.purposes: list[VerificationPurpose] = []
+
+    async def proved_just_now(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
+        if self.proved is None:
+            return None
+        return ProvedAccount(
+            login=self.proved, github_user_id=583231, verified_at=datetime(2026, 9, 17, tzinfo=UTC)
+        )
+
+    async def link_for(
+        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+    ) -> str:
+        self.links_handed_out += 1
+        self.purposes.append(purpose)
+        return "https://github.com/login/oauth/authorize?state=abc"
 
 
 def default_gate() -> PermissionGate:

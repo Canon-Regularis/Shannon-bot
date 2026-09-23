@@ -14,6 +14,7 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.errors import (
     DuplicateRegistrationError,
     NotInstalledError,
+    NotProvenError,
     UnparseableLinkError,
 )
 from shannon.domain.models import RepositorySnapshot
@@ -30,6 +31,9 @@ from tests.support.db import blocked_on_a_row
 pytestmark = pytest.mark.integration
 
 REPO_LINK = "https://github.com/Canon-Regularis/Shannon-bot"
+# Whoever GitHub said was at the keyboard. Every test here is about something other than the
+# proof, and the fake answers `admin` for anybody unless a test says otherwise (#135).
+OCTOCAT = "octocat"
 SNAPSHOT = RepositorySnapshot(
     github_repo_id=1255504909,
     owner="Canon-Regularis",
@@ -53,7 +57,7 @@ def service(
 async def test_registration_stores_repository_and_pr_channel(
     service: RepositoryRegistrationService, db_session: AsyncSession
 ) -> None:
-    result = await service.register(guild_id=1, channel_id=10, link=REPO_LINK)
+    result = await service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
 
     assert result.full_name == "Canon-Regularis/Shannon-bot"
     assert result.pr_channel_id == 10
@@ -73,7 +77,9 @@ async def test_registration_stores_repository_and_pr_channel(
 async def test_a_deep_link_still_registers_the_repository(
     service: RepositoryRegistrationService,
 ) -> None:
-    result = await service.register(guild_id=1, channel_id=10, link=f"{REPO_LINK}/pull/7/files")
+    result = await service.register(
+        guild_id=1, channel_id=10, login=OCTOCAT, link=f"{REPO_LINK}/pull/7/files"
+    )
 
     assert result.full_name == "Canon-Regularis/Shannon-bot"
 
@@ -84,10 +90,12 @@ async def test_second_registration_in_the_same_guild_is_rejected(
     github.repositories["other/repo"] = RepositorySnapshot(
         github_repo_id=999, owner="other", name="repo", html_url="https://github.com/other/repo"
     )
-    await service.register(guild_id=1, channel_id=10, link=REPO_LINK)
+    await service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
 
     with pytest.raises(DuplicateRegistrationError, match="already registered to"):
-        await service.register(guild_id=1, channel_id=11, link="https://github.com/other/repo")
+        await service.register(
+            guild_id=1, channel_id=11, login=OCTOCAT, link="https://github.com/other/repo"
+        )
 
     assert len((await db_session.scalars(select(Repository))).all()) == 1
 
@@ -95,24 +103,28 @@ async def test_second_registration_in_the_same_guild_is_rejected(
 async def test_same_repository_in_a_second_guild_is_rejected(
     service: RepositoryRegistrationService, db_session: AsyncSession
 ) -> None:
-    await service.register(guild_id=1, channel_id=10, link=REPO_LINK)
+    await service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
 
     with pytest.raises(DuplicateRegistrationError, match="already registered to another server"):
-        await service.register(guild_id=2, channel_id=20, link=REPO_LINK)
+        await service.register(guild_id=2, channel_id=20, login=OCTOCAT, link=REPO_LINK)
 
     assert len((await db_session.scalars(select(Repository))).all()) == 1
 
 
 async def test_unknown_repository_is_rejected(service: RepositoryRegistrationService) -> None:
     with pytest.raises(GitHubNotFoundError):
-        await service.register(guild_id=1, channel_id=10, link="https://github.com/who/what")
+        await service.register(
+            guild_id=1, channel_id=10, login=OCTOCAT, link="https://github.com/who/what"
+        )
 
 
 async def test_invalid_link_never_reaches_github(
     service: RepositoryRegistrationService, github: FakeGitHubClient
 ) -> None:
     with pytest.raises(UnparseableLinkError):
-        await service.register(guild_id=1, channel_id=10, link="https://gitlab.com/owner/repo")
+        await service.register(
+            guild_id=1, channel_id=10, login=OCTOCAT, link="https://gitlab.com/owner/repo"
+        )
 
     assert github.repository_calls == []
 
@@ -120,10 +132,10 @@ async def test_invalid_link_never_reaches_github(
 async def test_a_rejected_registration_leaves_no_rows_behind(
     service: RepositoryRegistrationService, db_session: AsyncSession
 ) -> None:
-    await service.register(guild_id=1, channel_id=10, link=REPO_LINK)
+    await service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
 
     with pytest.raises(DuplicateRegistrationError):
-        await service.register(guild_id=2, channel_id=20, link=REPO_LINK)
+        await service.register(guild_id=2, channel_id=20, login=OCTOCAT, link=REPO_LINK)
 
     mappings = (await db_session.scalars(select(ChannelMapping))).all()
     assert len(mappings) == 1
@@ -139,7 +151,10 @@ async def test_a_burst_of_registrations_leaves_one_repository_and_no_raw_databas
     below is the one that guarantees the losing path is taken.
     """
     results = await asyncio.gather(
-        *(service.register(guild_id=1, channel_id=10 + n, link=REPO_LINK) for n in range(8)),
+        *(
+            service.register(guild_id=1, channel_id=10 + n, login=OCTOCAT, link=REPO_LINK)
+            for n in range(8)
+        ),
         return_exceptions=True,
     )
 
@@ -183,7 +198,9 @@ async def test_a_registration_that_commits_between_the_check_and_the_insert(
         )
         await blocker.flush()
 
-        racing = asyncio.create_task(service.register(guild_id=1, channel_id=10, link=REPO_LINK))
+        racing = asyncio.create_task(
+            service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
+        )
         await blocked_on_a_row(
             db_sessionmaker,
             racing,
@@ -314,7 +331,9 @@ class TestARepositoryTheAppIsNotInstalledOn:
         )
 
         with pytest.raises(NotInstalledError):
-            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+            await service.register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link="https://github.com/acme/secret"
+            )
 
         assert github.repository_calls == [], "it went looking for a repository it cannot see"
 
@@ -326,7 +345,9 @@ class TestARepositoryTheAppIsNotInstalledOn:
         )
 
         with pytest.raises(NotInstalledError) as refusal:
-            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+            await service.register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link="https://github.com/acme/secret"
+            )
 
         assert "acme/secret" in refusal.value.message
         assert "https://github.com/apps/shannon-bot/installations/new" in refusal.value.message
@@ -341,7 +362,9 @@ class TestARepositoryTheAppIsNotInstalledOn:
         )
 
         with pytest.raises(NotInstalledError) as refusal:
-            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+            await service.register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link="https://github.com/acme/secret"
+            )
 
         assert "Install the GitHub App" in refusal.value.message
         assert "https://github.com/apps" not in refusal.value.message
@@ -354,7 +377,9 @@ class TestARepositoryTheAppIsNotInstalledOn:
         )
 
         with pytest.raises(NotInstalledError):
-            await service.register(guild_id=1, channel_id=99, link="https://github.com/acme/secret")
+            await service.register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link="https://github.com/acme/secret"
+            )
 
         assert await RepositoryStore(db_session).get_by_guild(1) is None
 
@@ -371,7 +396,7 @@ class TestARepositoryTheAppCanSee:
             FakeInstallations(installation=42),
         )
 
-        await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+        await service.register(guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK)
 
         found = await InstallationStore(db_session).for_owner("Canon-Regularis")
         assert found is not None
@@ -390,7 +415,7 @@ class TestARepositoryTheAppCanSee:
             FakeInstallations(installation=42),
         )
 
-        await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+        await service.register(guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK)
 
         stored = await RepositoryStore(db_session).get_by_guild(1)
         assert stored is not None
@@ -406,6 +431,97 @@ class TestARepositoryTheAppCanSee:
             FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT}),
         )
 
-        result = await service.register(guild_id=1, channel_id=99, link=REPO_LINK)
+        result = await service.register(guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK)
 
         assert result.full_name == "Canon-Regularis/Shannon-bot"
+
+
+class TestOnlySomebodyWhoAdministersItMayBindIt:
+    """Issue #135. The Discord role said who could bind a repository, and a guild administrator
+    holds that role automatically in every server this bot was invited to.
+
+    So the role was never evidence of anything on GitHub. Anybody who administered any server
+    could mirror any repository the App is installed on — a private one included — into a channel
+    of their choosing, and everything in it went with them: titles, bodies, every comment and
+    review, inline file paths, commit messages, CI logs.
+    """
+
+    def _service(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], github: FakeGitHubClient
+    ) -> RepositoryRegistrationService:
+        return RepositoryRegistrationService(
+            db_sessionmaker, github, FakeInstallations(installation=42)
+        )
+
+    @pytest.mark.parametrize("permission", ["none", "read", "write"])
+    async def test_anything_short_of_admin_is_refused(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], permission: str
+    ) -> None:
+        """`write` is the one that matters here: it is the plausible weaker bar, and taking it
+        would let any contributor disclose a private repository into a server of their choosing.
+        `none` is what GitHub answers for an account it has no relationship on record for, which
+        is how a 404 fails closed."""
+        github = FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT})
+        github.permissions["stranger"] = permission
+
+        with pytest.raises(NotProvenError) as refusal:
+            await self._service(db_sessionmaker, github).register(
+                guild_id=1, channel_id=99, login="stranger", link=REPO_LINK
+            )
+
+        assert "does not have admin" in refusal.value.message
+        assert "stranger" in refusal.value.message, "it did not name the account they signed in as"
+
+    async def test_nothing_is_bound_when_the_answer_is_no(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        github = FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT})
+        github.permissions["stranger"] = "none"
+
+        with pytest.raises(NotProvenError):
+            await self._service(db_sessionmaker, github).register(
+                guild_id=1, channel_id=99, login="stranger", link=REPO_LINK
+            )
+
+        assert await RepositoryStore(db_session).get_by_guild(1) is None
+
+    async def test_an_admin_binds_it(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        github = FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT})
+
+        await self._service(db_sessionmaker, github).register(
+            guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK
+        )
+
+        assert await RepositoryStore(db_session).get_by_guild(1) is not None
+        assert github.permission_calls == [("canon-regularis/shannon-bot", OCTOCAT)]
+
+    async def test_the_installation_is_written_down_before_github_is_asked_anything(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        """The ordering this change forced, and a bug that predates it.
+
+        Both `permission_for` and `get_repository` resolve their token through the installations
+        table, and the row used to be written inside the transaction that binds — after the
+        repository had already been read. On an owner no `installation` webhook ever wrote, the
+        first `/register` read the repository anonymously: a public one worked by luck, a private
+        one answered 404 and was reported as a repository that does not exist.
+
+        Asking about a collaborator makes it worse rather than better, because an anonymous
+        collaborators call is a guaranteed 404, which reads as `none`. Every first registration
+        for a fresh owner would refuse somebody who does administer it. So the row is written
+        first, and it stays written even when the answer is no.
+        """
+        github = FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT})
+        github.permissions["stranger"] = "none"
+
+        with pytest.raises(NotProvenError):
+            await self._service(db_sessionmaker, github).register(
+                guild_id=1, channel_id=99, login="stranger", link=REPO_LINK
+            )
+
+        found = await InstallationStore(db_session).for_owner("Canon-Regularis")
+        assert found is not None, "the token every call below resolves through was never written"
+        assert found.installation_id == 42
+        assert github.permission_calls, "it never got as far as asking"

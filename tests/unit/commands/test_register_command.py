@@ -7,6 +7,7 @@ import pytest
 
 from shannon.commands._replies import words_for
 from shannon.commands.register import build_register_command
+from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError
 from shannon.services.registration import RegistrationResult
@@ -14,7 +15,13 @@ from tests.fakes.discord_objects import (
     FakeInteraction,
     FakeMember,
 )
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.unit.commands.conftest import (
+    FakeVerification,
+    administrator,
+    default_gate,
+    developer,
+    project_manager,
+)
 
 LINK = "https://github.com/Canon-Regularis/Shannon-bot"
 RESULT = RegistrationResult(
@@ -33,21 +40,33 @@ class StubRegistration:
         self.error = error
         self.calls: list[dict[str, object]] = []
 
-    async def register(self, *, guild_id: int, channel_id: int, link: str) -> RegistrationResult:
-        self.calls.append({"guild_id": guild_id, "channel_id": channel_id, "link": link})
+    async def register(
+        self, *, guild_id: int, channel_id: int, link: str, login: str
+    ) -> RegistrationResult:
+        self.calls.append(
+            {"guild_id": guild_id, "channel_id": channel_id, "link": link, "login": login}
+        )
         if self.error is not None:
             raise self.error
         assert self.result is not None
         return self.result
 
 
-def command(service: StubRegistration):
-    return build_register_command(service, default_gate())
+def command(service: StubRegistration, verification: FakeVerification | None = None):
+    """Proved by default, so every test that is not about #135 reads as it always did."""
+    return build_register_command(
+        service, verification if verification is not None else FakeVerification(), default_gate()
+    )
 
 
-async def run(service: StubRegistration, member: FakeMember, link: str = LINK) -> FakeInteraction:
+async def run(
+    service: StubRegistration,
+    member: FakeMember,
+    link: str = LINK,
+    verification: FakeVerification | None = None,
+) -> FakeInteraction:
     interaction = FakeInteraction(guild_id=1, channel_id=99, user=member)
-    await command(service).callback(interaction, link)
+    await command(service, verification).callback(interaction, link)
     return interaction
 
 
@@ -56,7 +75,7 @@ async def test_a_project_manager_can_register() -> None:
 
     interaction = await run(service, project_manager())
 
-    assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK}]
+    assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK, "login": "octocat"}]
     assert "Registered Canon-Regularis/Shannon-bot" in interaction.reply
     assert "<#99>" in interaction.reply
 
@@ -214,7 +233,7 @@ async def test_a_forum_channel_is_accepted() -> None:
 
     await command(service).callback(interaction, LINK)
 
-    assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK}]
+    assert service.calls == [{"guild_id": 1, "channel_id": 99, "link": LINK, "login": "octocat"}]
 
 
 async def test_a_forum_that_demands_a_tag_is_refused_while_somebody_is_looking() -> None:
@@ -235,3 +254,63 @@ async def test_a_forum_that_demands_a_tag_is_refused_while_somebody_is_looking()
 
     assert service.calls == [], "it registered a channel that will refuse every thread"
     assert "Require Tags" in interaction.reply
+
+
+class TestProvingYouAdministerIt:
+    """Issue #135. A Discord role said who could bind a repository, and a guild administrator
+    holds that role automatically in every server this bot was invited to.
+
+    So the role was never evidence of anything on GitHub: anybody who administered any server
+    could mirror any repository the App is installed on, private ones included, into a channel of
+    their choosing. GitHub is asked now, and the role gate stays in front of it.
+    """
+
+    async def test_the_first_run_hands_out_a_link_and_binds_nothing(self) -> None:
+        service = StubRegistration()
+        verification = FakeVerification(proved=None)
+
+        interaction = await run(service, project_manager(), verification=verification)
+
+        assert service.calls == [], "it bound a repository before anybody had proved anything"
+        assert verification.links_handed_out == 1
+        assert verification.purposes == [VerificationPurpose.REGISTER]
+        assert "/register again" in interaction.said
+
+    async def test_the_first_run_says_to_come_back_with_the_same_link(self) -> None:
+        """The repository is read off the argument rather than off a stored row, unlike
+        `/unregister`, so a second run with a different link is refused with no way to tell why."""
+        interaction = await run(
+            StubRegistration(), project_manager(), verification=FakeVerification(proved=None)
+        )
+
+        assert "same repository link" in interaction.said
+
+    async def test_the_second_run_binds_as_the_account_that_signed_in(self) -> None:
+        service = StubRegistration()
+
+        await run(service, project_manager(), verification=FakeVerification(proved="monalisa"))
+
+        assert service.calls[0]["login"] == "monalisa"
+
+    async def test_a_deployment_that_cannot_ask_github_refuses(self) -> None:
+        """Rather than falling back to the role check. A control somebody can turn off by leaving
+        a setting out is not one, and nobody inside Discord could tell that it had been."""
+        service = StubRegistration()
+        verification = FakeVerification(configured=False)
+
+        interaction = await run(service, project_manager(), verification=verification)
+
+        assert service.calls == []
+        assert verification.links_handed_out == 0, "it started a round trip it cannot finish"
+        assert "client secret" in interaction.said
+
+    async def test_it_refuses_before_handing_out_a_link_to_somebody_without_the_role(self) -> None:
+        """The role gate stays first. Minting a link writes an unauthenticated row, so an ungated
+        command lets any member make the bot mint them at will."""
+        service = StubRegistration()
+        verification = FakeVerification(proved=None)
+
+        await run(service, developer(), verification=verification)
+
+        assert verification.links_handed_out == 0
+        assert service.calls == []

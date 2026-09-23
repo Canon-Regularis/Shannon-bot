@@ -674,7 +674,9 @@ def _commands(
     """
     return (
         build_register_command(
-            RepositoryRegistrationService(sessionmaker, github, installations), gate
+            RepositoryRegistrationService(sessionmaker, github, installations),
+            verification,
+            gate,
         ),
         build_unregister_command(
             RepositoryUnregistrationService(sessionmaker, github), verification, gate
