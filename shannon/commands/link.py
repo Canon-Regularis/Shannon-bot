@@ -111,9 +111,7 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
         await reply(
             interaction,
             owed(
-                "Open this link and sign in to GitHub. That is the whole of it: clicking it "
-                "connects whichever account you sign in as, and there is no second "
-                f"command.\n{url}"
+                f"Open this link and sign in to GitHub.\n{url}"
             ),
         )
 
