@@ -239,7 +239,7 @@ class TestAPullRequest:
 
         assert github.people_calls == [("add_assignees", (REPO_FULL, 7), ("newbie",))]
 
-    async def test_somebody_already_asked_is_refused_without_asking_github(
+    async def test_somebody_already_asked_is_left_alone_without_asking_github(
         self,
         tracked,
         linked,
@@ -248,12 +248,20 @@ class TestAPullRequest:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
+        """Issue #147. A repeat takes no action, which is not the same as a failure, and this
+        used to be the one place in the project that raised for one.
+
+        The half worth keeping is the second assertion. GitHub is still never asked, because a
+        second request is a 422 it would refuse; what changed is only what the person is told.
+        """
         github.pull_requests[(REPO_FULL, 7)] = replace(pr_event("opened"), reviewers=(NEWBIE,))
 
-        with pytest.raises(WorkflowRefusedError, match="already been asked"):
-            await service.request_review(thread_id=thread_for(threads, 99), discord_user_id=ALICE)
+        outcome = await service.request_review(
+            thread_id=thread_for(threads, 99), discord_user_id=ALICE
+        )
 
-        assert github.people_calls == []
+        assert outcome.changed is False
+        assert github.people_calls == [], "it asked GitHub for a review that had been asked for"
 
 
 class TestAnIssue:

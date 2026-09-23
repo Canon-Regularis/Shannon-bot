@@ -125,7 +125,8 @@ async def _act(
 
 def _said(outcome: PeopleOutcome, discord_user_id: int) -> str:
     """What happened, with the person written as the mention the command was given."""
-    return _did(outcome, discord_user_id) + ("" if outcome.proved else _UNPROVED)
+    unproved = _UNPROVED if outcome.changed and not outcome.proved else ""
+    return _did(outcome, discord_user_id) + unproved
 
 
 # Said under a change that went through on a link nobody ever proved. `/link` records a login an
@@ -142,9 +143,25 @@ _UNPROVED = (
 )
 
 
+# What a repeat says, keyed by whether it is a review request and whether it was adding. A
+# table rather than nested ifs: four sentences, four keys, and no arm that cannot be reached.
+_NOTHING_CHANGED = {
+    (True, True): "{who} has already been asked for a review on {item}, so nothing changed.",
+    (True, False): "{who} has not been asked for a review on {item}, so nothing changed.",
+    (False, True): "{who} is already on {item}, so nothing changed.",
+    (False, False): "{who} is not on {item}, so nothing changed.",
+}
+
+
 def _did(outcome: PeopleOutcome, discord_user_id: int) -> str:
     item = f"{outcome.full_name}#{outcome.number}"
     who = f"<@{discord_user_id}>"
+    if not outcome.changed:
+        # A repeat is not a failure. `/label` and the status commands have always answered this
+        # way; putting somebody on an item twice was the one place that answered in red (#147).
+        return _NOTHING_CHANGED[outcome.role is ActorRole.REVIEWER, outcome.added].format(
+            who=who, item=item
+        )
     if outcome.role is ActorRole.REVIEWER:
         if outcome.added:
             return f"Asked {who} for a review on {item}."

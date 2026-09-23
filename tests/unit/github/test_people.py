@@ -57,7 +57,8 @@ class TestAskingForAReview:
         change = reviewer_change("alice", pull_request(reviewers=(Actor("alice"),)), adding=True)
 
         assert change.wanted is False
-        assert change.refusal == "alice has already been asked to review this."
+        assert change.already is True
+        assert change.refusal is None, "a repeat was reported as something to put right"
 
     def test_the_person_who_opened_it(self) -> None:
         """GitHub refuses this as though they were not a collaborator, which for the author of
@@ -86,7 +87,8 @@ class TestWithdrawingAReview:
         change = reviewer_change("alice", pull_request(), adding=False)
 
         assert change.wanted is False
-        assert change.refusal == "alice has not been asked to review this."
+        assert change.already is True
+        assert change.refusal is None
 
     def test_the_author_is_only_refused_when_being_added(self) -> None:
         """The author guard must not leak into the other direction: somebody can be the author
@@ -106,7 +108,8 @@ class TestPuttingSomebodyOnAnIssue:
         change = assignee_change("alice", issue(assignees=(Actor("alice"),)), adding=True)
 
         assert change.wanted is False
-        assert change.refusal == "alice has already been assigned to this."
+        assert change.already is True
+        assert change.refusal is None
 
     def test_taking_somebody_off(self) -> None:
         change = assignee_change("alice", issue(assignees=(Actor("alice"),)), adding=False)
@@ -117,7 +120,8 @@ class TestPuttingSomebodyOnAnIssue:
         change = assignee_change("alice", issue(), adding=False)
 
         assert change.wanted is False
-        assert change.refusal == "alice has not been assigned to this."
+        assert change.already is True
+        assert change.refusal is None
 
 
 class TestHowTwoLoginsAreCompared:
