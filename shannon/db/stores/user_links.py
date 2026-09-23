@@ -49,8 +49,18 @@ class UserLinkStore:
         GitHub frees a renamed or deleted login for anybody to take, so a name-only match once gave
         a stranger the previous holder's review pings. A stored account id that disagrees with the
         one on the item is dropped and logged, since a stale link and a member who never linked look
-        identical in the thread. A null on either side is no evidence — the row predates the column,
-        or the payload carried no id — so the name still resolves.
+        identical in the thread.
+
+        Two nulls, and they are not the same null. Issue #135.
+
+        A row with no id is a link somebody typed before `/link` asked GitHub whose the login was,
+        so the row is a claim and nothing more. Those stop resolving: an unproved claim becoming a
+        live Discord mention is how a login an admin typed reaches a member who never held it.
+        Nothing is deleted, so running `/link` restores it.
+
+        A PAYLOAD with no id still resolves against a row that has one, and that is deliberate.
+        An `@login` written in a comment body carries no id and there is nowhere to get one, so
+        refusing there would stop every body-mention resolving for everybody, proved or not.
         """
         wanted = {name.lower(): asked for name, asked in people.items()}
         if not wanted:
@@ -68,7 +78,15 @@ class UserLinkStore:
         resolved: dict[str, int] = {}
         for row in rows:
             asked = wanted[row.github_username]
-            if row.github_user_id is not None and asked is not None and row.github_user_id != asked:
+            if row.github_user_id is None:
+                logger.warning(
+                    "%r is linked here by name alone, from before this bot asked GitHub whose "
+                    "login it was, so it will not be mentioned; that person should run /link "
+                    "again to settle it",
+                    row.github_username,
+                )
+                continue
+            if asked is not None and row.github_user_id != asked:
                 logger.warning(
                     "%r is linked here to the account %s, and the one on this item is %s, so it "
                     "is somebody else now and will not be mentioned; that person should run "

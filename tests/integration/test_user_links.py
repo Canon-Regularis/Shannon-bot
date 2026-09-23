@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -138,24 +140,58 @@ class TestALoginThatChangedHands:
         assert "/link again" in caplog.text
 
     @pytest.mark.parametrize("asked", [111, 900, None])
-    async def test_a_row_from_before_the_column_existed_still_works(
+    async def test_a_row_from_before_the_column_existed_no_longer_resolves(
         self, db_session: AsyncSession, asked: int | None
     ) -> None:
-        """Nothing can invent an id for a link made before this: GitHub can say what a login is
-        called now, not what it was called when somebody bound it. A null is no evidence, and
-        refusing on no evidence would take away mentions that work."""
+        """This test asserted the opposite until issue #135, and the argument has changed rather
+        than the code having been wrong before.
+
+        What it used to say: nothing can invent an id for a link made before the column existed,
+        a null is no evidence, and refusing on no evidence takes away mentions that work. Every
+        clause of that is still true. What it weighed them against was a hole nobody had priced:
+        a row with no id is a login somebody TYPED, and `/link` did not ask GitHub whose it was,
+        so an admin could write any login against any Discord account and that account would
+        receive every ping meant for the person who actually holds it.
+
+        A mention that works and a mention that reaches the wrong person are not told apart by
+        the thread, so the only safe reading of no evidence is no mention. Nothing is deleted:
+        running `/link` writes the id and the link comes back.
+
+        Parametrised over all three because the row's own null is what decides now — the payload's
+        id no longer makes any difference, which is the whole of the change.
+        """
         await UserLinkStore(db_session).link(
             guild_id=1, github_username="alice", github_user_id=None, discord_user_id=42
         )
 
         resolved = await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": asked})
 
-        assert resolved == {"alice": 42}
+        assert resolved == {}
 
-    async def test_a_payload_that_carries_no_id_falls_back_to_the_name(
+    async def test_a_name_only_row_says_in_the_log_how_to_put_it_right(
+        self, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nobody is running a command when this happens, so there is no one to tell in Discord.
+        The member finds out by ceasing to be pinged and the admin finds out here."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="alice", github_user_id=None, discord_user_id=42
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await UserLinkStore(db_session).resolve_many(guild_id=1, people={"alice": 111})
+
+        assert "by name alone" in caplog.text
+        assert "/link again" in caplog.text
+
+    async def test_a_payload_that_carries_no_id_still_falls_back_to_the_name(
         self, db_session: AsyncSession
     ) -> None:
-        """The other side of the same rule: a deleted account arrives with no id at all."""
+        """The other null, and it is deliberately not the same rule. Issue #135.
+
+        An `@login` written in a comment body carries no id and there is nowhere to get one, so
+        failing closed here would stop every body-mention resolving for everybody, proved or not.
+        The row has evidence; the payload simply did not carry any.
+        """
         await UserLinkStore(db_session).link(
             guild_id=1, github_username="alice", github_user_id=111, discord_user_id=42
         )
