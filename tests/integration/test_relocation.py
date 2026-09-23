@@ -1,6 +1,9 @@
-"""Moving the threads a changed channel mapping left behind. Issue #78.
+"""Moving the threads a changed channel mapping left behind. Issues #78 and #134.
 
-Two tests here carry the change and both fail without it.
+Three tests here carry a change and each fails without it.
+
+`test_a_kind_that_was_borrowing_is_left_where_it_is` is #134: one kind's channel moves that kind
+and nothing else.
 
 `test_the_signpost_goes_in_before_the_lock` is the ordering one: posting to an archived thread
 unarchives it, so shutting first is undone by the very line meant to close the thread.
@@ -19,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.container import _relocation
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.models import ChannelMapping, Repository, TrackedItem
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
@@ -31,12 +34,14 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
+from shannon.services.channels import ChannelMappingService
 from shannon.services.sync.items import SyncOutcome, SyncResult, build_item_sync
-from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
+from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, channel_fallbacks
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import register_repository
 
 pytestmark = pytest.mark.integration
 
@@ -120,10 +125,14 @@ def relocation_with(
 async def remap(
     session: AsyncSession, repository: Repository, object_type: ObjectType, *, channel_id: int
 ) -> None:
-    """What `/set_channel` leaves behind, upserting the way the real store does.
+    """One row, upserted the way the real store does.
 
     `tests.support.db.map_channel` inserts, which is right for a kind nobody has mapped and wrong
     for every test here: this file is about a mapping being CHANGED.
+
+    Deliberately less than `/set_channel` does, which since #134 also gives every kind borrowing
+    this channel a row of its own first. Tests that care about that drive `ChannelMappingService`
+    instead, because the pin is the thing under test rather than setup.
     """
     await ChannelMappingStore(session).set(
         repository_id=repository.id, object_type=object_type, discord_channel_id=channel_id
@@ -419,47 +428,49 @@ class TestWhichKindsMove:
         assert outcome.moved == 1
         assert (await row_for(db_session, pull.number)).discord_channel_id == 99
 
-    async def test_a_kind_borrowing_this_channel_moves_with_it(
+    async def test_a_kind_that_was_borrowing_is_left_where_it_is(
         self,
         db_session: AsyncSession,
         db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
-        """Issues fall back to the pull request channel, so pointing pull requests somewhere new
-        moves where issue threads go too. Relocating only the named kind would reproduce this very
-        bug for the other one, triggered by fixing it.
+        """Issue #134, and this test used to assert the opposite.
+
+        Issues fall back to the pull request channel, so re-pointing pull requests used to move
+        every issue thread too. That was not a stray filter: their destination genuinely changed,
+        and leaving them behind would have split issue threads across two channels, which is #78
+        again for the kind nobody named.
+
+        What removes the split is not relocating less, it is giving issues a channel of their own
+        at the one they were already using, before the pull request row moves. So this drives the
+        real service rather than `remap`: the whole fix lives in the row `remap` does not write.
         """
-        from tests.support.db import register_repository
-
-        repository = await register_repository(db_session)
+        await register_repository(db_session, channel_id=99)
         issue = an_issue()
-        await strand_an_issue(db_sessionmaker, threads, issue)
-        # What `/set_channel pull requests` writes before it asks for the move. The sync resolves
-        # the channel itself, so the two have to agree, and the command is what makes them.
-        await remap(db_session, repository, ObjectType.PR, channel_id=NEW)
+        old = await strand_an_issue(db_sessionmaker, threads, issue)
+        opened = len(threads.created)
 
+        await ChannelMappingService(db_sessionmaker, channel_fallbacks()).assign(
+            guild_id=1, object_type=ObjectType.PR, channel_id=NEW
+        )
         outcome = await relocation_with(
             db_sessionmaker, threads, github_with(issues=[issue])
         ).relocate(guild_id=1, object_type=ObjectType.PR, channel_id=NEW)
 
-        assert outcome.moved == 1, "the borrowed kind was left behind"
-        assert threads.created[-1].channel_id == NEW
+        assert outcome.moved == 0, "the issue was dragged along with the pull requests"
+        assert len(threads.created) == opened, "it opened a replacement for a thread that stayed"
+        assert threads.threads[old].locked is False, "it shut a thread still in use"
+        assert (await row_for(db_session, issue.number)).discord_channel_id == 99
 
-    async def test_a_kind_with_a_channel_of_its_own_is_not_borrowing(
-        self,
-        registered: Repository,
-        db_session: AsyncSession,
-        db_sessionmaker: async_sessionmaker[AsyncSession],
-        threads: FakeThreadGateway,
-    ) -> None:
-        issue = an_issue()
-        await strand_an_issue(db_sessionmaker, threads, issue)
-
-        outcome = await relocation_with(
-            db_sessionmaker, threads, github_with(issues=[issue])
-        ).relocate(guild_id=1, object_type=ObjectType.PR, channel_id=NEW)
-
-        assert outcome.moved == 0, "it moved a kind that has its own mapping"
+        db_session.expire_all()
+        pinned = await db_session.scalar(
+            select(ChannelMapping.discord_channel_id).where(
+                ChannelMapping.object_type == ObjectType.ISSUE
+            )
+        )
+        # The only assertion that catches the pin being written after the upsert rather than
+        # before it: the threads would not move today, and the next run would take them all.
+        assert pinned == 99, "issues were pinned to the channel being set, not the one they were in"
 
 
 class TestTheCap:

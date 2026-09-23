@@ -7,13 +7,12 @@ Discord cannot move a thread between channels: a move is a new thread, a line in
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import StrandedThread, TrackedItemStore
@@ -25,7 +24,6 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.domain.models import Fetcher
 from shannon.services.sync.items import SyncsItems
-from shannon.services.sync.policies import channel_fallbacks
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +95,19 @@ class ThreadRelocation:
     async def relocate(
         self, *, guild_id: int, object_type: ObjectType, channel_id: int
     ) -> RelocationOutcome:
-        """Move what this mapping change left in the wrong place."""
+        """Move what this mapping change left in the wrong place.
+
+        This kind and no other, which is issue #134. It used to widen to every kind borrowing
+        this channel, because a kind with no row of its own resolved through the one being
+        changed, so its threads really did belong somewhere new. `/set_channel` now gives every
+        borrower a row of its own before it moves anything, so there is no borrower left by the
+        time this runs, and widening here would move threads whose destination never changed.
+        """
         repository_id, owner, name = await self._registered(guild_id)
-        kinds = await self._kinds_now_pointing_here(repository_id, object_type)
 
         async with self._sessionmaker() as session:
             candidates = await TrackedItemStore(session).stranded_threads(
-                repository_id=repository_id, kinds=kinds, channel_id=channel_id
+                repository_id=repository_id, kind=object_type, channel_id=channel_id
             )
 
         moved = 0
@@ -157,22 +161,6 @@ class ThreadRelocation:
                 raise NotRegisteredError("This server has no repository yet. Run /register first.")
             owner, _, name = stored.repo_name.partition("/")
             return stored.id, owner, name
-
-    async def _kinds_now_pointing_here(
-        self, repository_id: int, object_type: ObjectType
-    ) -> Sequence[ObjectType]:
-        """Every kind whose threads this mapping decides, not just the one named.
-
-        Issues fall back to the pull request channel, so pointing pull requests somewhere new
-        moves where issue threads go too, on a server that never mapped issues.
-        """
-        kinds = [object_type]
-        async with self._sessionmaker() as session:
-            mappings = ChannelMappingStore(session)
-            for borrower, lends in channel_fallbacks().items():
-                if lends is object_type and await mappings.get(repository_id, borrower) is None:
-                    kinds.append(borrower)
-        return kinds
 
     async def _where_it_is(self, candidate: StrandedThread) -> tuple[object, int]:
         """Where this item's thread actually is, and what asking cost.

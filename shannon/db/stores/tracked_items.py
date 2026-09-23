@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -168,14 +167,15 @@ class TrackedItemStore:
         return {(row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5]) for row in rows.all()}
 
     async def stranded_threads(
-        self, *, repository_id: int, kinds: Sequence[ObjectType], channel_id: int
+        self, *, repository_id: int, kind: ObjectType, channel_id: int
     ) -> list[StrandedThread]:
-        """Items of these kinds whose thread is not known to be in `channel_id`.
+        """Items of this kind whose thread is not known to be in `channel_id`.
 
         A candidate list, not an answer: a row remembering no channel is included, and only
-        asking Discord settles where the thread is. `kinds` is plural because issues fall back to
-        the pull request channel, so moving pull requests moves issue threads too. Ordered by
-        what moved most recently, because a run is capped.
+        asking Discord settles where the thread is. One kind rather than several, because
+        `/set_channel` gives a kind borrowing another's channel a row of its own before it
+        moves anything, so no other kind's destination changed (#134). Ordered by what moved
+        most recently, because a run is capped.
         """
         rows = await self._session.execute(
             select(
@@ -187,7 +187,7 @@ class TrackedItemStore:
             )
             .where(
                 TrackedItem.repository_id == repository_id,
-                TrackedItem.github_object_type.in_(kinds),
+                TrackedItem.github_object_type == kind,
                 TrackedItem.discord_thread_id.is_not(None),
                 or_(
                     TrackedItem.discord_channel_id.is_(None),
