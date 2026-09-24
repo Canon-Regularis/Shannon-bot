@@ -6363,3 +6363,60 @@ feature end to end rather than assuming a predecessor the file never recorded.
   what had arrived, which is how a fourth copy gets written rather than a third reused. What the
   callers genuinely disagreed about turned out to be nothing: two already raised on an item with
   no thread yet so the delivery is retried, and the third had no reason not to.
+
+## An organisation's board is one this bot can read
+
+- **The board mirror now reads either kind of owner.** First slice of #158. Every request went to
+  `/users/{owner}/projectsV2/...` and there was no organisation path anywhere, so an organisation's
+  board answered 404 on every poll for ever. That was known and written down; what was not known is
+  what it was standing in front of.
+- **The wrong prefix is worse than no answer.** A board number is a sequence GitHub keeps per
+  account, so `/users/x/projectsV2/3` and `/orgs/x/projectsV2/3` are two real boards that are not
+  each other. A 404 was the lucky outcome. The unlucky one is 200 with somebody else's cards, which
+  this bot would have mirrored into Discord threads and, with `SHANNON_BOARD_MAY_SET_STATUS` on,
+  started moving statuses from. Silently wrong beats silently absent nowhere.
+- **Which kind of account it is is asked of GitHub, not configured.** `GET /users/{owner}` answers
+  with a `type` for an organisation as readily as for a person, once per account for the life of
+  the process. A setting would have replaced one silent misconfiguration with another: it can be
+  typed wrong, it still 404s after an upgrade until somebody reads a changelog, and it goes stale
+  the day an account is converted. GitHub is the only party that cannot get this wrong.
+- **An answer it cannot read is taken as a person and asked again next poll.** The same bargain the
+  Status field lookup already makes. Remembered, one bad answer would decide the prefix until a
+  restart nobody knew to do; guessed at afresh each minute, a blip costs one poll. It says so in
+  the log either way, because an organisation whose board went quiet deserves a reason.
+- **Falling back is not trying `/orgs/` after `/users/`.** A 404 is equally what a deleted board, a
+  wrong number and a private board with the wrong token answer, so a retry would fire on cases it
+  cannot fix and then name the organisation path for a person's board — a wrong diagnosis is worse
+  than none. A user-scoped token reaching an organisation path can also answer 403, so it would not
+  even fire reliably.
+- **`SHANNON_GITHUB_PROJECT_OWNER`, for a board the registered repository does not own.** The owner
+  was scraped out of the repository's full name, which is right for most deployments and, per the
+  above, quietly wrong rather than broken for the rest. Empty keeps the old behaviour exactly.
+- **Two owners, deliberately not one field, and the reason is not tidiness.** One addresses the
+  board; the other names the repository every mirrored card is filed under. They are the same
+  account often enough to invite collapsing them, and collapsed the damage is written down: each
+  card carries a repository snapshot, the sync hands that snapshot's name to `follow_rename`, and
+  `follow_rename` writes it to the `repositories` row. One poll renames the registered repository
+  to the board owner's - and the fallback owner is scraped back out of that row, so every later
+  poll reads the wrong board even after the setting is taken away again. Proved by collapsing them
+  on purpose and watching the row change, rather than argued for.
+- **A second `/users/` was hiding behind the first.** A draft card has no page of its own, so it is
+  linked to the board, and that link was built by hunting `/users/` in the card's `project_url`. An
+  organisation's card says `/orgs/`, so the hunt failed and the card got
+  `github.com/users/unknown/projects/N` — a dead link, in the thread's metadata block and in
+  `tracked_items.github_url`, kept. Fixing only the request paths would have taken organisation
+  boards from dead to working with every draft link broken.
+- **No new App permission, on purpose.** GitHub does publish one for organisation projects, and
+  taking it would have been the tidier arrangement. It also suspends an installed App's event
+  delivery until an admin accepts the change: every pull request, issue, comment, review and check
+  in every registered repository, dark, to switch on a feature that ships off. The board keeps its
+  own narrow token, which now wants Projects: Read-only under organisation permissions as well as
+  user ones. The cost is attribution — board history names the token's owner, not this bot.
+- **Correcting this file.** The entry that first recorded the limitation said it was "written down
+  in the README now, where somebody about to set the project number will find it". It was not; no
+  such warning was ever added. It is there now, and describes a feature that works rather than one
+  that does not.
+- **Still one board.** Naming its owner made the board addressable on its own; it did not decide
+  whose cards it holds, so the refusal to poll with more than one server registered stands
+  unchanged. Per-repository boards, per-item projects, field options, writing back to a board, and
+  the rest of #158 are their own work.
