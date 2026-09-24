@@ -309,7 +309,7 @@ async def test_a_status_label_is_not_announced_as_an_ordinary_tag(
     registered: Repository, db_engine: AsyncEngine
 ) -> None:
     """The five statuses live as labels on the repository and this bot writes them itself, so a
-    `/set_done` and somebody tagging an issue `bug` arrive down the same webhook. Saying the same
+    `/status Done` and somebody tagging an issue `bug` arrive down the same webhook. Saying the same
     sentence about both buried the one that matters under the one that does not.
 
     Through the whole stack rather than against the renderer, because the classification happens

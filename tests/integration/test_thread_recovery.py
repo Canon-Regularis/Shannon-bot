@@ -855,7 +855,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
         prs = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
         await prs.sync(pr_event("opened"))
 
-        # Finished, the way `/set_done` leaves it.
+        # Finished, the way `/status Done` leaves it.
         item = await stored(db_session)
         await db_session.execute(
             update(TrackedItem).where(TrackedItem.id == item.id).values(status=Status.DONE)

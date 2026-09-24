@@ -245,7 +245,7 @@ def format_label_change(move: LabelMove) -> Panel:
     happened at all.
 
     Three groups rather than one, because two of them are labels this bot writes itself. Status
-    and priority both live as labels on the repository, so `/set_done` and somebody tagging an
+    and priority both live as labels on the repository, so `/status Done` and somebody tagging an
     issue `bug` arrive down the same webhook, and saying the same sentence about both buried the
     one that matters under the one that does not.
 
@@ -311,7 +311,7 @@ _STATE_HEADINGS = {
 # Two ways of saying the thread is shut, because only one of them can be undone. A closed issue
 # reopens on GitHub and the thread comes back with it; a merged pull request does not reopen at
 # all, so pointing somebody at GitHub to undo it would send them looking for a button that is not
-# there. This is not a corner: `/set_done` is what locks a pull request and the requirements have
+# there. This is not a corner: `/status Done` is what locks a pull request and the requirements have
 # it run before the merge, so a merged item arriving in a shut thread is the ordinary order.
 _SHUT = "-# This thread is locked and archived."
 _SHUT_UNTIL_REOPENED = (

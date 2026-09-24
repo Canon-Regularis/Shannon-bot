@@ -77,7 +77,7 @@ class SyncPolicy(Protocol):
 class PullRequestPolicy:
     object_type = ObjectType.PR
     channel_fallback: ObjectType | None = None
-    # `/set_done` is the only thing that locks one, and no payload can say a pull request is
+    # `/status Done` is the only thing that locks one, and no payload can say a pull request is
     # finished, so the row is all a replacement thread has.
     lock_lives_in_the_row = True
 
@@ -118,7 +118,7 @@ class PullRequestPolicy:
     def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """Closed covers merged and abandoned alike.
 
-        An open one at DONE is `/set_done`, which no payload knows about; False elsewhere,
+        An open one at DONE is `/status Done`, which no payload knows about; False elsewhere,
         rather than None, is the only thing that gives a reopened pull request its thread back.
         """
         if snapshot.closed:
@@ -128,7 +128,7 @@ class PullRequestPolicy:
         return False
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
-        """`/set_done` writes the status, and closing or merging writes the state."""
+        """`/status Done` writes the status, and closing or merging writes the state."""
         return status is Status.DONE or github_state != "open"
 
     def thread_name(self, snapshot: TrackedSnapshot) -> str:
@@ -178,13 +178,13 @@ class IssuePolicy:
         return current
 
     def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
-        """GitHub decides: an issue has no `/set_done`, and the command closes it on GitHub."""
+        """GitHub decides: an issue has no `/status Done`, and the command closes it on GitHub."""
         return snapshot.closed
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """The answer `shut` gives, read from the column the payload writes into.
 
-        Not the status: `/set_done` can put an open issue at DONE, and an open issue's thread is
+        Not the status: `/status Done` can put an open issue at DONE, and an open issue's thread is
         one people are still meant to be talking in.
         """
         return github_state == "closed"
