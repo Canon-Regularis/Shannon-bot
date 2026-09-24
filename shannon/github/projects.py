@@ -1,9 +1,15 @@
 """Reading a GitHub project board over REST.
 
 REST rather than GraphQL, to keep one transport. Every path is prefixed by the kind of account
-that owns the board, and the two prefixes are not interchangeable: a board number is a sequence
-GitHub keeps per owner, so `/users/x/projectsV2/3` and `/orgs/x/projectsV2/3` are two different
-boards. The kind is therefore asked about rather than assumed.
+that owns the board, and the two prefixes are not interchangeable. A login names one account of
+one kind — GitHub keeps users and organisations in a single namespace — so the wrong prefix is
+not a longer route to the same board, it is a 404, which is what every organisation's board
+answered here until this asked rather than assumed.
+
+That is a different fact from the one the owner setting guards, and they are easy to run
+together. A project number is a sequence GitHub keeps per OWNER, so the same number under a
+DIFFERENT owner is a real board holding somebody else's cards. The prefix cannot take you there;
+a wrongly guessed owner can.
 """
 
 from __future__ import annotations
@@ -37,6 +43,18 @@ CONTENT_TYPES: dict[str, ObjectType] = {
     "Issue": ObjectType.ISSUE,
     "PullRequest": ObjectType.PR,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectListing:
+    """One board, as somebody choosing between them needs it.
+
+    No owner on it. A listing is always read under one owner and handing that owner back would
+    invite a caller to trust the copy rather than the question it asked.
+    """
+
+    number: int
+    title: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +94,32 @@ class HttpProjectBoards:
         self._fields: dict[tuple[str, int], tuple[int, ...]] = {}
         self._kinds: dict[str, str] = {}
 
+    async def list_boards(self, owner: str) -> Sequence[ProjectListing]:
+        """Every board this owner has, for somebody choosing one.
+
+        Over the same prefix the reads use, so the organisation-or-person decision is made once
+        and a picker cannot offer a board the poller then cannot open.
+        """
+        kind = await self._owner_kind(owner)
+        listings: list[ProjectListing] = []
+        async for body in self._client.get_pages(
+            f"/{kind}/{quote(owner, safe='')}/projectsV2", owner=owner, per_page=PAGE_SIZE
+        ):
+            rows = body if is_json_list(body) else []
+            listings.extend(listing for row in rows if (listing := parse_listing(row)) is not None)
+        return listings
+
+    async def get_board(self, owner: str, project_number: int) -> ProjectListing | None:
+        """One board, or None where this token cannot open it.
+
+        Exists so that "the token cannot see this board" becomes a refusal the person who typed
+        it reads, rather than a warning once a minute in a log nobody is watching. A picker's
+        suggestions are only suggestions - discord.py says so - so the number that arrives here
+        may never have been offered.
+        """
+        board = await self._board_path(owner, project_number)
+        return parse_listing(await self._client.get_json(board, owner=owner))
+
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
         """Every card on the board, archived ones dropped.
 
@@ -110,8 +154,8 @@ class HttpProjectBoards:
         """`orgs` or `users`, asked of GitHub once per account and then kept.
 
         Asked rather than configured because an operator can get it wrong and GitHub cannot,
-        and because an account that converts to an organisation would leave a setting stale and
-        every poll afterwards reading somebody else's board.
+        and because an account converted to an organisation would leave a setting stale and
+        every poll afterwards asking under a prefix that has stopped answering.
 
         An answer that cannot be read is taken as a person — which is what every board did
         before this existed — and is NOT remembered, so a blip does not decide the prefix for
@@ -211,6 +255,26 @@ def parse_item(payload: object, project_number: int) -> BoardItem | None:
         updated_at=mapping.parse_timestamp(payload.get("updated_at")),
         content_id=content_id if isinstance(content_id, int) else None,
     )
+
+
+def parse_listing(payload: object) -> ProjectListing | None:
+    """One board out of a listing, or None for a shape this bot cannot use.
+
+    A board with no title is not refused for tidiness: the title is the whole of what a picker
+    shows, and an entry reading `#7` with nothing beside it is a choice nobody can make.
+    """
+    if not is_json_object(payload):
+        return None
+
+    number = payload.get("number")
+    if not isinstance(number, int):
+        return None
+
+    title = _text(payload.get("title"))
+    if not title:
+        return None
+
+    return ProjectListing(number=number, title=title)
 
 
 def _field_value(fields: list[object], name: str) -> object:

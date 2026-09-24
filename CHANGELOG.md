@@ -6370,11 +6370,14 @@ feature end to end rather than assuming a predecessor the file never recorded.
   `/users/{owner}/projectsV2/...` and there was no organisation path anywhere, so an organisation's
   board answered 404 on every poll for ever. That was known and written down; what was not known is
   what it was standing in front of.
-- **The wrong prefix is worse than no answer.** A board number is a sequence GitHub keeps per
-  account, so `/users/x/projectsV2/3` and `/orgs/x/projectsV2/3` are two real boards that are not
-  each other. A 404 was the lucky outcome. The unlucky one is 200 with somebody else's cards, which
-  this bot would have mirrored into Discord threads and, with `SHANNON_BOARD_MAY_SET_STATUS` on,
-  started moving statuses from. Silently wrong beats silently absent nowhere.
+- **Two facts that are easy to run together, and were.** A login names one account of one kind,
+  because GitHub keeps users and organisations in a single namespace - so the wrong PREFIX is not
+  a longer route to the same board, it is the 404 above, and nothing worse. Separately, a project
+  number is a sequence GitHub keeps per OWNER, so the same number under a DIFFERENT owner is a
+  real board holding somebody else's cards. The first is what the organisation path fixes; the
+  second is what the owner setting below guards, and it is the one that answers 200 with work
+  that is not yours. An earlier draft of this entry attached the second consequence to the first,
+  which would have been a scarier and less true story.
 - **Which kind of account it is is asked of GitHub, not configured.** `GET /users/{owner}` answers
   with a `type` for an organisation as readily as for a person, once per account for the life of
   the process. A setting would have replaced one silent misconfiguration with another: it can be
@@ -6384,6 +6387,13 @@ feature end to end rather than assuming a predecessor the file never recorded.
   Status field lookup already makes. Remembered, one bad answer would decide the prefix until a
   restart nobody knew to do; guessed at afresh each minute, a blip costs one poll. It says so in
   the log either way, because an organisation whose board went quiet deserves a reason.
+- **A board it cannot read names the token too, and answers 403 the same way as 404.** The first
+  version of this named only the two settings that address a board, which is a confident wrong
+  diagnosis for the likeliest cause of all: the user half of Projects: Read-only does not read an
+  organisation's board, and an unset token falls through to the App, which holds no Projects
+  permission at all. A token that is not authorised answers 404 as readily as 403, so the two are
+  caught together rather than told apart on a guess - and 403, which this is the first code to
+  make reachable, would otherwise have been the one case still getting a traceback a minute.
 - **Falling back is not trying `/orgs/` after `/users/`.** A 404 is equally what a deleted board, a
   wrong number and a private board with the wrong token answer, so a retry would fire on cases it
   cannot fix and then name the organisation path for a person's board — a wrong diagnosis is worse
@@ -6420,3 +6430,192 @@ feature end to end rather than assuming a predecessor the file never recorded.
   whose cards it holds, so the refusal to poll with more than one server registered stands
   unchanged. Per-repository boards, per-item projects, field options, writing back to a board, and
   the rest of #158 are their own work.
+
+## A draft card stops being offered labels it cannot have
+
+- **The label picker and the refusal behind it were answering different questions.** A project
+  ticket's thread IS a tracked item, so it got past the guard that turns away a channel which is
+  not an item's, and was handed every label the REGISTERED REPOSITORY has. A full, working-looking
+  picker, every entry of which `set_label` then refused. Both now answer off one predicate, so
+  they cannot drift apart again.
+- **Why a draft cannot simply be allowed through.** Worth writing down, because the guard reads
+  like a missing feature and is not. A draft card has no number of its own, so the poller carries
+  the BOARD's number in that slot and `FoundItem` reads it straight back. Drop the guard and
+  nothing raises: the write goes to `/repos/{owner}/{name}/issues/{board_number}/labels` and lands
+  on whatever issue or pull request happens to hold that number, under a reply naming an item
+  nobody asked about. Widening the kind table does not fix that, it hides it - there is no
+  `(owner, name, number)` that addresses a draft.
+- **The advice now differs by command, because it was wrong for one of them.** Three callers share
+  the refusal and it told all three to move the card on the board. That is right for a status and a
+  priority, which a column genuinely sets. For a label it is wrong advice: a column is not a label,
+  and moving a card sets no label at all. A label now says to convert the draft to an issue, which
+  is the only thing that actually gives it one.
+- **Required rather than defaulted.** The differing sentence has no default value. Three callers,
+  three sentences, and a default would be an arm nothing reaches - which under a total branch floor
+  is a hole rather than a convenience.
+- **Handed on rather than fixed here.** Converting a draft to an issue keeps the same project item
+  id and flips its content type, so the card leaves the draft half of the poll and enters the
+  tracked half, which looks items up by content id. The old ticket row is never visited again: its
+  thread is orphaned, frozen at the last draft render, while the issue opens a second thread from
+  its own webhook. Reachable today by anyone clicking Convert to issue, and now slightly likelier,
+  because the refusal above recommends it.
+
+## A board belongs to a repository, not to the process
+
+- **`/set_board` points a server's repository at the project it mirrors.** Issue #158, the first
+  of its four asks. The board was a pair of environment variables read once at boot: one board for
+  the whole deployment, changed only by somebody with shell access and a restart. That was never a
+  link to a repository - it was a link to a PROCESS, and which repository it belonged to was
+  inferred by scraping the owner out of whichever single one happened to be registered.
+- **Which is why the poller used to refuse to run at all with two servers registered.** It stopped
+  itself, reported `poller: false` for ever after, and told the operator to set the number to zero
+  or give that server a deployment of its own. Reading it again with the column in front of you,
+  that guard was not protecting anybody from a hard problem: it was the shape of a missing column.
+  Nothing elected which repository the board belonged to because nothing recorded it. Two servers
+  with two boards are now both polled, and the refusal is gone.
+- **The ambiguity itself has not gone, only the punishment for it.** One number and two
+  repositories still says nothing about whose board it is, so nothing is read and the log says to
+  run the command - once, rather than once a minute. Taking the whole feature down for every
+  server was affordable while there could be one board; it is not affordable when one server's
+  typo would stop everybody else's board being read.
+- **Two nullable columns rather than a table.** One repository gets one board. A table would be
+  the shape for an item on several boards, and that needs an arbitration rule for two boards
+  disagreeing about a status and a cap to keep N reads a minute inside one token's budget - and
+  REST cannot answer "which boards is this issue on" in the first place, so the discovery half is
+  not buildable here at all. Null number means no board, which every existing row is. Null owner
+  means the repository's own, which is exactly the fallback the poller already had.
+- **The settings survive as a DEFAULT, and are not migrated.** They apply where no repository has
+  a board of its own, so the upgrade is a no-op for every existing deployment and the first
+  `/set_board` is the moment they stop. Half-honouring them would poll one server out of the
+  database and another out of the environment with nothing saying which. A data migration was
+  refused on purpose: Alembic would have to guess which row the variable meant, and the one case
+  where the answer is unambiguous is the case the runtime fallback already covers - where it can
+  be re-evaluated every pass rather than frozen into a row at upgrade time.
+- **No restart, and no wake-up either.** The boards are re-read from the database at the top of
+  every pass, so a board linked at 12:00:05 is polled at 12:01:00 and the reply says so. Pushing a
+  wake-up from the command would couple the command table to the poller instance to save
+  fifty-nine seconds, once. What `enabled` means changed with it: it used to mean "a board is
+  configured", read from a number at boot, which is exactly why a board linked afterwards would
+  have been invisible until a restart - the task was only created when it was true.
+- **`SHANNON_POLL_BOARDS`, because the off switch moved.** Setting the number to zero on every
+  replica but one used to be what stopped two pollers racing on one card and undoing each other's
+  moves. That stops working the moment a board can be linked by a command: a second replica would
+  start polling as soon as somebody ran it, with no environment change anywhere to notice.
+- **The board is opened before it is stored.** discord.py documents a choice as a suggestion, so
+  what arrives may be typed, may be a digit out, and may name a board this token cannot see. Every
+  one of those stored is a warning once a minute in a log; opened first, it is a sentence read by
+  the person who caused it, naming the token as well as the number.
+- **"None" and "that is not a board number" are different answers.** They were the same one for
+  about an hour: a bare `int | None` off the picker meant typing `Roadmap` into the field would
+  have quietly unlinked the board rather than refusing. Three outcomes now, and a test over the
+  shapes that used to collapse.
+- **Two repositories may not share a board.** Each would mirror every draft card into its own
+  server, because a tracked item is keyed by repository and nothing compares across them. One
+  query and one sentence, rather than two threads per card and nobody knowing why.
+- **The unreadable-board warning names the repository now.** With one board it could say "board 3"
+  and be understood. With several it has to say whose.
+
+## Eight commands become two, with the state as a choice
+
+- **`/status` and `/priority` replace the eight `/set_*` commands.** Issue #158. They were eight
+  separate commands taking no argument, one per state, on the reasoning that Discord shows them in
+  the picker as eight things to do. It also shows them as eight things to scroll past, and one of
+  the eight is `/set_med_priority`, which is not what anybody types first.
+- **Two rather than one, because a priority is not a status.** The brief said one command. The code
+  says two and the code is right: the service has a method for each, the sentences differ, and the
+  rules about a closed item and about DONE needing READY_FOR_MERGE apply to status alone. One
+  picker holding both would put High in a list labelled status and need an isinstance on the far
+  side to tell them apart again.
+- **Static choices, which is not a limitation being worked around.** A choice list is baked into
+  the registration at `tree.sync()`, which runs once at boot, globally - so anything per-guild or
+  per-board could only be an autocomplete. These are a StrEnum: the same five and the same three in
+  every server for the life of the process. Registered, Discord renders a validated dropdown and
+  resolves what comes back against the list, so the callback has no parse to guard and no
+  unreachable arm to leave uncovered.
+- **Both tables are written out rather than comprehended, for two different reasons.** Status,
+  because Discord shows choices in the order they are written and the enum is not in that order: it
+  declares BACKLOG fourth, which is right for the database and wrong for a person, who would open
+  the picker on "Not reviewed" with "Backlog" buried under "Ready for merge".
+- **Priority, because its enum has a fourth member that must never reach the picker.** UNSET is
+  what an item has before anybody says, not something to pick, and `priority_change` ends in a
+  lookup against a table of three - so a picked "None" would be a KeyError reaching whoever ran it
+  as "Something went wrong here". Eight commands could not express UNSET and so were structurally
+  immune to this; a list comprehended over the enum would say it on the first try. A test now holds
+  the choice list against the label table so that tidying one cannot outrun the other.
+- **The table mapping each state to the command that owned it is gone.** It existed because
+  MEDIUM's command was `set_med_priority` and not `set_medium_priority`, so a derived name would
+  have been wrong for exactly one of the eight and right everywhere it was tested. With the state a
+  choice rather than a command name, nothing about it is underivable. What replaces its test is the
+  invariant that still means something: a refusal that tells somebody to pick a word cannot name a
+  word the picker does not show.
+- **The log line grew the value.** With eight commands the name said what was asked for. With two
+  it does not, and "/status could not finish" names neither the item nor the state somebody wanted.
+- **Clients keep the old names for up to an hour.** `tree.sync()` replaces the global set, but
+  Discord's own propagation is not instant and the README already says so. A stale `/set_done`
+  raises `CommandNotFound`, which reaches the error handler as "Something went wrong here" - a
+  message that says bug where the truth is a rename. Worth knowing about rather than worth
+  preventing: the alternative is keeping eight aliases alive for ever to spare one hour.
+
+## GitHub decides too, where it can
+
+- **Eight commands now ask GitHub whether the caller may write here.** Issue #158, the last of its
+  four asks. `/label`, `/unlabel`, `/status`, `/priority`, `/assign`, `/unassign`,
+  `/request_review` and `/unrequest_review`. Every gate in this bot until now was a Discord role:
+  somebody holding Project Manager could move any item in any repository the server is bound to,
+  whatever GitHub thought of them. That is the right answer for a server where nobody has
+  connected an account, and the wrong one for a server where GitHub already knows who may write
+  here and was never asked.
+- **Four ways to say yes, and only one of them is the caller having access.** Worth setting out,
+  because the other three are deliberate holes and a hole nobody wrote down is a bug. No proved
+  account, nothing registered, GitHub unreachable, and enough permission.
+- **A caller who never proved an account is decided by the Discord role alone.** The whole posture
+  in one branch, and the reason the feature can ship on by default: a second lock added on top of
+  a working system must not become the reason the system stops. It raises the floor for everybody
+  who has run `/link` and locks out nobody who has not - which also means never running it is a
+  way to keep the old behaviour. Closing that needs a setting that refuses an unproved caller
+  outright, and that is a decision about a deployment rather than a default.
+- **It fails open when GitHub cannot be reached.** An outage must not turn every one of those
+  commands in every server into a refusal. The cost is real and is not hidden: anybody who can
+  wait for an outage gets the old behaviour back for its duration, so the fallback is logged while
+  it lasts rather than passing silently.
+- **A ladder rather than an equality.** `at_least` ranks none, read, write and admin, so asking
+  for write does not refuse an administrator - which an `==` would have done and which is exactly
+  the kind of bug that only shows up in front of the person it refuses. A word GitHub has never
+  sent ranks as none: these are wire values off a JSON body, not a column this bot controls, so a
+  fifth name appearing one day should refuse a write rather than end the command in a traceback.
+- **Two refusals, not one.** No access at all and read-only are different situations: one is fixed
+  by asking for access and the other by asking for MORE access. Both name the account, because
+  somebody may be signed in as one they forgot they proved, or one they have since renamed on
+  GitHub - which reads here as an account that is not a collaborator, since a login is asked about
+  by name. The first says to run `/link` again for exactly that reason.
+- **The role is checked first, and GitHub only after the defer.** Somebody without the Discord
+  role is told that rather than told about a GitHub account they may never have connected. And
+  the GitHub question is a network call, while Discord allows three seconds for a first response -
+  asked before the defer, a slow answer produces an interaction that expires rather than one that
+  refuses, and an expired interaction says nothing at all.
+- **The label picker stays ungated.** An autocomplete cannot reply, so there is nowhere to put a
+  refusal, and it is asked once per keystroke - gating it would be a GitHub call per letter typed.
+  What it offers is a repository's label names, which are already in every thread this bot writes.
+- **The four people commands were not named in #158 and are gated anyway.** They are the writes
+  that put a named person onto somebody else's pull request. Gating `/label` and leaving those
+  four open was not a line worth defending.
+
+## A team belongs to an organisation
+
+- **`/link_team` refuses where the repository belongs to a personal account.** Only an
+  organisation has teams, so GitHub would never ask one for a review there: the mapping could
+  never match anything, and what it left behind was a role sitting in the database looking
+  configured and silent for ever. The slug check in front of it passes any well-shaped name, which
+  is how this was reachable at all.
+- **One Metadata-only call, through the App.** `GET /users/{owner}` says whether an account is an
+  organisation, which needs no permission the installation does not already hold - and that
+  matters, because granting a new one suspends event delivery until an admin accepts it.
+- **It is NOT asked whether the team exists, and that is the shape of the slice.** Listing an
+  organisation's teams needs Members: Read, which the App does not hold and which a second
+  fine-grained token could only reach by being broad enough to read the organisation's people.
+  The project token is defensible because a leak exposes a board; this one would have no such
+  defence, would expire within a year with nothing said, and would still be blind to a secret team
+  - so it would refuse mappings that are correct. A typo is not worth that.
+- **A behaviour change worth naming: this now needs `/register` first.** There is no repository to
+  read an owner off otherwise, and a team mapping made before one exists is a row pointing at
+  nothing. It was allowed before and could never have matched anything either.

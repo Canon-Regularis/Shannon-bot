@@ -56,7 +56,7 @@ class ReadsBoards(Protocol):
 class MovesStatus(Protocol):
     """Setting a tracked item's status, which is what a card moving on a board amounts to.
 
-    The same path a person takes with /set_in_review, deliberately. A board move and a command
+    The same path a person takes with /status In review, deliberately. A board move and a command
     are the same event told two ways, and routing them differently is how the labels on GitHub
     and the block in Discord start disagreeing.
     """
@@ -74,8 +74,9 @@ class ProjectPoller:
         sync: SyncsItems,
         workflow: MovesStatus,
         *,
-        project_number: int,
+        project_number: int = 0,
         board_owner: str = "",
+        polling: bool = True,
         interval: float = 60.0,
         may_set_status: bool = False,
     ) -> None:
@@ -83,17 +84,32 @@ class ProjectPoller:
         self._projects = projects
         self._sync = sync
         self._workflow = workflow
+        # A default for a deployment that has not run `/set_board` yet, rather than the one
+        # board there is. Zero means none, which is what it always meant.
         self._project_number = project_number
         self._board_owner = board_owner
+        self._polling = polling
         self._interval = interval
         self._may_set_status = may_set_status
+        self._said = False
         self._stopping = False
         self._stopped = asyncio.Event()
 
     @property
     def enabled(self) -> bool:
-        """Whether a board was configured at all. Zero means none."""
-        return self._project_number > 0
+        """Whether this process reads boards at all.
+
+        It used to mean "a board is configured", read once from a number at boot - which made a
+        board linked afterwards invisible until a restart, because the task itself was only
+        created when this was true. It now means what the operator actually decides: whether
+        THIS process is the one that polls. Which boards exist is a question for the database,
+        asked afresh every pass.
+
+        That moves where the multi-replica off switch lives. Setting the number to zero on every
+        replica used to be what stopped two pollers racing on one card and undoing each other's
+        moves; `SHANNON_POLL_BOARDS` is now that switch, and the number no longer is.
+        """
+        return self._polling
 
     @property
     def stopping(self) -> bool:
@@ -110,32 +126,55 @@ class ProjectPoller:
         self._stopped.set()
 
     async def run_once(self) -> int:
-        """Read the board and sync what moved, answering with how many cards that was."""
+        """Read every linked board and sync what moved, answering with how many cards that was.
+
+        Boards are re-read from the database at the top of every pass rather than resolved once
+        at boot, which is the whole of how `/set_board` takes effect without a restart. A board
+        linked at 12:00:05 is polled at 12:01:00, and the command's reply says so. Pushing a
+        wake-up from the command instead would couple the command table to the poller instance
+        to save fifty-nine seconds, once.
+        """
         if not self.enabled:
             return 0
 
-        board = await self._registered()
-        if board is None:
-            # Nobody has run /register, so there is no guild to post into and no owner to ask
-            # about. Not an error: the process runs before anybody has set it up.
-            return 0
+        moved = 0
+        for board in await self._boards():
+            moved += await self._poll(board)
+        return moved
 
+    async def _poll(self, board: _Board) -> int:
+        """One board: read it, and sync the cards that have moved since the last read."""
         try:
-            listed = await self._projects.list_board_items(board.board_owner, self._project_number)
-        except GitHubNotFoundError as missing:
+            listed = await self._projects.list_board_items(board.board_owner, board.project_number)
+        except (GitHubNotFoundError, GitHubAuthError) as unreadable:
             # Named rather than left to the loop's `logger.exception`, which answers a
-            # misconfiguration with a traceback once a minute and never says what was asked for.
-            # This is the failure two settings can now cause between them, and the trap is that
-            # neither is wrong on its own: the number is a sequence GitHub keeps per account, so
-            # it addresses a different board under every owner and only the pair means anything.
+            # misconfiguration with a traceback once a minute. Both answers are caught together
+            # because an operator cannot act on the difference: a fine-grained token that is not
+            # authorised for an organisation answers 404 as readily as 403, so telling the two
+            # apart in the message would be a confident guess rather than a diagnosis.
+            #
+            # Three things can be wrong and the log cannot tell which, so it names all three
+            # rather than the two this slice added. A board GitHub does not have, an owner it
+            # was asked under - the number is a sequence kept per account, so the pair means
+            # something neither half does alone - or a token that cannot see the board, which is
+            # the one most likely here: the user half of Projects: Read-only does not read an
+            # organisation's board, and an unset token falls through to the App, which holds no
+            # Projects permission at all.
+            #
+            # The repository is named because there can now be several boards, and a line saying
+            # only that "board 3" failed is one an operator cannot act on when two servers each
+            # have one.
             logger.warning(
-                "GitHub has no board %s belonging to %r, so there is nothing to mirror (%s). "
-                "That number is a sequence GitHub keeps per account rather than an id of its "
-                "own, so check SHANNON_GITHUB_PROJECT_NUMBER and SHANNON_GITHUB_PROJECT_OWNER "
-                "against each other rather than one at a time",
-                self._project_number,
+                "could not read board %s belonging to %r for %s, so there is nothing to mirror "
+                "(%s). Run /set_board in that server to check the number against the board's "
+                "URL and the owner against who owns it - the number is a sequence GitHub keeps "
+                "per account, so the pair means something neither half does alone - and check "
+                "that SHANNON_GITHUB_PROJECT_TOKEN grants Projects: Read-only for that owner's "
+                "kind of account",
+                board.project_number,
                 board.board_owner,
-                missing,
+                board.snapshot.full_name,
+                unreadable,
             )
             return 0
 
@@ -247,7 +286,7 @@ class ProjectPoller:
 
         Not a second thread and not a second snapshot: the issue is mirrored from its own
         webhooks, and all the board adds is which column it sits in. That goes through the same
-        path a person takes with /set_in_review, so the label on GitHub and the block in Discord
+        path a person takes with /status In review, so the label on GitHub and the block in Discord
         cannot end up disagreeing about a status the board decided.
 
         Acting on a MOVE, not on a disagreement. Those are different questions and answering the
@@ -518,43 +557,66 @@ class ProjectPoller:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
 
-    async def _registered(self) -> _Board | None:
+    async def _boards(self) -> Sequence[_Board]:
+        """Every board to read this pass, newest state of the database each time.
+
+        A linked board wins over the configured one, per repository and per pass. The settings
+        are a default for a deployment that has not run `/set_board` yet, not a fallback for one
+        whose command failed: once any repository carries a board of its own, they stop applying
+        anywhere, because half-honouring them would poll one server from the database and
+        another from the environment with nothing saying which.
+
+        The refusal this replaces stopped the poller outright with more than one server
+        registered, and said to set the number to zero or give that server a deployment of its
+        own. That was never a guard against a hard problem - it was the shape of a missing
+        column. Nothing elected which repository a board belonged to because nothing recorded it.
+
+        Built inside the session on purpose. The old one got away with building after it closed
+        because every attribute was already loaded; a row read after an expire raises a lazy load
+        inside the poll loop, where `run_forever` swallows it and it surfaces as a board that
+        silently stopped.
+        """
         async with self._sessionmaker() as session:
-            found = await RepositoryStore(session).registered(at_most=2)
+            repositories = RepositoryStore(session)
+            linked = await repositories.with_boards()
+            if linked:
+                return [
+                    _Board.of(row, number, row.project_owner or "")
+                    for row in linked
+                    # Narrowed per row rather than trusted from the WHERE clause, which filters
+                    # in SQL and tells the type checker nothing.
+                    if (number := row.project_number) is not None
+                ]
 
-        if len(found) > 1:
-            # Which repository a mirrored card is filed under, and which server's channels its
-            # thread is opened in, both come from the one registered repository, and nothing
-            # here elects one. Naming the board's owner does not settle it: that made the board
-            # addressable on its own, but a card still has to belong somewhere, and polling
-            # whichever registered first would mirror one board into one server's channels and
-            # say nothing anywhere about the others, which reads from every other server as a
-            # feature that simply does not work.
-            #
-            # Stopping rather than warning, because a warning here is one nobody reads: this runs
-            # once a minute for as long as the process lives. Ending the task puts it where
-            # something already watches. `report_exit` says so once, and `/health` answers
-            # `poller: false` from then on, which is a standing machine-readable flag rather than
-            # a line in a log.
-            #
-            # Nothing else stops with it. The poller is the one task this process is useful
-            # without, and it is deliberately wired without `halt`, so refusing to serve webhooks,
-            # threads, comments and every command in every server to protect a feature that is
-            # off would be the wrong blast radius by an enormous margin. `healthy` does not count
-            # the poller, so the deploy monitor stays green as well.
-            #
-            # It does not start again by itself once a server unregisters. A guard that quietly
-            # resumes is a guard nobody ever finds out about.
-            logger.error(
-                "%s servers are registered and a board is configured, and nothing elects which "
-                "board to read, so the board mirror is stopping. Set "
-                "SHANNON_GITHUB_PROJECT_NUMBER to 0, or give that server a deployment of its own.",
-                len(found),
-            )
-            self.stop()
-            return None
+            if self._project_number <= 0:
+                return []
 
-        return _Board.of(found[0], self._board_owner) if found else None
+            found = await repositories.registered(at_most=2)
+            if len(found) == 1:
+                return [_Board.of(found[0], self._project_number, self._board_owner)]
+
+            if found:
+                self._say_once(
+                    "%s servers are registered and the board settings name one board between "
+                    "them, so nothing says whose it is and no board is read. Run /set_board in "
+                    "the server it belongs to; the settings are a default for a deployment that "
+                    "has not done that yet",
+                    len(found),
+                )
+            return []
+
+    def _say_once(self, message: str, *args: object) -> None:
+        """Say something the operator has to act on, once rather than once a minute.
+
+        This runs on a timer for as long as the process lives, so a line repeated every pass is
+        one people learn to scroll past. It used to stop the task instead, which put the fact
+        somewhere `/health` could report it - affordable when it meant one board could not be
+        read, and not affordable now that it would take every other server's board down with it.
+        """
+        if self._said:
+            return
+        self._said = True
+        logger.error(message, *args)
 
     async def _mirrored(self, repository_id: int) -> dict[int, tuple[datetime | None, int | None]]:
         async with self._sessionmaker() as session:
@@ -568,7 +630,7 @@ class ProjectPoller:
             github_object_id=item.item_id,
             # A card has no number of its own, so the board's is carried instead. It is what a
             # reader of the row has to go on to find where the thing came from.
-            number=self._project_number,
+            number=board.project_number,
             # Cut to what the row holds. A draft card's Title is a free text field with no cap
             # on GitHub's side, unlike an issue's, and one card too wide for the column ends the
             # whole poll rather than that one card.
@@ -578,7 +640,7 @@ class ProjectPoller:
             updated_at=item.updated_at,
             action="polled",
             column=item.column,
-            project_number=self._project_number,
+            project_number=board.project_number,
         )
 
 
@@ -661,14 +723,16 @@ class _Board:
     """
 
     repository_id: int
+    project_number: int
     board_owner: str
     snapshot: RepositorySnapshot
 
     @classmethod
-    def of(cls, repository: Repository, board_owner: str = "") -> _Board:
+    def of(cls, repository: Repository, project_number: int, board_owner: str = "") -> _Board:
         owner, _, name = repository.repo_name.partition("/")
         return cls(
             repository_id=repository.id,
+            project_number=project_number,
             board_owner=board_owner or owner,
             snapshot=RepositorySnapshot(
                 github_repo_id=repository.github_repo_id,

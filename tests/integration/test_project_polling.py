@@ -117,6 +117,7 @@ def poller_for(
         *,
         project_number: int = PROJECT,
         board_owner: str = "",
+        polling: bool = True,
         may_set_status: bool = True,
     ) -> ProjectPoller:
         """Allowed to move things unless a test says otherwise. Off is the shipped default and
@@ -128,6 +129,7 @@ def poller_for(
             workflow,
             project_number=project_number,
             board_owner=board_owner,
+            polling=polling,
             interval=0.01,
             may_set_status=may_set_status,
         )
@@ -234,42 +236,45 @@ class TestReadingABoard:
 class TestABoardAndMoreThanOneServer:
     """This bot is invited to a server rather than built into one, so several may register.
 
-    A board is not, and naming its owner does not settle it. That made the board addressable on
-    its own, but a card still has to be filed against a repository and opened in a channel, and
-    nothing elects which registered one. Polling whichever registered first mirrored one board
-    into one server's channels and said nothing anywhere about the others, which reads from
-    every other server as a feature that does not work at all.
+    The board used to be one process-wide pair of settings, so nothing said which server it
+    belonged to and the poller refused to run at all with a second one registered - it stopped
+    itself and told the operator to set the number to zero. That was never a guard against a hard
+    problem; it was the shape of a missing column. A board recorded against a repository answers
+    the question the refusal was standing in for, so the refusal is gone.
     """
 
-    async def test_one_server_is_still_polled(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    async def test_one_server_is_still_polled_from_the_settings(
+        self, board_channel: None, poller_for
     ) -> None:
-        """The other half of the guard. Without this the comparison could be widened to refuse
-        everything and the test below would still pass."""
+        """The default the settings name still applies where nothing else does, so a deployment
+        that upgrades without running the command keeps working exactly as it did."""
         poller = poller_for(FakeBoard(card()))
 
         assert await poller.run_once() == 1
         assert poller.stopping is False
 
-    async def test_a_second_server_stops_the_board_mirror(
+    async def test_a_second_server_no_longer_stops_the_mirror(
         self, board_channel: None, poller_for, db_session: AsyncSession
     ) -> None:
-        """Stopped, not merely quiet for one pass. Returning zero would leave it trying again
-        every minute for the life of the process with nothing anywhere saying why, and `/health`
-        would go on reporting `poller: true` while it mirrored nothing."""
+        """It used to take the whole feature down for every server to protect one ambiguity.
+        Affordable while there could be one board; not affordable now that one server's typo
+        would stop everybody else's board being read."""
         await register_repository(
             db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
         )
         poller = poller_for(FakeBoard(card()))
 
-        assert await poller.run_once() == 0
-        assert poller.stopping is True
+        await poller.run_once()
 
-    async def test_it_reads_no_board_at_all(
+        assert poller.stopping is False
+
+    async def test_the_settings_alone_still_read_no_board_with_two_servers(
         self, board_channel: None, poller_for, db_session: AsyncSession
     ) -> None:
-        """Rather than reading one and discarding it. The owner it would ask for is one of two
-        answers and there is no reason to prefer either."""
+        """The ambiguity itself has not gone away, only the punishment for it. One number and two
+        repositories still says nothing about whose board it is, and guessing would mirror one
+        server's cards into one server's channels while the other saw a feature that does not
+        work."""
         await register_repository(
             db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
         )
@@ -279,11 +284,12 @@ class TestABoardAndMoreThanOneServer:
 
         assert board.reads == []
 
-    async def test_it_says_which_setting_to_change(
+    async def test_it_says_to_run_the_command_rather_than_to_turn_it_off(
         self, board_channel: None, poller_for, db_session: AsyncSession, caplog
     ) -> None:
-        """Going quiet is the failure this guard replaces, so the one line it does write has to
-        name the way out."""
+        """The advice reversed with the fix. It used to say to set the number to zero or give
+        that server a deployment of its own, because there was no third answer; there is one
+        now, and it is one command."""
         await register_repository(
             db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
         )
@@ -291,7 +297,56 @@ class TestABoardAndMoreThanOneServer:
         with caplog.at_level(logging.ERROR):
             await poller_for(FakeBoard(card())).run_once()
 
-        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
+        assert "/set_board" in caplog.text
+
+    async def test_it_says_so_once_rather_than_once_a_minute(
+        self, board_channel: None, poller_for, db_session: AsyncSession, caplog
+    ) -> None:
+        """This runs on a timer for as long as the process lives. Stopping the task used to be
+        what kept the line from repeating; without that, a line every pass is one people learn to
+        scroll past."""
+        await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+        poller = poller_for(FakeBoard(card()))
+
+        with caplog.at_level(logging.ERROR):
+            await poller.run_once()
+            await poller.run_once()
+
+        assert caplog.text.count("/set_board") == 1
+
+    async def test_two_servers_each_with_their_own_board_are_both_read(
+        self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
+    ) -> None:
+        """What the refusal was standing in front of, and the whole point of the column. Two
+        servers, two boards, both mirrored, neither guessed at."""
+        other = await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+        registered.project_number = PROJECT
+        other.project_number = 77
+        await db_session.commit()
+        board = FakeBoard(card())
+
+        await poller_for(board).run_once()
+
+        assert sorted(board.reads) == [("Canon-Regularis", PROJECT), ("other", 77)]
+
+    async def test_a_linked_board_wins_over_the_settings(
+        self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
+    ) -> None:
+        """Once any repository carries a board of its own the settings stop applying anywhere.
+        Half-honouring them would poll one server out of the database and another out of the
+        environment, with nothing saying which was which."""
+        registered.project_number = 91
+        registered.project_owner = "acme"
+        await db_session.commit()
+        board = FakeBoard(card())
+
+        await poller_for(board, project_number=PROJECT, board_owner="ignored").run_once()
+
+        assert board.reads == [("acme", 91)]
 
 
 class TestNotDoingWorkTwice:
@@ -365,6 +420,24 @@ class TestWhenThereIsNothingToDo:
         assert synced == 0
         assert board.reads == [], "a board was read with no project configured"
 
+    async def test_a_replica_told_not_to_poll_reads_nothing(
+        self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
+    ) -> None:
+        """The multi-replica off switch, which used to be the project number set to zero
+        everywhere but one process. That stopped being enough once a board could be linked by a
+        command: a second replica would start polling the moment somebody ran it, with no
+        environment change anywhere to notice. Two pollers racing on one card can each put its
+        row back and undo the other's finished move, permanently.
+        """
+        registered.project_number = PROJECT
+        await db_session.commit()
+        board = FakeBoard(card())
+
+        synced = await poller_for(board, polling=False).run_once()
+
+        assert synced == 0
+        assert board.reads == [], "a replica told not to poll read a board anyway"
+
     async def test_an_unregistered_guild_reads_nothing(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], poller_for
     ) -> None:
@@ -378,21 +451,38 @@ class TestWhenThereIsNothingToDo:
 
 
 class TestTheLoop:
-    async def test_a_board_that_is_not_there_says_which_settings_to_check(
-        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            GitHubNotFoundError("nothing at /orgs/acme/projectsV2/3"),
+            GitHubAuthError("GitHub refused the request for /orgs/acme/projectsV2/3 (403)"),
+        ],
+        ids=["not found", "refused"],
+    )
+    async def test_a_board_it_cannot_read_says_which_settings_to_check(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture, refusal: Exception
     ) -> None:
         """Left to the loop's catch-all this is a traceback a minute that never says what was
-        asked for. The two settings that address a board are only wrong in combination — the
-        number means a different board under every owner — so the line names both."""
+        asked for.
+
+        Both answers, because an operator cannot act on the difference between them: a token not
+        authorised for an organisation answers 404 as readily as 403. Naming the token as well as
+        the board, because it is the likeliest cause of the three and was the one left out.
+
+        The repository is named too. There can be several boards now, so a line saying only that
+        board 12 failed is one nobody can act on when two servers each have one.
+        """
         board = FakeBoard(card())
-        board.error = GitHubNotFoundError("nothing at /orgs/acme/projectsV2/3")
+        board.error = refusal
 
         with caplog.at_level("WARNING", logger="shannon.services.projects"):
             assert await poller_for(board, board_owner="acme").run_once() == 0
 
-        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
-        assert "SHANNON_GITHUB_PROJECT_OWNER" in caplog.text
+        assert "/set_board" in caplog.text
+        assert "SHANNON_GITHUB_PROJECT_TOKEN" in caplog.text
         assert "acme" in caplog.text
+        assert REPO_FULL.split("/")[1] in caplog.text.lower(), "it did not name the repository"
+        assert "Traceback" not in caplog.text
 
     async def test_a_board_it_cannot_read_does_not_end_the_loop(
         self, board_channel: None, poller_for
@@ -1699,7 +1789,7 @@ class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:
 
         Nothing in this bot ever unlocks a ticket thread. The unlock is reached only by
         `locked` answering False and `TicketPolicy` answers None to everything, the branch that
-        shuts a new thread runs only for a thread being opened, and `/set_in_review` refuses a
+        shuts a new thread runs only for a thread being opened, and `/status In review` refuses a
         ticket thread outright because the workflow is built for pull requests and issues. So a
         card shut in Done and then dragged back to In Progress would be live work nobody in
         Discord could reply to, with no way back short of a moderator doing it by hand.
@@ -1791,7 +1881,7 @@ class TestATicketWhoseThreadSomebodyDeleted:
         back out of Done into a thread nobody could answer in.
 
         The pull request rule this sits next to is the opposite and for the opposite reason: its
-        DONE is `/set_done`, which locks, and the row is the only record of it.
+        DONE is `/status Done`, which locks, and the row is the only record of it.
         """
         board = FakeBoard(card(column="Done"))
         poller = poller_for(board)
