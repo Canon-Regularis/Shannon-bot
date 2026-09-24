@@ -14,13 +14,14 @@ from typing import Any, Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import in_a_thread
+from shannon.commands._guards import DecidesGitHubAccess, github_allows, in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
+from shannon.github import people
 from shannon.services.workflow import WorkflowOutcome
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,16 @@ class SuggestsLabels(Protocol):
 
 
 def build_label_command(
-    service: SetsLabels, gate: PermissionGate, suggestions: SuggestsLabels
+    service: SetsLabels,
+    gate: PermissionGate,
+    access: DecidesGitHubAccess,
+    suggestions: SuggestsLabels,
 ) -> SlashCommand:
     @app_commands.command(name="label", description="Put a label on this item")
     @app_commands.describe(name="Which label, from the ones this repository has")
     @app_commands.guild_only()
     async def label(interaction: discord.Interaction, name: str) -> None:
-        await _act(interaction, "label", gate, name, service, adding=True)
+        await _act(interaction, "label", gate, access, name, service, adding=True)
 
     label.autocomplete("name")(_suggesting(suggestions))
     # discord.py's decorator leaves the binding parameter unsolved for a module-level command,
@@ -68,13 +72,16 @@ def build_label_command(
 
 
 def build_unlabel_command(
-    service: SetsLabels, gate: PermissionGate, suggestions: SuggestsLabels
+    service: SetsLabels,
+    gate: PermissionGate,
+    access: DecidesGitHubAccess,
+    suggestions: SuggestsLabels,
 ) -> SlashCommand:
     @app_commands.command(name="unlabel", description="Take a label off this item")
     @app_commands.describe(name="Which label to remove")
     @app_commands.guild_only()
     async def unlabel(interaction: discord.Interaction, name: str) -> None:
-        await _act(interaction, "unlabel", gate, name, service, adding=False)
+        await _act(interaction, "unlabel", gate, access, name, service, adding=False)
 
     unlabel.autocomplete("name")(_suggesting(suggestions))
     return unlabel  # pyright: ignore[reportUnknownVariableType]
@@ -111,17 +118,25 @@ async def _act(
     interaction: discord.Interaction,
     command: str,
     gate: PermissionGate,
+    access: DecidesGitHubAccess,
     name: str,
     service: SetsLabels,
     *,
     adding: bool,
 ) -> None:
-    """The half both commands share: check, defer, call, answer."""
+    """The half both commands share: check, defer, call, answer.
+
+    The picker beside the name stays ungated. An autocomplete cannot reply, so there is
+    nowhere to put a refusal, and it is asked once per keystroke - gating it would be a
+    GitHub call per letter typed.
+    """
     where = await in_a_thread(interaction, command, gate, SYNC_ROLES)
     if where is None:
         return
 
     await defer(interaction)
+    if not await github_allows(interaction, access, where.guild_id, at_least=people.WRITE):
+        return
     try:
         outcome = await service.set_label(thread_id=where.channel_id, name=name, adding=adding)
     except ShannonError as error:

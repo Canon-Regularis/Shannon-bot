@@ -60,6 +60,22 @@ def assignee_change(login: str, snapshot: TrackedSnapshot, *, adding: bool) -> P
 # everything else between them cover every answer there is.
 NO_ACCESS: Final = "none"
 READ_ONLY: Final = "read"
+WRITE: Final = "write"
+ADMIN: Final = "admin"
+
+# The ladder in order, so a caller can ask "at least write" without knowing what is above it.
+_RANK: Final[dict[str, int]] = {NO_ACCESS: 0, READ_ONLY: 1, WRITE: 2, ADMIN: 3}
+
+
+def at_least(permission: str, wanted: str) -> bool:
+    """Whether GitHub's answer reaches a level.
+
+    A word GitHub has never sent reads as no access rather than raising. These are wire values
+    off a JSON body, not a column this bot controls, so a fifth name appearing one day should
+    refuse a write rather than end the command in a traceback - and a `.get` with a default says
+    that in one expression, where an `if` would be an arm nothing reaches until that day comes.
+    """
+    return _RANK.get(permission, 0) >= _RANK[wanted]
 
 
 def assignment_refusal(login: str, full_name: str, permission: str) -> str:
