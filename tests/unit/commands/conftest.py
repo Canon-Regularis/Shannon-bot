@@ -78,3 +78,22 @@ def developer() -> FakeMember:
 def administrator() -> FakeMember:
     """Outranks every configured role, including on a server that never set them up."""
     return FakeMember(guild_permissions=FakeGuildPermissions(administrator=True))
+
+
+class FakeAccess:
+    """Whether GitHub would allow the caller, stood in for.
+
+    `None` is what a caller who has never proved an account gets, which is the default here for
+    the same reason it is the default in the service: it is the behaviour every command had
+    before the gate existed, so a test that says nothing about GitHub gets the old answer.
+    """
+
+    def __init__(self, refusal: str | None = None) -> None:
+        self.refusal = refusal
+        self.asked: list[tuple[int, int, str]] = []
+
+    async def refusal_for(
+        self, *, guild_id: int, discord_user_id: int, at_least: str
+    ) -> str | None:
+        self.asked.append((guild_id, discord_user_id, at_least))
+        return self.refusal

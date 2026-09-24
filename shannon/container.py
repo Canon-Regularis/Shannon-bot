@@ -25,6 +25,7 @@ from shannon.commands.people import (
 from shannon.commands.refresh import build_refresh_command
 from shannon.commands.regenerate import build_regenerate_command
 from shannon.commands.register import build_register_command
+from shannon.commands.set_board import build_set_board_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.unregister import build_unregister_command
@@ -69,6 +70,8 @@ from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
+from shannon.services.access import GitHubAccess
+from shannon.services.boards import BoardLinkingService, OwnerBoards
 from shannon.services.channels import ChannelMappingService
 from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
 from shannon.services.delivery.queue import WebhookDeliveryQueue
@@ -280,9 +283,11 @@ class _EveryAnnouncer:
 class _OneToken:
     """The same token for every account, which is what a plain personal access token is.
 
-    Exists for one caller. The project board cannot be read through an installation at all -
-    GitHub has no App permission for a user-owned Projects v2 board - so that reader keeps a token
-    of its own, and this is the shape the client expects a credential to arrive in.
+    Exists for one caller. A user-owned Projects v2 board cannot be read through an installation
+    at all - GitHub publishes no App permission for one - and an organisation's is read the same
+    way rather than through a permission whose granting would suspend event delivery until
+    somebody accepted it. So that reader keeps a token of its own, and this is the shape the
+    client expects a credential to arrive in.
 
     Deliberately not offered to anything else. Every repository call goes through an installation,
     and a second way to hand the client a fixed token is a second way to end up back where this
@@ -691,6 +696,8 @@ def _commands(
     links: UserLinkingService,
     people: ItemPeople,
     conversations: ConversationLog,
+    boards: BoardLinkingService,
+    access: GitHubAccess,
     *,
     capturing: bool,
 ) -> tuple[SlashCommand, ...]:
@@ -711,32 +718,33 @@ def _commands(
         build_set_channel_command(
             ChannelMappingService(sessionmaker, channel_fallbacks()), relocation, gate
         ),
+        build_set_board_command(boards, gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
         build_regenerate_command(regenerate, gate),
         build_link_command(verification, gate),
-        build_link_team_command(TeamLinkingService(sessionmaker), gate),
+        build_link_team_command(TeamLinkingService(sessionmaker, github), gate),
         # The only one with no gate at all, which is visible at a glance and is the point.
         # See `_permissions.UNGATED`.
         build_mentions_command(MentionPreferences(sessionmaker)),
         # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
         # service, which decides from the thread whether that means a reviewer or an assignee.
-        build_assign_command(people, gate),
-        build_unassign_command(people, gate),
-        build_request_review_command(people, gate),
-        build_unrequest_review_command(people, gate),
+        build_assign_command(people, gate, access),
+        build_unassign_command(people, gate, access),
+        build_request_review_command(people, gate, access),
+        build_unrequest_review_command(people, gate, access),
         # The workflow service twice over, behind two narrow protocols: one that may move a
         # label and one that may only suggest a name. The picker is asked on every keystroke by
         # somebody who has not run anything yet, so it holds the handle that cannot write.
-        build_label_command(workflow, gate, workflow),
-        build_unlabel_command(workflow, gate, workflow),
+        build_label_command(workflow, gate, access, workflow),
+        build_unlabel_command(workflow, gate, access, workflow),
         # Only the start is told whether this deployment can read messages. Turning capture off
         # where it used to be on leaves conversations open, and somebody in one of those threads
         # has been told logging is on, so stopping has to keep working.
         build_log_conversation_command(conversations, gate, capturing=capturing),
         build_stop_conversation_command(conversations, gate),
-        *build_workflow_commands(workflow, gate),
+        *build_workflow_commands(workflow, gate, access),
     )
 
 
@@ -808,9 +816,14 @@ def build_container(
     conversations = ConversationLog(sessionmaker, threads)
 
     # The board's own client with its own token. GitHub publishes no App permission for a
-    # user-owned Projects v2 board, so this one feature cannot go through the installation
-    # and keeps a narrow credential instead. Left unset, the board reads through the
-    # ordinary client, which is what every deployment with the project number at zero does.
+    # user-owned Projects v2 board, so that half of the feature cannot go through the
+    # installation at all and keeps a narrow credential instead.
+    #
+    # An organisation's board could go through it, and deliberately does not: granting a new
+    # permission to an installed App suspends its event delivery until somebody accepts the
+    # change, so asking for one would take every webhook in every registered repository down
+    # until an admin noticed. One token reads both kinds. Left unset, the board reads through
+    # the ordinary client, which is what every deployment with the project number at zero does.
     project_token = settings.github_project_token.get_secret_value()
     board_client = (
         HttpGitHubClient(
@@ -821,6 +834,10 @@ def build_container(
         if project_token
         else None
     )
+
+    # One reader for both callers. Two would each pay the owner-kind lookup and each keep
+    # their own field cache, and the command would be warming a cache the poller never sees.
+    boards = HttpProjectBoards(board_client or github)
 
     return Container(
         settings=settings,
@@ -833,10 +850,12 @@ def build_container(
         ),
         poller=ProjectPoller(
             sessionmaker,
-            HttpProjectBoards(board_client or github),
+            boards,
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
             project_number=settings.github_project_number,
+            board_owner=settings.github_project_owner,
+            polling=settings.poll_boards,
             interval=settings.project_poll_seconds,
             may_set_status=settings.board_may_set_status,
         ),
@@ -872,6 +891,8 @@ def build_container(
                 require_proved=settings.require_proved_links,
             ),
             conversations,
+            BoardLinkingService(sessionmaker, boards, OwnerBoards(boards)),
+            GitHubAccess(sessionmaker, github, verification),
             capturing=settings.capture_discord_messages,
         ),
         also_opened=(app_http,) if board_client is None else (app_http, board_client),

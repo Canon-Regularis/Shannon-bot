@@ -13,7 +13,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import in_a_thread
+from shannon.commands._guards import DecidesGitHubAccess, github_allows, in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -21,6 +21,7 @@ from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import ActorRole
 from shannon.domain.errors import ShannonError
+from shannon.github import people as github_people
 from shannon.services.people import PeopleOutcome
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,9 @@ class PutsSomebodyOnAnItem(Protocol):
     async def unrequest_review(self, *, thread_id: int, discord_user_id: int) -> PeopleOutcome: ...
 
 
-def build_assign_command(service: PutsSomebodyOnAnItem, gate: PermissionGate) -> SlashCommand:
+def build_assign_command(
+    service: PutsSomebodyOnAnItem, gate: PermissionGate, access: DecidesGitHubAccess
+) -> SlashCommand:
     @app_commands.command(
         name="assign",
         description="Put someone on this item as an assignee",
@@ -46,25 +49,27 @@ def build_assign_command(service: PutsSomebodyOnAnItem, gate: PermissionGate) ->
     @app_commands.describe(member="Who to put on this item")
     @app_commands.guild_only()
     async def assign(interaction: discord.Interaction, member: discord.Member) -> None:
-        await _act(interaction, "assign", gate, member, service.assign)
+        await _act(interaction, "assign", gate, access, member, service.assign)
 
     # discord.py's decorator leaves the binding parameter unsolved for a module-level command, so
     # it hands back `Command[Unknown, ...]` whatever this is declared as. See `discord_bot/slash`.
     return assign  # pyright: ignore[reportUnknownVariableType]
 
 
-def build_unassign_command(service: PutsSomebodyOnAnItem, gate: PermissionGate) -> SlashCommand:
+def build_unassign_command(
+    service: PutsSomebodyOnAnItem, gate: PermissionGate, access: DecidesGitHubAccess
+) -> SlashCommand:
     @app_commands.command(name="unassign", description="Take someone off this item's assignees")
     @app_commands.describe(member="Who to take off this item")
     @app_commands.guild_only()
     async def unassign(interaction: discord.Interaction, member: discord.Member) -> None:
-        await _act(interaction, "unassign", gate, member, service.unassign)
+        await _act(interaction, "unassign", gate, access, member, service.unassign)
 
     return unassign  # pyright: ignore[reportUnknownVariableType]
 
 
 def build_request_review_command(
-    service: PutsSomebodyOnAnItem, gate: PermissionGate
+    service: PutsSomebodyOnAnItem, gate: PermissionGate, access: DecidesGitHubAccess
 ) -> SlashCommand:
     @app_commands.command(
         name="request_review", description="Ask someone to review this pull request"
@@ -72,13 +77,13 @@ def build_request_review_command(
     @app_commands.describe(member="Who to ask for a review")
     @app_commands.guild_only()
     async def request_review(interaction: discord.Interaction, member: discord.Member) -> None:
-        await _act(interaction, "request_review", gate, member, service.request_review)
+        await _act(interaction, "request_review", gate, access, member, service.request_review)
 
     return request_review  # pyright: ignore[reportUnknownVariableType]
 
 
 def build_unrequest_review_command(
-    service: PutsSomebodyOnAnItem, gate: PermissionGate
+    service: PutsSomebodyOnAnItem, gate: PermissionGate, access: DecidesGitHubAccess
 ) -> SlashCommand:
     @app_commands.command(
         name="unrequest_review", description="Withdraw a review request on this pull request"
@@ -86,7 +91,7 @@ def build_unrequest_review_command(
     @app_commands.describe(member="Whose review request to withdraw")
     @app_commands.guild_only()
     async def unrequest_review(interaction: discord.Interaction, member: discord.Member) -> None:
-        await _act(interaction, "unrequest_review", gate, member, service.unrequest_review)
+        await _act(interaction, "unrequest_review", gate, access, member, service.unrequest_review)
 
     return unrequest_review  # pyright: ignore[reportUnknownVariableType]
 
@@ -101,6 +106,7 @@ async def _act(
     interaction: discord.Interaction,
     name: str,
     gate: PermissionGate,
+    access: DecidesGitHubAccess,
     member: discord.Member,
     call: _Change,
 ) -> None:
@@ -114,6 +120,8 @@ async def _act(
         return
 
     await defer(interaction)
+    if not await github_allows(interaction, access, where.guild_id, at_least=github_people.WRITE):
+        return
     try:
         outcome = await call(thread_id=where.channel_id, discord_user_id=member.id)
     except ShannonError as error:

@@ -31,8 +31,15 @@ class Settings(BaseSettings):
     github_app_webhook_secret: SecretStr = SecretStr("")
 
     # GitHub publishes no App permission for a USER-owned Projects v2 board - the Projects
-    # permission exists at organisation level only - so `HttpProjectBoards` reads
-    # `/users/{owner}/projectsV2/...` with a token of its own.
+    # permission exists at organisation level only - so the board reader keeps a token of its own.
+    #
+    # An organisation's board is not read through the App either, although it could be. Granting
+    # a new permission to an installed App suspends its event delivery until an admin accepts, so
+    # taking that route would stop every webhook in every registered repository until somebody
+    # clicked a button, in order to turn on a feature that ships off. One token covers both kinds
+    # of board and costs nothing to anybody not using one.
+    #
+    # Left unset, the board reads through the ordinary client rather than not at all.
     github_project_token: SecretStr = SecretStr("")
 
     role_admin: str = "Admin"
@@ -64,13 +71,31 @@ class Settings(BaseSettings):
     require_proved_links: bool = False
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
-    # A GitHub project board to mirror, by the number in its URL. Zero means none. Polled rather
-    # than delivered: GitHub sends projects_v2 webhooks for organisation projects only, and a
-    # personal account gets no such event at all.
+    # Whether THIS process reads project boards at all. Polled rather than delivered: GitHub
+    # sends projects_v2 webhooks for organisation projects only, and a personal account gets no
+    # such event at all.
     #
-    # Run this in ONE replica. Nothing elects a leader, so two pollers racing on one card can put
-    # its row back and undo the other's finished move, permanently.
+    # Run the poller in ONE replica. Nothing elects a leader, so two pollers racing on one card
+    # can each put its row back and undo the other's finished move, permanently. This is the
+    # switch that says which replica - a job the number below used to do, badly and now not at
+    # all: a board is linked by /set_board, so a second replica would start polling the moment
+    # somebody ran the command, with no environment change anywhere to notice.
+    poll_boards: bool = True
+
+    # A DEFAULT board, for a deployment that has not run /set_board yet. Not "the" board any
+    # more: a board belongs to a repository and is recorded on its row, which is what lets two
+    # servers each mirror their own. Zero means none.
+    #
+    # These two stop applying anywhere the moment ANY repository carries a board of its own.
+    # Half-honouring them would poll one server out of the database and another out of the
+    # environment with nothing saying which was which.
     github_project_number: int = Field(default=0, ge=0)
+    # Who owns that default board, where it is not the registered repository's own owner. Empty
+    # means it is. Worth a setting rather than an assumption because the number above is a
+    # sequence GitHub keeps per account: the wrong owner does not reliably answer 404, it can
+    # answer with a real board belonging to somebody else, and its cards would be mirrored in
+    # here as if they were this repository's work.
+    github_project_owner: str = ""
     project_poll_seconds: float = Field(default=60.0, gt=0)
     # Whether dragging a card may change the item's status. Off: nothing GitHub sends with a
     # board says who moved a card, so the poller cannot ask the permission question the slash

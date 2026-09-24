@@ -75,10 +75,23 @@ class FakeJson:
 
     async def get_json(self, path: str, **params: Any) -> Any:
         self.calls.append((path, params))
-        return self.bodies.get("fields" if path.endswith("/fields") else "items", [])
+        if path.endswith("/fields"):
+            return self.bodies.get("fields", [])
+        if "/projectsV2/" in path:
+            # One board, opened by number. `list_board_items` pages instead, so nothing else
+            # reaches this by that path.
+            return self.bodies.get("one_board", {})
+        if path.endswith("/projectsV2"):
+            return self.bodies.get("boards", [])
+        # The account lookup that decides the prefix. A person by default, which is the prefix
+        # every board was read under before there was a choice.
+        return self.bodies.get("account", {"type": "User"})
 
     async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
         self.calls.append((path, params))
+        if path.endswith("/projectsV2"):
+            yield self.bodies.get("boards", [])
+            return
         for page in self.pages if self.pages is not None else [self.bodies.get("items", [])]:
             yield page
 
@@ -181,10 +194,11 @@ class TestReadingABoard:
         items = await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
 
         assert len(items) == 1
-        assert client.calls[0][0] == f"/users/monalisa/projectsV2/{PROJECT}/fields"
-        assert client.calls[1][1]["fields"] == "39516,39518"
-        assert client.calls[1][1]["per_page"] == 100
-        assert "page" not in client.calls[1][1], "it counted pages instead of following the cursor"
+        assert f"/users/monalisa/projectsV2/{PROJECT}/fields" in [path for path, _ in client.calls]
+        listed = next(params for path, params in client.calls if path.endswith("/items"))
+        assert listed["fields"] == "39516,39518"
+        assert listed["per_page"] == 100
+        assert "page" not in listed, "it counted pages instead of following the cursor"
 
     async def test_the_field_ids_are_looked_up_once_and_kept(self) -> None:
         """They change only when somebody edits the board's columns, and this runs every minute."""
@@ -225,6 +239,165 @@ class TestReadingABoard:
         client = FakeJson(fields={"message": "Not Found"}, items={"message": "Not Found"})
 
         assert await HttpProjectBoards(client).list_board_items("monalisa", PROJECT) == []
+
+
+class TestListingTheBoardsAnOwnerHas:
+    """What `/set_board` offers. Over the same prefix the reads use, deliberately: a picker on a
+    path of its own could offer a board the poller then cannot open."""
+
+    async def test_it_lists_them(self) -> None:
+        client = FakeJson(
+            boards=[
+                {"number": 3, "title": "Roadmap"},
+                {"number": 7, "title": {"raw": "Bugs", "html": "Bugs"}},
+            ]
+        )
+
+        listed = await HttpProjectBoards(client).list_boards("monalisa")
+
+        assert [(one.number, one.title) for one in listed] == [(3, "Roadmap"), (7, "Bugs")]
+
+    async def test_an_organisation_is_listed_under_orgs(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, boards=[{"number": 3, "title": "R"}])
+
+        await HttpProjectBoards(client).list_boards("acme")
+
+        assert any(path == "/orgs/acme/projectsV2" for path, _ in client.calls)
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"number": 3},
+            {"title": "Roadmap"},
+            {"number": "3", "title": "Roadmap"},
+            {"number": 3, "title": ""},
+            {"number": 3, "title": {"html": "Roadmap"}},
+            "not an object",
+            None,
+        ],
+    )
+    async def test_a_row_it_cannot_use_is_passed_over(self, row: Any) -> None:
+        """A board with no readable title is not refused for tidiness: the title is the whole of
+        what a picker shows, and an entry reading `#7` with nothing beside it is a choice nobody
+        can make."""
+        client = FakeJson(boards=[row, {"number": 9, "title": "Real"}])
+
+        listed = await HttpProjectBoards(client).list_boards("monalisa")
+
+        assert [one.number for one in listed] == [9]
+
+    async def test_an_answer_that_is_not_a_list_is_no_boards(self) -> None:
+        client = FakeJson(boards={"message": "Not Found"})
+
+        assert await HttpProjectBoards(client).list_boards("monalisa") == []
+
+
+class TestOpeningOneBoard:
+    """So that "this token cannot see that board" is a sentence the person who typed it reads,
+    rather than a warning once a minute in a log nobody is watching."""
+
+    async def test_it_answers_the_board(self) -> None:
+        client = FakeJson(one_board={"number": 3, "title": "Roadmap"})
+
+        found = await HttpProjectBoards(client).get_board("monalisa", PROJECT)
+
+        assert found is not None
+        assert (found.number, found.title) == (3, "Roadmap")
+
+    async def test_it_asks_under_the_owners_own_kind(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, one_board={"number": 3, "title": "R"})
+
+        await HttpProjectBoards(client).get_board("acme", PROJECT)
+
+        assert any(path == f"/orgs/acme/projectsV2/{PROJECT}" for path, _ in client.calls)
+
+    async def test_a_body_it_cannot_read_is_no_board(self) -> None:
+        client = FakeJson(one_board={"message": "Not Found"})
+
+        assert await HttpProjectBoards(client).get_board("monalisa", PROJECT) is None
+
+
+class TestWhichKindOfAccountOwnsTheBoard:
+    """A login names one account of one kind: GitHub keeps users and organisations in a single
+    namespace, so `acme` cannot be both. The wrong prefix is therefore not a slower way to the
+    same board, it is a 404 — which is the answer every organisation's board gave here until the
+    kind was asked about rather than assumed.
+    """
+
+    async def test_an_organisations_board_is_read_under_orgs(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        boards = [path for path, _ in client.calls if "/projectsV2/" in path]
+        assert boards
+        assert all(path.startswith(f"/orgs/acme/projectsV2/{PROJECT}") for path in boards)
+
+    async def test_a_persons_board_is_still_read_under_users(self) -> None:
+        client = FakeJson(account={"type": "User"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+
+        assert any(
+            path.startswith(f"/users/monalisa/projectsV2/{PROJECT}") for path, _ in client.calls
+        )
+
+    async def test_the_kind_is_asked_once_and_kept(self) -> None:
+        """It changes when an account is converted, which is not a thing that happens between
+        two polls a minute apart, and this would otherwise be a second request every time."""
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("acme", PROJECT)
+        await boards.list_board_items("acme", PROJECT)
+
+        assert sum(path == "/users/acme" for path, _ in client.calls) == 1
+
+    async def test_the_lookup_carries_the_boards_own_credential(self) -> None:
+        """The board is read with a token of its own, and an organisation can be private. Asked
+        anonymously this is both a possible 404 and a share of an IP-wide hourly allowance."""
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        asked = next(params for path, params in client.calls if path == "/users/acme")
+        assert asked["owner"] == "acme"
+
+    async def test_the_owner_is_escaped_into_the_path(self) -> None:
+        """It reaches here from a setting somebody typed, and every other interpolation in this
+        client is quoted."""
+        client = FakeJson(account={"type": "Organization"}, items=[])
+
+        await HttpProjectBoards(client).list_board_items("a b/c", PROJECT)
+
+        assert all("a b/c" not in path for path, _ in client.calls if "projectsV2" in path)
+        assert any("a%20b%2Fc" in path for path, _ in client.calls)
+
+    @pytest.mark.parametrize("account", [{"type": 7}, {}, ["not an object"], None])
+    async def test_an_answer_it_cannot_read_is_taken_as_a_person(
+        self, account: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Which is how every board was read before there was a choice, so an unreadable answer
+        costs an organisation what it already had rather than breaking a working board."""
+        client = FakeJson(account=account, items=[draft()])
+
+        with caplog.at_level("WARNING"):
+            await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        assert any(path.startswith(f"/users/acme/projectsV2/{PROJECT}") for path, _ in client.calls)
+        assert "kind of account" in caplog.text
+
+    async def test_an_answer_it_cannot_read_is_asked_again_next_poll(self) -> None:
+        """A guess is not an answer worth keeping. Remembered, one blip would decide the prefix
+        for the life of the process, and an organisation's board would stay dead until a
+        restart nobody knew to do."""
+        client = FakeJson(account={}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("acme", PROJECT)
+        await boards.list_board_items("acme", PROJECT)
+
+        assert sum(path == "/users/acme" for path, _ in client.calls) == 2
 
 
 class TestFieldsInShapesNobodyPromised:
@@ -272,6 +445,26 @@ class TestFieldsInShapesNobodyPromised:
         """The owner is only carried in that URL. Without it the link cannot name anybody, and a
         card with no link at all would be worse than one pointing at the wrong board."""
         item = parse_item(draft(project_url=None), PROJECT)
+
+        assert item is not None
+        assert item.html_url == f"https://github.com/users/unknown/projects/{PROJECT}"
+
+    def test_a_draft_on_an_organisations_board_links_to_that_board(self) -> None:
+        """The kind of owner is half the path, not decoration. `/users/` and `/orgs/` are two
+        different pages, and only one of them exists for any given board."""
+        item = parse_item(
+            draft(project_url=f"https://api.github.com/orgs/acme/projectsV2/{PROJECT}"), PROJECT
+        )
+
+        assert item is not None
+        assert item.html_url == f"https://github.com/orgs/acme/projects/{PROJECT}"
+
+    def test_a_project_url_naming_neither_kind_falls_back(self) -> None:
+        """A shape this bot has not seen. Guessing an owner out of it would put a real login on
+        a board it may not own, so it says so instead."""
+        item = parse_item(
+            draft(project_url=f"https://api.github.com/teams/acme/projectsV2/{PROJECT}"), PROJECT
+        )
 
         assert item is not None
         assert item.html_url == f"https://github.com/users/unknown/projects/{PROJECT}"

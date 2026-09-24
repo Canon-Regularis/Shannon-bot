@@ -51,6 +51,29 @@ def workflow(
     )
 
 
+@pytest.fixture
+async def ticket_thread(db_session: AsyncSession, registered: Repository) -> int:
+    """A draft card's thread: a tracked item this service has no way to write to.
+
+    Its `github_object_number` is the BOARD's number rather than an item's, which is what the
+    poller stores for a card that has no number of its own. That is why the refusal cannot
+    simply be dropped.
+    """
+    db_session.add(
+        TrackedItem(
+            repository_id=registered.id,
+            github_object_id=555,
+            github_object_type=ObjectType.TICKET,
+            github_object_number=1,
+            github_url="",
+            title="A card",
+            discord_thread_id=7777,
+        )
+    )
+    await db_session.commit()
+    return 7777
+
+
 def added(github: FakeGitHubClient) -> list[str]:
     return [label for kind, _, label in github.label_calls if kind == "add"]
 
@@ -137,10 +160,10 @@ class TestTheNameThisBotOwns:
 
         assert github.label_calls == []
 
-    async def test_the_refusal_names_the_command(
+    async def test_the_refusal_names_the_command_and_the_word_to_pick(
         self, workflow: ItemWorkflow, thread_id: int
     ) -> None:
-        with pytest.raises(WorkflowRefusedError, match="/set_in_review"):
+        with pytest.raises(WorkflowRefusedError, match="/status and pick In review"):
             await workflow.set_label(thread_id=thread_id, name="IN_REVIEW", adding=True)
 
     @pytest.mark.parametrize("name", ["critical", "urgent", "minor", "p-high"])
@@ -154,10 +177,10 @@ class TestTheNameThisBotOwns:
 
         assert github.label_calls == []
 
-    async def test_the_priority_refusal_names_its_command(
+    async def test_the_priority_refusal_names_its_command_and_word(
         self, workflow: ItemWorkflow, thread_id: int
     ) -> None:
-        with pytest.raises(WorkflowRefusedError, match="/set_med_priority"):
+        with pytest.raises(WorkflowRefusedError, match="/priority and pick Medium"):
             await workflow.set_label(thread_id=thread_id, name="moderate", adding=True)
 
     async def test_it_is_refused_before_github_is_asked_anything(
@@ -221,24 +244,18 @@ class TestWhatElseItRefuses:
         with pytest.raises(NotAnItemThreadError):
             await workflow.set_label(thread_id=999999, name="bug", adding=True)
 
-    async def test_a_project_board_card(
-        self, workflow: ItemWorkflow, db_session: AsyncSession, registered: Repository
-    ) -> None:
-        db_session.add(
-            TrackedItem(
-                repository_id=registered.id,
-                github_object_id=555,
-                github_object_type=ObjectType.TICKET,
-                github_object_number=1,
-                github_url="",
-                title="A card",
-                discord_thread_id=7777,
-            )
-        )
-        await db_session.commit()
-
+    async def test_a_project_board_card(self, workflow: ItemWorkflow, ticket_thread: int) -> None:
         with pytest.raises(WorkflowRefusedError, match="no GitHub labels"):
-            await workflow.set_label(thread_id=7777, name="bug", adding=True)
+            await workflow.set_label(thread_id=ticket_thread, name="bug", adding=True)
+
+    async def test_a_card_is_told_to_convert_rather_than_to_move_its_card(
+        self, workflow: ItemWorkflow, ticket_thread: int
+    ) -> None:
+        """Status and priority tell you to move the card, which is right for them and wrong here:
+        a column is not a label, and moving one sets no label at all. The advice differs per
+        command even though the refusal is shared."""
+        with pytest.raises(WorkflowRefusedError, match="Convert it to an issue"):
+            await workflow.set_label(thread_id=ticket_thread, name="bug", adding=True)
 
     async def test_a_repository_renamed_away_from_under_it(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient, pr_event
@@ -276,6 +293,16 @@ class TestWhatThePickerSees:
         """An autocomplete has nowhere to put a refusal, so a channel that is not an item's thread
         gets an empty picker rather than an exception Discord renders as silence anyway."""
         assert await workflow.labels_for_thread(424242) == ()
+
+    async def test_a_project_card_is_offered_nothing_rather_than_everything(
+        self, workflow: ItemWorkflow, ticket_thread: int
+    ) -> None:
+        """The bug this closes. A draft card's thread IS a tracked item, so it got past the guard
+        above and was handed every label the registered repository has - a picker that looked
+        like it worked, every entry of which `set_label` then refused. Offering nothing is the
+        only honest answer while a draft card has nothing to write a label to.
+        """
+        assert await workflow.labels_for_thread(ticket_thread) == ()
 
 
 async def test_the_stored_status_and_priority_are_untouched(

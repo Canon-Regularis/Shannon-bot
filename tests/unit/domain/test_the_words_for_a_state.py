@@ -16,7 +16,6 @@ import pytest
 from shannon.discord_bot.safe_text import EMPTY
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.github.labels import PRIORITY_LABELS, STATUS_LABELS, status_of
-from shannon.services.workflow import _OWNED_BY
 
 STATES: list[Status | Priority] = [*Status, *Priority]
 
@@ -82,9 +81,3 @@ def test_the_absence_of_a_priority_is_called_what_an_empty_field_is_called() -> 
     """UNSET is the absence of a priority rather than one of them, which is why no label answers
     to it, and the card already has a word for a field with nothing in it."""
     assert spoken(Priority.UNSET) == EMPTY
-
-
-def test_nothing_speaks_for_a_state_no_command_owns() -> None:
-    """`_OWNED_BY` is the eight a command sets and UNSET is the one it does not, so the two
-    tables differ by exactly that one state."""
-    assert set(_OWNED_BY) | {Priority.UNSET} == set(STATES)

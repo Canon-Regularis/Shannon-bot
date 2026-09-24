@@ -4,8 +4,8 @@ The loudest case of the same silence the tag line answers. Closing an issue rewr
 block and locks the thread, and Discord announces neither: an edit posts no message, notifies
 nobody and does not bump the thread, and a lock is not an event at all. So an item could close,
 shut the discussion under it, and leave nothing whatever in the channel. The only text anybody saw
-was the `/set_done` reply, and every command reply here is ephemeral, so nobody but the person who
-ran it ever read one. Reported as issue #73.
+was the `/status Done` reply, and every command reply here is ephemeral, so nobody but the
+person who ran it ever read one. Reported as issue #73.
 """
 
 from __future__ import annotations

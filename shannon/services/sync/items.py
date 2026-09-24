@@ -84,7 +84,7 @@ class SyncsItems(Protocol):
 
         `settles_the_lock` is False for a caller that takes the lock itself afterwards.
 
-        Only `/set_done` and the commands beside it do, and they own it: they decide the status
+        Only `/status Done` and the commands beside it do, and they own it: they decide the status
         the lock follows from, they report a refusal to the person who ran them rather than
         failing everything before it, and they lock the thread the render actually wrote to. A
         second attempt from in here would take the refusal away from them and fail the command
@@ -277,7 +277,7 @@ class ItemSyncService:
         # mid-sync should never find a thread locked against a state it has not been given yet.
         # `settles_the_lock` gates this as well as the shut at the end, and the two are the same
         # promise read in both directions. A caller that says it will take the lock itself owns
-        # both halves of it: `/set_done` and the commands beside it decide the status the lock
+        # both halves of it: `/status Done` and the commands beside it decide the status the lock
         # follows from and report a refusal to the person who ran them. Reaching in here to give
         # a thread back would take that refusal away from them, and worse, it fails the command
         # outright, because a transient refusal is not caught below. Nothing noticed until a
@@ -347,11 +347,11 @@ class ItemSyncService:
 
         # Or a thread has just been opened, and one this bot opens belongs in the state the item
         # is in. For a pull request the payload cannot say what that is: its lock is taken by
-        # `/set_done` alone and lives in the row. So a finished pull request whose thread
+        # `/status Done` alone and lives in the row. So a finished pull request whose thread
         # somebody deleted came back with a replacement anybody could post in, above a block
         # reading DONE, and nothing here ever shut one, because `PullRequestPolicy.locked`
         # answers None for every snapshot and both calls that could have are skipped on that.
-        # Running `/set_done` again does restore it, and nothing tells anybody to.
+        # Running `/status Done` again does restore it, and nothing tells anybody to.
         #
         # The policy is asked rather than read off `locked` answering None, which a ticket does
         # too and for the opposite reason. A card in the Done column is DONE on the row because
@@ -1044,7 +1044,7 @@ class _SyncState:
     # the staleness guard below applies to it at all.
     shut_from_the_row: bool
     # Whether a thread opened by this sync belongs shut, read off the row's status. Only for the
-    # case the payload says nothing about, which is now `/set_done` on an open pull request.
+    # case the payload says nothing about, which is now `/status Done` on an open pull request.
     shut_when_opened: bool
     # What the row remembers this bot last making of the thread it points at. Null means it has
     # not shut one, which is what a thread just opened is and what every row written before the

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
-from shannon.domain.errors import ShannonError
+from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.domain.text import code_span
 from shannon.github.mentions import is_team_slug
 
@@ -67,15 +69,44 @@ class InvalidGitHubTeamError(ShannonError):
     """The string given is not shaped like a GitHub team slug."""
 
 
+class NoTeamsHereError(ShannonError):
+    """The repository belongs to a person, and a person has no teams."""
+
+
+class KnowsAccountKinds(Protocol):
+    """Whether a GitHub account is an organisation or a person.
+
+    One member, and Metadata-only on GitHub's side: this is the same question the board
+    reader asks to decide which path a project lives under, and it goes through the
+    ordinary installation rather than needing a credential of its own. Listing an
+    organisation's actual teams would not - that wants Members: Read, which the App does
+    not hold and which no token narrow enough to be worth adding can cover.
+    """
+
+    async def is_organisation(self, owner: str) -> bool: ...
+
+
 class TeamLinkingService:
     """Binds a GitHub team to a Discord role, so a review asked of it reaches somebody.
 
     Pointing a role at a team is a decision about the server rather than a claim on one's own
     account, so the command that drives this is gated like `/set_channel` rather than `/link`.
+
+    GitHub is asked one thing and deliberately not another. It is asked what KIND of account
+    owns the repository, because a personal account has no teams at all and a mapping made
+    against one is dead on arrival with nothing to say so. It is not asked whether the team
+    EXISTS: that needs the organisation's membership roster, which the App has no permission
+    for and which a second token would only reach by being broad enough to read the
+    organisation's people - a worse trade than the typo it would catch. A secret team is
+    invisible to such a token anyway, so even that check would refuse mappings that are
+    correct.
     """
 
-    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], accounts: KnowsAccountKinds
+    ) -> None:
         self._sessionmaker = sessionmaker
+        self._accounts = accounts
 
     async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> str:
         slug = github_team.strip().lstrip("@")
@@ -83,6 +114,23 @@ class TeamLinkingService:
             raise InvalidGitHubTeamError(f"{code_span(github_team)} is not a GitHub team.")
 
         async with self._sessionmaker() as session, session.begin():
+            repository = await RepositoryStore(session).get_by_guild(guild_id)
+            if repository is None:
+                raise NotRegisteredError("This server has no repository yet. Run /register first.")
+
+            # A team is an organisation's, and only an organisation's. GitHub has never
+            # asked a personal account's repository for a review from a team, so a
+            # mapping made on one can never match anything: the role sits there looking
+            # configured and is silent for ever. The shape check above passes any slug,
+            # which is how this was reachable at all.
+            owner = repository.repo_name.partition("/")[0]
+            if not await self._accounts.is_organisation(owner):
+                raise NoTeamsHereError(
+                    f"{owner} is a personal account, and only an organisation has teams. "
+                    "GitHub will never ask a team for a review here, so this mapping "
+                    "would never match anything."
+                )
+
             await TeamLinkStore(session).link(
                 guild_id=guild_id, github_team=slug, discord_role_id=discord_role_id
             )

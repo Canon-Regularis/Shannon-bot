@@ -105,7 +105,7 @@ async def test_a_closed_pull_request_is_shut(
     threads: FakeThreadGateway,
     pr_event,
 ) -> None:
-    """Issue #76. Pull request threads used to be left open by every webhook, with `/set_done`
+    """Issue #76. Pull request threads used to be left open by every webhook, with `/status Done`
     the only thing that ever shut one, so a merged pull request kept a live thread for ever."""
     opened = await sync_service.sync(pr_event("opened"))
     await sync_service.sync(pr_event("closed", state="closed"))

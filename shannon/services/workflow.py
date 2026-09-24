@@ -111,21 +111,6 @@ class WorkflowOutcome:
     label: str = ""
 
 
-# Which command owns a name that may not be set by hand, so a refusal says where to go instead.
-# Written out rather than derived from the enum: MEDIUM's command is `set_med_priority` and not
-# `set_medium_priority`, so a derived name would be wrong for exactly one of the eight and right
-# everywhere it was tested. A test holds this against the tables the commands are built from.
-_OWNED_BY: dict[Status | Priority, str] = {
-    Status.BACKLOG: "set_backlog",
-    Status.NOT_REVIEWED: "set_not_reviewed",
-    Status.IN_REVIEW: "set_in_review",
-    Status.READY_FOR_MERGE: "set_ready_for_merge",
-    Status.DONE: "set_done",
-    Priority.HIGH: "set_high_priority",
-    Priority.MEDIUM: "set_med_priority",
-    Priority.LOW: "set_low_priority",
-}
-
 # How many of a repository's labels a refusal lists before it stops. A taxonomy can be long and
 # the reply is one Discord message.
 _ENOUGH_TO_SHOW = 15
@@ -171,7 +156,7 @@ class ItemWorkflow:
     async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done."""
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
         self._refuse_conflicting_status(found, snapshot, status)
 
@@ -271,7 +256,7 @@ class ItemWorkflow:
             # Touched only when DONE is on one side of the move or the other, so an ordinary
             # status change still costs no Discord call. Moving OUT of DONE has to give the
             # thread back: `PullRequestPolicy.locked` returns None on every sync, so the lock
-            # `/set_done` takes is the only one a pull request ever gets and nothing else was
+            # `/status Done` takes is the only one a pull request ever gets and nothing else was
             # ever going to lift it. The commands to move it back are all allowed and all
             # reported success, and left the thread shut against the discussion they had just
             # reopened.
@@ -308,7 +293,7 @@ class ItemWorkflow:
         in the thread, and the command that exists to fix it reporting nothing to do.
         """
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
 
         change = labels.priority_change(snapshot.label_names, priority)
@@ -330,7 +315,11 @@ class ItemWorkflow:
         The two refusals are the whole of this command. Everything else here already existed.
         """
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(
+            found,
+            instead="A draft card has no labels on GitHub. Convert it to an issue there and "
+            "this bot will track the issue from its own page.",
+        )
         self._refuse_a_name_this_bot_owns(name)
 
         # Before the labels are listed, not after. Listing addresses GitHub by the stored
@@ -362,15 +351,23 @@ class ItemWorkflow:
         that is not a tracked item answers with nothing rather than raising: an autocomplete has
         nowhere to put a refusal, and an empty picker in a channel that is not an item's thread is
         the right amount of nothing to say.
+
+        A kind this service cannot write to is the same nothing, and used not to be. A project
+        ticket's thread is a tracked item, so it got past the guard above and was offered every
+        label the REGISTERED REPOSITORY has - a full, working-looking picker where `set_label`
+        then refused all of them. Answered off the same predicate the refusal uses, so the two
+        cannot drift apart again.
         """
         try:
             found = await locate(self._sessionmaker, thread_id)
         except NotAnItemThreadError:
             return ()
+        if not self._can_be_moved(found):
+            return ()
         return await self._labels.names(found.owner, found.name)
 
     def _refuse_a_name_this_bot_owns(self, name: str) -> None:
-        """Refuse a label that already means something here, and say which command owns it.
+        """Refuse a label that already means something here, and say how to set it properly.
 
         A status set this way would make the block contradict itself. Nothing on the webhook path
         reads a status back onto the stored column, so the item would go on showing one status
@@ -384,11 +381,19 @@ class ItemWorkflow:
         reserved = labels.reserved_as(name)
         if reserved is None:
             return
-        instead = f"Run /{_OWNED_BY[reserved]} instead."
+        # The word rather than a command name. There used to be a table here mapping each state
+        # to the command that owned it, written out because MEDIUM's was `set_med_priority` and
+        # not `set_medium_priority` - a derived name would have been wrong for exactly one of the
+        # eight and right everywhere it was tested. With the state a choice rather than a command
+        # name, nothing about it is underivable and the table has nothing left to say.
         if isinstance(reserved, Status):
-            raise WorkflowRefusedError(f"{code_span(name)} is a workflow status here. {instead}")
+            raise WorkflowRefusedError(
+                f"{code_span(name)} is a workflow status here. Run /status and pick "
+                f"{spoken(reserved)} instead."
+            )
         raise WorkflowRefusedError(
-            f"{code_span(name)} already means {spoken(reserved)} priority here. {instead}"
+            f"{code_span(name)} already means {spoken(reserved)} priority here. Run /priority "
+            f"and pick {spoken(reserved)} instead."
         )
 
     async def _spelling_the_repository_uses(self, found: FoundItem, name: str) -> str:
@@ -416,19 +421,42 @@ class ItemWorkflow:
             + (f", and {rest} more." if rest > 1 else ", and one more." if rest == 1 else ".")
         )
 
-    def _refuse_a_kind_it_cannot_move(self, found: FoundItem) -> None:
+    def _can_be_moved(self, found: FoundItem) -> bool:
+        """Whether this service has any way to write to the item behind a thread.
+
+        One predicate rather than two, because the refusal below and the picker in
+        `labels_for_thread` were answering it separately and disagreeing: the picker offered a
+        draft card the whole repository's labels and the refusal then turned every one of them
+        down.
+        """
+        return found.object_type in self._kinds
+
+    def _refuse_a_kind_it_cannot_move(self, found: FoundItem, *, instead: str) -> None:
         """Refuse a thread whose item this service has no way to write to.
 
         A project ticket is a draft card on a board. It has no repository page and no labels, so
         there is nothing here to set: its status is the column it sits in, and the board is where
-        that gets changed. Without this the dict lookup below raises KeyError, which reaches the
-        person who ran the command as "Something went wrong here" and the log as a traceback.
+        that gets changed.
+
+        The KeyError this stands in front of is the smaller half of why it exists. A draft card
+        has no number, so `_snapshot` carries the BOARD's number in that slot and `FoundItem.of`
+        reads it straight back. Drop the guard and nothing raises: the write goes to
+        `/repos/{owner}/{name}/issues/{project_number}/labels` and lands on whatever issue or
+        pull request happens to hold that number, under a reply naming an item nobody asked
+        about. Widening `_kinds` with a TICKET entry does not fix that, it hides it - there is no
+        `(owner, name, number)` that addresses a draft.
+
+        `instead` is the one sentence that differs by caller. Required rather than defaulted:
+        three callers, three sentences, and a default would be an arm nothing reaches. Telling
+        somebody to move the card is right for a status and wrong for a label, which is a column
+        rather than a label and was the advice this gave for both.
         """
-        if found.object_type not in self._kinds:
-            raise WorkflowRefusedError(
-                f"That thread is a project {found.object_type.value.lower()}, which has no "
-                "GitHub labels to set. Move its card on the board instead."
-            )
+        if self._can_be_moved(found):
+            return
+        raise WorkflowRefusedError(
+            f"That thread is a project {found.object_type.value.lower()}, which has no "
+            f"GitHub labels to set. {instead}"
+        )
 
     def _refuse_conflicting_status(
         self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
@@ -474,7 +502,7 @@ class ItemWorkflow:
         So the path this asks about can be somebody else's repository by the time it is asked.
         Unchecked, the labels were written onto their item, the re-render resolved the fetched
         snapshot by its own id and opened a thread in whichever server had registered it, and
-        `/set_done` locked that thread rather than the one the command was run in. The reviewer
+        `/status Done` locked that thread rather than the one the command was run in. The reviewer
         was told it worked and their own thread never changed.
 
         The check is free. The snapshot already carries the id, and comparing it costs no call.
@@ -586,13 +614,14 @@ class ItemWorkflow:
         command, because three GitHub round trips sit in between and two commands overlapping
         across them both decided from a row neither of them still had.
 
-        What that cost: a pull request at READY_FOR_MERGE, a `/set_done` and a `/set_in_review`
-        from two reviewers, or from a reviewer and the board poller. The one that was not
-        finishing the item read a status that was not DONE yet, so it never asked for the thread
-        back, while `/set_done` locked it last. The item was left reading IN_REVIEW with its
-        thread shut, both users were told their command had worked, and nothing lifted it:
-        `PullRequestPolicy.locked` returns None, so no webhook or sync ever unlocks a pull
-        request, and `/set_done` is refused for being exactly what the race made it.
+        What that cost: a pull request at READY_FOR_MERGE, a `/status Done` and a
+        `/status In review` from two reviewers, or from a reviewer and the board poller. The one
+        that was not finishing the item read a status that was not DONE yet, so it never asked
+        for the thread back, while `/status Done` locked it last. The item was left reading
+        IN_REVIEW with its thread shut, both users were told their command had worked, and
+        nothing lifted it: `PullRequestPolicy.locked` returns None, so no webhook or sync ever
+        unlocks a pull request, and `/status Done` is refused for being exactly what the race
+        made it.
         """
         async with self._sessionmaker() as session, session.begin():
             item = await TrackedItemStore(session).get_by_id(tracked_item_id, lock=True)
