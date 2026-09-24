@@ -280,9 +280,11 @@ class _EveryAnnouncer:
 class _OneToken:
     """The same token for every account, which is what a plain personal access token is.
 
-    Exists for one caller. The project board cannot be read through an installation at all -
-    GitHub has no App permission for a user-owned Projects v2 board - so that reader keeps a token
-    of its own, and this is the shape the client expects a credential to arrive in.
+    Exists for one caller. A user-owned Projects v2 board cannot be read through an installation
+    at all - GitHub publishes no App permission for one - and an organisation's is read the same
+    way rather than through a permission whose granting would suspend event delivery until
+    somebody accepted it. So that reader keeps a token of its own, and this is the shape the
+    client expects a credential to arrive in.
 
     Deliberately not offered to anything else. Every repository call goes through an installation,
     and a second way to hand the client a fixed token is a second way to end up back where this
@@ -808,9 +810,14 @@ def build_container(
     conversations = ConversationLog(sessionmaker, threads)
 
     # The board's own client with its own token. GitHub publishes no App permission for a
-    # user-owned Projects v2 board, so this one feature cannot go through the installation
-    # and keeps a narrow credential instead. Left unset, the board reads through the
-    # ordinary client, which is what every deployment with the project number at zero does.
+    # user-owned Projects v2 board, so that half of the feature cannot go through the
+    # installation at all and keeps a narrow credential instead.
+    #
+    # An organisation's board could go through it, and deliberately does not: granting a new
+    # permission to an installed App suspends its event delivery until somebody accepts the
+    # change, so asking for one would take every webhook in every registered repository down
+    # until an admin noticed. One token reads both kinds. Left unset, the board reads through
+    # the ordinary client, which is what every deployment with the project number at zero does.
     project_token = settings.github_project_token.get_secret_value()
     board_client = (
         HttpGitHubClient(
@@ -837,6 +844,7 @@ def build_container(
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
             project_number=settings.github_project_number,
+            board_owner=settings.github_project_owner,
             interval=settings.project_poll_seconds,
             may_set_status=settings.board_may_set_status,
         ),

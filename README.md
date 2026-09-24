@@ -318,7 +318,11 @@ What is shared, and what that costs:
 - **One `SHANNON_GITHUB_PROJECT_TOKEN`, if the board is used at all.** GitHub publishes no App
   permission for a user-owned Projects v2 board, so that one feature keeps a credential of its
   own. It is narrow on purpose: a leak exposes a board rather than source, and it is unset in
-  every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero.
+  every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero. An organisation's board
+  reads through the same token, even though an App permission exists for one, because asking for
+  a new permission suspends event delivery to the installation until somebody accepts it — see
+  the note above. The board history shows the token's owner rather than this bot, which is the
+  real cost of the arrangement.
 - **One webhook secret per source.** The App has its own, and the endpoint also accepts
   `SHANNON_GITHUB_WEBHOOK_SECRET` so a repository configured the old way keeps working while a
   deployment moves across. Delete the per-repository webhook once the App is installed: until you
@@ -327,10 +331,12 @@ What is shared, and what that costs:
 - **One set of role names.** `SHANNON_ROLE_*` are read once at startup and apply everywhere, so a
   server that calls its managers something else grants nothing to anybody but guild
   administrators. This is the one that surprises people.
-- **One board, or none.** `SHANNON_GITHUB_PROJECT_NUMBER` names a single project, and nothing
-  elects which server's board it belongs to. With more than one server registered the board mirror
-  stops itself and `/health` reports `poller: false` until the number goes back to zero and the
-  process restarts. Leave it at `0` unless exactly one server is registered.
+- **One board, or none.** `SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` name
+  a single project between them, and nothing elects which server's cards it fills. Naming the
+  owner made the board addressable on its own; it did not decide what a card is filed under. With
+  more than one server registered the board mirror stops itself and `/health` reports
+  `poller: false` until the number goes back to zero and the process restarts. Leave it at `0`
+  unless exactly one server is registered.
 
 Adding one: invite the bot with the `bot` and `applications.commands` scopes and the permissions
 above, point that repository's webhook at the same URL with the same secret, then `/register` and
@@ -362,7 +368,7 @@ at the door.
 | `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
 | `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
-| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with user Projects: Read-only. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
+| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with Projects: Read-only — under **user** permissions for a personal board, under **organisation** permissions for an org one, and both where the deployment reads one of each over time. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
@@ -374,6 +380,7 @@ at the door.
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
 | `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | The project board to mirror, by the number in its URL. Zero means none |
+| `SHANNON_GITHUB_PROJECT_OWNER` | empty | The account owning that board, where it is not the registered repository's own owner. Empty means it is. That number is a sequence GitHub keeps per account, so a board under a different owner is a different board rather than a missing one |
 | `SHANNON_PROJECT_POLL_SECONDS` | `60.0` | How often that board is read |
 | `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
@@ -393,6 +400,14 @@ for organisation projects only and none at all for a personal account's, and the
 events the requirements name belong to Projects (classic), which was sunset in August 2024. The
 token needs project read access, and the board's tickets need a channel: they have no fallback,
 so `/set_channel project tickets` is what turns the mirror on.
+
+Either kind of owner works. Which one it is is asked of GitHub rather than configured, because a
+setting for it can be wrong and go stale, and the board number alone cannot tell you: GitHub
+keeps that number as a sequence per account, so `github.com/users/you/projects/3` and
+`github.com/orgs/yours/projects/3` are two real boards that are not each other. Set
+`SHANNON_GITHUB_PROJECT_OWNER` when the board is not owned by the account owning the registered
+repository — without it the owner is taken from the repository's name, which is right for most
+deployments and quietly wrong rather than obviously broken for the rest.
 
 One rule spans fields: `worker_lease_seconds` must cover `worker_batch_size *
 worker_delivery_timeout_seconds`, or construction fails. A lease expiring mid-batch would let a

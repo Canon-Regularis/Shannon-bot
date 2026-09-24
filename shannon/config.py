@@ -31,8 +31,15 @@ class Settings(BaseSettings):
     github_app_webhook_secret: SecretStr = SecretStr("")
 
     # GitHub publishes no App permission for a USER-owned Projects v2 board - the Projects
-    # permission exists at organisation level only - so `HttpProjectBoards` reads
-    # `/users/{owner}/projectsV2/...` with a token of its own.
+    # permission exists at organisation level only - so the board reader keeps a token of its own.
+    #
+    # An organisation's board is not read through the App either, although it could be. Granting
+    # a new permission to an installed App suspends its event delivery until an admin accepts, so
+    # taking that route would stop every webhook in every registered repository until somebody
+    # clicked a button, in order to turn on a feature that ships off. One token covers both kinds
+    # of board and costs nothing to anybody not using one.
+    #
+    # Left unset, the board reads through the ordinary client rather than not at all.
     github_project_token: SecretStr = SecretStr("")
 
     role_admin: str = "Admin"
@@ -71,6 +78,12 @@ class Settings(BaseSettings):
     # Run this in ONE replica. Nothing elects a leader, so two pollers racing on one card can put
     # its row back and undo the other's finished move, permanently.
     github_project_number: int = Field(default=0, ge=0)
+    # Who owns that board, for a board that is not owned by the registered repository's own
+    # owner. Empty means it is, which is what this always assumed. Worth a setting rather than
+    # an assumption because the number above is a sequence GitHub keeps per account: the wrong
+    # owner does not reliably answer 404, it can answer with a real board belonging to somebody
+    # else, and its cards would be mirrored in here as if they were this repository's work.
+    github_project_owner: str = ""
     project_poll_seconds: float = Field(default=60.0, gt=0)
     # Whether dragging a card may change the item's status. Off: nothing GitHub sends with a
     # board says who moved a card, so the poller cannot ask the permission question the slash
