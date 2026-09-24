@@ -34,7 +34,7 @@ from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
-from shannon.github.errors import GitHubAuthError, GitHubRateLimitError
+from shannon.github.errors import GitHubAuthError, GitHubNotFoundError, GitHubRateLimitError
 from shannon.github.projects import BoardItem
 from shannon.services.sync.items import SyncOutcome, SyncsItems
 from shannon.services.workflow import WorkflowOutcome, WorkflowRefusedError
@@ -75,6 +75,7 @@ class ProjectPoller:
         workflow: MovesStatus,
         *,
         project_number: int,
+        board_owner: str = "",
         interval: float = 60.0,
         may_set_status: bool = False,
     ) -> None:
@@ -83,6 +84,7 @@ class ProjectPoller:
         self._sync = sync
         self._workflow = workflow
         self._project_number = project_number
+        self._board_owner = board_owner
         self._interval = interval
         self._may_set_status = may_set_status
         self._stopping = False
@@ -118,7 +120,26 @@ class ProjectPoller:
             # about. Not an error: the process runs before anybody has set it up.
             return 0
 
-        items = _once_each(await self._projects.list_board_items(board.owner, self._project_number))
+        try:
+            listed = await self._projects.list_board_items(board.board_owner, self._project_number)
+        except GitHubNotFoundError as missing:
+            # Named rather than left to the loop's `logger.exception`, which answers a
+            # misconfiguration with a traceback once a minute and never says what was asked for.
+            # This is the failure two settings can now cause between them, and the trap is that
+            # neither is wrong on its own: the number is a sequence GitHub keeps per account, so
+            # it addresses a different board under every owner and only the pair means anything.
+            logger.warning(
+                "GitHub has no board %s belonging to %r, so there is nothing to mirror (%s). "
+                "That number is a sequence GitHub keeps per account rather than an id of its "
+                "own, so check SHANNON_GITHUB_PROJECT_NUMBER and SHANNON_GITHUB_PROJECT_OWNER "
+                "against each other rather than one at a time",
+                self._project_number,
+                board.board_owner,
+                missing,
+            )
+            return 0
+
+        items = _once_each(listed)
 
         # Whether the board's Status field can be read at all, decided from the whole board
         # rather than from one card. A single card with no column is somebody clearing its
@@ -502,10 +523,13 @@ class ProjectPoller:
             found = await RepositoryStore(session).registered(at_most=2)
 
         if len(found) > 1:
-            # A board is addressed by an owner taken from one repository's name, and nothing here
-            # elects which one. Polling whichever registered first would mirror one server's
-            # board into one server's channels and say nothing anywhere about the others, which
-            # reads from every other server as a feature that simply does not work.
+            # Which repository a mirrored card is filed under, and which server's channels its
+            # thread is opened in, both come from the one registered repository, and nothing
+            # here elects one. Naming the board's owner does not settle it: that made the board
+            # addressable on its own, but a card still has to belong somewhere, and polling
+            # whichever registered first would mirror one board into one server's channels and
+            # say nothing anywhere about the others, which reads from every other server as a
+            # feature that simply does not work.
             #
             # Stopping rather than warning, because a warning here is one nobody reads: this runs
             # once a minute for as long as the process lives. Ending the task puts it where
@@ -530,7 +554,7 @@ class ProjectPoller:
             self.stop()
             return None
 
-        return _Board.of(found[0]) if found else None
+        return _Board.of(found[0], self._board_owner) if found else None
 
     async def _mirrored(self, repository_id: int) -> dict[int, tuple[datetime | None, int | None]]:
         async with self._sessionmaker() as session:
@@ -625,18 +649,27 @@ def _has_moved(item: BoardItem, stored: datetime | None, thread_id: int | None) 
 
 @dataclass(frozen=True, slots=True)
 class _Board:
-    """The registered repository, as plain values out of its session."""
+    """The registered repository and the board read against it, as plain values.
+
+    Two owners, kept apart on purpose. `board_owner` addresses the board; the snapshot's owner
+    names the repository every mirrored card is filed under. They are the same account often
+    enough to invite one field, and the cost of that is not a misleading log line: the sync
+    hands each snapshot's full name to `follow_rename`, which writes it to the `repositories`
+    row. One poll would rename the registered repository to the board owner's, and `of` scrapes
+    the fallback owner back out of that row, so every later poll would read the wrong board
+    even with the setting taken away again.
+    """
 
     repository_id: int
-    owner: str
+    board_owner: str
     snapshot: RepositorySnapshot
 
     @classmethod
-    def of(cls, repository: Repository) -> _Board:
+    def of(cls, repository: Repository, board_owner: str = "") -> _Board:
         owner, _, name = repository.repo_name.partition("/")
         return cls(
             repository_id=repository.id,
-            owner=owner,
+            board_owner=board_owner or owner,
             snapshot=RepositorySnapshot(
                 github_repo_id=repository.github_repo_id,
                 owner=owner,

@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.domain.enums import ObjectType, Priority, Status
-from shannon.github.errors import GitHubAuthError, GitHubRateLimitError, GitHubUnavailableError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubNotFoundError,
+    GitHubRateLimitError,
+    GitHubUnavailableError,
+)
 from shannon.services.projects import BoardItem, ProjectPoller
 from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
@@ -108,7 +113,11 @@ def poller_for(
     workflow: ItemWorkflow,
 ):
     def build(
-        board: FakeBoard, *, project_number: int = PROJECT, may_set_status: bool = True
+        board: FakeBoard,
+        *,
+        project_number: int = PROJECT,
+        board_owner: str = "",
+        may_set_status: bool = True,
     ) -> ProjectPoller:
         """Allowed to move things unless a test says otherwise. Off is the shipped default and
         has its own tests; every other test here is about what a board that may move does."""
@@ -118,6 +127,7 @@ def poller_for(
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             workflow,
             project_number=project_number,
+            board_owner=board_owner,
             interval=0.01,
             may_set_status=may_set_status,
         )
@@ -187,14 +197,48 @@ class TestReadingABoard:
 
         assert board.reads == [("Canon-Regularis", PROJECT)]
 
+    async def test_a_board_owned_somewhere_else_is_read_under_that_owner(
+        self, board_channel: None, poller_for
+    ) -> None:
+        """Scraping the owner off the repository is not a near miss when the board belongs to
+        another account. That number is a sequence GitHub keeps per account, so the scraped
+        owner can have a board with it too, and reading it mirrors a stranger's cards in here."""
+        board = FakeBoard(card())
+
+        await poller_for(board, board_owner="acme").run_once()
+
+        assert board.reads == [("acme", PROJECT)]
+
+    async def test_a_board_owned_elsewhere_does_not_rename_this_repository(
+        self, board_channel: None, poller_for, registered: Repository, db_session: AsyncSession
+    ) -> None:
+        """Two owners that are the same account often enough to invite one field, and the cost
+        of collapsing them is not a log line. Every mirrored card carries a repository snapshot,
+        and the sync hands that snapshot's name to `follow_rename`, which writes it to the
+        `repositories` row. One poll would rename the registered repository to the board
+        owner's - and the board owner is scraped back out of that row next poll, so the wrong
+        board would be read from then on even with the setting taken away again.
+        """
+        # Read before the poll: asserting on the attribute afterwards is a lazy load on an
+        # expired instance outside the greenlet rather than an assertion.
+        repository_id, name = registered.id, registered.repo_name
+
+        await poller_for(FakeBoard(card()), board_owner="acme").run_once()
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == name
+
 
 class TestABoardAndMoreThanOneServer:
     """This bot is invited to a server rather than built into one, so several may register.
 
-    A board is not: it is addressed by an owner taken from one repository's name, and nothing
-    elects which. Polling whichever registered first mirrored one server's board into one
-    server's channels and said nothing anywhere about the others, which reads from every other
-    server as a feature that does not work at all.
+    A board is not, and naming its owner does not settle it. That made the board addressable on
+    its own, but a card still has to be filed against a repository and opened in a channel, and
+    nothing elects which registered one. Polling whichever registered first mirrored one board
+    into one server's channels and said nothing anywhere about the others, which reads from
+    every other server as a feature that does not work at all.
     """
 
     async def test_one_server_is_still_polled(
@@ -334,6 +378,22 @@ class TestWhenThereIsNothingToDo:
 
 
 class TestTheLoop:
+    async def test_a_board_that_is_not_there_says_which_settings_to_check(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Left to the loop's catch-all this is a traceback a minute that never says what was
+        asked for. The two settings that address a board are only wrong in combination — the
+        number means a different board under every owner — so the line names both."""
+        board = FakeBoard(card())
+        board.error = GitHubNotFoundError("nothing at /orgs/acme/projectsV2/3")
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            assert await poller_for(board, board_owner="acme").run_once() == 0
+
+        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
+        assert "SHANNON_GITHUB_PROJECT_OWNER" in caplog.text
+        assert "acme" in caplog.text
+
     async def test_a_board_it_cannot_read_does_not_end_the_loop(
         self, board_channel: None, poller_for
     ) -> None:
