@@ -331,12 +331,18 @@ What is shared, and what that costs:
 - **One set of role names.** `SHANNON_ROLE_*` are read once at startup and apply everywhere, so a
   server that calls its managers something else grants nothing to anybody but guild
   administrators. This is the one that surprises people.
-- **One board, or none.** `SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` name
-  a single project between them, and nothing elects which server's cards it fills. Naming the
-  owner made the board addressable on its own; it did not decide what a card is filed under. With
-  more than one server registered the board mirror stops itself and `/health` reports
-  `poller: false` until the number goes back to zero and the process restarts. Leave it at `0`
-  unless exactly one server is registered.
+- **One board per repository, set from Discord.** `/set_board` records which project a server's
+  repository mirrors, so two servers each get their own and neither is guessed at.
+  `SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` are now only a default for a
+  deployment that has not run the command, and they stop applying anywhere once any repository
+  carries a board of its own. With more than one server registered and nothing but the settings,
+  no board is read and the log says to run the command - it used to stop the poller outright for
+  everybody, which was affordable while there could only be one board.
+- **One poller, still.** Nothing elects a leader, so two pollers racing on one card can each put
+  its row back and undo the other's finished move, permanently. `SHANNON_POLL_BOARDS=false` on
+  every replica but one is what prevents that. It used to be the project number set to zero, which
+  stopped being enough the moment a board could be linked by a command: a second replica would
+  start polling as soon as somebody ran it, with no environment change anywhere to notice.
 
 Adding one: invite the bot with the `bot` and `applications.commands` scopes and the permissions
 above, point that repository's webhook at the same URL with the same secret, then `/register` and
@@ -379,8 +385,9 @@ at the door.
 | `SHANNON_BUILD` | `unknown` | The commit the image was built from, reported by `/health`. Written by the Dockerfile, so do not set it: compose passes `.env` into the container and it would override the real one. It is the only setting missing from `.env.example`, for that reason |
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
-| `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | The project board to mirror, by the number in its URL. Zero means none |
-| `SHANNON_GITHUB_PROJECT_OWNER` | empty | The account owning that board, where it is not the registered repository's own owner. Empty means it is. That number is a sequence GitHub keeps per account, so a board under a different owner is a different board rather than a missing one |
+| `SHANNON_POLL_BOARDS` | `true` | Whether **this** process reads project boards. Run the poller in one replica: nothing elects a leader, and two racing on one card can each undo the other's finished move. This is the switch that says which replica, a job the number below used to do |
+| `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | A **default** board, for a deployment that has not run `/set_board` yet, by the number in its URL. Zero means none. A board belongs to a repository and is recorded on its row; this and the owner below stop applying anywhere once any repository has one |
+| `SHANNON_GITHUB_PROJECT_OWNER` | empty | The account owning that **default** board, where it is not the registered repository's own owner. Empty means it is. That number is a sequence GitHub keeps per account, so a board under a different owner is a different board rather than a missing one |
 | `SHANNON_PROJECT_POLL_SECONDS` | `60.0` | How often that board is read |
 | `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
@@ -434,6 +441,26 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 
 ## Commands
 
+**GitHub decides too, where it can.** Eight commands write to GitHub - `/label`, `/unlabel`,
+`/status`, `/priority`, `/assign`, `/unassign`, `/request_review` and `/unrequest_review` - and
+each now asks GitHub whether the caller's own account may write to the repository, on top of the
+Discord role. It asks only where the caller has proved an account with `/link`: somebody who has
+not is decided by the Discord role alone, exactly as before.
+
+That is a deliberate floor rather than a wall. It raises the bar for everybody who has connected
+an account and does not lock out anybody who has not, which also means never running `/link` is a
+way to keep the old behaviour. Closing that needs a setting that refuses an unproved caller
+outright, and that is a decision about a deployment rather than a default.
+
+It also **fails open** when GitHub cannot be reached: an outage must not turn every one of those
+commands in every server into a refusal. Anybody who can wait for an outage gets the
+Discord-role-only behaviour back for its duration, and the log says so while it lasts.
+
+Read and triage are not enough; write, maintain and admin are. GitHub folds `maintain` onto write
+and `triage` onto read before it answers, so those are the whole ladder, and the refusal says so
+rather than leaving somebody with triage thinking this bot got it wrong.
+
+
 | Command | Who | What |
 | --- | --- | --- |
 | `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
@@ -444,18 +471,18 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request and issue that has no thread yet, leaving the ones that do alone. `all`, `pull requests` or `issues`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run, and the reply says how many are left |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
-| `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role |
+| `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
 | `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
 | `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you`, which is a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
-| `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and point at the `/set_*` command that owns them |
+| `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
 | `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
-| `/set_backlog` `/set_not_reviewed` `/set_in_review` `/set_ready_for_merge` `/set_done` | Project Manager | Moves the item whose thread you are in. `/set_done` shuts the thread, and a pull request has to be ready for merge first |
-| `/set_high_priority` `/set_med_priority` `/set_low_priority` | Project Manager | Same, for priority |
+| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from Backlog, Not reviewed, In review, Ready for merge and Done. Done shuts the thread, and a pull request has to be ready for merge first |
+| `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
 
 Guild only, and replies are ephemeral with one exception: `/link @member` posts its note where that person can see it, because it is addressed to them and they are not the one watching for a reply. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
@@ -571,7 +598,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0025`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0026`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

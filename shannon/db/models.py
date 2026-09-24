@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -59,6 +60,14 @@ class Repository(TimestampMixin, Base):
     # written before the column existed. Rewritten from the repository object on every sync, so
     # it corrects itself on the next delivery rather than needing a backfill.
     private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # The project board mirrored into this repository's server, by the number in its URL. Null
+    # means none, which is what every row written before this was and needs no backfill.
+    project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Who owns that board, where it is not this repository's own owner. Null means it is. A board
+    # number is a sequence GitHub keeps per account, so the pair addresses a board and neither
+    # half does alone - which is why this is stored beside the number rather than derived.
+    project_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
     # need every child row loaded into the session first.
