@@ -13,8 +13,9 @@ from typing import Any
 
 import pytest
 
-from shannon.domain.enums import ObjectType
-from shannon.github.projects import HttpProjectBoards, parse_item
+from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.github.errors import GitHubRefusedError
+from shannon.github.projects import CardMove, HttpProjectBoards, parse_item
 
 PROJECT = 3
 
@@ -75,10 +76,23 @@ class FakeJson:
 
     async def get_json(self, path: str, **params: Any) -> Any:
         self.calls.append((path, params))
-        return self.bodies.get("fields" if path.endswith("/fields") else "items", [])
+        if path.endswith("/fields"):
+            return self.bodies.get("fields", [])
+        if "/projectsV2/" in path:
+            # One board, opened by number. `list_board_items` pages instead, so nothing else
+            # reaches this by that path.
+            return self.bodies.get("one_board", {})
+        if path.endswith("/projectsV2"):
+            return self.bodies.get("boards", [])
+        # The account lookup that decides the prefix. A person by default, which is the prefix
+        # every board was read under before there was a choice.
+        return self.bodies.get("account", {"type": "User"})
 
     async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
         self.calls.append((path, params))
+        if path.endswith("/projectsV2"):
+            yield self.bodies.get("boards", [])
+            return
         for page in self.pages if self.pages is not None else [self.bodies.get("items", [])]:
             yield page
 
@@ -181,10 +195,11 @@ class TestReadingABoard:
         items = await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
 
         assert len(items) == 1
-        assert client.calls[0][0] == f"/users/monalisa/projectsV2/{PROJECT}/fields"
-        assert client.calls[1][1]["fields"] == "39516,39518"
-        assert client.calls[1][1]["per_page"] == 100
-        assert "page" not in client.calls[1][1], "it counted pages instead of following the cursor"
+        assert f"/users/monalisa/projectsV2/{PROJECT}/fields" in [path for path, _ in client.calls]
+        listed = next(params for path, params in client.calls if path.endswith("/items"))
+        assert listed["fields"] == "39516,39518"
+        assert listed["per_page"] == 100
+        assert "page" not in listed, "it counted pages instead of following the cursor"
 
     async def test_the_field_ids_are_looked_up_once_and_kept(self) -> None:
         """They change only when somebody edits the board's columns, and this runs every minute."""
@@ -225,6 +240,165 @@ class TestReadingABoard:
         client = FakeJson(fields={"message": "Not Found"}, items={"message": "Not Found"})
 
         assert await HttpProjectBoards(client).list_board_items("monalisa", PROJECT) == []
+
+
+class TestListingTheBoardsAnOwnerHas:
+    """What `/set_board` offers. Over the same prefix the reads use, deliberately: a picker on a
+    path of its own could offer a board the poller then cannot open."""
+
+    async def test_it_lists_them(self) -> None:
+        client = FakeJson(
+            boards=[
+                {"number": 3, "title": "Roadmap"},
+                {"number": 7, "title": {"raw": "Bugs", "html": "Bugs"}},
+            ]
+        )
+
+        listed = await HttpProjectBoards(client).list_boards("monalisa")
+
+        assert [(one.number, one.title) for one in listed] == [(3, "Roadmap"), (7, "Bugs")]
+
+    async def test_an_organisation_is_listed_under_orgs(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, boards=[{"number": 3, "title": "R"}])
+
+        await HttpProjectBoards(client).list_boards("acme")
+
+        assert any(path == "/orgs/acme/projectsV2" for path, _ in client.calls)
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"number": 3},
+            {"title": "Roadmap"},
+            {"number": "3", "title": "Roadmap"},
+            {"number": 3, "title": ""},
+            {"number": 3, "title": {"html": "Roadmap"}},
+            "not an object",
+            None,
+        ],
+    )
+    async def test_a_row_it_cannot_use_is_passed_over(self, row: Any) -> None:
+        """A board with no readable title is not refused for tidiness: the title is the whole of
+        what a picker shows, and an entry reading `#7` with nothing beside it is a choice nobody
+        can make."""
+        client = FakeJson(boards=[row, {"number": 9, "title": "Real"}])
+
+        listed = await HttpProjectBoards(client).list_boards("monalisa")
+
+        assert [one.number for one in listed] == [9]
+
+    async def test_an_answer_that_is_not_a_list_is_no_boards(self) -> None:
+        client = FakeJson(boards={"message": "Not Found"})
+
+        assert await HttpProjectBoards(client).list_boards("monalisa") == []
+
+
+class TestOpeningOneBoard:
+    """So that "this token cannot see that board" is a sentence the person who typed it reads,
+    rather than a warning once a minute in a log nobody is watching."""
+
+    async def test_it_answers_the_board(self) -> None:
+        client = FakeJson(one_board={"number": 3, "title": "Roadmap"})
+
+        found = await HttpProjectBoards(client).get_board("monalisa", PROJECT)
+
+        assert found is not None
+        assert (found.number, found.title) == (3, "Roadmap")
+
+    async def test_it_asks_under_the_owners_own_kind(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, one_board={"number": 3, "title": "R"})
+
+        await HttpProjectBoards(client).get_board("acme", PROJECT)
+
+        assert any(path == f"/orgs/acme/projectsV2/{PROJECT}" for path, _ in client.calls)
+
+    async def test_a_body_it_cannot_read_is_no_board(self) -> None:
+        client = FakeJson(one_board={"message": "Not Found"})
+
+        assert await HttpProjectBoards(client).get_board("monalisa", PROJECT) is None
+
+
+class TestWhichKindOfAccountOwnsTheBoard:
+    """A login names one account of one kind: GitHub keeps users and organisations in a single
+    namespace, so `acme` cannot be both. The wrong prefix is therefore not a slower way to the
+    same board, it is a 404 — which is the answer every organisation's board gave here until the
+    kind was asked about rather than assumed.
+    """
+
+    async def test_an_organisations_board_is_read_under_orgs(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        boards = [path for path, _ in client.calls if "/projectsV2/" in path]
+        assert boards
+        assert all(path.startswith(f"/orgs/acme/projectsV2/{PROJECT}") for path in boards)
+
+    async def test_a_persons_board_is_still_read_under_users(self) -> None:
+        client = FakeJson(account={"type": "User"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+
+        assert any(
+            path.startswith(f"/users/monalisa/projectsV2/{PROJECT}") for path, _ in client.calls
+        )
+
+    async def test_the_kind_is_asked_once_and_kept(self) -> None:
+        """It changes when an account is converted, which is not a thing that happens between
+        two polls a minute apart, and this would otherwise be a second request every time."""
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("acme", PROJECT)
+        await boards.list_board_items("acme", PROJECT)
+
+        assert sum(path == "/users/acme" for path, _ in client.calls) == 1
+
+    async def test_the_lookup_carries_the_boards_own_credential(self) -> None:
+        """The board is read with a token of its own, and an organisation can be private. Asked
+        anonymously this is both a possible 404 and a share of an IP-wide hourly allowance."""
+        client = FakeJson(account={"type": "Organization"}, items=[draft()])
+
+        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        asked = next(params for path, params in client.calls if path == "/users/acme")
+        assert asked["owner"] == "acme"
+
+    async def test_the_owner_is_escaped_into_the_path(self) -> None:
+        """It reaches here from a setting somebody typed, and every other interpolation in this
+        client is quoted."""
+        client = FakeJson(account={"type": "Organization"}, items=[])
+
+        await HttpProjectBoards(client).list_board_items("a b/c", PROJECT)
+
+        assert all("a b/c" not in path for path, _ in client.calls if "projectsV2" in path)
+        assert any("a%20b%2Fc" in path for path, _ in client.calls)
+
+    @pytest.mark.parametrize("account", [{"type": 7}, {}, ["not an object"], None])
+    async def test_an_answer_it_cannot_read_is_taken_as_a_person(
+        self, account: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Which is how every board was read before there was a choice, so an unreadable answer
+        costs an organisation what it already had rather than breaking a working board."""
+        client = FakeJson(account=account, items=[draft()])
+
+        with caplog.at_level("WARNING"):
+            await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+
+        assert any(path.startswith(f"/users/acme/projectsV2/{PROJECT}") for path, _ in client.calls)
+        assert "kind of account" in caplog.text
+
+    async def test_an_answer_it_cannot_read_is_asked_again_next_poll(self) -> None:
+        """A guess is not an answer worth keeping. Remembered, one blip would decide the prefix
+        for the life of the process, and an organisation's board would stay dead until a
+        restart nobody knew to do."""
+        client = FakeJson(account={}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("acme", PROJECT)
+        await boards.list_board_items("acme", PROJECT)
+
+        assert sum(path == "/users/acme" for path, _ in client.calls) == 2
 
 
 class TestFieldsInShapesNobodyPromised:
@@ -276,6 +450,26 @@ class TestFieldsInShapesNobodyPromised:
         assert item is not None
         assert item.html_url == f"https://github.com/users/unknown/projects/{PROJECT}"
 
+    def test_a_draft_on_an_organisations_board_links_to_that_board(self) -> None:
+        """The kind of owner is half the path, not decoration. `/users/` and `/orgs/` are two
+        different pages, and only one of them exists for any given board."""
+        item = parse_item(
+            draft(project_url=f"https://api.github.com/orgs/acme/projectsV2/{PROJECT}"), PROJECT
+        )
+
+        assert item is not None
+        assert item.html_url == f"https://github.com/orgs/acme/projects/{PROJECT}"
+
+    def test_a_project_url_naming_neither_kind_falls_back(self) -> None:
+        """A shape this bot has not seen. Guessing an owner out of it would put a real login on
+        a board it may not own, so it says so instead."""
+        item = parse_item(
+            draft(project_url=f"https://api.github.com/teams/acme/projectsV2/{PROJECT}"), PROJECT
+        )
+
+        assert item is not None
+        assert item.html_url == f"https://github.com/users/unknown/projects/{PROJECT}"
+
     @pytest.mark.parametrize("stamp", ["not a date", "2026-13-45T99:00:00Z", "", None, 7])
     def test_a_timestamp_it_cannot_read_is_no_timestamp(self, stamp: Any) -> None:
         """A card with no readable timestamp is always synced, which is a wasted edit rather
@@ -291,3 +485,568 @@ def test_a_content_type_that_is_not_a_string_is_skipped(content_type: Any) -> No
     """A dict lookup on an unhashable key raises rather than answering None, and one malformed
     card would have ended the whole poll rather than being passed over."""
     assert parse_item(draft(content_type=content_type), PROJECT) is None
+
+
+class TestTheStatusFieldsChoices:
+    """A write needs the ID of the option it moves a card to, not its name.
+
+    They ride along on the `/fields` answer the reader already makes, so keeping them costs no
+    second call. Every row is checked before it is read, like every other shape in this module:
+    these came from published documentation rather than from a board.
+    """
+
+    def fields(self, status: dict[str, Any]) -> list[Any]:
+        return [{"id": 39516, "name": "Title"}, status]
+
+    async def test_the_options_are_kept_with_their_ids(self) -> None:
+        client = FakeJson(
+            fields=self.fields(
+                {
+                    "id": 39518,
+                    "name": "Status",
+                    "options": [
+                        {"id": "0b6e37be", "name": {"raw": "Todo", "html": "Todo"}},
+                        {"id": "aa1c2d3e", "name": "In Progress"},
+                    ],
+                }
+            ),
+            items=[draft()],
+        )
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        found = boards._fields[("monalisa", PROJECT)]
+
+        assert [(one.option_id, one.name) for one in found.status.options] == [
+            ("0b6e37be", "Todo"),
+            ("aa1c2d3e", "In Progress"),
+        ]
+
+    async def test_the_order_github_gave_them_is_kept(self) -> None:
+        """It is the board's own left-to-right order, which is the tiebreak when two columns
+        mean the same thing to this bot."""
+        client = FakeJson(
+            fields=self.fields(
+                {
+                    "id": 39518,
+                    "name": "Status",
+                    "options": [
+                        {"id": "c", "name": "Done"},
+                        {"id": "a", "name": "Todo"},
+                        {"id": "b", "name": "In Progress"},
+                    ],
+                }
+            ),
+            items=[],
+        )
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert [one.option_id for one in boards._fields[("monalisa", PROJECT)].status.options] == [
+            "c",
+            "a",
+            "b",
+        ]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"name": "Todo"},
+            {"id": 7, "name": "Todo"},
+            {"id": "a"},
+            {"id": "a", "name": ""},
+            {"id": "a", "name": {"html": "Todo"}},
+            "not an object",
+            None,
+        ],
+    )
+    async def test_a_choice_it_cannot_read_is_passed_over(self, row: Any) -> None:
+        """An option id is a STRING here while a field id is an int, so an int id is a shape
+        this cannot use rather than one to coerce."""
+        client = FakeJson(
+            fields=self.fields(
+                {"id": 39518, "name": "Status", "options": [row, {"id": "ok", "name": "Done"}]}
+            ),
+            items=[],
+        )
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert [one.option_id for one in boards._fields[("monalisa", PROJECT)].status.options] == [
+            "ok"
+        ]
+
+    @pytest.mark.parametrize("listed", [None, {}, "nope", 7])
+    async def test_a_field_with_no_readable_choices_has_none(self, listed: Any) -> None:
+        """A board can be read and mirrored without them. Only a write needs them, and a write
+        with nothing to choose from does nothing rather than guessing."""
+        status: dict[str, Any] = {"id": 39518, "name": "Status"}
+        if listed is not None:
+            status["options"] = listed
+        client = FakeJson(fields=self.fields(status), items=[])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert boards._fields[("monalisa", PROJECT)].status.options == ()
+
+    async def test_the_status_id_is_right_on_a_board_with_no_title_field(self) -> None:
+        """The bug this shape exists to prevent. `wanted` is built positionally, so it is
+        `(status_id,)` here and `(title_id, status_id)` on an ordinary board - a writer reaching
+        for `wanted[1]` is wrong on the first and right on the second."""
+        client = FakeJson(fields=[{"id": 39518, "name": "Status"}], items=[])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        found = boards._fields[("monalisa", PROJECT)]
+
+        assert found.wanted == (39518,)
+        assert found.status.field_id == 39518
+
+    async def test_the_status_id_is_right_on_an_ordinary_board(self) -> None:
+        client = FakeJson(fields=self.fields({"id": 39518, "name": "Status"}), items=[])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        found = boards._fields[("monalisa", PROJECT)]
+
+        assert found.wanted == (39516, 39518)
+        assert found.status.field_id == 39518
+
+    async def test_a_board_with_no_status_field_caches_nothing_at_all(self) -> None:
+        """One entry holds the ids and the choices together so this rule cannot be honoured for
+        one and missed for the other: two caches can disagree about whether a board has a Status
+        field, and one cannot."""
+        client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert boards._fields == {}
+
+
+class FakeWriter:
+    """The PATCH half, which is a separate Protocol from the read half on purpose."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.sent: list[tuple[str, str, Any]] = []
+
+    async def patch_json(self, path: str, *, owner: str, json: Any) -> None:
+        self.sent.append((path, owner, json))
+        if self.error is not None:
+            raise self.error
+
+
+def a_board(**fields: Any) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "id": 39518,
+        "name": "Status",
+        "options": [
+            {"id": "opt-todo", "name": "Todo"},
+            {"id": "opt-doing", "name": "In Progress"},
+            {"id": "opt-done", "name": "Done"},
+        ],
+    }
+    status.update(fields)
+    return status
+
+
+class TestMovingACard:
+    """The write. Its body shape came from published documentation like every other shape in
+    this module, so what is pinned here is the decisions around it rather than GitHub's answer:
+    which path, which ids, and the three ways it declines to write at all."""
+
+    def boards(self, writer: FakeWriter | None, **bodies: Any) -> HttpProjectBoards:
+        client = FakeJson(fields=[{"id": 39516, "name": "Title"}, a_board()], **bodies)
+        return HttpProjectBoards(client, writer=writer)
+
+    async def test_it_patches_the_card_with_the_option_id(self) -> None:
+        writer = FakeWriter()
+
+        moved = await self.boards(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+        )
+
+        assert moved.outcome is CardMove.MOVED
+        assert writer.sent == [
+            (
+                f"/users/monalisa/projectsV2/{PROJECT}/items/99",
+                "monalisa",
+                {"fields": [{"id": 39518, "value": "opt-doing"}]},
+            )
+        ]
+
+    async def test_an_organisations_board_is_written_under_orgs(self) -> None:
+        """For the same reason it is read under it: a login names one account of one kind, and
+        the wrong prefix is a 404 rather than a longer route."""
+        writer = FakeWriter()
+        boards = self.boards(writer, account={"type": "Organization"})
+
+        await boards.move_card(owner="acme", project_number=PROJECT, card_id=99, state=Status.DONE)
+
+        assert writer.sent[0][0] == f"/orgs/acme/projectsV2/{PROJECT}/items/99"
+
+    async def test_the_owner_goes_with_it_so_the_write_carries_a_credential(self) -> None:
+        """An empty owner sends the PATCH out anonymous, GitHub answers 401, and the poller
+        reads that as permanent and writes the card off for good."""
+        writer = FakeWriter()
+
+        await self.boards(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        assert writer.sent[0][1] == "monalisa"
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (Status.NOT_REVIEWED, "opt-todo"),
+            (Status.IN_REVIEW, "opt-doing"),
+            (Status.DONE, "opt-done"),
+        ],
+    )
+    async def test_the_column_is_chosen_through_the_words_a_board_may_use(
+        self, status: Status, expected: str
+    ) -> None:
+        """Read through `status_from_column`, so a board saying Todo or In Progress works
+        without an inverse table that could drift from the one this project already keeps."""
+        writer = FakeWriter()
+
+        await self.boards(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=status
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] == expected
+
+    async def test_the_column_named_for_the_state_wins_over_a_synonym(self) -> None:
+        """`In Progress` and `In Review` both mean IN_REVIEW. Board order alone would take
+        whichever came first, which is how `/status In review` moved a card to In progress.
+        The column called what the state is called wins; order only breaks a tie between
+        two synonyms, neither of which is the name."""
+        writer = FakeWriter()
+        client = FakeJson(
+            fields=[
+                a_board(
+                    options=[
+                        {"id": "second", "name": "In Review"},
+                        {"id": "first", "name": "In Progress"},
+                    ]
+                )
+            ]
+        )
+
+        await HttpProjectBoards(client, writer=writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] == "second"
+
+    async def test_with_no_writer_it_writes_nothing(self) -> None:
+        """Which is every deployment with no project token. The reader falls back to the App
+        client, and the App holds no Projects permission of any kind, so there is nothing to
+        fall back to for a write."""
+        moved = await self.boards(None).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        assert moved.outcome is CardMove.NO_WRITER
+
+    async def test_a_board_whose_status_field_cannot_be_read_writes_nothing(self) -> None:
+        writer = FakeWriter()
+        client = FakeJson(fields=[{"id": 39516, "name": "Title"}])
+
+        moved = await HttpProjectBoards(client, writer=writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        assert moved.outcome is CardMove.UNREADABLE
+        assert writer.sent == []
+
+    async def test_a_board_with_no_column_meaning_that_status_writes_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Not a failure worth telling whoever ran the command: their change landed on GitHub
+        and in Discord, and the board simply has nowhere to put it."""
+        writer = FakeWriter()
+        client = FakeJson(fields=[a_board(options=[{"id": "opt-todo", "name": "Todo"}])])
+
+        with caplog.at_level("WARNING", logger="shannon.github.projects"):
+            moved = await HttpProjectBoards(client, writer=writer).move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            )
+
+        assert moved.outcome is CardMove.NO_COLUMN
+        assert writer.sent == []
+        assert "no column this bot reads as" in caplog.text
+        assert "done, closed" in caplog.text, "it offered no column name to use"
+
+    async def test_a_refusal_from_github_is_not_swallowed_here(self) -> None:
+        """The caller decides what a failed write means. Here it only has to not pretend."""
+        writer = FakeWriter(error=GitHubRefusedError("Could not resolve to a node"))
+
+        with pytest.raises(GitHubRefusedError):
+            await self.boards(writer).move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            )
+
+
+# The Status column of a real board, read off GitHub's own default project template:
+# Backlog, Ready, In progress, In review, Done. Option ids are strings, and a name arrives as
+# a {raw, html} pair rather than a bare string - both checked here rather than assumed.
+DEFAULT_TEMPLATE = {
+    "id": 353672864,
+    "name": "Status",
+    "data_type": "single_select",
+    "options": [
+        {"id": "f75ad846", "name": {"raw": "Backlog", "html": "Backlog"}, "color": "GREEN"},
+        {"id": "e18bf179", "name": {"raw": "Ready", "html": "Ready"}, "color": "BLUE"},
+        {
+            "id": "47fc9ee4",
+            "name": {"raw": "In progress", "html": "In progress"},
+            "color": "YELLOW",
+        },
+        {"id": "aba860b9", "name": {"raw": "In review", "html": "In review"}, "color": "PURPLE"},
+        {"id": "98236657", "name": {"raw": "Done", "html": "Done"}, "color": "ORANGE"},
+    ],
+}
+
+
+class TestABoardFromGitHubsOwnTemplate:
+    """The default template, which is what most boards actually look like.
+
+    It carries BOTH `In progress` and `In review`, and this bot reads both as IN_REVIEW - which
+    is right for reading a column back and not enough for writing one. Taken in board order,
+    `/status In review` moved a card to `In progress`.
+    """
+
+    def moving(self, writer: FakeWriter) -> HttpProjectBoards:
+        return HttpProjectBoards(
+            FakeJson(fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE]), writer=writer
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (Status.BACKLOG, "f75ad846"),
+            (Status.NOT_REVIEWED, "e18bf179"),
+            (Status.IN_REVIEW, "aba860b9"),
+            (Status.DONE, "98236657"),
+        ],
+    )
+    async def test_each_status_lands_in_the_column_a_person_would_pick(
+        self, status: Status, expected: str
+    ) -> None:
+        writer = FakeWriter()
+
+        await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=status
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] == expected
+
+    async def test_in_review_does_not_land_in_in_progress(self) -> None:
+        """The bug this ordering exists to prevent, named on its own so a change that brings it
+        back cannot be read as a harmless reshuffle."""
+        writer = FakeWriter()
+
+        await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] != "47fc9ee4", "it picked In progress"
+
+    async def test_a_status_the_template_has_no_column_for_writes_nothing(self) -> None:
+        """READY_FOR_MERGE. The template has `Ready`, which means something else here - work
+        that is ready to be picked up, not work that is ready to merge - so there is genuinely
+        nowhere to put it and inventing somewhere would be worse than declining."""
+        writer = FakeWriter()
+
+        moved = await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+        )
+
+        assert moved.outcome is CardMove.NO_COLUMN
+        assert writer.sent == []
+
+    async def test_the_status_field_id_is_the_one_the_write_addresses(self) -> None:
+        writer = FakeWriter()
+
+        await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        assert writer.sent[0][2]["fields"][0]["id"] == 353672864
+
+
+PRIORITY_FIELD_ROW = {
+    "id": 353672876,
+    "name": "Priority",
+    "data_type": "single_select",
+    "options": [
+        {"id": "79628723", "name": {"raw": "HIGH", "html": "HIGH"}, "color": "RED"},
+        {"id": "0a877460", "name": {"raw": "MEDIUM", "html": "MEDIUM"}, "color": "ORANGE"},
+        {"id": "da944a9c", "name": {"raw": "LOW", "html": "LOW"}, "color": "YELLOW"},
+    ],
+}
+
+
+class TestSettingAPriority:
+    """A board may carry a Priority single-select, and a real one does - option names matching
+    this bot's own, in capitals. It is optional where Status is not: a board without one mirrors
+    perfectly well and simply cannot be told a priority.
+    """
+
+    def moving(self, writer: FakeWriter, *, with_priority: bool = True) -> HttpProjectBoards:
+        rows: list[Any] = [{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE]
+        if with_priority:
+            rows.append(PRIORITY_FIELD_ROW)
+        return HttpProjectBoards(FakeJson(fields=rows), writer=writer)
+
+    @pytest.mark.parametrize(
+        ("priority", "expected"),
+        [
+            (Priority.HIGH, "79628723"),
+            (Priority.MEDIUM, "0a877460"),
+            (Priority.LOW, "da944a9c"),
+        ],
+    )
+    async def test_each_priority_lands_in_its_own_option(
+        self, priority: Priority, expected: str
+    ) -> None:
+        """`HIGH` on the board and `High` here are the same word once both are normalised."""
+        writer = FakeWriter()
+
+        await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=priority
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] == expected
+
+    async def test_it_addresses_the_priority_field_not_the_status_one(self) -> None:
+        """The callee picks the field from what it was given, which is why one method over the
+        union is safer than two: a caller cannot send a priority to the Status field."""
+        writer = FakeWriter()
+
+        await self.moving(writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        )
+
+        assert writer.sent[0][2]["fields"][0]["id"] == 353672876
+
+    async def test_a_synonym_is_read_the_way_a_label_would_be(self) -> None:
+        """`urgent` means HIGH to this bot wherever it is written, so a board spelling its top
+        column that way is understood - the same table that reads a priority off a label."""
+        writer = FakeWriter()
+        client = FakeJson(
+            fields=[
+                DEFAULT_TEMPLATE,
+                {
+                    "id": 353672876,
+                    "name": "Priority",
+                    "options": [{"id": "urgent-id", "name": "Urgent"}],
+                },
+            ]
+        )
+
+        await HttpProjectBoards(client, writer=writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        )
+
+        assert writer.sent[0][2]["fields"][0]["value"] == "urgent-id"
+
+    async def test_a_board_with_no_priority_field_writes_nothing(self) -> None:
+        """Not a misconfiguration. GitHub's default template ships no Priority field at all."""
+        writer = FakeWriter()
+
+        moved = await self.moving(writer, with_priority=False).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        )
+
+        assert moved.outcome is CardMove.NO_FIELD
+        assert writer.sent == []
+
+    async def test_a_priority_field_with_no_usable_options_is_no_field(self) -> None:
+        """One shape for nothing to write to, rather than two. A select with no options is a
+        field a write can address and never satisfy."""
+        writer = FakeWriter()
+        client = FakeJson(
+            fields=[DEFAULT_TEMPLATE, {"id": 353672876, "name": "Priority", "options": []}]
+        )
+
+        moved = await HttpProjectBoards(client, writer=writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        )
+
+        assert moved.outcome is CardMove.NO_FIELD
+
+    async def test_the_status_field_still_works_on_the_same_board(self) -> None:
+        """Both selects live in one cache entry, so reading one must not disturb the other."""
+        writer = FakeWriter()
+        boards = self.moving(writer)
+
+        await boards.move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        )
+        await boards.move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        assert [sent[2]["fields"][0]["id"] for sent in writer.sent] == [353672876, 353672864]
+
+    async def test_the_request_does_not_ask_for_the_priority_field(self) -> None:
+        """`fields=` governs the READ, and nothing reads a card's priority back. Naming it there
+        would send a field per card per poll that nothing parses."""
+        client = FakeJson(
+            fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE, PRIORITY_FIELD_ROW],
+            items=[],
+        )
+
+        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+
+        asked = next(params for path, params in client.calls if path.endswith("/items"))
+        assert asked["fields"] == "353672862,353672864"
+
+
+class TestSayingItOnce:
+    """Nothing retries a card write, so this cannot repeat on a timer - the ceiling is the rate
+    people run the command. A team whose board has no merge-gate column would otherwise write a
+    byte-identical line dozens of times a day."""
+
+    def moving(self, writer: FakeWriter) -> HttpProjectBoards:
+        return HttpProjectBoards(FakeJson(fields=[DEFAULT_TEMPLATE]), writer=writer)
+
+    async def test_the_same_complaint_is_said_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        boards = self.moving(FakeWriter())
+
+        with caplog.at_level("WARNING", logger="shannon.github.projects"):
+            await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+            )
+            await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+            )
+
+        assert caplog.text.count("has no column this bot reads as") == 1
+
+    async def test_a_different_state_is_a_different_complaint(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Keyed on the state as well as the board. A board with no Ready for merge column almost
+        certainly HAS a Done one, and keying on the board alone would swallow a real complaint
+        about something else."""
+        writer = FakeWriter()
+        client = FakeJson(fields=[{"id": 39518, "name": "Status", "options": []}])
+        boards = HttpProjectBoards(client, writer=writer)
+
+        with caplog.at_level("WARNING", logger="shannon.github.projects"):
+            await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+            )
+            await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            )
+
+        assert caplog.text.count("has no column this bot reads as") == 2

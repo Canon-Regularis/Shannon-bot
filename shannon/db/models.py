@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -59,6 +60,14 @@ class Repository(TimestampMixin, Base):
     # written before the column existed. Rewritten from the repository object on every sync, so
     # it corrects itself on the next delivery rather than needing a backfill.
     private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # The project board mirrored into this repository's server, by the number in its URL. Null
+    # means none, which is what every row written before this was and needs no backfill.
+    project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Who owns that board, where it is not this repository's own owner. Null means it is. A board
+    # number is a sequence GitHub keeps per account, so the pair addresses a board and neither
+    # half does alone - which is why this is stored beside the number rather than derived.
+    project_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
     # need every child row loaded into the session first.
@@ -151,6 +160,16 @@ class TrackedItem(TimestampMixin, Base):
     # this rather than `status`, which cannot tell a card that has just been dragged from one
     # that sat still while somebody set the status from Discord.
     project_column: Mapped[str | None] = mapped_column(String(COLUMN_WIDTH), nullable=True)
+
+    # The board card this item is wrapped by, for writing its column back. Null means no
+    # card has been seen for it, which is every row until a poll pairs the two: GitHub's REST
+    # API answers no per-item project lookup, so the poller reading a board whole is the only
+    # place in this project where a card id and an item are ever in scope together.
+    #
+    # BigInteger because these share a space with content ids, which already exceed 2**31 in
+    # the fixtures. No unique index: a card id is unique per board, and that stops being true
+    # the day a repository carries two.
+    project_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
     # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a

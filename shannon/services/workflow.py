@@ -29,6 +29,7 @@ from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.domain.text import code_span
 from shannon.github import labels
 from shannon.github.client import GitHubClient
+from shannon.github.projects import CardMove, CardMoved
 from shannon.services.labels import RepositoryLabels
 from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
@@ -104,6 +105,12 @@ class WorkflowOutcome:
     # board poller is the one caller with nobody to tell, so it is the one that has to know the
     # difference between a refusal worth another poll and one that will refuse every poll.
     lock_refusal_is_permanent: bool = False
+    # Set where the board had no column standing for what was just set. The change landed
+    # everywhere that matters, so this is a caveat on a success rather than a failure - but
+    # it is the one board refusal a person can see for themselves, because they will open
+    # the board and find the card where it was. The others are invisible and identical for
+    # every command, and saying them would be a warning attached to nothing they can do.
+    board_has_no_column: bool = False
     # The label this moved, as the REPOSITORY spells it rather than as it was typed. Empty
     # for the seven commands that do not move an arbitrary one. The reply says it back, and
     # saying back what somebody typed would hide the one thing worth showing them: that
@@ -111,24 +118,37 @@ class WorkflowOutcome:
     label: str = ""
 
 
-# Which command owns a name that may not be set by hand, so a refusal says where to go instead.
-# Written out rather than derived from the enum: MEDIUM's command is `set_med_priority` and not
-# `set_medium_priority`, so a derived name would be wrong for exactly one of the eight and right
-# everywhere it was tested. A test holds this against the tables the commands are built from.
-_OWNED_BY: dict[Status | Priority, str] = {
-    Status.BACKLOG: "set_backlog",
-    Status.NOT_REVIEWED: "set_not_reviewed",
-    Status.IN_REVIEW: "set_in_review",
-    Status.READY_FOR_MERGE: "set_ready_for_merge",
-    Status.DONE: "set_done",
-    Priority.HIGH: "set_high_priority",
-    Priority.MEDIUM: "set_med_priority",
-    Priority.LOW: "set_low_priority",
-}
-
 # How many of a repository's labels a refusal lists before it stops. A taxonomy can be long and
 # the reply is one Discord message.
 _ENOUGH_TO_SHOW = 15
+
+
+class MovesCards(Protocol):
+    """Dragging an item's board card into the column standing for a status.
+
+    Answers what became of it rather than raising for the ordinary ways there is nothing to
+    do. The board is a mirror of the labels rather than the record, so none of them is worth
+    failing a command that has already landed everywhere that counts - but one of them is
+    worth mentioning, which is why the answer is not a bool.
+    """
+
+    async def move_card(
+        self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
+    ) -> CardMoved: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BoardCard:
+    """Where an item's card is, for writing its column back.
+
+    All three or none: a card id addresses nothing without the board it is on, and a board
+    addresses nothing without an owner. Held together so that whether this can be written
+    is one question rather than three that could be asked apart.
+    """
+
+    owner: str
+    project_number: int
+    card_id: int
 
 
 class LabelsItems(Protocol):
@@ -160,6 +180,7 @@ class ItemWorkflow:
         threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
         repository_labels: RepositoryLabels,
+        cards: MovesCards | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -167,11 +188,23 @@ class ItemWorkflow:
         self._threads = threads
         self._kinds = kinds
         self._labels = repository_labels
+        # None where this deployment has not turned board writes on, or has no project
+        # token to make them with. Wiring rather than a flag read here, so a deployment
+        # that has not opted in cannot reach the write at all.
+        self._cards = cards
 
-    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
-        """Move an item to a status, and lock its thread once it is done."""
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> WorkflowOutcome:
+        """Move an item to a status, and lock its thread once it is done.
+
+        `tell_the_board` is False for exactly one caller: the board poller, which calls
+        this BECAUSE a card moved and would otherwise write the column it has just read
+        straight back. It terminates either way - the next poll sees nothing further
+        changed - so what it costs is a wasted call per moved card rather than a loop.
+        """
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
         self._refuse_conflicting_status(found, snapshot, status)
 
@@ -236,6 +269,13 @@ class ItemWorkflow:
                         found, snapshot, change, wants_lock, thread_id
                     )
                 await self._write_the_lock_down(found.tracked_item_id, thread_id, lock)
+
+            # The card too, for the reason the lock above is retried here: a swallowed
+            # board write is permanent. Nothing retries it, the poller only ever rederives
+            # a status FROM a column, and a card left behind because GitHub was having a
+            # moment is noticed by nothing. Running the command again is what a person
+            # does, and it answered 'already Done' and asked the board nothing.
+            repeated = tell_the_board and await self._move_the_card(found, status)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -244,6 +284,7 @@ class ItemWorkflow:
                 lock_refused=lock.refused,
                 wanted_locked=wants_lock,
                 lock_refusal_is_permanent=lock.permanent,
+                board_has_no_column=repeated,
             )
 
         await self._apply(found, change)
@@ -271,7 +312,7 @@ class ItemWorkflow:
             # Touched only when DONE is on one side of the move or the other, so an ordinary
             # status change still costs no Discord call. Moving OUT of DONE has to give the
             # thread back: `PullRequestPolicy.locked` returns None on every sync, so the lock
-            # `/set_done` takes is the only one a pull request ever gets and nothing else was
+            # `/status Done` takes is the only one a pull request ever gets and nothing else was
             # ever going to lift it. The commands to move it back are all allowed and all
             # reported success, and left the thread shut against the discussion they had just
             # reopened.
@@ -285,6 +326,8 @@ class ItemWorkflow:
             if touched:
                 await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
+        no_column = tell_the_board and await self._move_the_card(found, status)
+
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
             found.full_name,
@@ -294,6 +337,7 @@ class ItemWorkflow:
             lock_refused=lock.refused,
             wanted_locked=wants_lock,
             lock_refusal_is_permanent=lock.permanent,
+            board_has_no_column=no_column,
         )
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
@@ -308,18 +352,32 @@ class ItemWorkflow:
         in the thread, and the command that exists to fix it reporting nothing to do.
         """
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
 
         change = labels.priority_change(snapshot.label_names, priority)
         if change.nothing_to_do and found.priority is priority:
-            return WorkflowOutcome(found.full_name, found.number, changed=False)
+            # The board is asked on a repeat too, the same as the status half. Both
+            # commands answer the same question and a repeat means the same thing in both:
+            # try the half that has nothing else to retry it.
+            repeated = await self._move_the_card(found, priority)
+            return WorkflowOutcome(
+                found.full_name, found.number, changed=False, board_has_no_column=repeated
+            )
 
         await self._apply(found, change)
         await self._rerender(found, snapshot, change)
 
+        # No `tell_the_board` here, unlike the status half. That exists for one caller,
+        # the poller, which calls `set_status` BECAUSE a card moved - and nothing polls a
+        # priority: the poll reads a card's column and no other field. A parameter no
+        # caller ever passes False would be an arm only a test could take.
+        no_column = await self._move_the_card(found, priority)
+
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
-        return WorkflowOutcome(found.full_name, found.number, changed=True)
+        return WorkflowOutcome(
+            found.full_name, found.number, changed=True, board_has_no_column=no_column
+        )
 
     async def set_label(self, *, thread_id: int, name: str, adding: bool) -> WorkflowOutcome:
         """Put an ordinary label on an item, or take one off.
@@ -330,7 +388,11 @@ class ItemWorkflow:
         The two refusals are the whole of this command. Everything else here already existed.
         """
         found = await locate(self._sessionmaker, thread_id)
-        self._refuse_a_kind_it_cannot_move(found)
+        self._refuse_a_kind_it_cannot_move(
+            found,
+            instead="A draft card has no labels on GitHub. Convert it to an issue there and "
+            "this bot will track the issue from its own page.",
+        )
         self._refuse_a_name_this_bot_owns(name)
 
         # Before the labels are listed, not after. Listing addresses GitHub by the stored
@@ -362,15 +424,23 @@ class ItemWorkflow:
         that is not a tracked item answers with nothing rather than raising: an autocomplete has
         nowhere to put a refusal, and an empty picker in a channel that is not an item's thread is
         the right amount of nothing to say.
+
+        A kind this service cannot write to is the same nothing, and used not to be. A project
+        ticket's thread is a tracked item, so it got past the guard above and was offered every
+        label the REGISTERED REPOSITORY has - a full, working-looking picker where `set_label`
+        then refused all of them. Answered off the same predicate the refusal uses, so the two
+        cannot drift apart again.
         """
         try:
             found = await locate(self._sessionmaker, thread_id)
         except NotAnItemThreadError:
             return ()
+        if not self._can_be_moved(found):
+            return ()
         return await self._labels.names(found.owner, found.name)
 
     def _refuse_a_name_this_bot_owns(self, name: str) -> None:
-        """Refuse a label that already means something here, and say which command owns it.
+        """Refuse a label that already means something here, and say how to set it properly.
 
         A status set this way would make the block contradict itself. Nothing on the webhook path
         reads a status back onto the stored column, so the item would go on showing one status
@@ -384,11 +454,19 @@ class ItemWorkflow:
         reserved = labels.reserved_as(name)
         if reserved is None:
             return
-        instead = f"Run /{_OWNED_BY[reserved]} instead."
+        # The word rather than a command name. There used to be a table here mapping each state
+        # to the command that owned it, written out because MEDIUM's was `set_med_priority` and
+        # not `set_medium_priority` - a derived name would have been wrong for exactly one of the
+        # eight and right everywhere it was tested. With the state a choice rather than a command
+        # name, nothing about it is underivable and the table has nothing left to say.
         if isinstance(reserved, Status):
-            raise WorkflowRefusedError(f"{code_span(name)} is a workflow status here. {instead}")
+            raise WorkflowRefusedError(
+                f"{code_span(name)} is a workflow status here. Run /status and pick "
+                f"{spoken(reserved)} instead."
+            )
         raise WorkflowRefusedError(
-            f"{code_span(name)} already means {spoken(reserved)} priority here. {instead}"
+            f"{code_span(name)} already means {spoken(reserved)} priority here. Run /priority "
+            f"and pick {spoken(reserved)} instead."
         )
 
     async def _spelling_the_repository_uses(self, found: FoundItem, name: str) -> str:
@@ -416,19 +494,90 @@ class ItemWorkflow:
             + (f", and {rest} more." if rest > 1 else ", and one more." if rest == 1 else ".")
         )
 
-    def _refuse_a_kind_it_cannot_move(self, found: FoundItem) -> None:
+    async def _move_the_card(self, found: FoundItem, state: Status | Priority) -> bool:
+        """Drag this item's board card to match, where there is one and it may be.
+
+        Answers whether the board had nowhere to put it, which is the one refusal worth
+        passing back. Everything that matters has already landed by this point: the labels
+        are on GitHub, the row is written and the thread is redrawn. So a failure here is
+        logged and swallowed rather than raised - told to whoever ran the command it would
+        read as the change having failed, which it did not.
+
+        A 422 is the one worth reading in the log. `_raise_for_status` carries GitHub's own
+        words, and this write's body shape was taken from published documentation rather
+        than from a live board, so that message is the first real evidence either way.
+        """
+        if self._cards is None or found.card is None:
+            return False
+
+        try:
+            moved = await self._cards.move_card(
+                owner=found.card.owner,
+                project_number=found.card.project_number,
+                card_id=found.card.card_id,
+                state=state,
+            )
+        except ShannonError as refused:
+            logger.warning(
+                "%s#%s is %s here, but its card on board %s was left where it was: %s",
+                found.full_name,
+                found.number,
+                spoken(state),
+                found.card.project_number,
+                refused.message,
+            )
+            return False
+
+        if moved.outcome is CardMove.MOVED and isinstance(state, Status):
+            # The column the BOARD calls it, not the state that was asked for. The
+            # poller compares the column it last saw by text, so leaving this stale
+            # makes the next poll read this bot's own write as somebody dragging the
+            # card - and worse, a real drag BACK to the old column inside one poll
+            # interval reads as never having moved and is dropped for good.
+            #
+            # Status alone. The stored column is the STATUS column: a priority lands
+            # in a different field entirely, and writing its option name here would
+            # tell the poller the card had moved to a column called HIGH.
+            async with self._sessionmaker() as session, session.begin():
+                await TrackedItemStore(session).remember_column(found.tracked_item_id, moved.column)
+        return moved.outcome is CardMove.NO_COLUMN
+
+    def _can_be_moved(self, found: FoundItem) -> bool:
+        """Whether this service has any way to write to the item behind a thread.
+
+        One predicate rather than two, because the refusal below and the picker in
+        `labels_for_thread` were answering it separately and disagreeing: the picker offered a
+        draft card the whole repository's labels and the refusal then turned every one of them
+        down.
+        """
+        return found.object_type in self._kinds
+
+    def _refuse_a_kind_it_cannot_move(self, found: FoundItem, *, instead: str) -> None:
         """Refuse a thread whose item this service has no way to write to.
 
         A project ticket is a draft card on a board. It has no repository page and no labels, so
         there is nothing here to set: its status is the column it sits in, and the board is where
-        that gets changed. Without this the dict lookup below raises KeyError, which reaches the
-        person who ran the command as "Something went wrong here" and the log as a traceback.
+        that gets changed.
+
+        The KeyError this stands in front of is the smaller half of why it exists. A draft card
+        has no number, so `_snapshot` carries the BOARD's number in that slot and `FoundItem.of`
+        reads it straight back. Drop the guard and nothing raises: the write goes to
+        `/repos/{owner}/{name}/issues/{project_number}/labels` and lands on whatever issue or
+        pull request happens to hold that number, under a reply naming an item nobody asked
+        about. Widening `_kinds` with a TICKET entry does not fix that, it hides it - there is no
+        `(owner, name, number)` that addresses a draft.
+
+        `instead` is the one sentence that differs by caller. Required rather than defaulted:
+        three callers, three sentences, and a default would be an arm nothing reaches. Telling
+        somebody to move the card is right for a status and wrong for a label, which is a column
+        rather than a label and was the advice this gave for both.
         """
-        if found.object_type not in self._kinds:
-            raise WorkflowRefusedError(
-                f"That thread is a project {found.object_type.value.lower()}, which has no "
-                "GitHub labels to set. Move its card on the board instead."
-            )
+        if self._can_be_moved(found):
+            return
+        raise WorkflowRefusedError(
+            f"That thread is a project {found.object_type.value.lower()}, which has no "
+            f"GitHub labels to set. {instead}"
+        )
 
     def _refuse_conflicting_status(
         self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
@@ -474,7 +623,7 @@ class ItemWorkflow:
         So the path this asks about can be somebody else's repository by the time it is asked.
         Unchecked, the labels were written onto their item, the re-render resolved the fetched
         snapshot by its own id and opened a thread in whichever server had registered it, and
-        `/set_done` locked that thread rather than the one the command was run in. The reviewer
+        `/status Done` locked that thread rather than the one the command was run in. The reviewer
         was told it worked and their own thread never changed.
 
         The check is free. The snapshot already carries the id, and comparing it costs no call.
@@ -586,13 +735,14 @@ class ItemWorkflow:
         command, because three GitHub round trips sit in between and two commands overlapping
         across them both decided from a row neither of them still had.
 
-        What that cost: a pull request at READY_FOR_MERGE, a `/set_done` and a `/set_in_review`
-        from two reviewers, or from a reviewer and the board poller. The one that was not
-        finishing the item read a status that was not DONE yet, so it never asked for the thread
-        back, while `/set_done` locked it last. The item was left reading IN_REVIEW with its
-        thread shut, both users were told their command had worked, and nothing lifted it:
-        `PullRequestPolicy.locked` returns None, so no webhook or sync ever unlocks a pull
-        request, and `/set_done` is refused for being exactly what the race made it.
+        What that cost: a pull request at READY_FOR_MERGE, a `/status Done` and a
+        `/status In review` from two reviewers, or from a reviewer and the board poller. The one
+        that was not finishing the item read a status that was not DONE yet, so it never asked
+        for the thread back, while `/status Done` locked it last. The item was left reading
+        IN_REVIEW with its thread shut, both users were told their command had worked, and
+        nothing lifted it: `PullRequestPolicy.locked` returns None, so no webhook or sync ever
+        unlocks a pull request, and `/status Done` is refused for being exactly what the race
+        made it.
         """
         async with self._sessionmaker() as session, session.begin():
             item = await TrackedItemStore(session).get_by_id(tracked_item_id, lock=True)
@@ -772,6 +922,9 @@ class FoundItem:
     guild_id: int
     status: Status
     priority: Priority
+    # Where this item's board card is, or None where no board is linked to the
+    # repository or no poll has yet paired the two.
+    card: BoardCard | None = None
 
     @property
     def owner(self) -> str:
@@ -793,6 +946,19 @@ class FoundItem:
             guild_id=repository.discord_guild_id,
             status=item.status,
             priority=item.priority,
+            card=(
+                BoardCard(
+                    # Never empty. An empty owner sends the write out with no
+                    # credential at all, GitHub answers 401, and the poller reads that
+                    # as permanent and writes the card off for good.
+                    owner=repository.project_owner or repository.repo_name.partition("/")[0],
+                    project_number=number,
+                    card_id=card_id,
+                )
+                if (number := repository.project_number) is not None
+                and (card_id := item.project_item_id) is not None
+                else None
+            ),
         )
 
 
@@ -803,6 +969,7 @@ def build_item_workflow(
     *,
     pr_sync: SyncsItems,
     issue_sync: SyncsItems,
+    cards: MovesCards | None = None,
 ) -> ItemWorkflow:
     """Assemble the workflow service with a fetcher and a renderer per object type."""
     return ItemWorkflow(
@@ -820,4 +987,5 @@ def build_item_workflow(
             ),
         },
         RepositoryLabels(github),
+        cards,
     )

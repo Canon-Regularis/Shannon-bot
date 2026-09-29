@@ -1597,3 +1597,107 @@ class TestEveryReviewOnAPullRequest:
     async def test_a_pull_request_nobody_has_reviewed_answers_an_empty_list(self) -> None:
         async with client_with(responds(200, [])) as client:
             assert await client.list_reviews(self._repository(), 7) == []
+
+
+class TestWhichKindOfAccountAnOwnerIs:
+    """What `/link_team` asks before it writes a mapping.
+
+    Only an organisation has teams, so a team pointed at a personal account's repository can
+    never match anything GitHub sends. `GET /users/{owner}` answers for both kinds and says
+    which, so one Metadata-only call settles it and no App permission has to be added - which
+    matters, because granting one suspends event delivery until somebody accepts it.
+    """
+
+    def answering(self, kind: object):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"type": kind}))
+
+        return handler
+
+    async def test_an_organisation(self) -> None:
+        async with client_with(self.answering("Organization")) as client:
+            assert await client.is_organisation("acme") is True
+
+    @pytest.mark.parametrize("kind", ["User", "Bot", "", None, 7, [], {}])
+    async def test_everything_else_is_a_person(self, kind: object) -> None:
+        """Including shapes GitHub does not send today. This answer refuses rather than allows,
+        and refusing on something unreadable is the right way round: a refusal is one command to
+        run again, while a mapping written against a personal account is silent for ever."""
+        async with client_with(self.answering(kind)) as client:
+            assert await client.is_organisation("monalisa") is False
+
+    async def test_an_account_github_does_not_have(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+        async with client_with(handler) as client:
+            assert await client.is_organisation("nobody") is False
+
+    async def test_it_asks_the_account_endpoint(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps({"type": "Organization"}))
+
+        async with client_with(handler) as client:
+            await client.is_organisation("acme")
+
+        assert seen == ["/users/acme"]
+
+    async def test_the_owner_is_escaped_into_the_path(self) -> None:
+        """It arrives off a stored repository name, and every sibling here quotes what it
+        interpolates."""
+        seen: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps({"type": "User"}))
+
+        async with client_with(handler) as client:
+            await client.is_organisation("acme/..")
+
+        assert b"/users/acme%2F.." in seen[0]
+
+
+class TestWritingToAProjectBoard:
+    """`patch_json`, the one write that does not go to a repository.
+
+    Deliberately absent from the `GitHubClient` Protocol: that one carries the JSON readers only
+    because the wiring hands the same object to the board reader when no project token is set,
+    and a PATCH there would give every service the ability to write to any path.
+    """
+
+    async def test_it_sends_the_body_with_patch(self) -> None:
+        seen: list[tuple[str, str, bytes]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path, request.content))
+            return httpx.Response(200, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.patch_json(
+                "/users/monalisa/projectsV2/6/items/99",
+                owner="monalisa",
+                json={"fields": [{"id": 39518, "value": "opt-done"}]},
+            )
+
+        assert seen[0][0] == "PATCH"
+        assert seen[0][1] == "/users/monalisa/projectsV2/6/items/99"
+        assert json.loads(seen[0][2]) == {"fields": [{"id": 39518, "value": "opt-done"}]}
+
+    async def test_a_body_github_will_not_take_carries_its_own_words_back(self) -> None:
+        """The reason this write is diagnosable at all. Its body shape came from published
+        documentation rather than from a live board, so GitHub's 422 message is the first real
+        evidence either way and has to survive the trip."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422, content=json.dumps({"message": "Could not resolve to a node"})
+            )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="Could not resolve to a node"):
+                await client.patch_json(
+                    "/users/monalisa/projectsV2/6/items/99", owner="monalisa", json={}
+                )

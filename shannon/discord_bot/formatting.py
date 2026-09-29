@@ -245,7 +245,7 @@ def format_label_change(move: LabelMove) -> Panel:
     happened at all.
 
     Three groups rather than one, because two of them are labels this bot writes itself. Status
-    and priority both live as labels on the repository, so `/set_done` and somebody tagging an
+    and priority both live as labels on the repository, so `/status Done` and somebody tagging an
     issue `bug` arrive down the same webhook, and saying the same sentence about both buried the
     one that matters under the one that does not.
 
@@ -311,7 +311,7 @@ _STATE_HEADINGS = {
 # Two ways of saying the thread is shut, because only one of them can be undone. A closed issue
 # reopens on GitHub and the thread comes back with it; a merged pull request does not reopen at
 # all, so pointing somebody at GitHub to undo it would send them looking for a button that is not
-# there. This is not a corner: `/set_done` is what locks a pull request and the requirements have
+# there. This is not a corner: `/status Done` is what locks a pull request and the requirements have
 # it run before the merge, so a merged item arriving in a shut thread is the ordinary order.
 _SHUT = "-# This thread is locked and archived."
 _SHUT_UNTIL_REOPENED = (
@@ -333,7 +333,25 @@ _WOULD_NOT_SHUT = "-# This thread could not be closed: the bot needs Manage Thre
 # somewhere it can. "Nothing more will be posted here" is true either way, because the row has
 # already stopped pointing at this thread.
 _MOVED = "-# This item is now mirrored in {}. Nothing more will be posted in this thread."
+_CONVERTED = (
+    "-# This card became {} on GitHub, which is mirrored in a thread of its own. "
+    "Nothing more will be posted here."
+)
 _MOVING = "-# This item will be mirrored in {} from now on. Nothing more will be posted here."
+
+
+def format_card_converted(html_url: str) -> str:
+    """Point a draft card's thread at the issue it has become.
+
+    The ISSUE rather than its thread, deliberately. The issue's own thread is opened by its
+    `opened` webhook, which may not have arrived when this is written and may not arrive at
+    all if that delivery is still being retried - so naming a thread id here would be a
+    guess, while the issue's page exists the moment GitHub converted it.
+
+    No untrusted text: the URL is one GitHub gave us for an item it has just created, and
+    the words are this module's.
+    """
+    return _CONVERTED.format(html_url)
 
 
 def format_thread_moved(thread_id: int) -> str:

@@ -16,11 +16,18 @@ from shannon.commands.labels import (
     build_label_command,
     build_unlabel_command,
 )
-from shannon.commands.workflow import PRIORITY_COMMANDS, STATUS_COMMANDS
+from shannon.commands.workflow import PRIORITY_CHOICES, STATUS_CHOICES
+from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import RepositoryMismatchError
-from shannon.services.workflow import _OWNED_BY, NotAnItemThreadError, WorkflowOutcome
+from shannon.services.workflow import NotAnItemThreadError, WorkflowOutcome
 from tests.fakes.discord_objects import FakeInteraction
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.unit.commands.conftest import (
+    FakeAccess,
+    administrator,
+    default_gate,
+    developer,
+    project_manager,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -63,10 +70,11 @@ def run_it(
     who=None,
     channel_id: int | None = THREAD,
     removing: bool = False,
+    access: FakeAccess | None = None,
 ):
     service = service or StubLabels()
     build = build_unlabel_command if removing else build_label_command
-    command = build(service, default_gate(), StubSuggestions())
+    command = build(service, default_gate(), access or FakeAccess(), StubSuggestions())
     interaction = FakeInteraction(user=who or developer(), channel_id=channel_id)
     return command, interaction, service
 
@@ -230,11 +238,50 @@ class TestThePicker:
         assert await suggest(FakeInteraction(channel_id=THREAD), "bug") == []
 
 
-def test_every_reserved_name_points_at_a_command_that_exists() -> None:
-    """The refusal tells somebody which command owns the label they tried to set, and the mapping
-    is written out rather than derived because MEDIUM's command is `set_med_priority` and not
-    `set_medium_priority`. Derived, it would be wrong for exactly one of the eight.
-    """
-    owned = {command: value for value, command in _OWNED_BY.items()}
+def test_every_reserved_name_can_be_picked_in_the_command_it_names() -> None:
+    """The refusal tells somebody to run a command and pick a word, so every word it can
+    name has to be one that command's picker actually shows.
 
-    assert owned == {**STATUS_COMMANDS, **PRIORITY_COMMANDS}
+    This replaces a test that held a table of state-to-command-name against the eight
+    commands built from it. That table existed because MEDIUM's command was
+    `set_med_priority` and not `set_medium_priority`, so a derived name would have been
+    wrong for exactly one of the eight. With the state a choice rather than a command name,
+    nothing is underivable and the table is gone; what is still worth holding is that the
+    refusal cannot name a word nobody can pick.
+    """
+    offered = {choice.name for choice in (*STATUS_CHOICES, *PRIORITY_CHOICES)}
+
+    assert offered == {
+        spoken(state) for state in (*Status, *Priority) if state is not Priority.UNSET
+    }
+
+
+class TestWhatGitHubSays:
+    """The second gate, added by issue #158."""
+
+    async def test_a_refusal_from_github_stops_the_command(self) -> None:
+        access = FakeAccess(refusal="GitHub does not have monalisa as a collaborator.")
+        command, interaction, service = run_it(access=access)
+
+        await command.callback(interaction, "bug")
+
+        assert service.calls == [], "it wrote a label after GitHub said no"
+        assert "not have monalisa as a collaborator" in interaction.said
+
+    async def test_unlabel_is_gated_too(self) -> None:
+        access = FakeAccess(refusal="GitHub says no.")
+        command, interaction, service = run_it(access=access, removing=True)
+
+        await command.callback(interaction, "bug")
+
+        assert service.calls == []
+
+    async def test_the_picker_beside_it_is_not_gated(self) -> None:
+        """An autocomplete cannot reply, so there is nowhere to put a refusal - and it is asked
+        once per keystroke, so gating it would be a GitHub call per letter typed. What it offers
+        is a repository's label names, which are already in every thread this bot writes."""
+        suggest = _suggesting(StubSuggestions(("bug", "documentation")))
+
+        found = await suggest(FakeInteraction(channel_id=THREAD), "")
+
+        assert [choice.name for choice in found] == ["bug", "documentation"]

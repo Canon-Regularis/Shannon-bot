@@ -20,9 +20,14 @@ from shannon.db.models import ItemAssignment, Repository
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.discord_bot.formatting import format_reviewer_ping, format_team_ping
 from shannon.domain.enums import ActorRole
+from shannon.domain.errors import NotRegisteredError
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
-from shannon.services.linking import InvalidGitHubTeamError, TeamLinkingService
+from shannon.services.linking import (
+    InvalidGitHubTeamError,
+    NoTeamsHereError,
+    TeamLinkingService,
+)
 from shannon.services.reviews import ReviewRequestLedger
 from shannon.services.sync.items import ItemSyncService, build_item_sync
 from shannon.services.sync.notifications import ActorNotifier
@@ -244,13 +249,38 @@ class TestClosingATeamsRequest:
         assert told(threads) == before
 
 
+class FakeAccounts:
+    """Whether the repository's owner is an organisation, which is all this asks GitHub.
+
+    True by default: teams belong to organisations, so a personal account is the refusal
+    case rather than the ordinary one.
+    """
+
+    def __init__(self, *, organisation: bool = True) -> None:
+        self.organisation = organisation
+        self.asked: list[str] = []
+
+    async def is_organisation(self, owner: str) -> bool:
+        self.asked.append(owner)
+        return self.organisation
+
+
+def teams(
+    sessionmaker: async_sessionmaker[AsyncSession], accounts: FakeAccounts | None = None
+) -> TeamLinkingService:
+    return TeamLinkingService(sessionmaker, accounts or FakeAccounts())
+
+
 class TestLinkingATeam:
     async def test_a_slug_is_stored_lowercased(
-        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
     ) -> None:
         """GitHub lowercases a slug itself, so matching case sensitively would only make a
         hand-typed name fail to find the row it just wrote."""
-        await TeamLinkingService(db_sessionmaker).link(
+        await teams(db_sessionmaker).link(
             guild_id=1, github_team="@Backend-Team", discord_role_id=ROLE
         )
 
@@ -260,9 +290,12 @@ class TestLinkingATeam:
         assert found == {"backend-team": ROLE}
 
     async def test_pointing_a_team_somewhere_new_replaces_the_old_role(
-        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
     ) -> None:
-        service = TeamLinkingService(db_sessionmaker)
+        service = teams(db_sessionmaker)
         await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
 
         await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE + 1)
@@ -271,11 +304,14 @@ class TestLinkingATeam:
         assert found == {"backend": ROLE + 1}
 
     async def test_two_teams_may_share_one_role(
-        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
     ) -> None:
         """Unlike a person, whose account belongs to them. A server may keep one reviewers role
         that several teams should reach."""
-        service = TeamLinkingService(db_sessionmaker)
+        service = teams(db_sessionmaker)
         await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
         await service.link(guild_id=1, github_team="design", discord_role_id=ROLE)
 
@@ -286,19 +322,21 @@ class TestLinkingATeam:
 
     @pytest.mark.parametrize("slug", ["", "  ", "-leading", "a" * 200, "not a team"])
     async def test_something_that_is_not_a_team_is_refused(
-        self, db_sessionmaker: async_sessionmaker[AsyncSession], slug: str
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        slug: str,
+        registered: Repository,
     ) -> None:
         with pytest.raises(InvalidGitHubTeamError):
-            await TeamLinkingService(db_sessionmaker).link(
-                guild_id=1, github_team=slug, discord_role_id=ROLE
-            )
+            await teams(db_sessionmaker).link(guild_id=1, github_team=slug, discord_role_id=ROLE)
 
     async def test_a_guild_only_sees_its_own_links(
-        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
     ) -> None:
-        await TeamLinkingService(db_sessionmaker).link(
-            guild_id=1, github_team="backend", discord_role_id=ROLE
-        )
+        await teams(db_sessionmaker).link(guild_id=1, github_team="backend", discord_role_id=ROLE)
 
         found = await TeamLinkStore(db_session).resolve_many(guild_id=2, people={"backend": None})
         assert found == {}
@@ -307,6 +345,70 @@ class TestLinkingATeam:
         self, db_session: AsyncSession
     ) -> None:
         assert await TeamLinkStore(db_session).resolve_many(guild_id=1, people={}) == {}
+
+    async def test_a_personal_account_has_no_teams_to_link(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """A team is an organisation's, and only an organisation's. GitHub has never asked
+        a personal account's repository for a review from a team, so a mapping made on one
+        can never match anything: the role sits there looking configured and is silent for
+        ever. The slug check above passes any well-shaped name, which is how this was
+        reachable at all.
+        """
+        service = teams(db_sessionmaker, FakeAccounts(organisation=False))
+
+        with pytest.raises(NoTeamsHereError, match="only an organisation has teams"):
+            await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
+
+    async def test_nothing_is_written_for_a_personal_account(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+    ) -> None:
+        service = teams(db_sessionmaker, FakeAccounts(organisation=False))
+
+        with pytest.raises(NoTeamsHereError):
+            await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
+
+        found = await TeamLinkStore(db_session).resolve_many(guild_id=1, people={"backend": None})
+        assert found == {}, "a refused link was written anyway"
+
+    async def test_it_asks_about_the_registered_repositorys_owner(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        accounts = FakeAccounts()
+
+        await teams(db_sessionmaker, accounts).link(
+            guild_id=1, github_team="backend", discord_role_id=ROLE
+        )
+
+        assert accounts.asked == ["Canon-Regularis"]
+
+    async def test_a_server_with_nothing_registered_is_refused(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """There is no repository to read an owner off, and a team mapping without one is
+        a row pointing at nothing. A behaviour change: this used to be allowed before
+        /register, and the mapping it wrote could never have matched anything either.
+        """
+        with pytest.raises(NotRegisteredError, match="/register"):
+            await teams(db_sessionmaker).link(
+                guild_id=1, github_team="backend", discord_role_id=ROLE
+            )
+
+    async def test_a_slug_it_cannot_read_is_refused_before_github_is_asked(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """The shape is free to check and the account kind is a network call."""
+        accounts = FakeAccounts()
+
+        with pytest.raises(InvalidGitHubTeamError):
+            await teams(db_sessionmaker, accounts).link(
+                guild_id=1, github_team="not a team", discord_role_id=ROLE
+            )
+
+        assert accounts.asked == []
 
 
 class TestATeamIsNotToldTwice:
@@ -498,13 +600,15 @@ class TestATeamIsNotAPerson:
 
 
 async def test_re_pointing_a_team_moves_its_timestamp(
-    db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    registered: Repository,
 ) -> None:
     """An upsert does not fire SQLAlchemy's `onupdate`, so a row re-pointed at a new role kept
     the timestamp of the first link and read as untouched since."""
     from shannon.db.models import TeamLink
 
-    service = TeamLinkingService(db_sessionmaker)
+    service = teams(db_sessionmaker)
     await service.link(guild_id=1, github_team="backend", discord_role_id=ROLE)
     db_session.expire_all()
     first = (await db_session.scalars(select(TeamLink))).one().updated_at

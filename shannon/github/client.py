@@ -184,6 +184,8 @@ class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, Read
 
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
 
+    async def is_organisation(self, owner: str) -> bool: ...
+
     async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
 
     async def list_check_runs(
@@ -464,6 +466,39 @@ class HttpGitHubClient:
 
         permission = payload.get("permission")
         return permission if isinstance(permission, str) else "none"
+
+    async def patch_json(self, path: str, *, owner: str, json: JsonObject) -> None:
+        """Send JSON at a path with PATCH, for the one caller that writes to a board.
+
+        Over `_send` like every other write here, which is what gets the three things a
+        naive `client.patch()` does not: redirects re-issued by hand, because httpx turns a
+        redirected write into a bodyless GET; the credential for this owner; and
+        `_raise_for_status`, which turns a 422 into a refusal carrying GitHub's own words.
+        That last one is the whole diagnosis for a body shape this project has never been
+        able to check against a live board.
+
+        Deliberately absent from the `GitHubClient` Protocol. See `WritesJson`.
+        """
+        await self._send("PATCH", path, owner, json=json)
+
+    async def is_organisation(self, owner: str) -> bool:
+        """Whether this account is an organisation rather than a person.
+
+        `GET /users/{owner}` answers for an organisation as readily as for a person and
+        says which in `type`, so one Metadata-only call settles it and no permission has
+        to be added to the App - which matters, because granting one suspends event
+        delivery to the installation until somebody accepts.
+
+        Anything it cannot read reads as a person. That is the answer that refuses, and
+        refusing on a blip is the right way round here: a team mapping made against a
+        personal account never matches anything and is silent for ever, while a refusal
+        is one command to run again.
+        """
+        try:
+            payload = await self._get(f"/users/{quote(owner, safe='')}", owner)
+        except GitHubNotFoundError:
+            return False
+        return payload.get("type") == "Organization"
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
         """Say something on an item, as the App rather than as a person.

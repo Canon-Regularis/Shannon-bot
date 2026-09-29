@@ -126,7 +126,7 @@ class TestSettingAStatus:
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
         """Nothing else was ever going to. `PullRequestPolicy.locked` returns None on every sync,
-        so the lock `/set_done` takes is the only one a pull request gets, and every command to
+        so the lock `/status Done` takes is the only one a pull request gets, and every command to
         move it back out of DONE wrote the label, moved the stored status, reported success and
         left the thread shut against the discussion it had just reopened.
         """
@@ -202,7 +202,7 @@ class TestSettingAStatus:
 
 
 class TestFinishing:
-    """`/set_done` locks the thread, and only once a reviewer has said it may be merged."""
+    """`/status Done` locks the thread, and only once a reviewer has said it may be merged."""
 
     async def test_a_pull_request_has_to_be_ready_for_merge_first(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
@@ -253,7 +253,7 @@ class TestTheRepositoryNameTakenBySomebodyElse:
 
     Unchecked, the labels went onto their item, the re-render resolved the fetched snapshot by
     its own repository id and opened a thread wherever that repository was registered, and
-    `/set_done` locked that thread rather than the one the command was run in. The reviewer was
+    `/status Done` locked that thread rather than the one the command was run in. The reviewer was
     told it worked and the thread in front of them never changed.
     """
 
@@ -516,7 +516,7 @@ class TestWhatAReviewFound:
     ) -> None:
         """Locking is the last step and the likeliest to be refused, so it needs a second go.
 
-        Being already DONE used to fail the READY_FOR_MERGE gate, which meant a /set_done whose
+        Being already DONE used to fail the READY_FOR_MERGE gate, which meant a /status Done whose
         lock failed could never be repaired: the retry was refused for being what the first run
         had made it.
         """
@@ -545,9 +545,9 @@ class TestWhatAReviewFound:
         A pull request at READY_FOR_MERGE, one reviewer marking it done and another putting it
         back into review, or the board poller doing the second. The one that was not finishing
         the item read a status that was not DONE yet, so it never asked for the thread back,
-        while `/set_done` locked it last. The item was left reading IN_REVIEW with its thread
+        while `/status Done` locked it last. The item was left reading IN_REVIEW with its thread
         shut, both callers were told they had succeeded, and nothing lifted it: nothing else
-        locks or unlocks a pull request's thread, and `/set_done` is refused for being exactly
+        locks or unlocks a pull request's thread, and `/status Done` is refused for being exactly
         what the race had made it.
 
         Made to happen rather than timed. The fake GitHub holds the second command at the read
@@ -649,12 +649,12 @@ class TestWhatAReviewFound:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        """The lock `/set_done` takes is the only one a pull request ever gets.
+        """The lock `/status Done` takes is the only one a pull request ever gets.
 
         `PullRequestPolicy.locked` answers None for every snapshot, deliberately, so no delivery
         touches a pull request's lock. That leaves nothing to shut a replacement: somebody
         deletes the thread of a finished pull request, the next event of any kind rebuilds it,
-        and the new one is open to replies above a block that reads DONE. Running `/set_done`
+        and the new one is open to replies above a block that reads DONE. Running `/status Done`
         again does restore the lock and answers "is already DONE", which gives nobody a reason
         to run it.
 
@@ -920,7 +920,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
     event for the same item could be in its own Discord phase right now, and locking is the step
     where interleaving shows, because it is last on both sides and each side decided from what it
     read before it started. A pull request makes it permanent. `PullRequestPolicy.locked` answers
-    None on every sync, so the lock `/set_done` takes is the only one it ever gets, and nothing
+    None on every sync, so the lock `/status Done` takes is the only one it ever gets, and nothing
     but another command was ever going to lift it again.
     """
 

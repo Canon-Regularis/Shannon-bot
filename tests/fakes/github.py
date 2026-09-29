@@ -102,6 +102,10 @@ class FakeGitHubClient:
         # What each login may do, for `/unregister`. Anything not named here is an admin.
         self.permissions: dict[str, str] = {}
         self.permission_calls: list[tuple[str, str]] = []
+        # Logins a test has declared to be people rather than organisations, and every
+        # account this was asked about. Only `/link_team` asks.
+        self.personal_accounts: set[str] = set()
+        self.organisation_calls: list[str] = []
         self.error: Exception | None = None
         # Raised by the label writes alone, leaving the reads working. `error` fails every
         # call including the read that comes first, which is no use for showing what a
@@ -378,6 +382,18 @@ class FakeGitHubClient:
         """
         self.labels[key] = list(names)
         self._restate(key)
+
+    async def is_organisation(self, owner: str) -> bool:
+        """Whether an account is an organisation, out of a set.
+
+        Answers True unless a test says otherwise. Teams are the only thing that asks, and a
+        team mapping made against a personal account is refused - so a default of False
+        would refuse every team test in the suite for a reason none of them is about.
+        """
+        self.organisation_calls.append(owner.lower())
+        if self.error is not None:
+            raise self.error
+        return owner.lower() not in self.personal_accounts
 
     async def permission_for(self, owner: str, name: str, login: str) -> str:
         """What one account may do to one repository, out of a dictionary.

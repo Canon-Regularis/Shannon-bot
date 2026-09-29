@@ -23,7 +23,14 @@ from shannon.github.errors import GitHubNotFoundError, GitHubRefusedError
 from shannon.services.people import PeopleOutcome
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.unit.commands.conftest import (
+    FakeAccess,
+    administrator,
+    default_gate,
+    developer,
+    member_with,
+    project_manager,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -90,9 +97,10 @@ def run_it(
     who=None,
     channel_id: int | None = THREAD,
     command_name: str = "assign",
+    access: FakeAccess | None = None,
 ):
     service = service or StubAssignment()
-    command = BUILDERS[command_name](service, default_gate())
+    command = BUILDERS[command_name](service, default_gate(), access or FakeAccess())
     interaction = FakeInteraction(user=who or developer(), channel_id=channel_id)
     return command, interaction, service, FakeMember(id=WHO)
 
@@ -380,3 +388,29 @@ class TestARepeatThatChangedNothing:
         await command.callback(interaction, member)
 
         assert "run /link" not in interaction.reply
+
+
+class TestWhatGitHubSays:
+    """The second gate, added by issue #158. These four are the highest-consequence writes this
+    bot makes - they put a named person onto somebody else's pull request - so leaving them
+    ungated while gating `/label` would not have been a defensible line."""
+
+    @pytest.mark.parametrize("command_name", list(BUILDERS))
+    async def test_every_one_of_them_is_gated(self, command_name: str) -> None:
+        access = FakeAccess(refusal="GitHub does not have monalisa as a collaborator.")
+        command, interaction, service, member = run_it(
+            command_name=command_name, who=project_manager(), access=access
+        )
+
+        await command.callback(interaction, member)
+
+        assert service.calls == [], f"/{command_name} wrote to GitHub after GitHub said no"
+        assert "not have monalisa as a collaborator" in interaction.said
+
+    async def test_the_role_is_checked_first(self) -> None:
+        access = FakeAccess(refusal="GitHub says no.")
+        command, interaction, _, member = run_it(who=member_with("Reviewer"), access=access)
+
+        await command.callback(interaction, member)
+
+        assert access.asked == [], "it asked GitHub about somebody the role already refused"

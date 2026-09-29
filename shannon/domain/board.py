@@ -33,12 +33,35 @@ _COLUMNS: dict[str, Status] = {
     "ready for merge": Status.READY_FOR_MERGE,
     "ready to merge": Status.READY_FOR_MERGE,
     "approved": Status.READY_FOR_MERGE,
+    # What a reviewer says when they approve, beside the word for the same thing. Nothing
+    # else here is added on a guess: `ready to ship` is one word from `shipped`, which is
+    # DONE, and `ready for review` means awaiting one rather than past it.
+    "lgtm": Status.READY_FOR_MERGE,
     "done": Status.DONE,
     "closed": Status.DONE,
     "complete": Status.DONE,
     "completed": Status.DONE,
     "shipped": Status.DONE,
 }
+
+
+def columns_for(status: Status) -> tuple[str, ...]:
+    """Every column name this bot reads as one status, in the table's own order.
+
+    Derived rather than written out beside it: a word added to the table and not to the
+    sentence would be one this bot accepts and never offers, which is the whole failure
+    mode of a second hand-kept list.
+
+    Normalised, because that is how the table is keyed - a board spelling one `In Progress`
+    is told about `in progress` and is not misled by the difference, since the lookup
+    normalises too.
+
+    Complete for BOTH passes of the picker that writes a column, and only because every
+    status's own spoken form is itself a key here mapping to that status. A test holds
+    that, because it is otherwise an accident: break it and this would offer a list
+    missing the one name the exact-match pass would have taken.
+    """
+    return tuple(column for column, reads_as in _COLUMNS.items() if reads_as is status)
 
 
 def normalise(column: str) -> str:

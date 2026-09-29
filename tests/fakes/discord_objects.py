@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -212,6 +213,7 @@ class FakeInteraction:
         user: FakeMember | None = None,
         channel: object | None = None,
         app_permissions: discord.Permissions | None = None,
+        **options: object,
     ) -> None:
         self.guild_id = guild_id
         self.channel_id = channel_id
@@ -230,6 +232,10 @@ class FakeInteraction:
         # A real text channel by default, because that is where a command normally runs and
         # /register refuses anywhere threads cannot be opened.
         self.channel = channel if channel is not None else MagicMock(spec=discord.TextChannel)
+        # What has been typed into the command's OTHER options so far, which an autocomplete
+        # reads to narrow what it offers. A real `Interaction` always has this; what it may
+        # not have is any given option, because Discord sends only the ones touched so far.
+        self.namespace = SimpleNamespace(**options)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
 
