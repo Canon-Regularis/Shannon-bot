@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.discord_bot.safe_text import EMPTY
+from shannon.domain.board import _COLUMNS, columns_for, normalise
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.github.labels import PRIORITY_LABELS, STATUS_LABELS, status_of
 
@@ -81,3 +82,27 @@ def test_the_absence_of_a_priority_is_called_what_an_empty_field_is_called() -> 
     """UNSET is the absence of a priority rather than one of them, which is why no label answers
     to it, and the card already has a word for a field with nothing in it."""
     assert spoken(Priority.UNSET) == EMPTY
+
+
+def test_every_status_is_named_by_a_column_that_reads_back_as_it() -> None:
+    """The suggestion list a board is offered has to be complete for BOTH ways a column is
+    matched, and it is only because every status's own spoken form is itself a column name
+    meaning that status.
+
+    That is otherwise an accident. Break it and `columns_for` would offer a list missing the one
+    name the exact-match pass would have taken - so somebody told "call a column any of these"
+    would pick one, and the column they were told to make would be matched by the second pass
+    rather than the first, which on a board carrying a synonym too is a different column.
+    """
+    for status in Status:
+        assert normalise(spoken(status)) in columns_for(status), (
+            f"{spoken(status)!r} is what the picker calls {status.value}, "
+            "and no column by that name reads back as it"
+        )
+
+
+def test_the_suggestions_are_the_whole_table_and_nothing_else() -> None:
+    """Derived rather than hand-kept, so a word added to the table cannot go unoffered."""
+    offered = {column for status in Status for column in columns_for(status)}
+
+    assert offered == set(_COLUMNS)

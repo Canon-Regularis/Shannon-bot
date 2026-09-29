@@ -1658,3 +1658,46 @@ class TestWhichKindOfAccountAnOwnerIs:
             await client.is_organisation("acme/..")
 
         assert b"/users/acme%2F.." in seen[0]
+
+
+class TestWritingToAProjectBoard:
+    """`patch_json`, the one write that does not go to a repository.
+
+    Deliberately absent from the `GitHubClient` Protocol: that one carries the JSON readers only
+    because the wiring hands the same object to the board reader when no project token is set,
+    and a PATCH there would give every service the ability to write to any path.
+    """
+
+    async def test_it_sends_the_body_with_patch(self) -> None:
+        seen: list[tuple[str, str, bytes]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path, request.content))
+            return httpx.Response(200, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.patch_json(
+                "/users/monalisa/projectsV2/6/items/99",
+                owner="monalisa",
+                json={"fields": [{"id": 39518, "value": "opt-done"}]},
+            )
+
+        assert seen[0][0] == "PATCH"
+        assert seen[0][1] == "/users/monalisa/projectsV2/6/items/99"
+        assert json.loads(seen[0][2]) == {"fields": [{"id": 39518, "value": "opt-done"}]}
+
+    async def test_a_body_github_will_not_take_carries_its_own_words_back(self) -> None:
+        """The reason this write is diagnosable at all. Its body shape came from published
+        documentation rather than from a live board, so GitHub's 422 message is the first real
+        evidence either way and has to survive the trip."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422, content=json.dumps({"message": "Could not resolve to a node"})
+            )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError, match="Could not resolve to a node"):
+                await client.patch_json(
+                    "/users/monalisa/projectsV2/6/items/99", owner="monalisa", json={}
+                )
