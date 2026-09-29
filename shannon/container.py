@@ -822,6 +822,19 @@ def build_container(
     # until an admin noticed. One token reads both kinds. Left unset, the board reads through
     # the ordinary client, which is what every deployment with the project number at zero does.
     project_token = settings.github_project_token.get_secret_value()
+    if settings.github_project_number and not project_token:
+        # Said once and loudly, on the reasoning the App warning above gives: the failure this
+        # causes is silent and looks like something else. With no token the board reads through
+        # the App client, which holds no Projects permission for either kind of board, so every
+        # call answers 403 - and 403 reads as a wrong token rather than as a missing one.
+        #
+        # It is also the shape of a settings file edited while this was running. Both are read
+        # once, here, at startup.
+        logger.error(
+            "SHANNON_GITHUB_PROJECT_NUMBER is set and SHANNON_GITHUB_PROJECT_TOKEN is not, so "
+            "the board falls back to the App, which has no Projects permission and will answer "
+            "403 to everything. Set the token and restart."
+        )
     board_client = (
         HttpGitHubClient(
             tokens=_OneToken(project_token),

@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from shannon.domain.enums import ObjectType, Priority, Status
-from shannon.github.errors import GitHubRefusedError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubNotFoundError,
+    GitHubRateLimitError,
+    GitHubRefusedError,
+)
 from shannon.github.projects import CardMove, HttpProjectBoards, parse_item
 
 PROJECT = 3
@@ -1050,3 +1055,45 @@ class TestSayingItOnce:
             )
 
         assert caplog.text.count("has no column this bot reads as") == 2
+
+
+class TestOpeningABoardThatRefuses:
+    """A 404 and a 403 are one answer here: the board cannot be opened with what this has.
+
+    Left raw they reach whoever ran the command as GitHub's own sentence, which names neither
+    the board nor the credential - and the credential is the likeliest cause and the one with
+    four separate ways of being wrong.
+    """
+
+    class Refusing:
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+
+        async def get_json(self, path: str, **params: Any) -> Any:
+            if path.endswith(f"/projectsV2/{PROJECT}"):
+                raise self.error
+            return {"type": "User"}
+
+        async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
+            yield []
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubAuthError("GitHub refused the request for /users/x/projectsV2/6 (403)"),
+            GitHubNotFoundError("no such board"),
+        ],
+        ids=["refused", "not found"],
+    )
+    async def test_it_answers_no_board_rather_than_raising(self, error: Exception) -> None:
+        found = await HttpProjectBoards(self.Refusing(error)).get_board("monalisa", PROJECT)
+
+        assert found is None
+
+    async def test_anything_else_still_raises(self) -> None:
+        """Only the two that mean "you cannot open this" are folded. A rate limit is the whole
+        process being asked to wait and must not read as a board that is not there."""
+        boards = HttpProjectBoards(self.Refusing(GitHubRateLimitError("slow down")))
+
+        with pytest.raises(GitHubRateLimitError):
+            await boards.get_board("monalisa", PROJECT)

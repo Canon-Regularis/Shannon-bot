@@ -27,6 +27,7 @@ from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.priority import parse_priority
 from shannon.github import mapping
+from shannon.github.errors import GitHubAuthError, GitHubNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,16 @@ class HttpProjectBoards:
         may never have been offered.
         """
         board = await self._board_path(owner, project_number)
-        return parse_listing(await self._client.get_json(board, owner=owner))
+        try:
+            body = await self._client.get_json(board, owner=owner)
+        except (GitHubNotFoundError, GitHubAuthError):
+            # Folded into the answer this already gives for an unusable board, because an
+            # operator cannot act on the difference and the caller has one sentence to say.
+            # A board GitHub does not have, a token that may not see it, and a token that is
+            # not there at all are 404, 403 and 403 - and GitHub's own words for those name
+            # neither the board nor the credential, which is every question worth asking.
+            return None
+        return parse_listing(body)
 
     async def move_card(
         self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
