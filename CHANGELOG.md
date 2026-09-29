@@ -6619,3 +6619,190 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **A behaviour change worth naming: this now needs `/register` first.** There is no repository to
   read an owner off otherwise, and a team mapping made before one exists is a row pointing at
   nothing. It was allowed before and could never have matched anything either.
+
+## The board is written to as well as read
+
+- **A status set in Discord now drags the item's card on the board.** The last of the deferred
+  work on #158. The board has been read and never written since the poller was built, so a
+  `/status` moved the labels on GitHub, the stored row and the thread, and left the card sitting
+  where it was - the one place a reader of the board actually looks went on saying the old thing.
+- **Correcting four places that named a permission GitHub does not publish.** Written during the
+  earlier slices and wrong: there is no user-level Projects permission, for a GitHub App or for a
+  fine-grained token. GitHub lists "access Projects owned by a user account" among the things a
+  fine-grained token cannot do at all. An organisation's board takes a fine-grained token with
+  Projects under ORGANISATION permissions; a personal board - a `github.com/users/<login>/...`
+  URL - takes a CLASSIC token with `read:project`, or `project` to move cards. This repository
+  already disagreed with itself about it: `config.py` said the permission is organisation-only
+  while the README sent people to a user-level checkbox three files away.
+- **And a claim about how narrow that token is, which only held for half the cases.** The README
+  sold it as narrow because "a leak exposes a board rather than source". True of a fine-grained
+  token scoped to one organisation's projects. Not true of a classic one, which is not scoped to
+  a resource at all and grants read across every project its owner can see. Said plainly now,
+  with moving the board to an organisation named as the way to get the narrow version back.
+- **Two gates in front of the write, both wiring rather than a check.** No project token leaves
+  the board reader with no writer at all, because the thing it falls back to is the App client
+  and the App holds no Projects permission of any kind - so a write through it could only ever
+  403. And `SHANNON_BOARD_MAY_MOVE_CARDS` off passes no card mover to the workflow in the first
+  place. Neither is a flag read at the point of use, so neither is a flag somebody can forget.
+- **The option ids were on the wire and thrown away.** Setting a single-select field needs the id
+  of the option, not its name, and both arrive in the `/fields` answer the reader already makes
+  once per board. Kept in the same cache entry as the field ids rather than a second dict, which
+  is what makes the rule about a board with no Status field unbreakable rather than merely
+  honoured: that board is not cached at all, and two caches can disagree about whether it has one.
+- **`status_id` is its own field, and that is not tidiness.** The tuple of field ids is built
+  positionally - `(status_id,)` on a board with no Title field, `(title_id, status_id)` with both
+  - so reading the last element is correct only because the no-Status arm returns twenty lines
+  earlier. A positional invariant held by an unrelated `if` is exactly the kind of thing that
+  survives review and fails on the first real board.
+- **Which column a status means is read through the words this bot already knows**, and the
+  first attempt at it was wrong on the commonest board there is. The table the poller reads a
+  column back through is many-to-one on purpose - `In progress` and `In review` both mean
+  IN_REVIEW, because a board using either is saying the same thing. Right for reading. Taking
+  the first match in board order to WRITE one moved a card to `In progress` when somebody asked
+  for `In review`, and GitHub's own default template ships both columns, so that is the ordinary
+  case rather than a corner. A column called exactly what this bot calls the status now wins
+  over one that merely maps to it; board order only decides between synonyms. Caught by running
+  the design against a real board before trusting it, which is the whole reason this slice waited
+  for one.
+- **A card id had to be stored, because GitHub will not answer for it.** REST offers no per-item
+  project lookup, so "which card wraps this issue" can only be answered by reading a whole board
+  and inverting it. The poller already does exactly that once a minute and is the only place in
+  this codebase where a card and an item are ever in scope together. Migration `0027` gives
+  `tracked_items` somewhere to put it.
+- **It is written on the path where nothing moved, which is the whole reason it is its own pass.**
+  A card that has not moved returns early without writing anything, and on a real board that is
+  nearly every card on nearly every poll - so hung off a card moving, a board stable since the
+  deploy would never record a single id and no `/status` on it would have anywhere to write.
+- **Accepted openly: an item whose card no poll has seen is left alone.** There is no id to write
+  to and no way to find one, and no second chance either, because the poller acts on card MOVES
+  rather than on disagreements. The board stays wrong until somebody drags that card. Drafts need
+  none of this - a draft card's id is already the id its row is keyed by.
+- **The poller does not tell the board.** It calls the same path a person does, but it calls it
+  BECAUSE a card moved, so writing that column back would send GitHub the value it has just read.
+  It terminates either way - the next poll finds nothing further changed - so what it costs is a
+  wasted call per moved card rather than a loop. Worth naming rather than leaving as an accident.
+- **A refused write is logged, never raised.** By the time the board is asked, the labels are on
+  GitHub, the row is written and the thread is redrawn. Telling whoever ran the command that it
+  failed would report the opposite of what happened. The line carries GitHub's own words, which
+  matters more here than anywhere else in this project: the body shape was taken from published
+  documentation, because nobody working on this has ever held a token that could read a board, so
+  a 422 is the first real evidence either way.
+- **Not built, and not for want of trying.** Requirement 2 of #158, a per-item project, stays
+  closed. The same wall closes it: REST answers no per-item project lookup, so the question
+  "which boards is this issue on" cannot be asked at all - only answered by reading every
+  candidate board whole.
+
+## Four things the board was quiet about
+
+- **`/priority` moves the card, the way `/status` already did.** A real board carries a Priority
+  single-select whose options match this bot's own, and one of the two commands wrote to it. The
+  asymmetry was the whole of the defect.
+- **One method over `Status | Priority`, not two.** The callee picks the field from what it was
+  given, so a caller cannot hand a priority to the Status field - which two methods make possible
+  and a union makes unrepresentable. `spoken` is already typed over that union and the reserved
+  name refusal already branches on it.
+- **The two selects are one shape each rather than four loose fields.** Status is required and
+  Priority is not, and that difference is now in the types: a board with no Status field has no
+  entry at all, and one with no Priority field is ordinary and simply cannot be told a priority.
+  Neither id is read back out of the tuple the request is built from, which was a positional
+  invariant held by an unrelated `if` twenty lines away.
+- **Priority has a synonym table too, which nearly went unnoticed.** `urgent` and `critical` mean
+  HIGH wherever they are written, the same way `In progress` and `In review` both mean IN_REVIEW,
+  so the picker's two passes carry over unchanged: a column called what the state is called beats
+  one that merely maps to it, and board order only breaks a tie between synonyms.
+- **`Priority.UNSET` is refused by ORDERING rather than by a guard.** There is no option for the
+  absence of a priority, and a check here would be an arm no caller can reach - the picker offers
+  three and `priority_change` raises on a fourth long before the board is asked. Worth writing
+  down where the call sits, because `spoken(Priority.UNSET)` is "None" and would happily match a
+  board column literally called None.
+- **`fields=` deliberately does NOT ask for the Priority field.** It governs the READ, and nothing
+  reads a card's priority back, so naming it there would send a field per card per poll that
+  nothing parses.
+- **A repeat asks the board again, in both commands.** `/status Done` a second time answered
+  "already Done" and returned before the board was touched. That branch exists precisely so a
+  repeat can retry the half that failed on its own - it already does it for the Discord lock - and
+  a swallowed board write has exactly that character: nothing retries it, and the poller only ever
+  rederives a status FROM a column, so a card left behind because GitHub was having a moment is
+  noticed by nothing at all. Running the command again is what a person does, and it was the one
+  thing that could not help.
+
+- **A draft somebody converts to an issue no longer leaves two threads behind.** Clicking Convert
+  to issue keeps the card and its project item id and flips what it wraps, so the card leaves the
+  half of the poll that mirrors drafts and enters the half that finds items by what they wrap. The
+  ticket row is keyed by the CARD id, so nothing ever visited it again: its thread stayed frozen
+  at the last draft render while the issue opened a second one from its own webhook. Two threads,
+  one piece of work, and nothing anywhere saying which to read. Reachable from GitHub's own UI by
+  anybody with write access to the board.
+- **Detected for nothing.** The map the poll already builds filters by no type, so a ticket row is
+  already in it under its card id and the test is one lookup per wrapped card. The read moved up a
+  level so both passes share it.
+- **The row is kept and the pointer is let go of.** The row is the idempotency guard: the card
+  stays on the board and is offered again on every poll for ever, and a null pointer is what makes
+  the second visit do nothing. Deleted, the hand-over would be recorded nowhere.
+- **The line names the ISSUE, not a thread.** The issue's own thread is opened by its `opened`
+  webhook, which may not have arrived and may still be being retried - so a thread id would be a
+  guess, while the issue's page exists the moment GitHub converted it. That is also why the race
+  between the poll and the webhook needs no ordering rule.
+- **Adopting the thread was considered and refused.** Moving the pointer onto the issue's row is
+  the better outcome on paper and almost never available: the webhook fires within a second of the
+  convert and the poll is up to a minute later, so by then the issue has its own thread. A branch
+  that rarely runs in production and must still be covered is the worst trade available here.
+
+- **The board mirror gets no new flag, and the reasoning is written down instead.** Opening a
+  thread from a card has no Discord equivalent to bypass: its equivalent is the webhook path,
+  which is ungated by design, and on a public registered repository a stranger can cause a thread
+  by opening an issue while adding a card needs write access to the project. Gating the mirror
+  would gate the narrower door and leave the wider one open. It is already opt-in twice over by
+  the tier that runs `/register` - `/set_board` and `/set_channel project tickets`, tickets being
+  the one kind with no fallback channel - and it pings nobody, because a draft card names no
+  assignees. What was missing was that the README said none of this, and documented only the half
+  of the bypass that does have a flag.
+- **`/set_board` was not in the permissions table at all.** Added while writing the above down.
+
+- **A status the board has no column for now says what to call one.** The warning named the
+  number without the owner, printed READY_FOR_MERGE at somebody who had picked "Ready for merge",
+  and named no fix. It now names both halves of the board, the word the picker uses, the card, and
+  the column names that WOULD be read that way - derived from the table rather than written out
+  beside it, so a word added there cannot go unoffered. A test holds the one thing that makes the
+  list complete: every status's own spoken form is itself a column name meaning that status, which
+  was an accident until something depended on it.
+- **And the person who ran the command is told.** The only board refusal they hear about, because
+  it is the only one they can see: they will open the board and find the card where it was. The
+  others are invisible and identical for every command until an operator changes something, and a
+  warning attached to a fix the caller cannot make is noise. Said as a caveat on a success rather
+  than as a failure, exactly as a refused thread lock already is.
+- **Said once per board per state rather than once per command.** Nothing retries a card write, so
+  this cannot repeat on a timer - but a team whose board has no merge-gate column would otherwise
+  write a byte-identical line dozens of times a day. Keyed on the state too: a board with no
+  "Ready for merge" column almost certainly has a "Done" one.
+- **`_COLUMNS` gains one word and deliberately not the obvious one.** `lgtm` is what a reviewer
+  says when they approve. `Ready` stays NOT_REVIEWED: on GitHub's default template it sits between
+  Backlog and In progress and means ready to be PICKED UP, so reading it as the merge gate would
+  drag every freshly triaged item on every default board straight to it on the next poll. That is
+  the most damaging one-line edit available in that file.
+
+- **A card write records the column it landed in, which it did not.** Caught by auditing the
+  branch rather than by a test, and it was the sharper half of a bug this file had already
+  described in the abstract. The poller compares the column it last saw, by text. Leaving that
+  stale after a write means the next poll reads this bot's own move as somebody dragging the
+  card - and worse, a real drag BACK to the old column inside one poll interval reads as never
+  having moved and is dropped for good, which is exactly the failure `_remember_column` exists
+  to prevent.
+- **It records the BOARD's spelling, not the state that was asked for**, which is why the write
+  now answers with the option it chose rather than a bare outcome. A board may call IN_REVIEW
+  `In progress` and NOT_REVIEWED `Todo`; storing the state's own word would disagree with the
+  board for ever, once per poll, instead of once per command. The naive version of this fix is
+  worse than the defect it repairs.
+- **And only for a status.** A priority lands in a different field entirely, so writing its
+  option name into the status column would tell the poller the card had moved to a column called
+  HIGH. A test caught that between writing the fix and believing it.
+- **Relinking a board forgets the old board's cards.** A card id belongs to the board it is on,
+  so pointing a repository at a different one leaves every remembered id not merely stale but
+  wrong in a way that writes: the number would be sent as a card id under the NEW board's owner
+  and number, which is either a 404 nobody sees or another card entirely. Nothing else cleared
+  them - the poller only ever writes a pairing, and only for cards on the board it has just
+  read, so an item absent from the new board kept its old id for ever. Cleared before the
+  refusals and inside the same transaction, so a `/set_board` that does not land writes nothing.
+- **The pairing itself is tested now.** It is what the whole write path stands on and nothing
+  exercised it: inverting the two ids, or keying the lookup wrongly, left the suite green. Both
+  are integers, so a swap type-checks.
