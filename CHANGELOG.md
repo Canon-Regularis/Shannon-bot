@@ -6806,3 +6806,30 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **The pairing itself is tested now.** It is what the whole write path stands on and nothing
   exercised it: inverting the two ids, or keying the lookup wrongly, left the suite green. Both
   are integers, so a swap type-checks.
+
+## Pasting the board's URL, and three ways of saying why it will not open
+
+- **`/set_board` takes the board's URL.** It refused one and then asked the person to read the
+  number off the end of that same URL, which was work it could do. The URL is the obvious thing
+  to paste: it is what the picker's entries are named after and what GitHub puts in the address
+  bar. Both prefixes, either scheme, `www` or not, a trailing slash or a query, any capitalisation
+  - and anchored at both ends, so a sentence that merely contains one is still turned away rather
+  than half-read.
+- **A pasted URL carries the OWNER**, which is the other half of addressing a board and the half
+  people get wrong. What was typed into the option still beats what was pasted: somebody who
+  filled in both meant the one they typed.
+- **A board that will not open says what to check, rather than repeating GitHub.** A 403 reached
+  whoever ran the command as `GitHub refused the request for /users/x/projectsV2/6 (403)`, which
+  names neither the board nor the credential. Folded into the answer that already existed for an
+  unusable board, so the refusal naming the token kinds is the one they see. Only those two:
+  a rate limit is the whole process being asked to wait and must not read as a board that is not
+  there.
+- **And it names the thing that is invisible: the token is read once, at startup.** Settings are
+  cached for the life of the process, so a token written into `.env` while the bot is running is
+  not one it has - and with no token the board falls back to the App client, which holds no
+  Projects permission for either kind of board and answers 403 to everything. A 403 then reads as
+  a token that is wrong rather than one that was never loaded.
+- **Said at boot too, where it belongs.** A project number with no token cannot work, and the
+  moment to say so is when the process starts rather than when somebody runs a command. On the
+  reasoning the App warning beside it already gives: said once and loudly, because the failure it
+  causes is silent and looks like something else.
