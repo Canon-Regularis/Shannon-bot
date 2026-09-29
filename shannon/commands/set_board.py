@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import discord
@@ -30,6 +32,28 @@ Suggesting = Callable[
     [discord.Interaction, str], Coroutine[Any, Any, list[app_commands.Choice[str]]]
 ]
 
+# A board's own page, both kinds of owner, with whatever GitHub has appended to it - a view,
+# a query, a trailing slash. Anchored at both ends so a sentence that merely CONTAINS one is
+# still refused rather than half-read.
+_BOARD_URL = re.compile(
+    r"^https?://(?:www\.)?github\.com/(?:users|orgs)/"
+    r"(?P<owner>[^/]+)/projects/(?P<number>\d+)/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ChosenBoard:
+    """A board somebody named, and the owner where they named one.
+
+    The owner is empty for a bare number, which is every entry the picker offers: those are
+    already listed under an owner, so repeating it would be this command telling the service
+    something the service just told it.
+    """
+
+    number: int
+    owner: str = ""
+
 
 class LinksBoards(Protocol):
     """Pointing this server's repository at a board, and listing the ones to choose from."""
@@ -46,7 +70,7 @@ def build_set_board_command(service: LinksBoards, gate: PermissionGate) -> Slash
         name="set_board", description="Choose which GitHub project board this server mirrors"
     )
     @app_commands.describe(
-        board="The board to mirror, or None to stop mirroring one",
+        board="The board to mirror: pick one, paste its URL, or type its number",
         owner="Only if the board is not owned by this repository's own owner",
     )
     @app_commands.guild_only()
@@ -55,13 +79,13 @@ def build_set_board_command(service: LinksBoards, gate: PermissionGate) -> Slash
         if guild_id is None:
             return
 
-        wanted = _wanted(board)
-        if wanted is None:
+        chosen = _wanted(board)
+        if chosen is None:
             await reply(
                 interaction,
                 refused(
-                    f"{board!r} is not a board number. Pick one from the list, or type the "
-                    "number out of the board's URL."
+                    f"{board!r} is not a board. Pick one from the list, paste the board's "
+                    "URL, or type the number off the end of it."
                 ),
             )
             return
@@ -71,8 +95,11 @@ def build_set_board_command(service: LinksBoards, gate: PermissionGate) -> Slash
             link = await service.assign(
                 guild_id=guild_id,
                 # Zero is the picker's "stop mirroring a board", which the service spells None.
-                project_number=wanted if wanted > 0 else None,
-                typed_owner=owner,
+                project_number=chosen.number if chosen.number > 0 else None,
+                # What was typed beats what was pasted. Somebody who filled in both meant
+                # the one they typed, and silently preferring the URL would be this command
+                # overruling them about the half of the address people get wrong.
+                typed_owner=owner or chosen.owner,
             )
         except NotRegisteredError as error:
             await reply(interaction, refused(words_for(error, noun="repository")))
@@ -89,17 +116,31 @@ def build_set_board_command(service: LinksBoards, gate: PermissionGate) -> Slash
     return set_board  # pyright: ignore[reportUnknownVariableType]
 
 
-def _wanted(board: str) -> int | None:
-    """The number somebody chose, zero for none of them, or None for something unreadable.
+def _wanted(board: str) -> ChosenBoard | None:
+    """What somebody chose: a number, zero for none of them, and any owner they pasted.
 
     Three outcomes rather than two, and the distinction is the point: "stop mirroring a board"
-    and "that is not a board number" are different answers and used to be the same one. Parsed
-    rather than trusted, because discord.py documents a choice as a suggestion - what arrives
-    here may have been typed, and typed prose must be turned away with a sentence rather than
+    and "that is not a board" are different answers and were the same one once. Parsed rather
+    than trusted, because discord.py documents a choice as a suggestion - what arrives here
+    may have been typed, and typed prose must be turned away with a sentence rather than
     quietly clearing somebody's board.
+
+    A whole URL is accepted because it is the obvious thing to paste: it is what the picker's
+    entries are named after and what GitHub puts in the address bar. Refusing it and then
+    asking the person to read the number off the end of that same URL was work this could do.
+
+    And a URL carries the OWNER, which is the other half of addressing a board and the half
+    people get wrong. `/users/` and `/orgs/` are the same two prefixes the board reader
+    splits on, for the same reason: a login names one account of one kind.
     """
     text = board.strip()
-    return int(text) if text.isdigit() else None
+    if text.isdigit():
+        return ChosenBoard(number=int(text))
+
+    found = _BOARD_URL.match(text)
+    if found is None:
+        return None
+    return ChosenBoard(number=int(found.group("number")), owner=found.group("owner"))
 
 
 def _suggesting(service: LinksBoards) -> Suggesting:

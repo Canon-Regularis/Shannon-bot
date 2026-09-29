@@ -22,6 +22,7 @@ import pytest
 from shannon.commands.set_board import (
     MOST_CHOICES,
     NONE_CHOSEN,
+    ChosenBoard,
     _suggesting,
     _wanted,
     build_set_board_command,
@@ -147,7 +148,8 @@ class TestWhatArrivesInTheField:
 
         await fire(command, interaction, typed)
 
-        assert "is not a board number" in interaction.said
+        assert "is not a board" in interaction.said
+        assert "paste the board's URL" in interaction.said, "it offered no way in"
         assert service.calls == []
 
     async def test_a_typed_owner_is_passed_through(self) -> None:
@@ -320,9 +322,58 @@ class TestThePicker:
 
 @pytest.mark.parametrize(
     ("typed", "expected"),
-    [("3", 3), ("0", 0), (" 7 ", 7), ("bug", None), ("", None), ("-1", None), ("3.0", None)],
+    [
+        ("3", ChosenBoard(3)),
+        ("0", ChosenBoard(0)),
+        (" 7 ", ChosenBoard(7)),
+        ("bug", None),
+        ("", None),
+        ("-1", None),
+        ("3.0", None),
+    ],
 )
-def test_what_a_typed_board_reads_as(typed: str, expected: int | None) -> None:
+def test_what_a_typed_board_reads_as(typed: str, expected: ChosenBoard | None) -> None:
     """Three outcomes, not two. Zero is a board being cleared and None is something unreadable,
-    and a signature that cannot tell them apart turns every typo into an unlinked board."""
+    and a signature that cannot tell them apart turns every typo into an unlinked board.
+
+    A bare number carries no owner: every entry the picker offers is already listed under one,
+    so repeating it would tell the service something the service just said."""
     assert _wanted(typed) == expected
+
+
+@pytest.mark.parametrize(
+    ("pasted", "owner"),
+    [
+        ("https://github.com/users/Canon-Regularis/projects/6", "Canon-Regularis"),
+        ("https://github.com/orgs/acme/projects/6", "acme"),
+        ("http://github.com/users/mona/projects/6", "mona"),
+        ("https://www.github.com/users/mona/projects/6", "mona"),
+        ("https://github.com/users/mona/projects/6/", "mona"),
+        ("https://github.com/users/mona/projects/6?pane=issue", "mona"),
+        ("  https://github.com/users/mona/projects/6  ", "mona"),
+        ("https://GitHub.com/Users/mona/Projects/6", "mona"),
+    ],
+)
+def test_a_pasted_board_url_is_read(pasted: str, owner: str) -> None:
+    """The obvious thing to paste. Refusing it and then asking somebody to read the number off
+    the end of that same URL was work this could do - and the URL carries the OWNER too, which
+    is the other half of addressing a board and the half people get wrong."""
+    assert _wanted(pasted) == ChosenBoard(number=6, owner=owner)
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "https://github.com/Canon-Regularis/Shannon-bot",
+        "https://github.com/users/mona/projects/",
+        "https://github.com/users/mona/projects/abc",
+        "https://gitlab.com/users/mona/projects/6",
+        "https://github.com/teams/mona/projects/6",
+        "look at https://github.com/users/mona/projects/6 please",
+    ],
+)
+def test_something_that_is_not_a_board_url_is_refused(pasted: str) -> None:
+    """Anchored at both ends, so a sentence that merely CONTAINS a board URL is turned away
+    rather than half-read. A repository's own URL is the near miss worth naming: it has the same
+    host and one fewer path segment."""
+    assert _wanted(pasted) is None

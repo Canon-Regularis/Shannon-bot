@@ -241,3 +241,46 @@ class TestSayingWhenNoAppIsConfigured:
             )
 
         assert "no GitHub App is configured" not in caplog.text
+
+
+class TestABoardWithNoTokenToReadItWith:
+    """The failure this catches is silent and looks like something else.
+
+    With no project token the board reads through the App client, which holds no Projects
+    permission for either kind of board - so every call answers 403, and a 403 reads as a token
+    that is wrong rather than one that is missing. It is also exactly the shape of a .env edited
+    while the process was running: both are read once, here, at startup.
+    """
+
+    def test_a_number_with_no_token_is_said_at_boot(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(github_webhook_secret="x", github_project_number=6),
+            )
+
+        assert "SHANNON_GITHUB_PROJECT_TOKEN" in caplog.text
+        assert "403" in caplog.text
+        assert "restart" in caplog.text
+
+    def test_a_number_with_a_token_says_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(
+                    github_webhook_secret="x",
+                    github_project_number=6,
+                    github_project_token=SecretStr("ghp_" + "x" * 36),
+                ),
+            )
+
+        assert "SHANNON_GITHUB_PROJECT_TOKEN" not in caplog.text
+
+    def test_no_board_says_nothing_either(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Every deployment that leaves the number at zero, which is the default."""
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(DisposableEngine(), FakeGitHubClient())
+
+        assert "SHANNON_GITHUB_PROJECT_TOKEN" not in caplog.text

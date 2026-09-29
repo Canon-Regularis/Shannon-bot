@@ -164,7 +164,9 @@ class BoardLinkingService:
                     "SHANNON_GITHUB_PROJECT_TOKEN holds: an organisation's board wants a "
                     "fine-grained one with Projects under organisation permissions, and a "
                     "personal board wants a classic one with read:project, because GitHub "
-                    "publishes no Projects permission for a personal account at all."
+                    "publishes no Projects permission for a personal account at all. That "
+                    "token is read once when this bot starts, so one added to .env since then "
+                    "is not one it has yet."
                 )
 
             taken = await repositories.linked_to_board(
