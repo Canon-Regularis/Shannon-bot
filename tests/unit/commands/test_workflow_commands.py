@@ -343,3 +343,79 @@ class TestWhatGitHubSays:
         )
 
         assert service.calls == []
+
+
+class TestWhenTheBoardHadNowhereToPutIt:
+    """Said as a caveat on a success rather than as a failure, which is what it is: the labels
+    are on GitHub, the row is written and the thread is redrawn.
+
+    The same shape the refused lock takes, and for the same reason - reporting only the half
+    that did not land reads as nothing having happened.
+    """
+
+    def nowhere(self, **extra: object) -> WorkflowOutcome:
+        fields: dict[str, object] = {"changed": True, "board_has_no_column": True}
+        fields.update(extra)
+        return WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, **fields)  # type: ignore[arg-type]
+
+    async def test_it_says_the_card_was_left_where_it_was(self) -> None:
+        service = StubWorkflow(outcome=self.nowhere())
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), Status.READY_FOR_MERGE.value
+        )
+
+        answer = said(interaction)
+        assert "is now Ready for merge" in answer
+        assert "no column called Ready for merge" in answer
+
+    async def test_it_says_what_to_do_about_it(self) -> None:
+        service = StubWorkflow(outcome=self.nowhere())
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), Status.DONE.value
+        )
+
+        assert "rename a column to match, or move it by hand" in said(interaction)
+
+    async def test_it_does_not_claim_which_column_the_card_is_in(self) -> None:
+        """Nothing read the card. Saying where it is would be a guess in the one message whose
+        whole job is to be trustworthy about the board."""
+        service = StubWorkflow(outcome=self.nowhere())
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), Status.DONE.value
+        )
+
+        assert "is in" not in said(interaction)
+
+    async def test_a_repeat_says_it_too(self) -> None:
+        """The repeat is where somebody lands after the first one did nothing visible, so it is
+        the worst possible place to go quiet about it."""
+        service = StubWorkflow(outcome=self.nowhere(changed=False))
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), Status.DONE.value
+        )
+
+        answer = said(interaction)
+        assert "is already Done" in answer
+        assert "no column called Done" in answer
+
+    async def test_an_ordinary_move_says_nothing_extra(self) -> None:
+        service = StubWorkflow()
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), Status.IN_REVIEW.value
+        )
+
+        assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now In review."
+
+    async def test_priority_says_it_too(self) -> None:
+        service = StubWorkflow(outcome=self.nowhere())
+
+        interaction = await run(
+            "priority", service, member_with("Project Manager"), Priority.HIGH.value
+        )
+
+        assert "no column called High" in said(interaction)

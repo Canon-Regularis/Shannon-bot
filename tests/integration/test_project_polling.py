@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
+from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.github.errors import (
     GitHubAuthError,
@@ -31,6 +32,7 @@ from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, Ticke
 from shannon.services.workflow import (
     ItemMovedError,
     ItemWorkflow,
+    WorkflowOutcome,
     WorkflowRefusedError,
     build_item_workflow,
 )
@@ -127,6 +129,7 @@ def poller_for(
             board,
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             workflow,
+            threads,
             project_number=project_number,
             board_owner=board_owner,
             polling=polling,
@@ -540,6 +543,7 @@ class TestTheLoop:
             FakeBoard(card()),
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             workflow,
+            threads,
             project_number=PROJECT,
             interval=600.0,
         )
@@ -1349,7 +1353,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
         sync = ExplodingSync()
         board = FakeBoard(card(item_id=901), card(item_id=902))
         poller = ProjectPoller(
-            db_sessionmaker, board, sync, workflow, project_number=PROJECT, interval=0.01
+            db_sessionmaker, board, sync, workflow, threads, project_number=PROJECT, interval=0.01
         )
 
         with caplog.at_level("ERROR", logger="shannon.services.projects"):
@@ -1376,6 +1380,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
             board,
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             moves,
+            threads,
             project_number=PROJECT,
             interval=0.01,
             may_set_status=True,
@@ -1386,6 +1391,36 @@ class TestOneCardTakingTheWholeBoardWithIt:
 
         assert moves.calls == 2, "the first surprise took the card behind it with it"
         assert "could not move the card" in caplog.text
+
+    async def test_the_poller_does_not_write_the_column_it_just_read_back(
+        self,
+        mirrored: tuple[int, int],
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The poller takes the same path a person does, and has to say one thing differently.
+
+        It calls this BECAUSE a card moved, so telling the board would send GitHub the column it has
+        just read. It terminates either way - the next poll finds nothing further changed - so the
+        cost is a wasted write per moved card rather than a loop. Worth pinning rather than leaving
+        as something the next person to read `set_status` has to work out.
+        """
+        pull, _ = mirrored
+        moves = RememberingWorkflow()
+        poller = ProjectPoller(
+            db_sessionmaker,
+            FakeBoard(wraps(ObjectType.PR, pull, column="In Progress", item_id=701)),
+            build_item_sync(db_sessionmaker, threads, TicketPolicy()),
+            moves,
+            threads,
+            project_number=PROJECT,
+            interval=0.01,
+            may_set_status=True,
+        )
+
+        await poller.run_once()
+
+        assert moves.told_the_board == [False]
 
 
 class TestProgressRecordedForAStepThatFailed:
@@ -1747,13 +1782,28 @@ class ExplodingSync:
         raise RuntimeError("something nobody wrote a branch for")
 
 
+class RememberingWorkflow:
+    """Records how it was asked, for the one thing the poller says differently from a person."""
+
+    def __init__(self) -> None:
+        self.told_the_board: list[bool] = []
+
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> WorkflowOutcome:
+        self.told_the_board.append(tell_the_board)
+        return WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True)
+
+
 class ExplodingWorkflow:
     """The same, for the half of the poll that moves an item somebody else already mirrored."""
 
     def __init__(self) -> None:
         self.calls = 0
 
-    async def set_status(self, *, thread_id: int, status: Status) -> object:
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> object:
         self.calls += 1
         raise RuntimeError("something nobody wrote a branch for")
 
@@ -1902,3 +1952,239 @@ class TestATicketWhoseThreadSomebodyDeleted:
         assert await poller.run_once() == 1
         rebuilt = threads.created[-1].thread_id
         assert threads.threads[rebuilt].locked is False, "the replacement came back shut"
+
+
+# ---------------------------------------------------------------------------------------
+# Somebody clicks Convert to issue on a draft card.
+#
+# The card survives it: its project item id does not change and its thread does not know
+# anything happened. What it WRAPS changes, so it leaves the half of the poll that mirrors
+# drafts and enters the half that moves items somebody else already mirrored - which finds
+# them by the id of the thing they wrap. The ticket row is keyed by the CARD id, so nothing
+# ever visits it again: a thread frozen at the last draft render, and a second one opened by
+# the issue's own webhook. Two threads, one piece of work.
+# ---------------------------------------------------------------------------------------
+CARD = 901
+ISSUE_BEHIND_IT = 12
+
+
+async def ticket(session: AsyncSession) -> TrackedItem | None:
+    session.expire_all()
+    return await session.scalar(
+        select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.TICKET)
+    )
+
+
+def said_in(threads: FakeThreadGateway, thread_id: int) -> list[str]:
+    return [body for where, body in threads.posts if where == thread_id]
+
+
+class TestHandingTheThreadOver:
+    @pytest.fixture
+    async def mirrored_draft(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        db_session: AsyncSession,
+    ) -> int:
+        """A draft card with a thread, exactly as an ordinary poll leaves it."""
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+        row = await ticket(db_session)
+        assert row is not None and row.discord_thread_id is not None
+        return row.discord_thread_id
+
+    @pytest.fixture
+    def converted(self) -> FakeBoard:
+        """The same card, now wrapping an issue. Same item id - that is the difficulty."""
+        return FakeBoard(wraps(ObjectType.ISSUE, ISSUE_BEHIND_IT, item_id=CARD))
+
+    async def test_the_draft_thread_is_let_go_of(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, db_session: AsyncSession
+    ) -> None:
+        """The pointer, not the row. The row is the idempotency guard: the card is offered again
+        on every poll for ever, and a null pointer is what makes the second visit do nothing."""
+        await poller_for(converted).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None, "the row was deleted rather than emptied"
+        assert row.discord_thread_id is None
+
+    async def test_the_old_thread_is_told_where_to_go_once(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
+    ) -> None:
+        """A thread that simply stops is how somebody sits waiting in it.
+
+        Said once, not once a minute. The card stays on the board and is offered on every
+        poll for ever, so the null pointer left behind is what stops a second visit saying
+        it again - which is most of why the row is kept rather than deleted.
+        """
+        poller = poller_for(converted)
+        await poller.run_once()
+        await poller.run_once()
+
+        said = said_in(threads, mirrored_draft)
+        assert len(said) == 1, "it handed the same thread over twice"
+        assert "Nothing more will be posted here" in said[0]
+
+    async def test_it_names_the_issue_rather_than_a_thread(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
+    ) -> None:
+        """The issue's own thread is opened by its `opened` webhook, which may not have arrived
+        and may still be being retried - so a thread id here would be a guess. The issue's page
+        exists the moment GitHub converted it, which is why the race needs no ordering rule."""
+        await poller_for(converted).run_once()
+
+        said = "\n".join(said_in(threads, mirrored_draft))
+        assert "https://github.com/" in said
+
+    async def test_the_old_thread_is_shut(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(converted).run_once()
+
+        assert (mirrored_draft, True) in threads.shuts
+
+    async def test_a_discord_refusal_costs_the_line_and_nothing_else(
+        self,
+        mirrored_draft: int,
+        poller_for,
+        converted: FakeBoard,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Forget first, say second. The pointer is already gone by the time Discord is
+        asked, so a refusal costs the signpost and the lock on a thread nothing will write
+        to again - not the hand-over itself, which is the part that matters.
+        """
+        threads.post_error = DiscordGatewayError("Missing Access")
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            await poller_for(converted).run_once()
+
+        db_session.expire_all()
+        row = await ticket(db_session)
+        assert row is not None and row.discord_thread_id is None, "the pointer survived"
+        assert "could not hand thread" in caplog.text
+
+    async def test_a_second_poll_hands_nothing_over_again(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
+    ) -> None:
+        """The null pointer is what stops it. The card stays on the board and is offered on every
+        poll for ever, so without that this would say the same line once a minute."""
+        poller = poller_for(converted)
+
+        await poller.run_once()
+        once = len(said_in(threads, mirrored_draft))
+        await poller.run_once()
+
+        assert len(said_in(threads, mirrored_draft)) == once
+
+    async def test_a_card_that_was_never_a_draft_here_is_left_alone(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """A card id and a ticket row's id are the same number only because the poller wrote it
+        that way. A wrapped card whose id matches no ticket has nothing to hand over."""
+        await poller_for(
+            FakeBoard(wraps(ObjectType.ISSUE, ISSUE_BEHIND_IT, item_id=404404))
+        ).run_once()
+
+        assert threads.posts == []
+
+    async def test_a_draft_that_is_still_a_draft_is_left_alone(
+        self, mirrored_draft: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The guard is that the card WRAPS something now. A draft polled again is an ordinary
+        card and must keep its thread."""
+        before = len(said_in(threads, mirrored_draft))
+
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        assert len(said_in(threads, mirrored_draft)) == before
+
+
+class TestRememberingWhichCardWrapsWhat:
+    """The pairing the whole board-write path stands on, and the only place it can be learnt.
+
+    GitHub answers no per-item project lookup, so "which card wraps this issue" is answerable
+    only by reading a board whole and inverting it - which is what a poll already does. Nothing
+    else in the codebase ever sees both ids.
+    """
+
+    @pytest.fixture
+    async def mirrored(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        pr_event,
+        issue_event,
+    ) -> tuple[int, int]:
+        """A pull request and an issue, both already mirrored from their own webhooks."""
+        pull = pr_event("opened")
+        issue = issue_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(pull)
+        await build_item_sync(db_sessionmaker, threads, IssuePolicy()).sync(issue)
+        return pull.github_object_id, issue.github_object_id
+
+    async def test_a_wrapped_cards_id_is_written_against_its_item(
+        self, mirrored: tuple[int, int], poller_for, db_session: AsyncSession
+    ) -> None:
+        pull, _ = mirrored
+
+        await poller_for(FakeBoard(wraps(ObjectType.PR, pull, item_id=701))).run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_id == pull)
+        )
+        assert item is not None
+        assert item.project_item_id == 701
+
+    async def test_it_is_learnt_even_when_the_card_has_not_moved(
+        self, mirrored: tuple[int, int], poller_for, db_session: AsyncSession
+    ) -> None:
+        """The whole reason it is its own pass. A card that has not moved returns early without
+        writing anything, and on a real board that is nearly every card on nearly every poll -
+        so hung off a move, a board stable since the deploy would never record a single id and
+        no /status on it would have anywhere to write."""
+        pull, _ = mirrored
+        board = FakeBoard(wraps(ObjectType.PR, pull, column="In Progress", item_id=701))
+        poller = poller_for(board, may_set_status=False)
+
+        await poller.run_once()
+        await poller.run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_id == pull)
+        )
+        assert item is not None and item.project_item_id == 701
+
+    async def test_a_card_whose_item_is_not_tracked_here_pairs_nothing(
+        self, board_channel: None, poller_for, db_session: AsyncSession
+    ) -> None:
+        await poller_for(FakeBoard(wraps(ObjectType.ISSUE, 999999, item_id=702))).run_once()
+
+        db_session.expire_all()
+        paired = await db_session.scalars(
+            select(TrackedItem).where(TrackedItem.project_item_id.is_not(None))
+        )
+        assert list(paired) == []
+
+    async def test_the_pairing_is_not_inverted(
+        self, mirrored: tuple[int, int], poller_for, db_session: AsyncSession
+    ) -> None:
+        """Both are integers, so swapping them type-checks, passes every other test and writes a
+        row id where a card id belongs. Asserted against the two numbers being different."""
+        pull, _ = mirrored
+
+        await poller_for(FakeBoard(wraps(ObjectType.PR, pull, item_id=701))).run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_id == pull)
+        )
+        assert item is not None
+        assert item.project_item_id != item.id, "it stored the row id rather than the card id"

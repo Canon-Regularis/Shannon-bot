@@ -805,9 +805,6 @@ def build_container(
     )
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
-    workflow = build_item_workflow(
-        sessionmaker, github, threads, pr_sync=pr_sync, issue_sync=issue_sync
-    )
     queue = WebhookDeliveryQueue(sessionmaker)
     event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
     # Built here rather than inside `_commands`, because three things hold it: the two commands,
@@ -837,7 +834,22 @@ def build_container(
 
     # One reader for both callers. Two would each pay the owner-kind lookup and each keep
     # their own field cache, and the command would be warming a cache the poller never sees.
-    boards = HttpProjectBoards(board_client or github)
+    # The writer is `board_client` alone, never the App fallback: the App holds no
+    # Projects permission of any kind, so a write through it could only ever 403.
+    boards = HttpProjectBoards(board_client or github, writer=board_client)
+
+    # After the board reader, because the workflow is handed it: a status set in Discord
+    # drags the card to match. Two independent ways that stays off, both of them wiring
+    # rather than a check - no project token leaves the reader with no writer at all, and
+    # SHANNON_BOARD_MAY_MOVE_CARDS off passes no card mover here in the first place.
+    workflow = build_item_workflow(
+        sessionmaker,
+        github,
+        threads,
+        pr_sync=pr_sync,
+        issue_sync=issue_sync,
+        cards=boards if settings.board_may_move_cards else None,
+    )
 
     return Container(
         settings=settings,
@@ -853,6 +865,7 @@ def build_container(
             boards,
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
+            threads,
             project_number=settings.github_project_number,
             board_owner=settings.github_project_owner,
             polling=settings.poll_boards,

@@ -315,14 +315,19 @@ What is shared, and what that costs:
   and `/register` is open to anybody holding the Admin role in any server this bot was invited to.
 - **One GitHub App, and therefore one private key.** It is the credential to protect, because it
   mints tokens for every installation. Losing it is worse than losing the token it replaced.
-- **One `SHANNON_GITHUB_PROJECT_TOKEN`, if the board is used at all.** GitHub publishes no App
-  permission for a user-owned Projects v2 board, so that one feature keeps a credential of its
-  own. It is narrow on purpose: a leak exposes a board rather than source, and it is unset in
-  every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero. An organisation's board
-  reads through the same token, even though an App permission exists for one, because asking for
-  a new permission suspends event delivery to the installation until somebody accepts it — see
-  the note above. The board history shows the token's owner rather than this bot, which is the
-  real cost of the arrangement.
+- **One `SHANNON_GITHUB_PROJECT_TOKEN`, if the board is used at all.** GitHub's Projects
+  permission exists at organisation level only, so that one feature keeps a credential of its
+  own. It is unset in every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero, and
+  an organisation's board reads through it rather than through an App permission that does exist,
+  because asking for a new one suspends event delivery to the installation until somebody accepts
+  it — see the note above.
+- **How narrow that token is depends on the board, and a personal one is not narrow.** For an
+  organisation's board it is a fine-grained token scoped to Projects on that organisation: a leak
+  exposes a board rather than source. A **personal** board cannot be read by a fine-grained token
+  at all, so it takes a **classic** token with `read:project` — and classic tokens are not scoped
+  to a resource, so that one grants read across every project its owner can see. That is a real
+  step down and worth weighing against moving the board to an organisation. Either way the board
+  history shows the token's owner rather than this bot.
 - **One webhook secret per source.** The App has its own, and the endpoint also accepts
   `SHANNON_GITHUB_WEBHOOK_SECRET` so a repository configured the old way keeps working while a
   deployment moves across. Delete the per-repository webhook once the App is installed: until you
@@ -374,7 +379,7 @@ at the door.
 | `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
 | `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
-| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace. GitHub has no App permission for a user-owned Projects v2 board, so the board mirror needs a fine-grained token with Projects: Read-only — under **user** permissions for a personal board, under **organisation** permissions for an org one, and both where the deployment reads one of each over time. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
+| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace, and the kind of token depends on who owns the board. GitHub's Projects permission exists at **organisation** level only, for Apps and fine-grained tokens alike. An **organisation's** board takes a fine-grained token with Projects: Read-only under organisation permissions. A **personal** board — a `github.com/users/<login>/projects/N` URL — takes a **classic** token with `read:project`, issued by the account that owns it, because GitHub lists "access Projects owned by a user account" among the things a fine-grained token cannot do. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
@@ -389,6 +394,7 @@ at the door.
 | `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | A **default** board, for a deployment that has not run `/set_board` yet, by the number in its URL. Zero means none. A board belongs to a repository and is recorded on its row; this and the owner below stop applying anywhere once any repository has one |
 | `SHANNON_GITHUB_PROJECT_OWNER` | empty | The account owning that **default** board, where it is not the registered repository's own owner. Empty means it is. That number is a sequence GitHub keeps per account, so a board under a different owner is a different board rather than a missing one |
 | `SHANNON_PROJECT_POLL_SECONDS` | `60.0` | How often that board is read |
+| `SHANNON_BOARD_MAY_MOVE_CARDS` | `false` | The other direction: whether a status set in Discord drags the item's card on the board. Off, because it needs a token that may **write** — Projects: Read and write for an organisation's board, a classic `project` token for a personal one — and a read-only token answers 403, which would report a failure for a command that had already succeeded on GitHub and in Discord. A card this bot has never seen on a board is left alone either way: the pairing is learnt by polling, and GitHub answers no per-item project lookup |
 | `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
 | `SHANNON_WORKER_BATCH_SIZE` | `10` | |
@@ -465,6 +471,7 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | --- | --- | --- |
 | `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
 | `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
+| `/set_board <board> [owner]` | Admin, Project Manager | Which GitHub project board this server's repository mirrors, picked from the boards that owner has. The board is opened before it is stored, so a number that is a digit out or a token that cannot see it is a sentence here rather than a warning once a minute in a log. None stops mirroring one. Two repositories may not share a board: each would open its own thread for every card |
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
@@ -483,6 +490,13 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
 | `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from Backlog, Not reviewed, In review, Ready for merge and Done. Done shuts the thread, and a pull request has to be ready for merge first |
 | `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
+
+**The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:
+
+- **Mirroring a card into a thread** has no flag, because it has no Discord equivalent to bypass. Its equivalent is the webhook path, which is ungated by design: on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. What gates it instead is that it cannot happen at all until somebody with Admin or Project Manager runs **both** `/set_board` and `/set_channel project tickets` — tickets are the one kind with no fallback channel — and until an operator sets a project token. It pings nobody: a draft card names no assignees and its block carries no mentions.
+- **A card changing an item's status** is behind `SHANNON_BOARD_MAY_SET_STATUS`, off by default, because that one *does* have a Discord equivalent to bypass: `/status` is Project Manager only, and nothing GitHub sends with a board says who dragged the card.
+
+The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, also off, because it needs a token that may write.
 
 Guild only, and replies are ephemeral with one exception: `/link @member` posts its note where that person can see it, because it is addressed to them and they are not the one watching for a reply. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
@@ -598,7 +612,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0026`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0027`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

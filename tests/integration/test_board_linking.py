@@ -18,8 +18,9 @@ from collections.abc import Sequence
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository
+from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.projects import ProjectListing
 from shannon.services.boards import (
@@ -282,3 +283,69 @@ class TestTheStoreUnderneath:
         store = RepositoryStore(db_session)
         assert await store.linked_to_board(project_number=PROJECT, project_owner=None) is not None
         assert await store.linked_to_board(project_number=PROJECT, project_owner="x") is None
+
+
+class TestRelinkingForgetsTheOldBoardsCards:
+    """A card id belongs to the board it is on.
+
+    Pointed at a different board, a remembered id is not merely stale - it is wrong in a way
+    that WRITES. It would be sent as a card id under the new board's owner and number, which is
+    either a 404 nobody sees or, worse, another card entirely. Nothing else clears them: the
+    poller only ever writes a pairing, and only for cards on the board it just read, so an item
+    absent from the new board would keep the old id for ever.
+    """
+
+    async def carded(self, session: AsyncSession, registered: Repository) -> int:
+        item = TrackedItem(
+            repository_id=registered.id,
+            github_object_id=4242,
+            github_object_type=ObjectType.ISSUE,
+            github_object_number=7,
+            github_url="",
+            title="An issue on the old board",
+            project_item_id=999999,
+        )
+        session.add(item)
+        await session.commit()
+        return item.id
+
+    async def stored(self, session: AsyncSession, item_id: int) -> TrackedItem:
+        session.expire_all()
+        found = await session.get(TrackedItem, item_id)
+        assert found is not None
+        return found
+
+    async def test_pointing_at_another_board_forgets_them(
+        self, service: BoardLinkingService, registered: Repository, db_session: AsyncSession
+    ) -> None:
+        item_id = await self.carded(db_session, registered)
+
+        await service.assign(guild_id=1, project_number=77, typed_owner="")
+
+        assert (await self.stored(db_session, item_id)).project_item_id is None
+
+    async def test_clearing_the_board_forgets_them_too(
+        self, service: BoardLinkingService, registered: Repository, db_session: AsyncSession
+    ) -> None:
+        item_id = await self.carded(db_session, registered)
+
+        await service.assign(guild_id=1, project_number=None, typed_owner="")
+
+        assert (await self.stored(db_session, item_id)).project_item_id is None
+
+    async def test_a_refused_link_forgets_nothing(
+        self,
+        service: BoardLinkingService,
+        projects: FakeProjects,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        """The clear runs before the refusals, inside the same transaction, so a /set_board that
+        does not land leaves the row exactly as it was rather than half-applied."""
+        item_id = await self.carded(db_session, registered)
+        projects.opens = False
+
+        with pytest.raises(BoardUnreadableError):
+            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+
+        assert (await self.stored(db_session, item_id)).project_item_id == 999999

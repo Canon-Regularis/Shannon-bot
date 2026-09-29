@@ -22,6 +22,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.github.projects import ProjectListing
 
@@ -138,6 +139,10 @@ class BoardLinkingService:
                 raise NotRegisteredError("This server has no repository yet. Run /register first.")
 
             replaced = repository.project_number
+            # Before the branch rather than in each arm: one statement, no new arm to
+            # cover, and both refusals below raise inside this same transaction, so a
+            # refused /set_board still writes nothing at all.
+            await TrackedItemStore(session).forget_cards(repository.id)
             own_owner = repository.repo_name.partition("/")[0]
             if project_number is None:
                 await repositories.set_board(repository, project_number=None, project_owner=None)
@@ -155,8 +160,11 @@ class BoardLinkingService:
             if listing is None:
                 raise BoardUnreadableError(
                     f"{owner} has no project board numbered {project_number} that this bot can "
-                    "open. Check the number in the board's URL, and that "
-                    "SHANNON_GITHUB_PROJECT_TOKEN grants Projects: Read-only for that owner."
+                    "open. Check the number in the board's URL, and check which kind of token "
+                    "SHANNON_GITHUB_PROJECT_TOKEN holds: an organisation's board wants a "
+                    "fine-grained one with Projects under organisation permissions, and a "
+                    "personal board wants a classic one with read:project, because GitHub "
+                    "publishes no Projects permission for a personal account at all."
                 )
 
             taken = await repositories.linked_to_board(

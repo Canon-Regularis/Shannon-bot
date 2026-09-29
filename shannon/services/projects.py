@@ -28,7 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, URL_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
+from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
+from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.formatting import format_card_converted
+from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.threads import PostsToThread, ShutsThread
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
@@ -53,6 +58,19 @@ class ReadsBoards(Protocol):
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]: ...
 
 
+class SaysAndShuts(PostsToThread, ShutsThread, Protocol):
+    """Posting one line in a thread and shutting it, for a thread nothing will use again.
+
+    The poller otherwise reaches Discord only through the sync service, which renders items
+    rather than saying things. Handing a card over to the issue it became is the one moment
+    it has something to say that is not an item, and a thread going silent for ever with no
+    explanation is the failure being fixed.
+
+    Composed from the two Protocols that already say these, rather than restating them: a
+    third copy of `post` would be a third thing to keep in step with the gateway.
+    """
+
+
 class MovesStatus(Protocol):
     """Setting a tracked item's status, which is what a card moving on a board amounts to.
 
@@ -61,7 +79,9 @@ class MovesStatus(Protocol):
     and the block in Discord start disagreeing.
     """
 
-    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome: ...
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> WorkflowOutcome: ...
 
 
 class ProjectPoller:
@@ -73,6 +93,7 @@ class ProjectPoller:
         projects: ReadsBoards,
         sync: SyncsItems,
         workflow: MovesStatus,
+        threads: SaysAndShuts,
         *,
         project_number: int = 0,
         board_owner: str = "",
@@ -84,6 +105,7 @@ class ProjectPoller:
         self._projects = projects
         self._sync = sync
         self._workflow = workflow
+        self._threads = threads
         # A default for a deployment that has not run `/set_board` yet, rather than the one
         # board there is. Zero means none, which is what it always meant.
         self._project_number = project_number
@@ -153,13 +175,17 @@ class ProjectPoller:
             # authorised for an organisation answers 404 as readily as 403, so telling the two
             # apart in the message would be a confident guess rather than a diagnosis.
             #
-            # Three things can be wrong and the log cannot tell which, so it names all three
-            # rather than the two this slice added. A board GitHub does not have, an owner it
-            # was asked under - the number is a sequence kept per account, so the pair means
-            # something neither half does alone - or a token that cannot see the board, which is
-            # the one most likely here: the user half of Projects: Read-only does not read an
-            # organisation's board, and an unset token falls through to the App, which holds no
-            # Projects permission at all.
+            # Three things can be wrong and the log cannot tell which, so it names all three.
+            # A board GitHub does not have, an owner it was asked under - the number is a
+            # sequence kept per account, so the pair means something neither half does alone -
+            # or a token that cannot see the board, which is the one most likely here.
+            #
+            # The token line is specific because the wrong KIND of token is the commonest way
+            # to get here and the hardest to guess at. Projects is an organisation permission
+            # only, so a fine-grained token cannot read a PERSONAL board at all: GitHub lists
+            # that among the things it cannot do. A personal board wants a classic token. An
+            # unset token falls through to the App, which holds no Projects permission either
+            # way and therefore cannot read either kind.
             #
             # The repository is named because there can now be several boards, and a line saying
             # only that "board 3" failed is one an operator cannot act on when two servers each
@@ -169,8 +195,9 @@ class ProjectPoller:
                 "(%s). Run /set_board in that server to check the number against the board's "
                 "URL and the owner against who owns it - the number is a sequence GitHub keeps "
                 "per account, so the pair means something neither half does alone - and check "
-                "that SHANNON_GITHUB_PROJECT_TOKEN grants Projects: Read-only for that owner's "
-                "kind of account",
+                "SHANNON_GITHUB_PROJECT_TOKEN: an organisation's board wants a fine-grained "
+                "token with Projects under ORGANISATION permissions, a personal board wants a "
+                "CLASSIC token with read:project",
                 board.project_number,
                 board.board_owner,
                 board.snapshot.full_name,
@@ -186,8 +213,15 @@ class ProjectPoller:
         # below may believe. Only the board sees the difference.
         readable = any(_fits(item.column) for item in items)
 
+        wrapped = [i for i in items if not i.is_draft]
         moved = await self._mirror_drafts(board, [i for i in items if i.is_draft])
-        moved += await self._move_tracked(board, [i for i in items if not i.is_draft], readable)
+
+        # Read once and handed to both, where it used to be read inside the second. After
+        # the drafts, so today's ordering is unchanged and a draft mirrored this pass is in
+        # the map the hand-over reads.
+        state = await self._board_state(board.repository_id)
+        await self._hand_over_converted(wrapped, state)
+        moved += await self._move_tracked(board, wrapped, readable, state)
 
         if moved:
             logger.info("mirrored %s of %s cards that had moved", moved, len(items))
@@ -280,7 +314,11 @@ class ProjectPoller:
             )
 
     async def _move_tracked(
-        self, board: _Board, wrapped: Sequence[BoardItem], readable: bool
+        self,
+        board: _Board,
+        wrapped: Sequence[BoardItem],
+        readable: bool,
+        state: Mapping[tuple[ObjectType, int], BoardRow],
     ) -> int:
         """A card wrapping an issue or a pull request moves the thread that item already has.
 
@@ -299,7 +337,7 @@ class ProjectPoller:
         # One query for the whole board rather than one per card. Every card asks the same
         # question of the same table, and a board is read whole on every poll whether or not
         # anything moved.
-        state = await self._board_state(board.repository_id)
+        await self._remember_cards(wrapped, state)
 
         moved = 0
         for item in wrapped:
@@ -390,7 +428,12 @@ class ProjectPoller:
             return 0
 
         try:
-            moved = await self._workflow.set_status(thread_id=tracked.thread_id, status=wanted)
+            # Not told back to the board. This runs BECAUSE the card moved, so the
+            # column it would write is the one it has just read - a wasted call per
+            # moved card, and one the poller would then read again next pass.
+            moved = await self._workflow.set_status(
+                thread_id=tracked.thread_id, status=wanted, tell_the_board=False
+            )
         except WorkflowRefusedError as refusal:
             # A status the item cannot hold, such as anything but DONE on a closed issue.
             # The board is allowed to disagree with GitHub; it is not allowed to win. This is
@@ -514,6 +557,90 @@ class ProjectPoller:
             return
         async with self._sessionmaker() as session, session.begin():
             await TrackedItemStore(session).remember_column(tracked.tracked_item_id, column)
+
+    async def _hand_over_converted(
+        self,
+        wrapped: Sequence[BoardItem],
+        state: Mapping[tuple[ObjectType, int], BoardRow],
+    ) -> None:
+        """Let go of the thread of a draft somebody converted into an issue.
+
+        Clicking Convert to issue on GitHub keeps the card and its project item id and flips
+        what it wraps. So the card leaves the draft half of this poll and enters the tracked
+        half, which finds items by content id - and the ticket row, keyed by the CARD id,
+        is never visited again. Its thread was frozen at the last draft render while the
+        issue opened a second one from its own webhook: two threads, one piece of work, and
+        nothing anywhere saying so.
+
+        Detected for free. `board_state` filters by no type, so a ticket row is already in
+        the map under its card id and this costs one lookup per wrapped card.
+
+        The row is kept rather than deleted. It is the idempotency guard: the card is
+        offered again on every poll for ever, and a null pointer is what makes the second
+        visit do nothing. Deleted, nothing would record that the hand-over happened.
+
+        Forget first, say second - the same order `ThreadRelocation` uses, so a Discord
+        refusal costs the line rather than leaving a pointer at a thread nobody will read.
+        """
+        for item in wrapped:
+            ghost = state.get((ObjectType.TICKET, item.item_id))
+            if ghost is None or ghost.thread_id is None:
+                continue
+
+            async with self._sessionmaker() as session, session.begin():
+                await ThreadPointerStore(session).forget_thread(
+                    ghost.tracked_item_id, dead_thread_id=ghost.thread_id
+                )
+            logger.info(
+                "card %s became %s, so its draft thread was handed over",
+                item.item_id,
+                item.html_url,
+            )
+            await self._say_it_moved(ghost.thread_id, item.html_url)
+
+    async def _say_it_moved(self, thread_id: int, html_url: str) -> None:
+        """Point the old thread at the issue, and shut it.
+
+        Swallowed on a refusal, like the relocation path this copies: the pointer is already
+        gone, so what a failure costs is the signpost and the lock on a thread nothing will
+        write to again.
+        """
+        try:
+            await self._threads.post(
+                thread_id=thread_id, panel=Panel.of_text(format_card_converted(html_url))
+            )
+            await self._threads.set_shut(thread_id=thread_id, shut=True)
+        except DiscordGatewayError as refusal:
+            logger.warning("could not hand thread %s over to %s: %s", thread_id, html_url, refusal)
+
+    async def _remember_cards(
+        self, wrapped: Sequence[BoardItem], state: Mapping[tuple[ObjectType, int], BoardRow]
+    ) -> None:
+        """Write down which card wraps each item, for anything that wants to move one.
+
+        Here rather than inside the per-card loop, and that is the whole of why it exists as
+        its own pass. A card that has not moved returns early below without writing anything,
+        and on an ordinary board that is nearly every card on nearly every poll - so a board
+        that has been stable since the deploy would never record a single id, and a `/status`
+        on any item on it would have nothing to write to.
+
+        The pairing exists nowhere else. REST answers no per-item project lookup, so reading
+        a board whole and inverting it is the only way to learn it, and this is the only
+        place that does. Decided in memory and written only where it differs, so it costs one
+        statement per card the first time a board is seen and nothing on every poll after.
+        """
+        pairs = {
+            tracked.tracked_item_id: item.item_id
+            for item in wrapped
+            if item.content_id is not None
+            and (tracked := state.get((item.kind, item.content_id))) is not None
+            and tracked.card_id != item.item_id
+        }
+        if not pairs:
+            return
+
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).remember_cards(pairs)
 
     async def _board_state(self, repository_id: int) -> Mapping[tuple[ObjectType, int], BoardRow]:
         async with self._sessionmaker() as session:

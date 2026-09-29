@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     # board says who moved a card, so the poller cannot ask the permission question the slash
     # commands ask. A draft card is unaffected either way - its status is its column.
     board_may_set_status: bool = False
+    # Whether a status set HERE may drag the card on the board, which is the mirror of the
+    # line above. Off, because turning it on needs a token that may WRITE - Projects: Read
+    # and write for an organisation's board, a classic `project` token for a personal one -
+    # and an existing read-only token answers 403, which would report a failure for a command
+    # that had already succeeded on GitHub and in Discord. Off, every deployment behaves
+    # exactly as it did.
+    board_may_move_cards: bool = False
 
     # The webhook endpoint only writes a delivery down; these govern the worker that acts on it.
     # The defaults ride out roughly two hours of Discord being unreachable.

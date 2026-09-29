@@ -29,6 +29,7 @@ from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.domain.text import code_span
 from shannon.github import labels
 from shannon.github.client import GitHubClient
+from shannon.github.projects import CardMove, CardMoved
 from shannon.services.labels import RepositoryLabels
 from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
@@ -104,6 +105,12 @@ class WorkflowOutcome:
     # board poller is the one caller with nobody to tell, so it is the one that has to know the
     # difference between a refusal worth another poll and one that will refuse every poll.
     lock_refusal_is_permanent: bool = False
+    # Set where the board had no column standing for what was just set. The change landed
+    # everywhere that matters, so this is a caveat on a success rather than a failure - but
+    # it is the one board refusal a person can see for themselves, because they will open
+    # the board and find the card where it was. The others are invisible and identical for
+    # every command, and saying them would be a warning attached to nothing they can do.
+    board_has_no_column: bool = False
     # The label this moved, as the REPOSITORY spells it rather than as it was typed. Empty
     # for the seven commands that do not move an arbitrary one. The reply says it back, and
     # saying back what somebody typed would hide the one thing worth showing them: that
@@ -114,6 +121,34 @@ class WorkflowOutcome:
 # How many of a repository's labels a refusal lists before it stops. A taxonomy can be long and
 # the reply is one Discord message.
 _ENOUGH_TO_SHOW = 15
+
+
+class MovesCards(Protocol):
+    """Dragging an item's board card into the column standing for a status.
+
+    Answers what became of it rather than raising for the ordinary ways there is nothing to
+    do. The board is a mirror of the labels rather than the record, so none of them is worth
+    failing a command that has already landed everywhere that counts - but one of them is
+    worth mentioning, which is why the answer is not a bool.
+    """
+
+    async def move_card(
+        self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
+    ) -> CardMoved: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BoardCard:
+    """Where an item's card is, for writing its column back.
+
+    All three or none: a card id addresses nothing without the board it is on, and a board
+    addresses nothing without an owner. Held together so that whether this can be written
+    is one question rather than three that could be asked apart.
+    """
+
+    owner: str
+    project_number: int
+    card_id: int
 
 
 class LabelsItems(Protocol):
@@ -145,6 +180,7 @@ class ItemWorkflow:
         threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
         repository_labels: RepositoryLabels,
+        cards: MovesCards | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -152,9 +188,21 @@ class ItemWorkflow:
         self._threads = threads
         self._kinds = kinds
         self._labels = repository_labels
+        # None where this deployment has not turned board writes on, or has no project
+        # token to make them with. Wiring rather than a flag read here, so a deployment
+        # that has not opted in cannot reach the write at all.
+        self._cards = cards
 
-    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
-        """Move an item to a status, and lock its thread once it is done."""
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> WorkflowOutcome:
+        """Move an item to a status, and lock its thread once it is done.
+
+        `tell_the_board` is False for exactly one caller: the board poller, which calls
+        this BECAUSE a card moved and would otherwise write the column it has just read
+        straight back. It terminates either way - the next poll sees nothing further
+        changed - so what it costs is a wasted call per moved card rather than a loop.
+        """
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
@@ -221,6 +269,13 @@ class ItemWorkflow:
                         found, snapshot, change, wants_lock, thread_id
                     )
                 await self._write_the_lock_down(found.tracked_item_id, thread_id, lock)
+
+            # The card too, for the reason the lock above is retried here: a swallowed
+            # board write is permanent. Nothing retries it, the poller only ever rederives
+            # a status FROM a column, and a card left behind because GitHub was having a
+            # moment is noticed by nothing. Running the command again is what a person
+            # does, and it answered 'already Done' and asked the board nothing.
+            repeated = tell_the_board and await self._move_the_card(found, status)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -229,6 +284,7 @@ class ItemWorkflow:
                 lock_refused=lock.refused,
                 wanted_locked=wants_lock,
                 lock_refusal_is_permanent=lock.permanent,
+                board_has_no_column=repeated,
             )
 
         await self._apply(found, change)
@@ -270,6 +326,8 @@ class ItemWorkflow:
             if touched:
                 await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
+        no_column = tell_the_board and await self._move_the_card(found, status)
+
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
             found.full_name,
@@ -279,6 +337,7 @@ class ItemWorkflow:
             lock_refused=lock.refused,
             wanted_locked=wants_lock,
             lock_refusal_is_permanent=lock.permanent,
+            board_has_no_column=no_column,
         )
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
@@ -298,13 +357,27 @@ class ItemWorkflow:
 
         change = labels.priority_change(snapshot.label_names, priority)
         if change.nothing_to_do and found.priority is priority:
-            return WorkflowOutcome(found.full_name, found.number, changed=False)
+            # The board is asked on a repeat too, the same as the status half. Both
+            # commands answer the same question and a repeat means the same thing in both:
+            # try the half that has nothing else to retry it.
+            repeated = await self._move_the_card(found, priority)
+            return WorkflowOutcome(
+                found.full_name, found.number, changed=False, board_has_no_column=repeated
+            )
 
         await self._apply(found, change)
         await self._rerender(found, snapshot, change)
 
+        # No `tell_the_board` here, unlike the status half. That exists for one caller,
+        # the poller, which calls `set_status` BECAUSE a card moved - and nothing polls a
+        # priority: the poll reads a card's column and no other field. A parameter no
+        # caller ever passes False would be an arm only a test could take.
+        no_column = await self._move_the_card(found, priority)
+
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
-        return WorkflowOutcome(found.full_name, found.number, changed=True)
+        return WorkflowOutcome(
+            found.full_name, found.number, changed=True, board_has_no_column=no_column
+        )
 
     async def set_label(self, *, thread_id: int, name: str, adding: bool) -> WorkflowOutcome:
         """Put an ordinary label on an item, or take one off.
@@ -420,6 +493,54 @@ class ItemWorkflow:
             f"{found.full_name} has no label called {code_span(name)}. It has: {shown}"
             + (f", and {rest} more." if rest > 1 else ", and one more." if rest == 1 else ".")
         )
+
+    async def _move_the_card(self, found: FoundItem, state: Status | Priority) -> bool:
+        """Drag this item's board card to match, where there is one and it may be.
+
+        Answers whether the board had nowhere to put it, which is the one refusal worth
+        passing back. Everything that matters has already landed by this point: the labels
+        are on GitHub, the row is written and the thread is redrawn. So a failure here is
+        logged and swallowed rather than raised - told to whoever ran the command it would
+        read as the change having failed, which it did not.
+
+        A 422 is the one worth reading in the log. `_raise_for_status` carries GitHub's own
+        words, and this write's body shape was taken from published documentation rather
+        than from a live board, so that message is the first real evidence either way.
+        """
+        if self._cards is None or found.card is None:
+            return False
+
+        try:
+            moved = await self._cards.move_card(
+                owner=found.card.owner,
+                project_number=found.card.project_number,
+                card_id=found.card.card_id,
+                state=state,
+            )
+        except ShannonError as refused:
+            logger.warning(
+                "%s#%s is %s here, but its card on board %s was left where it was: %s",
+                found.full_name,
+                found.number,
+                spoken(state),
+                found.card.project_number,
+                refused.message,
+            )
+            return False
+
+        if moved.outcome is CardMove.MOVED and isinstance(state, Status):
+            # The column the BOARD calls it, not the state that was asked for. The
+            # poller compares the column it last saw by text, so leaving this stale
+            # makes the next poll read this bot's own write as somebody dragging the
+            # card - and worse, a real drag BACK to the old column inside one poll
+            # interval reads as never having moved and is dropped for good.
+            #
+            # Status alone. The stored column is the STATUS column: a priority lands
+            # in a different field entirely, and writing its option name here would
+            # tell the poller the card had moved to a column called HIGH.
+            async with self._sessionmaker() as session, session.begin():
+                await TrackedItemStore(session).remember_column(found.tracked_item_id, moved.column)
+        return moved.outcome is CardMove.NO_COLUMN
 
     def _can_be_moved(self, found: FoundItem) -> bool:
         """Whether this service has any way to write to the item behind a thread.
@@ -801,6 +922,9 @@ class FoundItem:
     guild_id: int
     status: Status
     priority: Priority
+    # Where this item's board card is, or None where no board is linked to the
+    # repository or no poll has yet paired the two.
+    card: BoardCard | None = None
 
     @property
     def owner(self) -> str:
@@ -822,6 +946,19 @@ class FoundItem:
             guild_id=repository.discord_guild_id,
             status=item.status,
             priority=item.priority,
+            card=(
+                BoardCard(
+                    # Never empty. An empty owner sends the write out with no
+                    # credential at all, GitHub answers 401, and the poller reads that
+                    # as permanent and writes the card off for good.
+                    owner=repository.project_owner or repository.repo_name.partition("/")[0],
+                    project_number=number,
+                    card_id=card_id,
+                )
+                if (number := repository.project_number) is not None
+                and (card_id := item.project_item_id) is not None
+                else None
+            ),
         )
 
 
@@ -832,6 +969,7 @@ def build_item_workflow(
     *,
     pr_sync: SyncsItems,
     issue_sync: SyncsItems,
+    cards: MovesCards | None = None,
 ) -> ItemWorkflow:
     """Assemble the workflow service with a fetcher and a renderer per object type."""
     return ItemWorkflow(
@@ -849,4 +987,5 @@ def build_item_workflow(
             ),
         },
         RepositoryLabels(github),
+        cards,
     )

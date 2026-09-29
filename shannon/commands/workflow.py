@@ -68,7 +68,9 @@ PRIORITY_CHOICES: list[app_commands.Choice[str]] = [
 class MovesItems(Protocol):
     """Setting the status or the priority of the item a thread belongs to."""
 
-    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome: ...
+    async def set_status(
+        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+    ) -> WorkflowOutcome: ...
 
     async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome: ...
 
@@ -181,7 +183,31 @@ def _said(outcome: WorkflowOutcome, said: str) -> str:
         )
     if not outcome.changed:
         # A repeat is not a failure: the requirements say a duplicate takes no action.
-        return f"{item} is already {said}."
+        return f"{item} is already {said}.{_no_column(outcome, said)}"
     if outcome.locked:
-        return f"{item} is now {said}, and this thread is locked."
-    return f"{item} is now {said}."
+        return f"{item} is now {said}, and this thread is locked.{_no_column(outcome, said)}"
+    return f"{item} is now {said}.{_no_column(outcome, said)}"
+
+
+def _no_column(outcome: WorkflowOutcome, said: str) -> str:
+    """Say the board had nowhere to put this, or say nothing.
+
+    The only board refusal a person is told about, and it is told as a caveat on a success
+    rather than as a failure, because that is what it is: the labels are on GitHub, the row
+    is written and the thread is redrawn. The same shape the refused lock above takes, for
+    the same reason - reporting only the half that did not land reads as nothing having
+    happened.
+
+    The other three ways a card can stay put say nothing. No project token and a board that
+    cannot be read at all are invisible and identical for every command until an operator
+    changes something; a warning attached to a fix the caller cannot make is noise. This one
+    they will see for themselves the moment they open the board.
+
+    It does not claim which column the card IS in. Nothing here read the card.
+    """
+    if not outcome.board_has_no_column:
+        return ""
+    return (
+        f" Its board has no column called {said}, so the card was left where it was - "
+        "rename a column to match, or move it by hand."
+    )

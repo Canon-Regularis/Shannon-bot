@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,6 +21,8 @@ class BoardRow:
     thread_id: int | None
     status: Status
     column: str | None
+    # The board card this item is wrapped by, or None until a poll has paired them.
+    card_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +165,28 @@ class TrackedItemStore:
                 TrackedItem.discord_thread_id,
                 TrackedItem.status,
                 TrackedItem.project_column,
+                TrackedItem.project_item_id,
             ).where(TrackedItem.repository_id == repository_id)
         )
-        return {(row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5]) for row in rows.all()}
+        return {
+            (row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5], row[6]) for row in rows.all()
+        }
+
+    async def remember_cards(self, pairs: Mapping[int, int]) -> None:
+        """Write down which board card wraps each of these items.
+
+        Only the ones whose stored id differs, decided by the caller in memory off a board
+        it has already read. A board that has not changed since the last deploy still has to
+        record its cards once, and every card on it sits in the branch that returns early
+        without writing anything - so this cannot hang off a card having moved.
+        """
+        for tracked_item_id, card_id in pairs.items():
+            await self._session.execute(
+                update(TrackedItem)
+                .where(TrackedItem.id == tracked_item_id)
+                .values(project_item_id=card_id)
+            )
+        await self._session.flush()
 
     async def stranded_threads(
         self, *, repository_id: int, kind: ObjectType, channel_id: int
@@ -197,6 +219,26 @@ class TrackedItemStore:
             .order_by(TrackedItem.github_updated_at.desc().nullslast(), TrackedItem.id.desc())
         )
         return [StrandedThread(row[0], row[1], row[2], row[3], row[4]) for row in rows.all()]
+
+    async def forget_cards(self, repository_id: int) -> None:
+        """Let go of every card id this repository remembers.
+
+        A card id belongs to the board it is on, so it means nothing the moment the
+        repository is pointed at a different one - and it is not merely stale, it is
+        wrong in a way that WRITES: the number would be sent as a card id under the
+        new board's owner and number, which is either a 404 nobody sees or another
+        card entirely.
+
+        Nothing else clears them. The poller only ever writes a pairing, and only for
+        cards on the board it just read, so an item absent from the new board would
+        keep the old id for ever.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(TrackedItem.repository_id == repository_id)
+            .values(project_item_id=None)
+        )
+        await self._session.flush()
 
     async def remember_column(self, tracked_item_id: int, column: str) -> None:
         """Record the board column this item was last seen in.

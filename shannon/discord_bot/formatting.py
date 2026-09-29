@@ -333,7 +333,25 @@ _WOULD_NOT_SHUT = "-# This thread could not be closed: the bot needs Manage Thre
 # somewhere it can. "Nothing more will be posted here" is true either way, because the row has
 # already stopped pointing at this thread.
 _MOVED = "-# This item is now mirrored in {}. Nothing more will be posted in this thread."
+_CONVERTED = (
+    "-# This card became {} on GitHub, which is mirrored in a thread of its own. "
+    "Nothing more will be posted here."
+)
 _MOVING = "-# This item will be mirrored in {} from now on. Nothing more will be posted here."
+
+
+def format_card_converted(html_url: str) -> str:
+    """Point a draft card's thread at the issue it has become.
+
+    The ISSUE rather than its thread, deliberately. The issue's own thread is opened by its
+    `opened` webhook, which may not have arrived when this is written and may not arrive at
+    all if that delivery is still being retried - so naming a thread id here would be a
+    guess, while the issue's page exists the moment GitHub converted it.
+
+    No untrusted text: the URL is one GitHub gave us for an item it has just created, and
+    the words are this module's.
+    """
+    return _CONVERTED.format(html_url)
 
 
 def format_thread_moved(thread_id: int) -> str:

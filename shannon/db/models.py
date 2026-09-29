@@ -161,6 +161,16 @@ class TrackedItem(TimestampMixin, Base):
     # that sat still while somebody set the status from Discord.
     project_column: Mapped[str | None] = mapped_column(String(COLUMN_WIDTH), nullable=True)
 
+    # The board card this item is wrapped by, for writing its column back. Null means no
+    # card has been seen for it, which is every row until a poll pairs the two: GitHub's REST
+    # API answers no per-item project lookup, so the poller reading a board whole is the only
+    # place in this project where a card id and an item are ever in scope together.
+    #
+    # BigInteger because these share a space with content ids, which already exceed 2**31 in
+    # the fixtures. No unique index: a card id is unique per board, and that stops being true
+    # the day a repository carries two.
+    project_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     repository: Mapped[Repository] = relationship(back_populates="tracked_items")
     # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a
     # time. `raise` keeps the mapping for the cascade and turns accidental use into an error.
