@@ -1090,6 +1090,27 @@ class TestOpeningABoardThatRefuses:
 
         assert found is None
 
+    @pytest.mark.parametrize(
+        ("error", "shows"),
+        [
+            (GitHubAuthError("GitHub refused the request for /x (403)"), "403"),
+            (GitHubNotFoundError("no such board"), "no such board"),
+        ],
+        ids=["refused", "not found"],
+    )
+    async def test_what_github_said_is_logged_before_it_is_folded(
+        self, error: Exception, shows: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Folding is what costs the evidence. The reply lists what to check and cannot say
+        which, so without this the one hard fact - 403 means a credential and 404 means a board -
+        is thrown away at the moment somebody most needs it."""
+        with caplog.at_level("WARNING", logger="shannon.github.projects"):
+            await HttpProjectBoards(self.Refusing(error)).get_board("monalisa", PROJECT)
+
+        assert "could not open board" in caplog.text
+        assert shows in caplog.text
+        assert "monalisa" in caplog.text
+
     async def test_anything_else_still_raises(self) -> None:
         """Only the two that mean "you cannot open this" are folded. A rate limit is the whole
         process being asked to wait and must not read as a board that is not there."""
