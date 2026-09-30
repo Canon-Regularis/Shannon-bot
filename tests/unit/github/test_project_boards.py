@@ -1225,3 +1225,48 @@ class TestTheOrderTheBoardIsIn:
 
         reads = [path for path, _ in client.calls if path.endswith("/fields")]
         assert len(reads) == 1
+
+
+class TestABoardThatWasFixedAfterTheComplaint:
+    """A write that finds no column doubts its own cached options, because it should.
+
+    The complaint tells an operator to add or rename a column. They do, and nothing changed until
+    the process restarted - the options were cached for its whole life - while `_warned` swallowed
+    the repeat, so the log fell silent, which reads as fixed while the card still never moved.
+
+    `/status` no longer needs this, because `order_for` refreshes on its way past. `/priority` does:
+    it writes with no rule to check first and so never refreshes.
+    """
+
+    NARROW: ClassVar[dict[str, object]] = {
+        "id": 353672864,
+        "name": "Status",
+        "options": [{"id": "98236657", "name": "Done"}],
+    }
+
+    async def test_a_second_attempt_reads_the_board_again(self) -> None:
+        client = FakeJson(fields=[self.NARROW])
+        boards = HttpProjectBoards(client, writer=FakeWriter())
+
+        for _ in range(2):
+            moved = await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
+            )
+            assert moved.outcome is CardMove.NO_COLUMN
+
+        reads = [path for path, _ in client.calls if path.endswith("/fields")]
+        assert len(reads) == 2, "the operator added the column and this never looked again"
+
+    async def test_a_write_that_lands_keeps_its_cache(self) -> None:
+        """Only a failure is a reason to doubt it. A board that answered is read once."""
+        client = FakeJson(fields=[self.NARROW])
+        boards = HttpProjectBoards(client, writer=FakeWriter())
+
+        for _ in range(2):
+            moved = await boards.move_card(
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            )
+            assert moved.outcome is CardMove.MOVED
+
+        reads = [path for path, _ in client.calls if path.endswith("/fields")]
+        assert len(reads) == 1

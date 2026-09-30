@@ -213,15 +213,30 @@ class ProjectPoller:
         # below may believe. Only the board sees the difference.
         readable = any(_fits(item.column) for item in items)
 
+        # Read HERE, beside the board, and deliberately not with the one below. `_move_tracked`
+        # acts on a card having MOVED: it compares this listing against the column it last saw,
+        # and that comparison is only sound if both halves were taken at the same moment.
+        #
+        # They were not. This used to be one read, taken after the drafts - and mirroring drafts
+        # is Discord round trips, so seconds. A `/status` landing in that window wrote the card,
+        # the row and `project_column`, and then the poll compared its own STALE listing against
+        # that FRESH memory, read the difference as somebody dragging the card back, and wrote the
+        # column it had read before the command ran straight over the top. With
+        # `SHANNON_BOARD_MAY_SET_STATUS` on, the status went with it and the command was silently
+        # undone; with it off the column alone was corrupted, which is enough - the rule that
+        # refuses a skipped column measures from exactly that column.
+        seen = await self._board_state(board.repository_id)
+
         wrapped = [i for i in items if not i.is_draft]
         moved = await self._mirror_drafts(board, [i for i in items if i.is_draft])
 
-        # Read once and handed to both, where it used to be read inside the second. After
-        # the drafts, so today's ordering is unchanged and a draft mirrored this pass is in
-        # the map the hand-over reads.
+        # Read again, and after the drafts on purpose: a draft mirrored this pass has a row only
+        # now, and the hand-over is the thing that needs to see it. The two reads answer different
+        # questions - `seen` is a snapshot to compare against, this is the current map - and one
+        # read cannot be both without being wrong for one of them.
         state = await self._board_state(board.repository_id)
         await self._hand_over_converted(wrapped, state)
-        moved += await self._move_tracked(board, wrapped, readable, state)
+        moved += await self._move_tracked(board, wrapped, readable, seen)
 
         if moved:
             logger.info("mirrored %s of %s cards that had moved", moved, len(items))

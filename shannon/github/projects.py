@@ -307,6 +307,15 @@ class HttpProjectBoards:
 
         option = _option_for(select.options, state)
         if option is None:
+            # Dropped before the complaint, because not finding a column is exactly when this
+            # board's cached options are worth doubting. They never expired, so an operator who
+            # did what the complaint tells them - add a column, rename one - saw nothing change
+            # until the process restarted, and `_warned` then swallowed the repeat, so the log
+            # fell silent, which reads as fixed while the card still never moved.
+            #
+            # `/status` no longer needs this: `order_for` refreshes on its way past. `/priority`
+            # does, because it writes with no rule to check first and so never refreshes.
+            self._fields.pop((owner, project_number), None)
             self._complain(owner, project_number, state, card_id)
             return CardMoved(CardMove.NO_COLUMN)
 

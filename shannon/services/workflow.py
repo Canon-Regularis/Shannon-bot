@@ -224,8 +224,17 @@ class ItemWorkflow:
             # it was already where it was being put.
             #
             # A closed issue cannot reach here asking to be unlocked: the guard above refuses any
-            # status but DONE for one. So the only thread this ever opens is one this path shut.
-            wants_lock = status is Status.DONE
+            # status but DONE for one. That argument covered issues and only issues, and a pull
+            # request has no such guard - so a MERGED one, whose thread the webhook shut on the
+            # merge and whose row can still read IN_REVIEW because `PullRequestPolicy.status_for`
+            # leaves the status alone, reached here asking for a status that is not DONE and had
+            # its thread handed back. Nothing shuts it again: `locked` answers None on every sync
+            # and `shut_for_state` wants a DONE the row does not hold.
+            #
+            # So the state of the ITEM decides too, not the status alone. A reopened pull request
+            # is not closed, so the case this branch exists for - a refused unlock on something
+            # reopened - still gets its second go.
+            wants_lock = status is Status.DONE or snapshot.closed
             # Held across the lock this sets, because this is a Discord call the sync path never
             # makes and so never covered. An event for the same item can be in its own Discord
             # phase right now, and locking is the step where interleaving shows: it is last on

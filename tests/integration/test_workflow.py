@@ -1045,3 +1045,62 @@ class TestHoldingTheItemWhileItSetsTheLock:
 async def _takes_the_item(lock: ItemLock, object_id: int) -> None:
     async with lock.held(object_id):
         pass
+
+
+class TestAMergedPullRequestKeepsItsShutThread:
+    """The repeat branch decides the lock from the wanted status alone, and that was not enough.
+
+    `A closed issue cannot reach here asking to be unlocked` was the argument, and it covered issues
+    only: the guard refuses any status but DONE for one. A pull request has no such guard. So a
+    MERGED one - thread shut by the webhook on the merge, row still reading IN_REVIEW because
+    `PullRequestPolicy.status_for` leaves the status alone - reached the repeat branch asking for a
+    status that is not DONE, and had its thread handed back.
+
+    Nothing shuts it again: `PullRequestPolicy.locked` answers None on every sync and
+    `shut_for_state` wants a DONE the row does not hold. So the thread stayed open on merged work,
+    permanently, and every later command answered that it was already where it was being put.
+    """
+
+    async def test_a_repeat_on_a_merged_pull_request_does_not_give_the_thread_back(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+        sync_service: ItemSyncService,
+        github: FakeGitHubClient,
+        pr_event,
+    ) -> None:
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        merged = pr_event("closed", state="closed", merged=True, merged_at="2026-08-20T10:00:00Z")
+        # Merged on GitHub, which shuts the thread and leaves the status where it was. GitHub is
+        # told as well as the sync, because the guard reads the item afresh rather than trusting
+        # the row - a status is refused against what GitHub says now, not what a delivery said.
+        github.pull_requests[REPO_KEY] = merged
+        await sync_service.sync(merged)
+        assert threads.threads[thread_id].locked is True, "the merge did not shut the thread"
+
+        # The repeat: the labels already say IN_REVIEW and so does the row, so nothing is written
+        # and only the lock is reconsidered.
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert threads.threads[thread_id].locked is True, "it unlocked merged work"
+
+    async def test_a_reopened_pull_request_still_gets_its_thread_back(
+        self,
+        workflow: ItemWorkflow,
+        thread_id: int,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The case the repeat branch exists for, and the one the fix must not take away. A
+        reopened pull request is not closed, so a refused unlock still gets a second go."""
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        assert threads.threads[thread_id].locked is True
+
+        threads.fail_next_shut = True
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        assert threads.threads[thread_id].locked is True, "the unlock was refused, as arranged"
+
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert threads.threads[thread_id].locked is False, "the repeat never tried again"

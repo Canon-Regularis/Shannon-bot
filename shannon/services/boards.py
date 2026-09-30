@@ -142,7 +142,7 @@ class BoardLinkingService:
             # Before the branch rather than in each arm: one statement, no new arm to
             # cover, and both refusals below raise inside this same transaction, so a
             # refused /set_board still writes nothing at all.
-            await TrackedItemStore(session).forget_cards(repository.id)
+            await TrackedItemStore(session).forget_the_board(repository.id)
             own_owner = repository.repo_name.partition("/")[0]
             if project_number is None:
                 await repositories.set_board(repository, project_number=None, project_owner=None)

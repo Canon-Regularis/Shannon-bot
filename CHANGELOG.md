@@ -6983,3 +6983,39 @@ feature end to end rather than assuming a predecessor the file never recorded.
   setting's name suggests, and consistent, which is the point. Off by default. It is paired with
   whether the OAuth round trip is configured at all, because a deployment with no public URL cannot
   produce a proof and would otherwise refuse those commands for everybody, for ever.
+
+## Four things the board and the commands disagreed about
+
+- **🚩 A `/status` that landed mid-poll was undone.** The poller read the board, mirrored drafts, and
+  only then read the columns it last saw. Mirroring drafts is Discord round trips, so that gap is
+  seconds wide — and a command landing in it was compared **stale board against fresh memory**. The
+  card looked as though somebody had dragged it back to where the listing said, so the poller
+  mirrored that and reverted the command. `_move_tracked`'s own docstring states the invariant this
+  broke: it acts on a card having *moved*, by comparing against the column it last saw, and a
+  comparison whose halves were taken seconds apart cannot answer that question.
+  - Two reads now, because they answer different questions. One taken beside the board listing, to
+    compare against; one taken after the drafts, because a draft mirrored this pass has a row only
+    then and the hand-over is what needs to see it. One read could not be both without being wrong
+    for one of them.
+  - Worth saying plainly: with `SHANNON_BOARD_MAY_SET_STATUS` off — the shipped default — the status
+    survived but the **column** was still overwritten, and the rule that refuses a skipped column
+    measures from exactly that column. So this was not dormant for anybody running the new rule.
+- **A merged pull request had its thread handed back.** The repeat branch decides the lock from the
+  wanted status alone, defended by the argument that *"a closed issue cannot reach here asking to be
+  unlocked: the guard above refuses any status but DONE for one"*. That covered issues and only
+  issues. A pull request has no such guard, so a merged one — thread shut by the webhook, row still
+  reading `IN_REVIEW` because `PullRequestPolicy.status_for` leaves the status alone — reached it
+  asking for a non-DONE status and was unlocked. Nothing shuts it again: `locked` answers None on
+  every sync and `shut_for_state` wants a DONE the row does not hold. The state of the item decides
+  too now. A reopened pull request is not closed, so the case the branch exists for still works.
+- **A relink kept the old board's columns.** `/set_board` let go of every card id, on the argument
+  that a card id belongs to the board it is on. A column name belongs to its board just as much.
+  Kept across a relink it is wrong twice over: the poller reads a move where nothing moved, and the
+  guard that stops the board overwriting a decision cannot fire, because it only arms when no column
+  is remembered at all. `forget_cards` is `forget_the_board` and clears both.
+- **A write that found no column kept trusting its own cache.** The complaint tells an operator to
+  add or rename a column. They did, and nothing changed until the process restarted, while the
+  once-per-board warning swallowed the repeat — so the log fell silent, which reads as fixed, while
+  the card still never moved. Not finding a column is exactly when those options are worth doubting,
+  so the entry is dropped then. `/status` no longer needs it, because reading the order refreshes on
+  the way past; `/priority` does, because it writes with no rule to check first.

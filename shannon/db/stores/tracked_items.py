@@ -220,8 +220,8 @@ class TrackedItemStore:
         )
         return [StrandedThread(row[0], row[1], row[2], row[3], row[4]) for row in rows.all()]
 
-    async def forget_cards(self, repository_id: int) -> None:
-        """Let go of every card id this repository remembers.
+    async def forget_the_board(self, repository_id: int) -> None:
+        """Let go of everything this repository remembers about the board it was on.
 
         A card id belongs to the board it is on, so it means nothing the moment the
         repository is pointed at a different one - and it is not merely stale, it is
@@ -229,14 +229,24 @@ class TrackedItemStore:
         new board's owner and number, which is either a 404 nobody sees or another
         card entirely.
 
-        Nothing else clears them. The poller only ever writes a pairing, and only for
+        The COLUMN goes with it, for exactly the same reason and for a while it did not.
+        A column name belongs to its board too, and keeping one across a relink is wrong
+        twice over. The poller acts on a card having moved by comparing the listing
+        against the column it last saw, so a remembered column from the old board reads
+        as a move on the first poll of the new one - and the guard that exists to stop
+        the board overwriting a decision somebody made cannot fire, because it only
+        arms when no column is remembered at all. And the rule that refuses a move for
+        skipping a column measures from that same column, so it would measure from one
+        the new board does not have and quietly stop applying.
+
+        Nothing else clears either. The poller only ever writes a pairing, and only for
         cards on the board it just read, so an item absent from the new board would
-        keep the old id for ever.
+        keep the old id and the old column for ever.
         """
         await self._session.execute(
             update(TrackedItem)
             .where(TrackedItem.repository_id == repository_id)
-            .values(project_item_id=None)
+            .values(project_item_id=None, project_column=None)
         )
         await self._session.flush()
 

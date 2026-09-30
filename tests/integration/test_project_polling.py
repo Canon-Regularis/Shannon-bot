@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.github.errors import (
@@ -2179,3 +2180,101 @@ class TestRememberingWhichCardWrapsWhat:
         )
         assert item is not None
         assert item.project_item_id != item.id, "it stored the row id rather than the card id"
+
+
+class TestACommandLandingWhileTheBoardIsBeingRead:
+    """The poll reads the board, mirrors drafts, and only then reads what it last saw.
+
+    Mirroring drafts is Discord round trips, so that gap is seconds wide. A `/status` landing in it
+    was compared STALE board against FRESH memory: the card looked as though somebody had dragged it
+    back to where the listing said, so the poller "mirrored" that and undid the command. The column
+    it had read before the command ran was written straight over the one the command wrote, and with
+    a board allowed to set a status the status went with it.
+
+    `_move_tracked`'s own docstring is the invariant this broke - it acts on a card having MOVED, by
+    comparing against the column it last saw - and a comparison whose two halves were taken seconds
+    apart cannot answer that question.
+    """
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_a_status_set_mid_poll_is_not_reverted(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+    ) -> None:
+        tracked_id = await db_session.scalar(select(TrackedItem.id))
+        async with db_sessionmaker() as session, session.begin():
+            # Where a previous poll left it, so the first-look guard is not what saves this.
+            store = TrackedItemStore(session)
+            item = await store.get_by_id(tracked_id, lock=True)
+            item.status = Status.BACKLOG
+            await store.remember_column(tracked_id, "Backlog")
+
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Backlog"))
+        poller = poller_for(board)
+
+        async def a_command_lands(*args: object, **kwargs: object) -> int:
+            """What `/status In review` writes while the drafts are being mirrored: the row, and -
+            with board writes on - the column the card was moved to."""
+            async with db_sessionmaker() as session, session.begin():
+                store = TrackedItemStore(session)
+                item = await store.get_by_id(tracked_id, lock=True)
+                item.status = Status.IN_REVIEW
+                await store.remember_column(tracked_id, "In review")
+            return 0
+
+        poller._mirror_drafts = a_command_lands
+
+        await poller.run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem).where(TrackedItem.id == tracked_id))
+        assert item.status is Status.IN_REVIEW, "the poll undid a command that landed mid-read"
+        assert item.project_column == "In review", "it wrote the column it read before the command"
+
+
+class TestRelinkingABoard:
+    """`/set_board` lets go of the card ids, and has to let go of the columns with them.
+
+    A column name belongs to its board exactly as a card id does. Kept across a relink it is wrong
+    twice over: the poller compares the new board's listing against a column from the old one and
+    reads a move where nothing moved, and the guard that stops the board overwriting a decision
+    cannot fire, because it only arms when no column is remembered at all.
+    """
+
+    async def test_it_forgets_the_column_as_well_as_the_card(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        pr_event,
+    ) -> None:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        tracked_id = await db_session.scalar(select(TrackedItem.id))
+        async with db_sessionmaker() as session, session.begin():
+            store = TrackedItemStore(session)
+            await store.remember_cards({tracked_id: 74106766})
+            await store.remember_column(tracked_id, "Approved")
+
+        async with db_sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).forget_the_board(registered.id)
+
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem).where(TrackedItem.id == tracked_id))
+        assert item.project_item_id is None
+        assert item.project_column is None, "a column from the old board survived the relink"
