@@ -235,7 +235,12 @@ class HttpProjectBoards:
         board = await self._board_path(owner, project_number)
         try:
             body = await self._client.get_json(board, owner=owner)
-        except (GitHubNotFoundError, GitHubAuthError):
+        except (GitHubNotFoundError, GitHubAuthError) as unopenable:
+            # Logged before it is folded, because folding is what costs the evidence. The reply
+            # lists what to check and cannot say WHICH, so without this line the one hard fact -
+            # 403 means a credential and 404 means a board - is thrown away at the moment
+            # somebody most needs it.
+            logger.warning("could not open board %s for %r: %s", project_number, owner, unopenable)
             # Folded into the answer this already gives for an unusable board, because an
             # operator cannot act on the difference and the caller has one sentence to say.
             # A board GitHub does not have, a token that may not see it, and a token that is

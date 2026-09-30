@@ -601,7 +601,7 @@ rather than abandoning the rest.
 | `user_links` | GitHub login to Discord account, per server |
 | `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
-| `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and can always be asked, so a missing row costs one request |
+| `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and is asked when this has nothing, so a missing row costs a read of the App's own installations and then writes itself down |
 | `identity_verifications` | Outstanding one-time links. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once, and `purpose` is the only record of which command sent them |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
