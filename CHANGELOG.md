@@ -6833,3 +6833,71 @@ feature end to end rather than assuming a predecessor the file never recorded.
   moment to say so is when the process starts rather than when somebody runs a command. On the
   reasoning the App warning beside it already gives: said once and loudly, because the failure it
   causes is silent and looks like something else.
+
+## The installation map repairs itself, and stops asking once it has
+
+- **An owner the map has nothing for is now asked of GitHub, once, and written down.**
+  `InstallationStore.for_owner` has said since it was written that None means "ask GitHub" rather
+  than "not installed", because "treating an empty cache as a refusal would make a missed webhook
+  look exactly like an App nobody ever installed". Nothing asked. `token_for` read the miss as a
+  refusal, handed back no token, and every call for that owner went out anonymous.
+- **What made it stick was that `installation.created` is sent once.** GitHub does not re-announce
+  an App that is already installed, so the row came back only if some *other* installation event
+  happened to arrive - an unsuspend, a permission acceptance, a repository added or removed, all of
+  which this bot already writes the row from - or if somebody ran `/register` again, which asks
+  GitHub directly and always has. None of those is something an operator can summon, and on a quiet
+  App none of them happens at all.
+- **And the symptom pointed somewhere else entirely.** An anonymous request against a private
+  repository answers 404, which reads as a repository that does not exist; an anonymous
+  collaborators call answers 404 too, which reads as `none`, which refuses somebody who does
+  administer it. So the evidence accused the repository, or the person, and never a missing row.
+- **`GET /app/installations`, the whole list, rather than one owner.** The per-owner endpoints are
+  split by kind - `/users/{login}/installation` against `/orgs/{org}/installation` - so asking one
+  means already knowing which kind of account this is, which is the thing being looked up. An
+  installation on an enterprise carries `name` and `slug` and no `login`, and owns no repositories
+  to mirror, so it is skipped rather than guessed at.
+- **Paged, following the Link header, because one page is not the list.** A hundred rows is
+  GitHub's maximum and it documents no order, so reading page one and logging "GitHub lists no
+  installation covering this account" would assert something that was never observed - and send the
+  owner back to the anonymous request this exists to prevent. Bounded rather than trusted, and it
+  says when it stopped: a truncation logged as an answer is how somebody ends up looking for the
+  wrong thing.
+- **A suspension is an answer, not a question, and that distinction is a type now.** The directory
+  used to return None both for a row it did not have and for a row it had and would not mint
+  against. Free while nothing could act on the difference - and the moment something could ask
+  GitHub about the second, it meant a paused App was re-listed from GitHub and its row re-written,
+  identically, on every single call, for as long as it stayed paused. Not merely a wasted GET:
+  `remember` opens a write transaction and takes a per-account advisory lock, so a read path that
+  did no writing at all began serialising every caller for that owner on one Postgres lock. Three
+  answers now - an installation, a suspension, nothing - and only the third is asked about.
+- **A row naming an installation GitHub no longer has is worse than no row.** It answers
+  confidently, so the asking never happens, and the mint 404s - and a 404 mints no token, so
+  nothing goes in the cache and nothing absorbs the repeat: every later call posts the same doomed
+  request. A reinstall keeps the login and issues a new id, which is exactly what a missed
+  `deleted` plus a missed `created` leaves behind. So a 404 on the mint now drops the row as well
+  as the cached token, which turns the next call into a question - the one thing this can answer.
+- **The login written down is GitHub's, not the caller's.** The store keys every row on
+  `account_login.strip().lower()`, so the row has to be written under a spelling it can be read
+  back by. The match uses `lower()` for the same reason rather than `casefold()`: the two are not
+  the same function - `U+017F` casefolds to `s` and `lower()` leaves it alone - and the owner is not
+  always a login this bot vouched for, since `/set_board` takes a free-text owner option. A
+  casefold match would have selected the real account's row and written its installation id back
+  under a login GitHub has never heard of. Nothing is lost, because GitHub logins are ASCII, which
+  is precisely why the two agree on every real one.
+- **One lock around discovery**, for the reason the mint lock beside it already gives. Discovery
+  runs on a miss, so a map with nothing in it - the state this whole path exists for - means every
+  caller misses together. The mint lock cannot cover it: that lock is keyed on an installation id,
+  which is the thing not yet known. The map is re-read inside it, so the callers queued behind the
+  first take the row it wrote rather than each taking their own turn at GitHub.
+- **The refusal is not cached.** An owner GitHub does not list is asked about again next time.
+  Remembering "not installed" is the whole of the bug this undoes, and an App installed a minute
+  from now has to be found without a restart. That costs one list call per attempt on a path that
+  runs per request, unlike `installed_on`, which runs once per `/register` - a real price, and the
+  price of the map never getting permanently stuck again.
+- **Logged, never raised.** Nobody asked this question: it is a repair attempted on the way past a
+  cache miss. Failing it leaves the caller with the anonymous request it was about to make anyway,
+  rather than an exception out of a path that did not exist before.
+- **The App's JWT is signed once per call and carried down.** Each signing re-parses the PEM and
+  performs an RSA signature on the event loop, `token_for` already signed one just to test that an
+  App is configured, and a token is asked for once per page of a paged read. Three signings a
+  recovery became one.
