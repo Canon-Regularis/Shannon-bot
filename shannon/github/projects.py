@@ -136,11 +136,6 @@ class BoardOrder:
     # Left to right on the board, which is the only ordering GitHub gives: a single-select
     # option carries no position, rank or index, and the array order is the whole of it.
     columns: tuple[str, ...]
-    # The subset some status would actually be written to, which is not all of them and is why
-    # this field exists. A board carrying both `In progress` and `In review` has the exact-name
-    # pass take `In review` for IN_REVIEW, so no command can put a card in `In progress` - and a
-    # rule that counted it as a step would demand one nobody could take.
-    reachable: tuple[str, ...]
     leaving: str
     arriving: str
 
@@ -274,7 +269,13 @@ class HttpProjectBoards:
         return parse_listing(body)
 
     async def move_card(
-        self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
+        self,
+        *,
+        owner: str,
+        project_number: int,
+        card_id: int,
+        state: Status | Priority,
+        column: str = "",
     ) -> CardMoved:
         """Set the card's Status or Priority to match, saying what became of it.
 
@@ -292,6 +293,13 @@ class HttpProjectBoards:
         on a fourth long before this, so a guard here would be an arm no caller can take -
         which matters more than it sounds, since `spoken(Priority.UNSET)` is "None" and
         would match a board column literally called None.
+
+        `column` is the board's own column name where somebody picked one, and it wins over the
+        state's own mapping. It is what makes a board with two columns for one status usable:
+        GitHub's default template ships `In progress` and `In review` and both read as IN_REVIEW,
+        so without a name to go on the exact-name pass takes `In review` every time and nothing
+        could ever put a card in `In progress`. Empty for `/priority`, which has one field and
+        no such ambiguity, and for anything that has only a status to go on.
         """
         if self._writer is None:
             return CardMoved(CardMove.NO_WRITER)
@@ -305,7 +313,7 @@ class HttpProjectBoards:
         if select is None:
             return CardMoved(CardMove.NO_FIELD)
 
-        option = _option_for(select.options, state)
+        option = _option_named_or_for(select.options, state, column)
         if option is None:
             # Dropped before the complaint, because not finding a column is exactly when this
             # board's cached options are worth doubting. They never expired, so an operator who
@@ -418,8 +426,27 @@ class HttpProjectBoards:
         self._kinds[owner] = decided
         return decided
 
+    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]:
+        """This board's Status columns, in board order, for a picker to offer.
+
+        Read fresh, the same way `order_for` reads fresh and for a sharper reason: this is the
+        list somebody chooses FROM, so a stale one offers a column the board no longer has and
+        hides one it does. The caller in front of this keeps the answer for a couple of minutes,
+        which is what stops a keystroke being a GitHub call.
+
+        Empty rather than None for a board that cannot be read. A picker has three seconds and
+        nowhere to put a refusal, so having nothing to offer and having nothing to say are the
+        same outcome to it.
+        """
+        board = await self._board_path(owner, project_number)
+        self._fields.pop((owner, project_number), None)
+        fields = await self._board_fields(board, owner, project_number)
+        if fields is None:
+            return ()
+        return tuple(one.name for one in fields.status.options)
+
     async def order_for(
-        self, *, owner: str, project_number: int, frm: Status, to: Status
+        self, *, owner: str, project_number: int, frm: Status, to: Status, column: str = ""
     ) -> BoardOrder | None:
         """This board's Status columns in order, with the columns two statuses map onto.
 
@@ -444,17 +471,12 @@ class HttpProjectBoards:
 
         options = fields.status.options
         leaving = _option_for(options, frm)
-        arriving = _option_for(options, to)
-        # Every status, through the same picker the write uses, so what the rule treats as a
-        # step is exactly what a command could put a card in. Asking `_option_for` rather than
-        # `status_from_column` is the whole point: the latter maps `In progress` to IN_REVIEW
-        # and would call it reachable, while the write never picks it.
-        written_to = {
-            found.name for found in (_option_for(options, one) for one in Status) if found
-        }
+        # Resolved exactly as the write will resolve it, which is the point of the shared
+        # helper: a rule measuring to one column while the write goes to another would refuse
+        # moves it then made.
+        arriving = _option_named_or_for(options, to, column)
         return BoardOrder(
             columns=tuple(one.name for one in options),
-            reachable=tuple(one.name for one in options if one.name in written_to),
             leaving=leaving.name if leaving is not None else "",
             arriving=arriving.name if arriving is not None else "",
         )
@@ -537,6 +559,28 @@ def _reads_as(name: str, state: Status | Priority) -> bool:
         return status_from_column(name) is state
     found = parse_priority([name])
     return found is not Priority.UNSET and found is state
+
+
+def _option_named_or_for(
+    options: Sequence[BoardOption], state: Status | Priority, column: str
+) -> BoardOption | None:
+    """The column somebody named, or the one this state maps to where they named none.
+
+    One resolver for both the write and the rule that decides whether the write is allowed. They
+    used to reach the same answer by two routes and only because both routes were `_option_for`;
+    now that a person can name a column the picker showed them, a rule measuring to one column
+    while the write went to another would refuse moves it then made, or make moves it had just
+    approved somewhere else.
+
+    A name that is not on this board falls back rather than failing. It arrives from a picker
+    that had three seconds and may have shown nothing at all, so what reaches here may be typed
+    prose or a column from the board this repository mirrored last week.
+    """
+    if column:
+        named = _option_named(options, column)
+        if named is not None:
+            return named
+    return _option_for(options, state)
 
 
 def _option_for(options: Sequence[BoardOption], state: Status | Priority) -> BoardOption | None:

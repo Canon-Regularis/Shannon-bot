@@ -7019,3 +7019,39 @@ feature end to end rather than assuming a predecessor the file never recorded.
   the card still never moved. Not finding a column is exactly when those options are worth doubting,
   so the entry is dropped then. `/status` no longer needs it, because reading the order refreshes on
   the way past; `/priority` does, because it writes with no rule to check first.
+
+## `/status` offers the board's own columns
+
+- **The picker is the board now, not a list of four.** `/status` autocompletes over whatever Status
+  columns this server's board actually has, so somebody picks the column they are looking at rather
+  than a word this bot chose. This bot's own four names stay behind them — but only for a status the
+  board has no column for at all, because a board calling it `Todo` where this bot says
+  `Not reviewed` means the same thing and offering both is two entries doing one job.
+- **Which makes `In progress` reachable, and that was the whole point.** It and `In review` both read
+  as `IN_REVIEW`, and the exact-name pass takes `In review` — so before this, no command could put a
+  card in `In progress` at all. A board with two columns for one status had one of them permanently
+  out of reach.
+- **And it makes the skip rule simpler rather than more complicated.** The rule had to filter out
+  columns nothing could be written to, or it demanded moves nobody could make: `Ready → In review`
+  counted as skipping `In progress`, and the remedy was a move no command offered, so a card in
+  `Ready` had no way forward. Every column is a step again, because every column can be picked. The
+  filter is gone rather than merely unused.
+- **One resolver for the write and the rule.** A named column beats the status's own mapping, and
+  both the write and the rule that decides whether to allow it go through the same function. They
+  used to agree only because both routes were the same call; a rule measuring to one column while
+  the write went to another would refuse moves it then made.
+- **What a picker costs, paid here.** A choice list is baked into the registration at `tree.sync()`,
+  once, at boot, globally — so anything per-board has to be an autocomplete. Three seconds to answer,
+  nowhere to put a refusal, and a callback that must parse what arrives because a suggestion is only
+  a suggestion. Prose is refused with a sentence that names the four that always work, since
+  somebody whose picker came back empty has otherwise been handed a text box and no vocabulary.
+- **A column this bot cannot read as a status is not offered**, because offering it would be offering
+  an entry its own callback then refuses. The picker asks `status_from_column`, which is the same
+  function the callback asks, so the two cannot disagree about what is pickable.
+- **One cached answer per server**, two minutes, on the same reasoning `RepositoryLabels` uses: a
+  picker reads this on every keystroke, and the repository lookup and the GitHub read are held
+  together so neither costs a character. Long enough that typing is one call, short enough that a
+  column renamed a moment ago can be picked.
+- **`/priority` is unchanged and stays a validated dropdown.** Three priorities are the same
+  everywhere, so there is nothing per-board about them and nothing to be gained by giving up
+  Discord's own validation.

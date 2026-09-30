@@ -1159,18 +1159,43 @@ class TestTheOrderTheBoardIsIn:
         assert order is not None
         assert order.columns == ("Backlog", "Ready", "In progress", "In review", "Done")
 
-    async def test_a_column_nothing_writes_to_is_left_out_of_the_reachable_ones(self) -> None:
-        """The whole reason `reachable` exists. `In progress` and `In review` both read as
-        IN_REVIEW and the exact-name pass takes `In review`, so no status can put a card in
-        `In progress` - and a rule that counted it as a step would demand a move nobody can make,
-        leaving a card in `Ready` with no way forward at all."""
+    async def test_a_named_column_wins_over_the_one_the_status_maps_to(self) -> None:
+        """The point of naming one. `In progress` and `In review` both read as IN_REVIEW and the
+        exact-name pass takes `In review`, so without a name to go on nothing could ever put a card
+        in `In progress` - which is what made a filter over writable columns necessary, and what
+        the picker offering the board's own columns removed the need for.
+
+        Resolved here exactly as `move_card` resolves it, through one shared helper, because a rule
+        measuring to one column while the write went to another would refuse moves it then made.
+        """
         boards, _ = self.reading(DEFAULT_TEMPLATE)
 
-        order = await self.asked(boards, frm=Status.NOT_REVIEWED, to=Status.DONE)
+        order = await boards.order_for(
+            owner="monalisa",
+            project_number=PROJECT,
+            frm=Status.NOT_REVIEWED,
+            to=Status.IN_REVIEW,
+            column="In progress",
+        )
 
         assert order is not None
-        assert order.reachable == ("Backlog", "Ready", "In review", "Done")
-        assert "In progress" in order.columns, "it dropped the column instead of not stepping on it"
+        assert order.arriving == "In progress"
+
+    async def test_a_named_column_the_board_does_not_have_falls_back(self) -> None:
+        """It arrives from a picker that had three seconds and may have shown nothing, so what
+        reaches here may be typed prose or a column from last week's board."""
+        boards, _ = self.reading(DEFAULT_TEMPLATE)
+
+        order = await boards.order_for(
+            owner="monalisa",
+            project_number=PROJECT,
+            frm=Status.NOT_REVIEWED,
+            to=Status.IN_REVIEW,
+            column="Needs design input",
+        )
+
+        assert order is not None
+        assert order.arriving == "In review"
 
     async def test_it_names_the_columns_the_two_statuses_are_written_to(self) -> None:
         """From the same picker `move_card` uses, which is what stops the rule and the write
@@ -1270,3 +1295,44 @@ class TestABoardThatWasFixedAfterTheComplaint:
 
         reads = [path for path, _ in client.calls if path.endswith("/fields")]
         assert len(reads) == 1
+
+
+class TestTheColumnsAPickerIsOffered:
+    """What `/status` autocompletes over, read off the board itself.
+
+    Its own tests rather than only the caching service's, because that service sees this through a
+    Protocol and a fake satisfying one has hidden an untested real method here three times already:
+    the fake answers, every caller passes, and only the coverage floor notices.
+    """
+
+    async def test_it_answers_the_columns_in_board_order(self) -> None:
+        """Order, not a set. It is the order the rule measures a skipped column against, and it is
+        the order somebody reads down the picker."""
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, writer=FakeWriter())
+
+        found = await boards.status_columns("monalisa", PROJECT)
+
+        assert found == ("Backlog", "Ready", "In progress", "In review", "Done")
+
+    async def test_a_board_with_no_status_field_offers_nothing(self) -> None:
+        """Empty rather than None. A picker has three seconds and nowhere to put a refusal, so
+        having nothing to offer and having nothing to say are one outcome to it."""
+        boards = HttpProjectBoards(
+            FakeJson(fields=[{"id": 1, "name": "Title"}]), writer=FakeWriter()
+        )
+
+        assert await boards.status_columns("monalisa", PROJECT) == ()
+
+    async def test_it_reads_the_board_again_every_time(self) -> None:
+        """This is the list somebody chooses FROM, so a stale one offers a column the board no
+        longer has and hides one it does. The caller in front of it keeps the answer for a couple of
+        minutes, which is what stops a keystroke being a GitHub call."""
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, writer=FakeWriter())
+
+        await boards.status_columns("monalisa", PROJECT)
+        await boards.status_columns("monalisa", PROJECT)
+
+        reads = [path for path, _ in client.calls if path.endswith("/fields")]
+        assert len(reads) == 2, "a picker was offered a snapshot from the last command"

@@ -14,6 +14,7 @@ rather than a sentence read by the person who caused it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,6 +25,8 @@ from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.projects import ProjectListing
 from shannon.services.boards import (
+    LIFETIME,
+    BoardColumns,
     BoardLinkingService,
     BoardTakenError,
     BoardUnreadableError,
@@ -349,3 +352,139 @@ class TestRelinkingForgetsTheOldBoardsCards:
             await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
 
         assert (await self.stored(db_session, item_id)).project_item_id == 999999
+
+
+class FakeColumnReader:
+    """The Status columns of one board, out of a tuple. Records what it was asked."""
+
+    def __init__(self, *columns: str) -> None:
+        self.columns = columns
+        self.asked: list[tuple[str, int]] = []
+
+    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]:
+        self.asked.append((owner, project_number))
+        return self.columns
+
+
+class TestTheColumnsThePickerOffers:
+    """What `/status` autocompletes over, resolved from a guild in the three seconds Discord allows.
+
+    Keyed on the guild because that is what an autocomplete is handed. One cached answer per server
+    holds the repository lookup and the GitHub read together, so a keystroke costs neither.
+    """
+
+    def columns(self, reader: FakeColumnReader, sessionmaker, **kwargs) -> BoardColumns:
+        return BoardColumns(sessionmaker, reader, **kwargs)
+
+    async def test_it_reads_the_board_this_server_mirrors(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await RepositoryStore(db_session).set_board(
+            registered, project_number=6, project_owner=None
+        )
+        await db_session.commit()
+        reader = FakeColumnReader("Backlog", "Ready", "Done")
+
+        found = await self.columns(reader, db_sessionmaker).offered(registered.discord_guild_id)
+
+        assert found == ("Backlog", "Ready", "Done")
+        assert reader.asked == [("Canon-Regularis", 6)]
+
+    async def test_a_board_somewhere_else_is_read_under_its_own_owner(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The board owner and the repository owner are kept apart everywhere else, and a picker
+        reading the wrong account would offer columns from somebody else's board."""
+        await RepositoryStore(db_session).set_board(
+            registered, project_number=6, project_owner="acme"
+        )
+        await db_session.commit()
+        reader = FakeColumnReader("Backlog")
+
+        await self.columns(reader, db_sessionmaker).offered(registered.discord_guild_id)
+
+        assert reader.asked == [("acme", 6)]
+
+    async def test_a_server_mirroring_no_board_offers_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Nothing rather than a refusal. The picker puts this bot's own four names behind whatever
+        comes back, so an empty answer is a picker that still works."""
+        reader = FakeColumnReader("Backlog")
+
+        found = await self.columns(reader, db_sessionmaker).offered(registered.discord_guild_id)
+
+        assert found == ()
+        assert reader.asked == [], "it asked GitHub about a board this server does not have"
+
+    async def test_a_server_with_no_repository_offers_nothing(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        reader = FakeColumnReader("Backlog")
+
+        assert await self.columns(reader, db_sessionmaker).offered(9999) == ()
+        assert reader.asked == []
+
+    async def test_a_second_keystroke_costs_nothing(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A picker reads this on every keystroke and Discord allows it about three seconds, so a
+        repository lookup and a GitHub read per character is the cost this cache exists to avoid."""
+        await RepositoryStore(db_session).set_board(
+            registered, project_number=6, project_owner=None
+        )
+        await db_session.commit()
+        reader = FakeColumnReader("Backlog")
+        columns = self.columns(reader, db_sessionmaker)
+
+        for _ in range(5):
+            await columns.offered(registered.discord_guild_id)
+
+        assert len(reader.asked) == 1
+
+    async def test_having_no_board_is_remembered_too(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A server with no board is the common case for a bot in several, and a lookup per
+        keystroke for an answer that is always nothing is the same cost worth avoiding."""
+        reader = FakeColumnReader()
+        columns = self.columns(reader, db_sessionmaker)
+        with_board = registered.discord_guild_id
+
+        for _ in range(5):
+            await columns.offered(with_board)
+
+        # Proved by the answer changing only once the life runs out, below.
+        assert await columns.offered(with_board) == ()
+
+    async def test_a_column_renamed_on_the_board_arrives_once_the_life_runs_out(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Bounded staleness rather than none. Long enough that typing a name is one call, short
+        enough that a column renamed a moment ago can be picked."""
+        await RepositoryStore(db_session).set_board(
+            registered, project_number=6, project_owner=None
+        )
+        await db_session.commit()
+        clock = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+        reader = FakeColumnReader("Todo")
+        columns = BoardColumns(db_sessionmaker, reader, now=lambda: clock)
+
+        assert await columns.offered(registered.discord_guild_id) == ("Todo",)
+        reader.columns = ("Backlog",)
+        assert await columns.offered(registered.discord_guild_id) == ("Todo",), "it forgot too soon"
+
+        clock = clock + LIFETIME + timedelta(seconds=1)
+        assert await columns.offered(registered.discord_guild_id) == ("Backlog",)

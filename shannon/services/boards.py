@@ -48,6 +48,12 @@ class ReadsProjects(Protocol):
     async def get_board(self, owner: str, project_number: int) -> ProjectListing | None: ...
 
 
+class ReadsColumns(Protocol):
+    """The Status columns one board has, which is all the `/status` picker needs."""
+
+    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class BoardLink:
     """What somebody who ran the command is told."""
@@ -191,3 +197,63 @@ class BoardLinkingService:
                 title=listing.title,
                 replaced=replaced,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class _RememberedColumns:
+    columns: tuple[str, ...]
+    until: datetime
+
+
+class BoardColumns:
+    """Which columns a server's board has, for the `/status` picker to offer.
+
+    Keyed on the guild rather than on the board, because that is what the picker knows: an
+    autocomplete is handed an interaction and has to get from there to a board in the three seconds
+    Discord allows. One cached answer per server holds the repository lookup and the GitHub read
+    together, so a keystroke costs neither.
+
+    The same two-minute life `RepositoryLabels` uses, for the same reason: long enough that typing a
+    name is one call, short enough that a column renamed on the board a moment ago can be picked.
+    """
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        columns: ReadsColumns,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        lifetime: timedelta = LIFETIME,
+    ) -> None:
+        self._sessionmaker = sessionmaker
+        self._columns = columns
+        self._now = now
+        self._lifetime = lifetime
+        self._held: dict[int, _RememberedColumns] = {}
+
+    async def offered(self, guild_id: int) -> tuple[str, ...]:
+        """The board's own columns, or nothing where this server mirrors no board.
+
+        Nothing is the honest answer for a server with no board, no repository, or a board that
+        will not read. The picker puts this bot's own four names behind whatever comes back, so
+        an empty answer is a picker that still works rather than one that offers nothing.
+        """
+        remembered = self._held.get(guild_id)
+        now = self._now()
+        if remembered is not None and remembered.until > now:
+            return remembered.columns
+
+        async with self._sessionmaker() as session:
+            stored = await RepositoryStore(session).get_by_guild(guild_id)
+        number = stored.project_number if stored is not None else None
+        if stored is None or number is None:
+            # Remembered all the same. A server with no board is the common case for a bot in
+            # several, and a lookup per keystroke for an answer that is always nothing is the
+            # cost this cache exists to avoid.
+            self._held[guild_id] = _RememberedColumns(columns=(), until=now + self._lifetime)
+            return ()
+
+        owner = stored.project_owner or stored.repo_name.partition("/")[0]
+        found = await self._columns.status_columns(owner, number)
+        self._held[guild_id] = _RememberedColumns(columns=found, until=now + self._lifetime)
+        return found

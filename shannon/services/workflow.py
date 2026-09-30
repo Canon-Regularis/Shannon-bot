@@ -128,11 +128,17 @@ class MovesCards(Protocol):
     """
 
     async def move_card(
-        self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
+        self,
+        *,
+        owner: str,
+        project_number: int,
+        card_id: int,
+        state: Status | Priority,
+        column: str = "",
     ) -> CardMoved: ...
 
     async def order_for(
-        self, *, owner: str, project_number: int, frm: Status, to: Status
+        self, *, owner: str, project_number: int, frm: Status, to: Status, column: str = ""
     ) -> BoardOrder | None: ...
 
 
@@ -193,7 +199,12 @@ class ItemWorkflow:
         self._cards = cards
 
     async def set_status(
-        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+        self,
+        *,
+        thread_id: int,
+        status: Status,
+        column: str = "",
+        tell_the_board: bool = True,
     ) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done.
 
@@ -201,13 +212,19 @@ class ItemWorkflow:
         this BECAUSE a card moved and would otherwise write the column it has just read
         straight back. It terminates either way - the next poll sees nothing further
         changed - so what it costs is a wasted call per moved card rather than a loop.
+
+        `column` is the board column somebody picked, where they picked one. The status is still
+        what drives the label, the lock and the block in Discord; the column decides only which
+        of the board's own columns the card lands in, and it exists because a board may have two
+        that mean one status. Empty where nothing named a column - the poller, and a repository
+        mirroring no board - and then the status picks the column as it always did.
         """
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
         self._refuse_conflicting_status(found, snapshot, status)
         if tell_the_board:
-            await self._refuse_a_move_the_board_forbids(found, status)
+            await self._refuse_a_move_the_board_forbids(found, status, column)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -285,7 +302,7 @@ class ItemWorkflow:
             # a status FROM a column, and a card left behind because GitHub was having a
             # moment is noticed by nothing. Running the command again is what a person
             # does, and it answered 'already Done' and asked the board nothing.
-            repeated = tell_the_board and await self._move_the_card(found, status)
+            repeated = tell_the_board and await self._move_the_card(found, status, column)
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -336,7 +353,7 @@ class ItemWorkflow:
             if touched:
                 await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
-        no_column = tell_the_board and await self._move_the_card(found, status)
+        no_column = tell_the_board and await self._move_the_card(found, status, column)
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
@@ -504,7 +521,9 @@ class ItemWorkflow:
             + (f", and {rest} more." if rest > 1 else ", and one more." if rest == 1 else ".")
         )
 
-    async def _move_the_card(self, found: FoundItem, state: Status | Priority) -> bool:
+    async def _move_the_card(
+        self, found: FoundItem, state: Status | Priority, column: str = ""
+    ) -> bool:
         """Drag this item's board card to match, where there is one and it may be.
 
         Answers whether the board had nowhere to put it, which is the one refusal worth
@@ -526,6 +545,7 @@ class ItemWorkflow:
                 project_number=found.card.project_number,
                 card_id=found.card.card_id,
                 state=state,
+                column=column,
             )
         except ShannonError as refused:
             logger.warning(
@@ -613,7 +633,9 @@ class ItemWorkflow:
                 )
             return
 
-    async def _refuse_a_move_the_board_forbids(self, found: FoundItem, status: Status) -> None:
+    async def _refuse_a_move_the_board_forbids(
+        self, found: FoundItem, status: Status, column: str = ""
+    ) -> None:
         """Refuse a jump the board's own column order does not allow.
 
         This replaced a rule written out in Python - a pull request had to be `Ready for merge`
@@ -641,6 +663,7 @@ class ItemWorkflow:
                 project_number=found.card.project_number,
                 frm=found.status,
                 to=status,
+                column=column,
             )
         except ShannonError as unreadable:
             logger.warning(
@@ -659,10 +682,7 @@ class ItemWorkflow:
         # ships `In progress` and `In review`, both IN_REVIEW - and the card's own column is
         # the one the next move is measured from.
         skipped = must_pass_through(
-            order.columns,
-            frm=found.column or order.leaving,
-            to=order.arriving,
-            reachable=order.reachable,
+            order.columns, frm=found.column or order.leaving, to=order.arriving
         )
         if not skipped:
             return
