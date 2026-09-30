@@ -743,7 +743,7 @@ def _commands(
         # Only the start is told whether this deployment can read messages. Turning capture off
         # where it used to be on leaves conversations open, and somebody in one of those threads
         # has been told logging is on, so stopping has to keep working.
-        build_log_conversation_command(conversations, gate, capturing=capturing),
+        build_log_conversation_command(conversations, gate, access, capturing=capturing),
         build_stop_conversation_command(conversations, gate),
         *build_workflow_commands(workflow, gate, access, board_columns),
     )

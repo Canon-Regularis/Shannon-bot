@@ -16,6 +16,7 @@ from shannon.commands.conversations import (
     build_stop_conversation_command,
 )
 from shannon.domain.errors import RepositoryMismatchError
+from shannon.github import people
 from shannon.services.transcripts.log import (
     AlreadyLoggingError,
     CannotLogError,
@@ -23,7 +24,14 @@ from shannon.services.transcripts.log import (
 )
 from shannon.services.workflow import NotAnItemThreadError
 from tests.fakes.discord_objects import FakeInteraction
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.unit.commands.conftest import (
+    FakeAccess,
+    administrator,
+    default_gate,
+    developer,
+    member_with,
+    project_manager,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -56,12 +64,15 @@ def run_it(
     channel_id: int | None = THREAD,
     stopping: bool = False,
     capturing: bool = True,
+    access: FakeAccess | None = None,
 ):
     service = service or StubLog()
     command = (
         build_stop_conversation_command(service, default_gate())
         if stopping
-        else build_log_conversation_command(service, default_gate(), capturing=capturing)
+        else build_log_conversation_command(
+            service, default_gate(), access or FakeAccess(), capturing=capturing
+        )
     )
     interaction = FakeInteraction(user=who or developer(), channel_id=channel_id)
     return command, interaction, service
@@ -175,3 +186,52 @@ class TestWhatItRefuses:
 
         with pytest.raises(RuntimeError, match="a bug"):
             await command.callback(interaction)
+
+
+class TestWhetherGitHubAllowsIt:
+    """Starting a log ends in a comment on somebody's issue, which is a write to their repository.
+
+    Every other command in this bot that writes to a repository asks GitHub whether the person may.
+    This one did not, so a Discord role alone put a comment on GitHub under the App's name - and a
+    role in a server says nothing about what GitHub has granted anybody.
+    """
+
+    async def test_a_refusal_from_github_stops_the_start(self) -> None:
+        command, interaction, service = run_it(access=FakeAccess("GitHub says no."))
+
+        await command.callback(interaction)
+
+        assert service.started == [], "it published on a refusal"
+        assert "GitHub says no." in interaction.said
+
+    async def test_it_asks_for_write_rather_than_admin(self) -> None:
+        """A comment is a write, not an administrative act. Asking for admin would refuse most of
+        the people who should be able to do this."""
+        access = FakeAccess()
+        command, interaction, _ = run_it(access=access)
+
+        await command.callback(interaction)
+
+        assert [wanted for _, _, wanted in access.asked] == [people.WRITE]
+
+    async def test_the_role_is_checked_first(self) -> None:
+        """Somebody without the role should hear about the role, not about a GitHub account they
+        never linked. `github_allows` documents the ordering and this holds it."""
+        access = FakeAccess("GitHub says no.")
+        command, interaction, _ = run_it(who=member_with("nothing"), access=access)
+
+        await command.callback(interaction)
+
+        assert access.asked == [], "it asked GitHub about somebody the role had already refused"
+        assert "You need one of these roles" in interaction.said
+
+    async def test_stopping_is_not_gated(self) -> None:
+        """Somebody may have started a log and since lost their write - a team change, a rename, a
+        token nobody renewed - and refusing them the stop would leave a thread publishing itself
+        with nobody able to say when to finish. Stopping writes nothing to GitHub in any case.
+        """
+        command, interaction, service = run_it(stopping=True)
+
+        await command.callback(interaction)
+
+        assert [thread for thread, _ in service.stopped] == [THREAD]

@@ -7055,3 +7055,18 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **`/priority` is unchanged and stays a validated dropdown.** Three priorities are the same
   everywhere, so there is nothing per-board about them and nothing to be gained by giving up
   Discord's own validation.
+
+## Starting a conversation log asks GitHub too
+
+- **`/log_conversation` ends in a comment on somebody's issue**, which is a write to their
+  repository — and it was the one command that made such a write without asking GitHub whether the
+  caller may. A Discord role alone put a comment on GitHub under the App's name, and a role in a
+  server says nothing about what GitHub has granted anybody. Nine commands ask now, where eight did.
+- **`/stop_conversation` is deliberately still not asked about**, for the same reason it ignores the
+  capture setting. Somebody may have started a log and since lost their write — a team change, a
+  rename, a token nobody renewed — and refusing them the stop would leave a thread publishing itself
+  with nobody able to say when to finish. Stopping writes nothing to GitHub in any case: it closes
+  the row, and the comment already posted is already posted.
+- **Asked after the role and after the defer**, which is what `github_allows` documents: it makes a
+  network call and Discord allows three seconds for a first response, and somebody without the role
+  should hear about the role rather than about a GitHub account they never linked.
