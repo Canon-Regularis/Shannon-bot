@@ -130,7 +130,7 @@ class TestSettingAStatus:
         move it back out of DONE wrote the label, moved the stored status, reported success and
         left the thread shut against the discussion it had just reopened.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is True
 
@@ -202,20 +202,30 @@ class TestSettingAStatus:
 
 
 class TestFinishing:
-    """`/status Done` locks the thread, and only once a reviewer has said it may be merged."""
+    """`/status Done` locks the thread.
 
-    async def test_a_pull_request_has_to_be_ready_for_merge_first(
+    It used to refuse unless the item was already `Ready for merge`, and that rule now lives on
+    the board: a card may move forward one column at a time, so `Done` is reachable from the
+    column before it and not from three columns back. These fixtures have no board, which is why
+    nothing is refused here - the requirement did not become weaker, it became the board's.
+    """
+
+    async def test_with_no_board_there_is_no_order_to_refuse_against(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
     ) -> None:
-        with pytest.raises(WorkflowRefusedError, match="Ready for merge"):
-            await workflow.set_status(thread_id=thread_id, status=Status.DONE)
+        """A repository mirroring no board has no columns, so there is nothing to measure a
+        move against and `Done` is reached directly. The old constant refused this on every
+        repository whether it had a board or not, including every board with no column of that
+        name - which is GitHub's own default template."""
+        outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
-        assert github.label_calls == [], "a refused command still wrote to GitHub"
+        assert outcome.locked is True
+        assert github.label_calls != [], "it reported the change without making one"
 
     async def test_once_it_is_ready_it_can_be_finished_and_the_thread_locks(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
@@ -226,7 +236,7 @@ class TestFinishing:
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
         """A locked thread rejects edits, so locking first leaves the block saying IN_REVIEW."""
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
 
@@ -516,11 +526,11 @@ class TestWhatAReviewFound:
     ) -> None:
         """Locking is the last step and the likeliest to be refused, so it needs a second go.
 
-        Being already DONE used to fail the READY_FOR_MERGE gate, which meant a /status Done whose
-        lock failed could never be repaired: the retry was refused for being what the first run
-        had made it.
+        Being already DONE used to fail the retired READY_FOR_MERGE gate, which meant a
+        /status Done whose lock failed could never be repaired: the retry was refused for being
+        what the first run had made it.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         threads.fail_next_shut = True
         refused = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is False
@@ -542,8 +552,8 @@ class TestWhatAReviewFound:
     ) -> None:
         """Whether to give the thread back was decided from a read taken three calls earlier.
 
-        A pull request at READY_FOR_MERGE, one reviewer marking it done and another putting it
-        back into review, or the board poller doing the second. The one that was not finishing
+        A pull request under review, one reviewer marking it done and another putting it back
+        to not reviewed, or the board poller doing the second. The one that was not finishing
         the item read a status that was not DONE yet, so it never asked for the thread back,
         while `/status Done` locked it last. The item was left reading IN_REVIEW with its thread
         shut, both callers were told they had succeeded, and nothing lifted it: nothing else
@@ -555,7 +565,7 @@ class TestWhatAReviewFound:
         three real round trips open, so the interleaving is the same every run instead of being
         whatever the machine was doing that second.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         reached, release = asyncio.Event(), asyncio.Event()
         github.before_read = (reached, release)
 
@@ -568,7 +578,7 @@ class TestWhatAReviewFound:
             await holder.flush()
 
             catching_up = asyncio.create_task(
-                workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+                workflow.set_status(thread_id=thread_id, status=Status.NOT_REVIEWED)
             )
             await asyncio.wait_for(reached.wait(), timeout=5)
             assert not catching_up.done(), "nothing overlapped, so this proves nothing"
@@ -581,7 +591,7 @@ class TestWhatAReviewFound:
 
         db_session.expire_all()
         stored = await db_session.scalar(select(TrackedItem.status))
-        assert stored is Status.IN_REVIEW
+        assert stored is Status.NOT_REVIEWED
         assert threads.threads[thread_id].locked is False, "an open item kept a shut thread"
 
     async def test_a_reopened_pull_request_whose_unlock_was_refused_can_be_reopened_again(
@@ -595,7 +605,7 @@ class TestWhatAReviewFound:
         pull request against the discussion it had just been reopened for, for good, while every
         later command answered that it was already where it was being put.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is True
 
@@ -620,7 +630,7 @@ class TestWhatAReviewFound:
         the thread already said so. The two readings are one Discord permission apart and a long
         way apart for somebody deciding what to do next.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         threads.fail_next_shut = True
 
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
@@ -638,7 +648,7 @@ class TestWhatAReviewFound:
         threads.fail_next_update = True
 
         with pytest.raises(DiscordGatewayError):
-            await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+            await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
     async def test_a_replacement_thread_for_a_finished_pull_request_comes_back_shut(
         self,
@@ -662,7 +672,7 @@ class TestWhatAReviewFound:
         rebuild path. A pull request has no such answer in the payload at all, so the answer has
         to come from the row for the one call that opens a thread.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         assert threads.threads[thread_id].locked is True
 
@@ -694,7 +704,7 @@ class TestWhatAReviewFound:
 
         The row remembers now, so any later delivery finishes what the first one started.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         threads.threads.pop(thread_id)
 
@@ -732,7 +742,7 @@ class TestWhatAReviewFound:
         would come back open to replies above a block reading DONE, which is the thing this pair
         of fixes exists to stop, reintroduced through the other command.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         threads.threads.pop(thread_id)
 
@@ -758,7 +768,7 @@ class TestWhatAReviewFound:
         the item would drop the same way, for a thread nobody can shut until somebody grants the
         permission. Everything else in the delivery has already landed by then.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         threads.threads.pop(thread_id)
 
@@ -792,7 +802,7 @@ class TestWhatAReviewFound:
     ) -> None:
         """Somebody deleting the thread mid-command has the sync open a replacement. Locking the
         id the command arrived on would lock a thread that is no longer there."""
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await threads.delete(thread_id=thread_id)
 
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.DONE)
@@ -845,7 +855,7 @@ class TestAMoveWhoseLastStepFailed:
         async def moved_by_somebody_else(*args: object, **kwargs: object) -> int | None:
             async with db_sessionmaker() as session, session.begin():
                 item = await TrackedItemStore(session).get_by_id(1, lock=True)
-                item.status = Status.READY_FOR_MERGE
+                item.status = Status.BACKLOG
             raise DiscordGatewayError("Discord refused to update the thread")
 
         workflow._rerender = moved_by_somebody_else
@@ -855,7 +865,7 @@ class TestAMoveWhoseLastStepFailed:
 
         db_session.expire_all()
         item = await db_session.scalar(select(TrackedItem))
-        assert item.status is Status.READY_FOR_MERGE, "it trampled a newer answer"
+        assert item.status is Status.BACKLOG, "it trampled a newer answer"
 
     async def test_being_cancelled_at_the_render_still_puts_the_row_back(
         self,
@@ -933,7 +943,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
         db_session: AsyncSession,
     ) -> None:
         # A pull request has to be ready for merge before it can be marked done.
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         object_id = (await stored(db_session)).github_object_id
         lock = ItemLock(db_sessionmaker)
@@ -982,7 +992,7 @@ class TestHoldingTheItemWhileItSetsTheLock:
         reason to wait is that somebody else is writing, and this went on to act on what it knew
         before they did.
         """
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
         tracked = await stored(db_session)
         object_id, row_id = tracked.github_object_id, tracked.id

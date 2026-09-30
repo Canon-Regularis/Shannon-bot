@@ -30,8 +30,16 @@ WHO = 424242
 
 
 class FakeProof:
-    def __init__(self, login: str | None = LOGIN) -> None:
+    def __init__(self, login: str | None = LOGIN, *, configured: bool = True) -> None:
         self.login = login
+        # Whether the OAuth round trip exists at all. Separate from whether anybody has used
+        # it, because `require_proved` has to tell a deployment that cannot produce a proof
+        # apart from a person who has not produced one.
+        self._configured = configured
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
 
     async def ever_proved(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
         if self.login is None:
@@ -57,8 +65,14 @@ def access(
     *,
     proof: FakeProof | None = None,
     permissions: FakePermissions | None = None,
+    require_proved: bool = False,
 ) -> GitHubAccess:
-    return GitHubAccess(sessionmaker, permissions or FakePermissions(), proof or FakeProof())
+    return GitHubAccess(
+        sessionmaker,
+        permissions or FakePermissions(),
+        proof or FakeProof(),
+        require_proved,
+    )
 
 
 async def refusal(service: GitHubAccess, *, at_least: str = people.WRITE) -> str | None:
@@ -229,3 +243,57 @@ class TestTheLadder:
         """These are wire values off a JSON body, not a column this bot controls. A fifth name
         appearing one day should refuse a write rather than end the command in a traceback."""
         assert people.at_least("superuser", people.READ_ONLY) is False
+
+
+class TestWhenTheServerInsistsOnAProvedAccount:
+    """`SHANNON_REQUIRE_PROVED_LINKS`, which until now only reached `/assign`.
+
+    The hole it closes is the widest one here: an unproved caller was let through on their Discord
+    role alone, so a server could hold every GitHub permission check it liked and a member who had
+    never run `/link` went past all of them. Off by default, because turning it on breaks every
+    server whose members have not linked - which is the same reason it was a hole rather than a bug.
+    """
+
+    async def test_an_unproved_caller_is_refused_and_told_what_to_run(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        service = access(db_sessionmaker, proof=FakeProof(login=None), require_proved=True)
+
+        said = await refusal(service)
+
+        assert said is not None
+        assert "/link" in said, "it refused without saying how to satisfy it"
+
+    async def test_a_proved_caller_is_unaffected(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """The setting is about callers with no proof. Somebody who has one is judged on their
+        GitHub permission exactly as before."""
+        service = access(db_sessionmaker, require_proved=True)
+
+        assert await refusal(service) is None
+
+    async def test_a_deployment_that_cannot_run_the_round_trip_still_lets_them_through(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """The half of the condition that is not optional. With no public URL there is no way to
+        produce a proof, so refusing for the lack of one would take these eight commands away from
+        everybody for ever, with the only remedy a setting nobody would connect to the symptom.
+
+        `/assign` pairs the same two for the same reason.
+        """
+        service = access(
+            db_sessionmaker,
+            proof=FakeProof(login=None, configured=False),
+            require_proved=True,
+        )
+
+        assert await refusal(service) is None
+
+    async def test_off_by_default_an_unproved_caller_passes(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """What every existing deployment does, and the behaviour this must not change silently."""
+        service = access(db_sessionmaker, proof=FakeProof(login=None))
+
+        assert await refusal(service) is None

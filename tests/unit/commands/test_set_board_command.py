@@ -22,7 +22,9 @@ import pytest
 from shannon.commands.set_board import (
     MOST_CHOICES,
     NONE_CHOSEN,
+    NONE_LABEL,
     ChosenBoard,
+    _label_for,
     _suggesting,
     _wanted,
     build_set_board_command,
@@ -140,10 +142,16 @@ class TestWhatArrivesInTheField:
 
         assert service.calls == [(GUILD, None, "")]
 
-    @pytest.mark.parametrize("typed", ["Roadmap", "", "  ", "#3", "3.0", "-1"])
+    @pytest.mark.parametrize("typed", ["Roadmap", "", "  ", "3.0", "-1", "#3abc", "None"])
     async def test_prose_is_refused_rather_than_read_as_none(self, typed: str) -> None:
         """The bug this shape exists to prevent. Parsed with a bare `int | None`, every one of
-        these would have reached the service as "clear the board" and silently unlinked one."""
+        these would have reached the service as "clear the board" and silently unlinked one.
+
+        `#3` used to sit in this list and no longer does: it is the shape `_label_for` writes,
+        so it reads as board 3, which is what somebody typing it meant. Nothing about the bug
+        above returns with it - prose still answers None, and None is still refused. `#3abc`
+        stays, because the word boundary is what keeps the label from swallowing prose, and a
+        bare "None" stays, because only the picker's exact entry clears a board."""
         command, interaction, service = run_it()
 
         await fire(command, interaction, typed)
@@ -151,6 +159,27 @@ class TestWhatArrivesInTheField:
         assert "is not a board" in interaction.said
         assert "paste the board's URL" in interaction.said, "it offered no way in"
         assert service.calls == []
+
+    async def test_the_pickers_own_label_is_accepted(self) -> None:
+        """What actually happened. Discord sends a choice's VALUE when the entry is
+        committed and the raw text when it is typed or a highlighted suggestion is let fall
+        through, and the two are different strings - so picking "#6 Shannon Bot" off the list
+        was answered with "that is not a board. Pick one from the list", told to somebody who
+        just had."""
+        command, interaction, service = run_it()
+
+        await fire(command, interaction, "#6 Shannon Bot")
+
+        assert service.calls == [(GUILD, 6, "")]
+
+    async def test_the_pickers_own_clearing_label_is_accepted(self) -> None:
+        """The same fall-through on the one entry whose meaning is destructive, which is
+        why it is matched exactly rather than by prefix."""
+        command, interaction, service = run_it(service=StubBoards(result=link(number=0)))
+
+        await fire(command, interaction, NONE_LABEL)
+
+        assert service.calls == [(GUILD, None, "")]
 
     async def test_a_typed_owner_is_passed_through(self) -> None:
         command, interaction, service = run_it()
@@ -326,10 +355,24 @@ class TestThePicker:
         ("3", ChosenBoard(3)),
         ("0", ChosenBoard(0)),
         (" 7 ", ChosenBoard(7)),
+        # The shapes the picker itself writes, which is what a client hands over when the
+        # entry is typed rather than committed.
+        ("#6 Shannon Bot", ChosenBoard(6)),
+        ("#6", ChosenBoard(6)),
+        (" #12 Anki Travel the World ", ChosenBoard(12)),
+        ("#6 Board #7", ChosenBoard(6)),
+        (NONE_LABEL, ChosenBoard(0)),
         ("bug", None),
         ("", None),
         ("-1", None),
         ("3.0", None),
+        # A hash in front of prose is not a label: the word boundary is what tells them apart.
+        ("#6abc", None),
+        ("#", None),
+        ("# 6", None),
+        # Only the picker's exact entry clears a board. Anything near it is prose.
+        ("None", None),
+        ("None - stop mirroring a board", None),
     ],
 )
 def test_what_a_typed_board_reads_as(typed: str, expected: ChosenBoard | None) -> None:
@@ -377,3 +420,17 @@ def test_something_that_is_not_a_board_url_is_refused(pasted: str) -> None:
     rather than half-read. A repository's own URL is the near miss worth naming: it has the same
     host and one fewer path segment."""
     assert _wanted(pasted) is None
+
+
+def test_the_picker_writes_the_label_the_parser_reads() -> None:
+    """The two halves of one bug, pinned against each other rather than against a literal.
+    `_label_for` is what the picker shows and `_wanted` is what comes back, and the whole defect
+    was that nobody had checked they agreed. A literal in each test would let them drift apart
+    again the moment the label gains a prefix or loses the hash.
+    """
+    for one in (
+        ProjectListing(number=6, title="Shannon Bot"),
+        ProjectListing(number=15, title="Code Court"),
+        ProjectListing(number=1, title="#1 with a hash in the title"),
+    ):
+        assert _wanted(_label_for(one)) == ChosenBoard(one.number), _label_for(one)

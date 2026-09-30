@@ -488,7 +488,7 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
 | `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
-| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from Backlog, Not reviewed, In review, Ready for merge and Done. Done shuts the thread, and a pull request has to be ready for merge first |
+| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from Backlog, Not reviewed, In review and Done. Done shuts the thread. Where a board is linked, a card may move forward one column at a time and back as far as you like, measured against the board's own column order |
 | `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
 
 **The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:
@@ -612,7 +612,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0027`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0028`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
