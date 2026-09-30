@@ -19,9 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Priority, Status
 from shannon.github.errors import GitHubRefusedError
-from shannon.github.projects import CardMove, CardMoved
+from shannon.github.projects import BoardOrder, CardMove, CardMoved
 from shannon.services.sync.items import ItemSyncService
-from shannon.services.workflow import ItemWorkflow, build_item_workflow
+from shannon.services.workflow import (
+    ItemWorkflow,
+    WorkflowRefusedError,
+    build_item_workflow,
+)
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -47,11 +51,19 @@ class FakeCards:
         error: Exception | None = None,
         answer: CardMove = CardMove.MOVED,
         column: str = "In review",
+        order: BoardOrder | None = None,
+        order_error: Exception | None = None,
     ):
         self.error = error
         self.answer = answer
         self.column = column
+        # None is a board whose columns could not be read, which is what every test here that
+        # is about the WRITE wants: no order means no rule, so nothing is refused before the
+        # thing under test happens. `TestTheOrderTheBoardIsIn` sets a real one.
+        self.order = order
+        self.order_error = order_error
         self.moved: list[tuple[str, int, int, Status | Priority]] = []
+        self.asked: list[tuple[Status, Status]] = []
 
     async def move_card(
         self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
@@ -60,6 +72,14 @@ class FakeCards:
         if self.error is not None:
             raise self.error
         return CardMoved(self.answer, column=self.column)
+
+    async def order_for(
+        self, *, owner: str, project_number: int, frm: Status, to: Status
+    ) -> BoardOrder | None:
+        self.asked.append((frm, to))
+        if self.order_error is not None:
+            raise self.order_error
+        return self.order
 
 
 @pytest.fixture
@@ -111,7 +131,7 @@ class TestWhenBothGatesAreOpen:
     ) -> None:
         """Never empty. An empty owner sends the write out with no credential at all, GitHub
         answers 401, and the poller reads that as permanent and writes the card off for good."""
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert cards.moved[0][0] == "Canon-Regularis"
 
@@ -127,7 +147,7 @@ class TestWhenBothGatesAreOpen:
         registered.project_owner = "acme"
         await db_session.commit()
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert cards.moved[0][0] == "acme"
 
@@ -205,9 +225,7 @@ class TestWhenTheBoardRefuses:
         refusing = FakeCards(error=GitHubRefusedError("Could not resolve to a node"))
 
         with caplog.at_level("WARNING", logger="shannon.services.workflow"):
-            await workflow_with(refusing).set_status(
-                thread_id=thread_id, status=Status.READY_FOR_MERGE
-            )
+            await workflow_with(refusing).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert "Could not resolve to a node" in caplog.text
         assert f"board {BOARD}" in caplog.text
@@ -356,3 +374,120 @@ class TestRememberingWhereItPutIt:
         db_session.expire_all()
         item = await db_session.scalar(select(TrackedItem))
         assert item is not None and item.project_column == before
+
+
+# GitHub's own default template, and the columns a command can actually write to on it.
+# `In progress` is missing from the second tuple on purpose: it and `In review` both read as
+# IN_REVIEW, the exact-name pass takes `In review`, so no status writes to `In progress`.
+TEMPLATE = ("Backlog", "Ready", "In progress", "In review", "Done")
+REACHABLE = ("Backlog", "Ready", "In review", "Done")
+
+
+class TestTheOrderTheBoardIsIn:
+    """A card moves forward one column at a time and back as far as you like.
+
+    This replaced a rule written out in Python - a pull request had to be `Ready for merge` before
+    `Done` - which named a column GitHub's own default template does not have. The requirement is
+    the same and the board is now what states it.
+    """
+
+    def order(self, *, leaving: str, arriving: str) -> BoardOrder:
+        return BoardOrder(columns=TEMPLATE, reachable=REACHABLE, leaving=leaving, arriving=arriving)
+
+    async def test_a_skipped_column_is_refused_before_anything_is_written(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """Refused first, and that ordering is the point. Everything else on this path - the
+        labels, the row, the thread - has already landed by the time the card is touched, so a
+        rule applied at the write would report a change it then declined to mirror."""
+        cards = FakeCards(order=self.order(leaving="Ready", arriving="Done"))
+
+        with pytest.raises(WorkflowRefusedError, match="In review"):
+            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert cards.moved == [], "it wrote to the board it had just refused"
+        assert github.label_calls == [], "a refused command still wrote to GitHub"
+
+    async def test_the_refusal_says_where_to_move_it_instead(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        """A bool would leave whoever ran it to open the board and work out which column. The
+        names come back so the sentence can name the next one."""
+        cards = FakeCards(order=self.order(leaving="Backlog", arriving="Done"))
+
+        with pytest.raises(WorkflowRefusedError) as refused:
+            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        said = refused.value.message
+        assert "would skip Ready, In review" in said
+        assert "Move it to Ready first" in said
+        # The board's real order is named in full, including the column nothing writes to,
+        # because that is what the board looks like. What must not name it is the instruction:
+        # telling somebody to move a card where no command can put one is advice they cannot
+        # take.
+        assert "Backlog -> Ready -> In progress -> In review -> Done" in said
+        assert "Move it to In progress" not in said
+
+    async def test_one_step_forward_goes_through(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        cards = FakeCards(order=self.order(leaving="In review", arriving="Done"))
+
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert cards.moved != []
+
+    async def test_a_column_nothing_writes_to_is_not_a_step(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        """`Ready -> In review` jumps over `In progress`, which no status writes to. Counting it
+        would have left a card in `Ready` with no forward move at all, on the commonest board
+        there is."""
+        cards = FakeCards(order=self.order(leaving="Ready", arriving="In review"))
+
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+
+        assert cards.moved != []
+
+    async def test_a_board_whose_columns_will_not_read_refuses_nothing(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        """Fails open, the way every other board read on this path does. A GitHub outage must not
+        take `/status` down for everybody."""
+        cards = FakeCards(order=None)
+
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert cards.moved != []
+
+    async def test_the_poller_is_never_refused(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        """`tell_the_board=False` is exactly the poller, and it calls BECAUSE a card has already
+        moved. Somebody dragging one is the fact being mirrored rather than a request to be
+        judged, and refusing it would leave the board and the row disagreeing for ever."""
+        cards = FakeCards(order=self.order(leaving="Backlog", arriving="Done"))
+
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.DONE, tell_the_board=False
+        )
+
+        assert cards.asked == [], "it asked the board about a move the board had already made"
+
+    async def test_a_board_that_will_not_answer_is_logged_and_lets_the_move_through(
+        self, on_a_board: None, workflow_with, thread_id: int, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rate limit, an outage, a token that stopped working. None of them is a reason to stop
+        somebody setting a status, so the read is allowed to fail - but silently failing open would
+        leave a rule that quietly stops applying and nothing anywhere saying when.
+
+        Logged with GitHub's own words, because that is the only evidence which of the three it was.
+        """
+        cards = FakeCards(order_error=GitHubRefusedError("API rate limit exceeded"))
+
+        with caplog.at_level("WARNING", logger="shannon.services.workflow"):
+            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert cards.moved != [], "a board it could not read stopped the move"
+        assert "API rate limit exceeded" in caplog.text
+        assert f"board {BOARD}" in caplog.text

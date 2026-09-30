@@ -9,7 +9,7 @@ rather than a poll that dies.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -863,18 +863,23 @@ class TestABoardFromGitHubsOwnTemplate:
 
         assert writer.sent[0][2]["fields"][0]["value"] != "47fc9ee4", "it picked In progress"
 
-    async def test_a_status_the_template_has_no_column_for_writes_nothing(self) -> None:
-        """READY_FOR_MERGE. The template has `Ready`, which means something else here - work
-        that is ready to be picked up, not work that is ready to merge - so there is genuinely
-        nowhere to put it and inventing somewhere would be worse than declining."""
+    @pytest.mark.parametrize("state", list(Status))
+    async def test_every_status_this_bot_has_lands_somewhere_on_the_template(
+        self, state: Status
+    ) -> None:
+        """It did not use to. READY_FOR_MERGE had no column here - the template's `Ready`
+        means work ready to be picked up, not work ready to merge - so `/status Ready for merge`
+        could only ever decline on the commonest board there is, while the gate in front of DONE
+        insisted on it. Retiring that status is what closed the gap, and this is the assertion
+        that says so: on GitHub's own default board, every status now has somewhere to go."""
         writer = FakeWriter()
 
         moved = await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=state
         )
 
-        assert moved.outcome is CardMove.NO_COLUMN
-        assert writer.sent == []
+        assert moved.outcome is CardMove.MOVED, f"nowhere to put {state}"
+        assert len(writer.sent) == 1, "it landed somewhere without writing, or wrote twice"
 
     async def test_the_status_field_id_is_the_one_the_write_addresses(self) -> None:
         writer = FakeWriter()
@@ -1017,21 +1022,32 @@ class TestSettingAPriority:
 
 class TestSayingItOnce:
     """Nothing retries a card write, so this cannot repeat on a timer - the ceiling is the rate
-    people run the command. A team whose board has no merge-gate column would otherwise write a
+    people run the command. A team whose board is missing a column would otherwise write a
     byte-identical line dozens of times a day."""
 
+    # A board somebody has narrowed to two columns, which is the ordinary way to end up with
+    # nowhere to put a status. The default template has a column for every one of them now.
+    TWO_COLUMNS: ClassVar[dict[str, object]] = {
+        "id": 353672864,
+        "name": "Status",
+        "options": [
+            {"id": "47fc9ee4", "name": "In progress"},
+            {"id": "98236657", "name": "Done"},
+        ],
+    }
+
     def moving(self, writer: FakeWriter) -> HttpProjectBoards:
-        return HttpProjectBoards(FakeJson(fields=[DEFAULT_TEMPLATE]), writer=writer)
+        return HttpProjectBoards(FakeJson(fields=[self.TWO_COLUMNS]), writer=writer)
 
     async def test_the_same_complaint_is_said_once(self, caplog: pytest.LogCaptureFixture) -> None:
         boards = self.moving(FakeWriter())
 
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
             )
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
             )
 
         assert caplog.text.count("has no column this bot reads as") == 1
@@ -1039,7 +1055,7 @@ class TestSayingItOnce:
     async def test_a_different_state_is_a_different_complaint(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Keyed on the state as well as the board. A board with no Ready for merge column almost
+        """Keyed on the state as well as the board. A board with no Backlog column almost
         certainly HAS a Done one, and keying on the board alone would swallow a real complaint
         about something else."""
         writer = FakeWriter()
@@ -1048,7 +1064,7 @@ class TestSayingItOnce:
 
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.READY_FOR_MERGE
+                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
             )
             await boards.move_card(
                 owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
@@ -1118,3 +1134,94 @@ class TestOpeningABoardThatRefuses:
 
         with pytest.raises(GitHubRateLimitError):
             await boards.get_board("monalisa", PROJECT)
+
+
+class TestTheOrderTheBoardIsIn:
+    """What `/status` asks before it writes, and the real implementation of it.
+
+    Driven through `HttpProjectBoards` rather than through the Protocol the service sees, because
+    this project has twice shipped an untested real method behind a fake that satisfied its
+    Protocol: the fake answers, every caller passes, and only the coverage floor notices.
+    """
+
+    def reading(self, *fields: object) -> tuple[HttpProjectBoards, FakeJson]:
+        client = FakeJson(fields=list(fields))
+        return HttpProjectBoards(client, writer=FakeWriter()), client
+
+    async def asked(self, boards: HttpProjectBoards, *, frm: Status, to: Status):
+        return await boards.order_for(owner="monalisa", project_number=PROJECT, frm=frm, to=to)
+
+    async def test_the_columns_come_back_in_board_order(self) -> None:
+        boards, _ = self.reading(DEFAULT_TEMPLATE)
+
+        order = await self.asked(boards, frm=Status.NOT_REVIEWED, to=Status.DONE)
+
+        assert order is not None
+        assert order.columns == ("Backlog", "Ready", "In progress", "In review", "Done")
+
+    async def test_a_column_nothing_writes_to_is_left_out_of_the_reachable_ones(self) -> None:
+        """The whole reason `reachable` exists. `In progress` and `In review` both read as
+        IN_REVIEW and the exact-name pass takes `In review`, so no status can put a card in
+        `In progress` - and a rule that counted it as a step would demand a move nobody can make,
+        leaving a card in `Ready` with no way forward at all."""
+        boards, _ = self.reading(DEFAULT_TEMPLATE)
+
+        order = await self.asked(boards, frm=Status.NOT_REVIEWED, to=Status.DONE)
+
+        assert order is not None
+        assert order.reachable == ("Backlog", "Ready", "In review", "Done")
+        assert "In progress" in order.columns, "it dropped the column instead of not stepping on it"
+
+    async def test_it_names_the_columns_the_two_statuses_are_written_to(self) -> None:
+        """From the same picker `move_card` uses, which is what stops the rule and the write
+        disagreeing about where a status goes."""
+        boards, _ = self.reading(DEFAULT_TEMPLATE)
+
+        order = await self.asked(boards, frm=Status.NOT_REVIEWED, to=Status.IN_REVIEW)
+
+        assert order is not None
+        assert (order.leaving, order.arriving) == ("Ready", "In review")
+
+    async def test_a_status_the_board_has_no_column_for_is_empty_rather_than_absent(self) -> None:
+        """Empty reads as nothing to reason about. A board narrowed to one column can still be
+        asked about, and the rule then refuses nothing rather than raising."""
+        boards, _ = self.reading(
+            {"id": 39518, "name": "Status", "options": [{"id": "d", "name": "Done"}]}
+        )
+
+        order = await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE)
+
+        assert order is not None
+        assert (order.leaving, order.arriving) == ("", "Done")
+
+    async def test_a_board_with_no_status_field_answers_nothing(self) -> None:
+        """Which the caller reads as no rule to apply, rather than as a board of no columns."""
+        boards, _ = self.reading({"id": 1, "name": "Title"})
+
+        assert await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE) is None
+
+    async def test_it_re_reads_the_fields_every_time(self) -> None:
+        """The cache is dropped first, deliberately. It never expired, so a column added, renamed
+        or REORDERED changed nothing until the process restarted - tolerable for a write, which
+        fails visibly, and not for a rule derived from the order, which would go on quietly judging
+        moves against a board somebody rearranged an hour ago."""
+        boards, client = self.reading(DEFAULT_TEMPLATE)
+
+        await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE)
+        await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE)
+
+        reads = [path for path, _ in client.calls if path.endswith("/fields")]
+        assert len(reads) == 2, "a second command was judged against the first one's snapshot"
+
+    async def test_the_write_after_it_reuses_what_it_just_read(self) -> None:
+        """One extra read per command, not two. The refreshed entry is left in the cache so the
+        `move_card` that follows does not go round again - and so the two agree."""
+        boards, client = self.reading(DEFAULT_TEMPLATE)
+
+        await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE)
+        await boards.move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        )
+
+        reads = [path for path, _ in client.calls if path.endswith("/fields")]
+        assert len(reads) == 1

@@ -6901,3 +6901,85 @@ feature end to end rather than assuming a predecessor the file never recorded.
   performs an RSA signature on the event loop, `token_for` already signed one just to test that an
   App is configured, and a token is asked for once per page of a paged read. Three signings a
   recovery became one.
+
+## The picker's own entry was not a board
+
+- **`/set_board` refused the entry it had just offered.** Picking `#6 Shannon Bot` off the list was
+  answered with *"'#6 Shannon Bot' is not a board. Pick one from the list"* — told to somebody who
+  had just done exactly that. Discord sends a choice's **value** when the entry is committed and
+  the raw **text** when it is typed, or when a highlighted suggestion is let fall through, and the
+  two are different strings: the value is the bare number, the label is `#6 Shannon Bot`. The
+  parser took numbers and URLs and nothing else.
+- **What makes it embarrassing rather than merely wrong** is that the function's own docstring
+  already said *"discord.py documents a choice as a suggestion — what arrives here may have been
+  typed"*. It anticipated typed prose and never considered that the typed thing would be the
+  picker's own label.
+- **`_label_for` is now one function**, used by the picker to write the label and by the parser to
+  read it back, with a test asserting the round trip rather than a literal in each. Two literals
+  are what let these drift apart, and a label the parser no longer recognises is a bug nothing
+  notices until somebody tries to use the list.
+- **`#3` left the refused-prose list, and nothing about that list's purpose changed.** It is there
+  to stop a typo reaching the service as "clear the board"; with a three-state parse `#3` reads as
+  board 3, which is what somebody typing it meant. Prose still answers None and None is still
+  refused — `#3abc` stays refused, because the word boundary is what keeps a label from swallowing
+  prose that opens with a hash.
+- **The clearing entry is matched exactly**, not by prefix, because it is the one entry whose
+  meaning is destructive. A loose match would put "None of them are right" one hash away from
+  unlinking a board, and the em dash is what makes the exact form unmistakable.
+
+## The board's column order became the rule, and READY_FOR_MERGE went
+
+- **`Ready for merge` is gone as a status.** It existed to carry one rule — a pull request had to be
+  `Ready for merge` before it could be `Done`, so nobody could call work finished before a reviewer
+  said it could be merged. The rule was right. Naming a *column* to express it was not: GitHub's own
+  default template ships `Backlog · Ready · In progress · In review · Done` and has no such column,
+  so on the commonest board there is, `/status Ready for merge` could only ever decline while the
+  gate in front of `Done` insisted on it. A requirement that cannot be satisfied is not a
+  requirement, it is a deadlock.
+- **The rule now comes from the board.** A card may move forward one column at a time and backwards
+  as far as you like, measured against the order the board's Status options are returned in. On that
+  same template `In review → Done` is one step and `Ready → Done` skips `In review` and is refused —
+  so the protection survives, expressed in whatever columns a board actually has instead of in a
+  constant that guessed at one.
+- **The asymmetry is deliberate.** Sending work back for rework is ordinary; declaring it finished
+  early is the thing worth stopping. `Done → Backlog` crosses three columns and is allowed.
+- **🚩 A column nothing can be written to is not a step.** Without this the rule brings the default
+  board to a halt, and finding that out is what the live board was for. `In progress` and
+  `In review` both read as `IN_REVIEW`, and the exact-name pass picks `In review` — so no status
+  writes to `In progress` at all. Counting it as a step made `Ready → In review` a skip whose only
+  remedy was a move no command could make, leaving a card in `Ready` with **no forward move at
+  all**. So what counts as a step is asked of the same picker the write uses, never of
+  `status_from_column`, which maps `In progress` and would have called it reachable.
+- **The order is read fresh, and it had to be.** A board's fields were cached for the life of the
+  process with nothing to invalidate them, so a column added, renamed or **reordered** changed
+  nothing until a restart — and the once-per-board warning then swallowed the repeat, so the log
+  fell silent, which reads as fixed, while the card still never moved. Tolerable for a write that
+  fails visibly; not for a rule derived from the order, which would go on quietly judging moves
+  against a board somebody rearranged an hour ago. One extra read per command, on a path a person
+  drives rather than a poll, and the write that follows reuses it — which is what keeps the rule and
+  the write agreeing about where a status goes.
+- **The poller is never refused.** It calls because a card has *already* moved: somebody dragging one
+  is the fact being mirrored, not a request to be judged, and a poll has nowhere to put a refusal.
+  Refusing there would leave the board and the row disagreeing for ever.
+- **It fails open.** No board, no card, no writer, or a board whose columns will not read, and
+  nothing is refused. The rule comes from a list this bot did not write, so a GitHub outage must not
+  take `/status` down for everybody.
+- **Migration `0028` is not optional.** `tracked_items.status` is a non-native `sa.Enum`, so the
+  database keeps a value the enum no longer knows — and SQLAlchemy then raises `LookupError` for the
+  *whole query* rather than the one row. One surviving `READY_FOR_MERGE` would take every read of
+  that table down: the poller, every command, every webhook. Rows become `IN_REVIEW`, which is a
+  judgement rather than a default: the work has been reviewed and not merged. The downgrade is
+  deliberately empty, because nothing records which rows to put back.
+- **The stale GitHub label is now inert.** Repositories that already carry a `READY_FOR_MERGE` label
+  keep it: nothing writes it and nothing reads it as a status any more, and `reserved_as` no longer
+  protects the name, so `/label READY_FOR_MERGE` becomes legal. Deleting it on GitHub is a few
+  seconds by hand; a cleanup path would be GitHub calls spent on tidiness.
+- **This departs from `requirements.md`**, which lists `READY_FOR_MERGE` under Required Statuses.
+  That file is left as written — it records what was asked for, and this records why the answer
+  changed after a real board showed the requirement could not be met as stated.
+- **`SHANNON_REQUIRE_PROVED_LINKS` now reaches the GitHub access gate.** An unproved caller was let
+  through on their Discord role alone, which was deliberate and is now optional. Turning it on
+  covers all eight commands that ask GitHub for permission, not only `/status` — wider than the
+  setting's name suggests, and consistent, which is the point. Off by default. It is paired with
+  whether the OAuth round trip is configured at all, because a deployment with no public URL cannot
+  produce a proof and would otherwise refuse those commands for everybody, for ever.

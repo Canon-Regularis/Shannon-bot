@@ -23,24 +23,19 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
+from shannon.domain.board import must_pass_through
 from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
 from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.domain.text import code_span
 from shannon.github import labels
 from shannon.github.client import GitHubClient
-from shannon.github.projects import CardMove, CardMoved
+from shannon.github.projects import BoardOrder, CardMove, CardMoved
 from shannon.services.labels import RepositoryLabels
 from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
 
 logger = logging.getLogger(__name__)
-
-# A pull request is only finished once somebody has said it is ready to merge. The requirement
-# is about the order of a review, not about bookkeeping: marking a pull request done skips the
-# step where a reviewer says it may be merged, and locking its thread takes away the place that
-# would have been said.
-DONE_NEEDS = Status.READY_FOR_MERGE
 
 
 class NotAnItemThreadError(ShannonError):
@@ -136,6 +131,10 @@ class MovesCards(Protocol):
         self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
     ) -> CardMoved: ...
 
+    async def order_for(
+        self, *, owner: str, project_number: int, frm: Status, to: Status
+    ) -> BoardOrder | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class BoardCard:
@@ -207,6 +206,8 @@ class ItemWorkflow:
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
         self._refuse_conflicting_status(found, snapshot, status)
+        if tell_the_board:
+            await self._refuse_a_move_the_board_forbids(found, status)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -603,14 +604,64 @@ class ItemWorkflow:
                 )
             return
 
-        # A pull request is only finished once a reviewer has said it may be merged. Already
-        # being DONE passes too: that is a repeat, and a repeat is how a lock that failed on
-        # its own gets tried again.
-        if status is Status.DONE and found.status not in (DONE_NEEDS, Status.DONE):
-            raise WorkflowRefusedError(
-                f"A pull request has to be {spoken(DONE_NEEDS)} before it can be marked "
-                f"{spoken(Status.DONE)}. This one is {spoken(found.status)}."
+    async def _refuse_a_move_the_board_forbids(self, found: FoundItem, status: Status) -> None:
+        """Refuse a jump the board's own column order does not allow.
+
+        This replaced a rule written out in Python - a pull request had to be `Ready for merge`
+        before `Done` - with the same requirement read off whatever columns a board has. The
+        old constant could only ever be right for a board that happened to use that word, and
+        GitHub's own default template does not.
+
+        Only when `tell_the_board` is true, which is exactly not the poller. The poller calls
+        BECAUSE a card has already moved: somebody dragging one is the fact being mirrored
+        rather than a request to be judged, and a poll has nowhere to put a refusal anyway.
+        Refusing there would leave the board and the row disagreeing for ever, with the card
+        where the person put it and the status where it was.
+
+        Silent wherever there is nothing to ask: no writer, no card, no board, or a board whose
+        columns will not read. The rule comes from a list this bot did not write, so it fails
+        open the way every other board read on this path does - a GitHub outage must not take
+        `/status` down for everybody.
+        """
+        if self._cards is None or found.card is None:
+            return
+
+        try:
+            order = await self._cards.order_for(
+                owner=found.card.owner,
+                project_number=found.card.project_number,
+                frm=found.status,
+                to=status,
             )
+        except ShannonError as unreadable:
+            logger.warning(
+                "could not read board %s to check the move for %s#%s: %s",
+                found.card.project_number,
+                found.full_name,
+                found.number,
+                unreadable.message,
+            )
+            return
+        if order is None:
+            return
+
+        # The column the card is actually in wins over the one this item's status maps to.
+        # They differ on a board with two columns reading as one status - GitHub's template
+        # ships `In progress` and `In review`, both IN_REVIEW - and the card's own column is
+        # the one the next move is measured from.
+        skipped = must_pass_through(
+            order.columns,
+            frm=found.column or order.leaving,
+            to=order.arriving,
+            reachable=order.reachable,
+        )
+        if not skipped:
+            return
+        raise WorkflowRefusedError(
+            f"Its board goes {' -> '.join(order.columns)}, so moving that card to "
+            f"{order.arriving} would skip {', '.join(skipped)}. Move it to {skipped[0]} first, "
+            "or drag the card on the board yourself."
+        )
 
     async def _fetch(self, found: FoundItem) -> TrackedSnapshot:
         """Read the item from GitHub, and refuse anything that is not the repository we mean.
@@ -925,6 +976,11 @@ class FoundItem:
     # Where this item's board card is, or None where no board is linked to the
     # repository or no poll has yet paired the two.
     card: BoardCard | None = None
+    # The column the card was last seen in, in the BOARD's own spelling, or None where no
+    # poll or write has recorded one. Kept beside `status` rather than derived from it
+    # because a board may have two columns reading as one status, and which of them a card
+    # actually sits in is what decides whether the next move skips anything.
+    column: str | None = None
 
     @property
     def owner(self) -> str:
@@ -946,6 +1002,7 @@ class FoundItem:
             guild_id=repository.discord_guild_id,
             status=item.status,
             priority=item.priority,
+            column=item.project_column,
             card=(
                 BoardCard(
                     # Never empty. An empty owner sends the write out with no

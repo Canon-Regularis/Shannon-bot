@@ -14,7 +14,6 @@ class ObjectType(StrEnum):
 class Status(StrEnum):
     NOT_REVIEWED = "NOT_REVIEWED"
     IN_REVIEW = "IN_REVIEW"
-    READY_FOR_MERGE = "READY_FOR_MERGE"
     BACKLOG = "BACKLOG"
     DONE = "DONE"
 
@@ -33,13 +32,12 @@ class Priority(StrEnum):
 # the key a priority label is case-folded against. SCREAMING_SNAKE is what all three want and none
 # of them is a sentence, so the display form has to be its own answer and never the same string.
 #
-# Written out for the reason `services/workflow._OWNED_BY` is written out: a derived form would be
-# right for eight of these and silently wrong for the ninth, and there is nowhere in a
+# Written out for the reason `services/workflow._OWNED_BY` was written out: a derived form would
+# be right for seven of these and silently wrong for the eighth, and there is nowhere in a
 # `.replace().capitalize()` to put UNSET's word.
 _SPOKEN: dict[Status | Priority, str] = {
     Status.NOT_REVIEWED: "Not reviewed",
     Status.IN_REVIEW: "In review",
-    Status.READY_FOR_MERGE: "Ready for merge",
     Status.BACKLOG: "Backlog",
     Status.DONE: "Done",
     Priority.HIGH: "High",

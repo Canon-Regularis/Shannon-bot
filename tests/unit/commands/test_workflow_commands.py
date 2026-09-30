@@ -116,11 +116,11 @@ async def test_project_managers_and_administrators_may_run_them(who) -> None:
 
 
 async def test_a_developer_may_not() -> None:
-    """The permissions table grants these to reviewers and project managers. A developer moving
-    their own work to ready for merge is the review step going missing."""
+    """The permissions table grants these to project managers. A developer marking their own
+    work done is the review step going missing."""
     service = StubWorkflow()
 
-    interaction = await run("status", service, developer(), Status.READY_FOR_MERGE.value)
+    interaction = await run("status", service, developer(), Status.DONE.value)
 
     assert service.calls == []
     assert "You need one of these roles" in said(interaction)
@@ -257,14 +257,18 @@ async def test_it_refuses_with_no_channel_to_act_on() -> None:
 
 def test_the_status_picker_opens_on_the_state_work_starts_in() -> None:
     """Discord shows choices in the order they are written, and the enum is not in that
-    order: it declares BACKLOG fourth, which is right for the database and wrong for a
+    order: it declares BACKLOG third, which is right for the database and wrong for a
     person. Comprehended over `Status`, the picker would open on Not reviewed with Backlog
-    buried under Ready for merge."""
+    buried under In review.
+
+    Written out rather than compared against `list(Status)` in some order, because the point is
+    that this list and that enum disagree on purpose. It also happens to run in the order a
+    board's columns usually do, which is worth nothing: the rule that refuses a skipped column
+    reads the BOARD's order and never this one."""
     assert [choice.value for choice in STATUS_CHOICES] == [
         Status.BACKLOG.value,
         Status.NOT_REVIEWED.value,
         Status.IN_REVIEW.value,
-        Status.READY_FOR_MERGE.value,
         Status.DONE.value,
     ]
 
@@ -362,12 +366,12 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow(outcome=self.nowhere())
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.READY_FOR_MERGE.value
+            "status", service, member_with("Project Manager"), Status.BACKLOG.value
         )
 
         answer = said(interaction)
-        assert "is now Ready for merge" in answer
-        assert "no column called Ready for merge" in answer
+        assert "is now Backlog" in answer
+        assert "no column called Backlog" in answer
 
     async def test_it_says_what_to_do_about_it(self) -> None:
         service = StubWorkflow(outcome=self.nowhere())

@@ -125,6 +125,27 @@ class BoardSelect:
 
 
 @dataclass(frozen=True, slots=True)
+class BoardOrder:
+    """A board's Status columns in board order, and the ones two statuses map onto.
+
+    Both come from the same picker `move_card` uses, so a rule built on this cannot disagree
+    with the write it is about to allow or refuse. Empty where the board has no column for that
+    status, which reads as nothing to reason about rather than as a column called "".
+    """
+
+    # Left to right on the board, which is the only ordering GitHub gives: a single-select
+    # option carries no position, rank or index, and the array order is the whole of it.
+    columns: tuple[str, ...]
+    # The subset some status would actually be written to, which is not all of them and is why
+    # this field exists. A board carrying both `In progress` and `In review` has the exact-name
+    # pass take `In review` for IN_REVIEW, so no command can put a card in `In progress` - and a
+    # rule that counted it as a step would demand one nobody could take.
+    reachable: tuple[str, ...]
+    leaving: str
+    arriving: str
+
+
+@dataclass(frozen=True, slots=True)
 class BoardFields:
     """What one board's `/fields` answer is worth keeping, looked up once per board.
 
@@ -205,8 +226,11 @@ class HttpProjectBoards:
         # Boards already complained about for one state, so the complaint is said once
         # rather than once per command. Keyed on the state too: a board with no column for
         # one status very likely has one for another, and keying on the board alone would
-        # swallow a different complaint. Never expires, and needs no expiry - the moment
-        # somebody adds the column the picker finds it and this is never reached again.
+        # swallow a different complaint. Never expires, and the reason it needs no expiry is
+        # `order_for` above: a command re-reads the board's fields, so the moment somebody adds
+        # the column the picker finds it and this is never reached again. Before that read was
+        # fresh, adding the column changed nothing until a restart while this swallowed the
+        # warning - so the log fell silent, which reads as fixed, and the card still never moved.
         self._warned: set[tuple[str, int, str]] = set()
 
     async def list_boards(self, owner: str) -> Sequence[ProjectListing]:
@@ -384,6 +408,47 @@ class HttpProjectBoards:
         decided = "orgs" if kind == "Organization" else "users"
         self._kinds[owner] = decided
         return decided
+
+    async def order_for(
+        self, *, owner: str, project_number: int, frm: Status, to: Status
+    ) -> BoardOrder | None:
+        """This board's Status columns in order, with the columns two statuses map onto.
+
+        Read fresh, by dropping the cached fields first. That cache exists so a poll does not
+        re-read a board it has already read, and it never expired - so a column added, renamed
+        or REORDERED had no effect until the process restarted. Tolerable for a write, which
+        fails visibly and tells whoever ran it to rename a column. Not tolerable for a rule
+        derived from the order, which would go on quietly judging moves against a board
+        somebody rearranged an hour ago and never say a word about it.
+
+        So one extra read per command - on a path a person drives, not a poll - and the write
+        that follows reuses what this just cached, which is what keeps the rule and the write
+        agreeing about where a status goes.
+
+        None where the board cannot be read at all, which the caller reads as no rule to apply.
+        """
+        board = await self._board_path(owner, project_number)
+        self._fields.pop((owner, project_number), None)
+        fields = await self._board_fields(board, owner, project_number)
+        if fields is None:
+            return None
+
+        options = fields.status.options
+        leaving = _option_for(options, frm)
+        arriving = _option_for(options, to)
+        # Every status, through the same picker the write uses, so what the rule treats as a
+        # step is exactly what a command could put a card in. Asking `_option_for` rather than
+        # `status_from_column` is the whole point: the latter maps `In progress` to IN_REVIEW
+        # and would call it reachable, while the write never picks it.
+        written_to = {
+            found.name for found in (_option_for(options, one) for one in Status) if found
+        }
+        return BoardOrder(
+            columns=tuple(one.name for one in options),
+            reachable=tuple(one.name for one in options if one.name in written_to),
+            leaving=leaving.name if leaving is not None else "",
+            arriving=arriving.name if arriving is not None else "",
+        )
 
     async def _board_fields(
         self, board: str, owner: str, project_number: int

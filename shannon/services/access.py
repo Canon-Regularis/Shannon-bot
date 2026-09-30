@@ -47,11 +47,15 @@ class ReadsPermissions(Protocol):
 class ProvesAccounts(Protocol):
     """The GitHub account somebody has proved they hold, if they have proved one.
 
-    One member rather than two. The verification service also answers whether the OAuth round
-    trip is configured at all, and this does not need asking: a deployment that cannot run it has
-    no proofs, so every caller answers None and this gate is inert by construction rather than by
-    a check.
+    Two members, and the second one used not to be needed. While an unproved caller was let
+    through, a deployment that cannot run the round trip had no proofs, so every caller answered
+    None and the gate was inert by construction. Once `require_proved` can turn that same None
+    into a refusal, inert by construction becomes refusing everything by construction - so
+    whether the round trip exists has to be asked rather than inferred.
     """
+
+    @property
+    def configured(self) -> bool: ...
 
     async def ever_proved(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None: ...
 
@@ -64,10 +68,12 @@ class GitHubAccess:
         sessionmaker: async_sessionmaker[AsyncSession],
         github: ReadsPermissions,
         proof: ProvesAccounts,
+        require_proved: bool = False,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
         self._proof = proof
+        self._require_proved = require_proved
 
     async def refusal_for(
         self, *, guild_id: int, discord_user_id: int, at_least: str
@@ -85,6 +91,18 @@ class GitHubAccess:
             # The fallback, and the whole security posture in one branch. Nobody proved who this
             # is, so there is no GitHub account to ask about and the Discord role stands alone -
             # which is what decided every command in this bot before this existed.
+            #
+            # `require_proved` closes it, and the second half of that condition is not optional:
+            # a deployment with no public URL cannot run the round trip, so without it this would
+            # refuse every one of these commands for everybody, for ever, with the only remedy
+            # being a setting nobody would connect to the symptom. The same pairing guards
+            # `/assign`, for the same reason.
+            if self._require_proved and self._proof.configured:
+                return (
+                    "Nobody has proved which GitHub account is yours in this server, and this "
+                    "server asks for that before a change is made on GitHub. Run /link, then "
+                    "try again."
+                )
             return None
 
         async with self._sessionmaker() as session:

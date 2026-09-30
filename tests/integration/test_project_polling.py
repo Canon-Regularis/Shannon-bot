@@ -662,7 +662,7 @@ class TestCardsWrappingSomethingAlreadyMirrored:
     async def test_a_card_moving_moves_the_status_of_the_item_it_wraps(
         self, mirrored_pr: int, poller_for, db_session: AsyncSession
     ) -> None:
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
 
         moved = await poller_for(board).run_once()
 
@@ -671,7 +671,7 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.status is Status.READY_FOR_MERGE
+        assert item.status is Status.IN_REVIEW
 
     async def test_it_does_not_open_a_second_thread(
         self, mirrored_pr: int, poller_for, threads: FakeThreadGateway
@@ -869,14 +869,14 @@ class TestTheBoardDoesNotOverruleACommand:
         await poller.run_once()
 
         thread_id = threads.created[0].thread_id
-        await workflow.set_status(thread_id=thread_id, status=Status.READY_FOR_MERGE)
+        await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert await poller.run_once() == 0, "the board overruled a command"
         db_session.expire_all()
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.status is Status.READY_FOR_MERGE
+        assert item.status is Status.IN_REVIEW
 
     async def test_a_card_that_does_move_is_still_followed(
         self,
@@ -890,9 +890,7 @@ class TestTheBoardDoesNotOverruleACommand:
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
         poller = poller_for(board)
         await poller.run_once()
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
 
         board.items = [wraps(ObjectType.PR, mirrored_pr, column="Backlog")]
 
@@ -926,9 +924,7 @@ class TestTheBoardDoesNotOverruleACommand:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A board added after the fact must not undo what was decided before it existed."""
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Backlog"))
 
         with caplog.at_level("INFO", logger="shannon.services.projects"):
@@ -939,7 +935,7 @@ class TestTheBoardDoesNotOverruleACommand:
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.status is Status.READY_FOR_MERGE
+        assert item.status is Status.IN_REVIEW
 
     async def test_a_move_the_item_cannot_take_is_not_asked_about_again(
         self,
@@ -1048,7 +1044,7 @@ class TestASecondReviewFound:
         """The column used to be written before the move was attempted, so a rate limit or a 500
         left the card recorded in its new column with the old status, and no later poll ever
         looked at it again. Nothing else rederives a status from a board."""
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
         github_client.error = GitHubUnavailableError("GitHub is down")
 
@@ -1060,7 +1056,7 @@ class TestASecondReviewFound:
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.status is Status.READY_FOR_MERGE
+        assert item.status is Status.IN_REVIEW
 
     async def test_a_card_first_seen_with_no_status_is_still_remembered(
         self,
@@ -1079,9 +1075,7 @@ class TestASecondReviewFound:
         set: the move that sets it is read as a first look at the card and dropped, and no later
         poll revisits it because the column then matches.
         """
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
         poller = poller_for(FakeBoard(wraps(ObjectType.PR, mirrored_pr, column=None)))
         assert await poller.run_once() == 0
 
@@ -1152,9 +1146,7 @@ class TestASecondReviewFound:
             card(item_id=901, title="A card that keeps its column"),
         ]
         await poller.run_once()
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
 
         # Dragged back into the column it started in.
         board.items = [
@@ -1192,9 +1184,10 @@ class TestASecondReviewFound:
         await poller.run_once()
 
         # Somebody looks at the item and decides otherwise while the board cannot be read.
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        # BACKLOG rather than a status the board's own column reads as: `In Progress` below
+        # maps to IN_REVIEW, so a decision spelled that way would agree with the board and the
+        # guard would be proved by nothing.
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.BACKLOG)
 
         # The field comes back, unchanged, saying what it said before.
         board.items = [wraps(ObjectType.PR, mirrored_pr, column="In Progress")]
@@ -1204,7 +1197,7 @@ class TestASecondReviewFound:
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.status is Status.READY_FOR_MERGE, "the board overwrote a decision"
+        assert item.status is Status.BACKLOG, "the board overwrote a decision"
 
     async def test_a_cleared_column_does_not_re_arm_the_first_look_guard(
         self,
@@ -1218,9 +1211,7 @@ class TestASecondReviewFound:
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
         poller = poller_for(board)
         await poller.run_once()
-        await workflow.set_status(
-            thread_id=threads.created[0].thread_id, status=Status.READY_FOR_MERGE
-        )
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
 
         board.items = [wraps(ObjectType.PR, mirrored_pr, column=None)]
         await poller.run_once()
@@ -1451,7 +1442,7 @@ class TestProgressRecordedForAStepThatFailed:
         by then, and matching statuses used to end the card: a finished pull request kept an
         open thread for ever, and no poll ever looked at it again.
         """
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
         await poller.run_once()
 
@@ -1548,7 +1539,7 @@ class TestProgressRecordedForAStepThatFailed:
 
         # A move a pull request is allowed to make, so the refusal under test is Discord's and
         # not the workflow declining the status itself.
-        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Ready for merge")]
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="In review")]
         threads.refuses_every_update = True
         assert await poller.run_once() == 0, "it reported a move Discord refused outright"
 
@@ -1644,7 +1635,7 @@ class TestProgressRecordedForAStepThatFailed:
         The move itself did land, so it is written off as carried through, which is what the
         column records, and the reason is said once rather than once a minute.
         """
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
         await poller.run_once()
 
@@ -1673,7 +1664,7 @@ class TestProgressRecordedForAStepThatFailed:
         ever looked at one of them again.
         """
         guild_id = registered.discord_guild_id
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
         await poller.run_once()
 
@@ -1704,7 +1695,7 @@ class TestProgressRecordedForAStepThatFailed:
         for a board asking something the item cannot hold, which is final and is written off on
         purpose, and this must not be read as one of those.
         """
-        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Ready for merge"))
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
         await poller.run_once()
 

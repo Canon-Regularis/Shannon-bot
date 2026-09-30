@@ -918,7 +918,7 @@ def build_container(
             ),
             conversations,
             BoardLinkingService(sessionmaker, boards, OwnerBoards(boards)),
-            GitHubAccess(sessionmaker, github, verification),
+            GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),
             capturing=settings.capture_discord_messages,
         ),
         also_opened=(app_http,) if board_client is None else (app_http, board_client),

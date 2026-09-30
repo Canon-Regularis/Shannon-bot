@@ -6,14 +6,14 @@ the picker as eight things to do. It also shows them as eight things to scroll p
 of the eight is `/set_med_priority`, which is not what anybody types first.
 
 Two rather than one, because a priority is not a status. The service has a method for each,
-the sentences differ, and the rules about a closed item and about DONE needing
-READY_FOR_MERGE apply to status alone. One picker holding both would put High in a list
-labelled status and need an isinstance to tell them apart again on the other side.
+the sentences differ, and the rules about a closed item and about the order a board's columns
+come in apply to status alone. One picker holding both would put High in a list labelled
+status and need an isinstance to tell them apart again on the other side.
 
 The choices are static, which is not a limitation being worked around. A choice list is baked
 into the registration at `tree.sync()`, which runs once at boot, globally - so anything
 per-guild or per-board would have to be an autocomplete instead. These values are a StrEnum:
-the same five and the same three in every server, for the life of the process. Registered,
+the same four and the same three in every server, for the life of the process. Registered,
 Discord renders a validated dropdown and discord.py resolves what comes back against the
 list, so the callback has no parse to guard.
 """
@@ -43,13 +43,14 @@ logger = logging.getLogger(__name__)
 # Written out rather than comprehended over the enum, and each table for its own reason.
 #
 # Status, because Discord shows choices in the order they are written and the enum is not in that
-# order: it declares BACKLOG fourth, which is right for the database and wrong for a person, who
-# would open the picker on "Not reviewed" with "Backlog" buried below "Ready for merge".
+# order: it declares BACKLOG third, which is right for the database and wrong for a person, who
+# would open the picker on "Not reviewed" with "Backlog" buried below "In review". The order
+# written here is also the order a board's columns usually run in, which is no accident and no
+# guarantee: the rule that refuses a skipped column reads the BOARD's order, never this list.
 STATUS_CHOICES: list[app_commands.Choice[str]] = [
     app_commands.Choice(name=spoken(Status.BACKLOG), value=Status.BACKLOG.value),
     app_commands.Choice(name=spoken(Status.NOT_REVIEWED), value=Status.NOT_REVIEWED.value),
     app_commands.Choice(name=spoken(Status.IN_REVIEW), value=Status.IN_REVIEW.value),
-    app_commands.Choice(name=spoken(Status.READY_FOR_MERGE), value=Status.READY_FOR_MERGE.value),
     app_commands.Choice(name=spoken(Status.DONE), value=Status.DONE.value),
 ]
 
