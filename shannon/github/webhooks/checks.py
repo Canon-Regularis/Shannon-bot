@@ -7,7 +7,7 @@ on the default branch, so such a suite is dropped and pull requests from forks a
 The obvious fallback, `GET /repos/{owner}/{repo}/commits/{sha}/pulls`, must not be used: it
 answers with pull requests ASSOCIATED with the commit, including the one merged to put it there,
 so CI on every push to `main` would reopen the merged pull request's archived thread and ring
-every reviewer of finished work.
+everybody who worked on finished work.
 """
 
 from __future__ import annotations

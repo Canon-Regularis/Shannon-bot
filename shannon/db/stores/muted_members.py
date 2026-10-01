@@ -31,9 +31,13 @@ class MutedMemberStore:
         for a rebuild from a superseded delivery, which both render the people in plain text.
 
         Deduped although `user_links` is unique on the Discord account within a guild, so one
-        item's mentions cannot repeat one; sorted so a test can assert on a literal. No cap:
-        Discord refuses more than a hundred entries here, and every caller is far under, since
-        GitHub allows ten assignees and fifteen requested reviewers and a comment mentions ten.
+        item's mentions cannot repeat one; sorted so a test can assert on a literal. No cap here:
+        Discord refuses more than a hundred entries, and GitHub bounds most callers well under,
+        allowing ten assignees and fifteen requested reviewers while a comment mentions ten.
+
+        One caller is NOT bounded by GitHub, and caps itself instead. A CI result rings everybody
+        with a commit on the pull request (issue #164), and a long-lived branch can carry work
+        from dozens of accounts, so `audience.PEOPLE_RUNG` cuts the list before it arrives here.
         """
         wanted = set(ids)
         if not wanted:

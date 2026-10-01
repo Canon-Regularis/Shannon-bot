@@ -1,10 +1,10 @@
 """Saying out loud that a pull request has crossed into or out of draft.
 
 Issues #132, #139 and #140. A draft rings nobody, deliberately and in two places: the CI
-announcer refuses to notify on one because reviewers have not been asked to look yet, and the
-card is painted grey rather than green to say the same thing quietly. Nothing was watching for
-either moment that changes, so the ask a draft defers never arrived, and its withdrawal never
-did either.
+announcer refuses to notify on one because a draft is the state in which this bot asks nothing of
+anybody, and the card is painted grey rather than green to say the same thing quietly. Nothing
+was watching for either moment that changes, so the ask a draft defers never arrived, and its
+withdrawal never did either.
 
 One class, built twice. The two halves differ in four values — which action they answer, which
 key they claim, which words they post, and whether a team becomes a role mention — and in

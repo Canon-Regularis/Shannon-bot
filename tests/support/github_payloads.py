@@ -73,7 +73,7 @@ def pull_request(**overrides: Any) -> dict[str, Any]:
         "base": {"ref": "main", "repo": repository()},
         # Both carried because GitHub sends both and issue #112 reads both: the head to tell a CI
         # result about this commit from one about a commit the branch has moved off, and the draft
-        # flag to decide whether reviewers are rung at all.
+        # flag to decide whether anybody is rung at all.
         "head": {"ref": "feature", "sha": CHECKED_SHA},
         "draft": False,
     }
