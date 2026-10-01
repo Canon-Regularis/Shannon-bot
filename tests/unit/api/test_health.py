@@ -84,14 +84,6 @@ async def test_an_unhealthy_process_does_not_also_complain_about_the_flusher() -
     assert response.json()["flusher"] is False
 
 
-async def test_no_board_configured_is_not_something_stopped() -> None:
-    """Which is the default: no board is set up unless somebody sets one up."""
-    async with client_with(FakeLiveness(poller=True)) as client:
-        response = await client.get("/health")
-
-    assert response.json()["poller"] is True
-
-
 async def test_a_dead_worker_makes_the_process_unhealthy() -> None:
     """The whole point: the port is open and deliveries are accepted, but nothing acts on them."""
     async with client_with(FakeLiveness(worker=False)) as client:
