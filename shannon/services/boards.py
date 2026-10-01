@@ -36,6 +36,16 @@ class BoardUnreadableError(ShannonError):
     """The board cannot be opened with the credential this deployment has."""
 
 
+class BoardNotLinkedError(ShannonError):
+    """This server mirrors no board, asked for something that only a board can answer.
+
+    Distinct from `BoardUnreadableError`, because the two send somebody to different places: this
+    one to `/set_board`, that one to the project token and the log. A caller that merely wants to
+    know whether a board exists reads the row instead; this is for a caller that asked for the
+    board's contents by name.
+    """
+
+
 class BoardTakenError(ShannonError):
     """Another registered repository is already mirroring this board."""
 

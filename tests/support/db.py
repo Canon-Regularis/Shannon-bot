@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
 from shannon.domain.enums import ObjectType
+from tests.fakes.boards import PROJECT
 from tests.support import github_payloads as payloads
 
 
@@ -62,6 +63,25 @@ async def map_channel(
             discord_channel_id=channel_id,
         )
     )
+    await session.commit()
+
+
+async def link_board(
+    session: AsyncSession,
+    repository: Repository,
+    *,
+    project_number: int = PROJECT,
+    project_owner: str | None = None,
+) -> None:
+    """The state /set_board leaves behind.
+
+    `project_owner` stays null by default, which is not laziness: null means "this repository's own
+    owner", and writing today's answer into the row instead would survive a rename. Both the poller
+    and the refresh path fall back to the repository owner when it is null, so the default is the
+    case nearly every server is in.
+    """
+    repository.project_number = project_number
+    repository.project_owner = project_owner
     await session.commit()
 
 

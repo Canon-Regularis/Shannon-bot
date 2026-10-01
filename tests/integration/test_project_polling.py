@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
-from datetime import datetime
 
 import pytest
 from sqlalchemy import select
@@ -37,6 +35,7 @@ from shannon.services.workflow import (
     WorkflowRefusedError,
     build_item_workflow,
 )
+from tests.fakes.boards import PROJECT, FakeBoard, card, wraps
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support.db import map_channel, register_repository
@@ -44,39 +43,8 @@ from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
-PROJECT = 12
 TICKET_CHANNEL = 4242
 REPO_FULL = "canon-regularis/shannon-bot"
-
-
-def card(
-    item_id: int = 900,
-    title: str = "Write the poller",
-    column: str | None = "In Progress",
-    at: str = "2026-08-20T10:00:00Z",
-) -> BoardItem:
-    return BoardItem(
-        item_id=item_id,
-        title=title,
-        column=column,
-        html_url=f"https://github.com/users/Canon-Regularis/projects/{PROJECT}",
-        updated_at=datetime.fromisoformat(at.replace("Z", "+00:00")),
-    )
-
-
-class FakeBoard:
-    """A project board that answers with whatever it was last set to hold."""
-
-    def __init__(self, *items: BoardItem) -> None:
-        self.items = list(items)
-        self.reads: list[tuple[str, int]] = []
-        self.error: Exception | None = None
-
-    async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
-        self.reads.append((owner, project_number))
-        if self.error is not None:
-            raise self.error
-        return list(self.items)
 
 
 @pytest.fixture
@@ -554,19 +522,6 @@ class TestTheLoop:
         poller.stop()
 
         await asyncio.wait_for(running, timeout=5)
-
-
-def wraps(kind: ObjectType, content_id: int, column: str = "Done", item_id: int = 700) -> BoardItem:
-    """A card that wraps something already mirrored from its own webhooks."""
-    return BoardItem(
-        item_id=item_id,
-        kind=kind,
-        title="Add the webhook endpoint",
-        column=column,
-        html_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
-        content_id=content_id,
-        updated_at=datetime.fromisoformat("2026-08-20T10:00:00+00:00"),
-    )
 
 
 class TestABoardThatMayNotSetAStatus:

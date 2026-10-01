@@ -79,9 +79,9 @@ from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.people import ItemPeople, PutsPeopleOnItems
-from shannon.services.projects import ReadsBoards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.sync.announcements import AnnouncesInThread
+from shannon.services.sync.draft_cards import ReadsBoards
 from shannon.services.sync.draft_lines import DraftSwitchLine
 from shannon.services.sync.items import (
     ItemSyncService,
@@ -116,6 +116,7 @@ from shannon.services.unregistration import (
 )
 from shannon.services.verification import BindsProvedAccounts, GitHubIdentityVerification
 from shannon.services.workflow import ItemWorkflow, LabelsItems
+from tests.fakes.boards import FakeBoard
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
@@ -201,6 +202,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (LabelsItems, HttpGitHubClient),
     (LabelsItems, FakeGitHubClient),
     (ReadsBoards, HttpProjectBoards),
+    # The fake side, which `ReadsBoards` had no row for. Two things mirror a draft card now,
+    # so a fake that drifts narrower than the protocol would be found by whichever caller
+    # happened to use the missing method rather than here.
+    (ReadsBoards, FakeBoard),
     (RoleNames, ConfiguredRoles),
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),

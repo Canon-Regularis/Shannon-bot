@@ -89,6 +89,7 @@ from shannon.services.reviews import (
 )
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.commit_lines import CommitLine
+from shannon.services.sync.draft_cards import ReadsBoards
 from shannon.services.sync.draft_lines import DRAFTED, READY, DraftSwitchLine
 from shannon.services.sync.items import (
     ItemSyncService,
@@ -559,7 +560,10 @@ def _event_router(
 
 
 def _refresh(
-    sessionmaker: async_sessionmaker[AsyncSession], github: GitHubClient, threads: ThreadGateway
+    sessionmaker: async_sessionmaker[AsyncSession],
+    github: GitHubClient,
+    threads: ThreadGateway,
+    boards: ReadsBoards,
 ) -> RepositoryRefresh:
     """The refresh path's own sync services, built with no notifier.
 
@@ -568,18 +572,27 @@ def _refresh(
     so no later edit to the sync path can make one fire, and nothing about being silent is a rule
     somebody has to keep reading.
 
-    Two more services is two more constructor calls. Each holds a sessionmaker, a stateless lock,
-    the one thread gateway, a stateless binding and a stateless policy: no connection, no task,
-    no cache. The poller already pays this for tickets, one line down.
+    Three more services is three more constructor calls. Each holds a sessionmaker, a stateless
+    lock, the one thread gateway, a stateless binding and a stateless policy: no connection, no
+    task, no cache. The poller pays the same for its own ticket sync, further down.
+
+    `boards` is the SAME reader the poller and the pickers get, on purpose. It caches a board's
+    field ids and an owner's kind per owner and number, so a command sharing it usually finds the
+    cache warm and spends one GET rather than three.
     """
     return RepositoryRefresh(
         sessionmaker,
         github,
+        boards,
         # Mentions off, because every thread this opens is a FIRST one and a first block is
         # posted. Twenty-five of them in a run would notify everybody on all twenty-five about a
         # backlog that has been sitting there.
         pull_requests=build_item_sync(sessionmaker, threads, PullRequestPolicy(), mentions=False),
         issues=build_item_sync(sessionmaker, threads, IssuePolicy(), mentions=False),
+        # Off for tickets too, though a draft card names nobody today so there is nothing to
+        # suppress. It is here so the three read alike, and so a card that one day carries an
+        # assignee cannot start notifying a backlog by inheriting a default.
+        tickets=build_item_sync(sessionmaker, threads, TicketPolicy(), mentions=False),
     )
 
 
@@ -905,7 +918,7 @@ def build_container(
             workflow,
             pr_sync,
             issue_sync,
-            _refresh(sessionmaker, github, threads),
+            _refresh(sessionmaker, github, threads, boards),
             _regenerate(sessionmaker, github, threads),
             _relocation(sessionmaker, github, threads),
             tokens,

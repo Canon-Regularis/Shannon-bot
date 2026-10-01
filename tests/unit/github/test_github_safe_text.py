@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.github.mentions import Mentioned, names_in
 from shannon.github.safe_text import (
     GITHUB_BODY_LIMIT,
     LINE_LIMIT,
@@ -256,3 +257,60 @@ class TestATagInsideAMessage:
         the published line reads exactly as it was typed."""
         assert one_message(f"<@{ALICE}> look", {ALICE: "@octocat"}) == "@octocat look"
         assert one_message(f"<@{ALICE}>", {ALICE: "@octocat"}) == "@octocat"
+
+    def test_a_slash_typed_against_a_mention_turns_it_into_a_team(self) -> None:
+        """The worst of the three joins, and the one the first fix missed.
+
+        A slash does not lengthen a login, it changes what KIND of thing is addressed: `@org/team`
+        is a team, and `mentions._MENTION` tries the team alternative first. So the hazard is not
+        "somebody else is notified as well" but "the person this bot was handed is not addressed at
+        all" - which needs no unusual data and happens on every install.
+
+        Read back through this project's own reader rather than asserted as a string, because the
+        string alone cannot say which of the two names GitHub would ring.
+        """
+        said = one_message(f"ping <@{ALICE}>/security now", {ALICE: "@acme"})
+
+        assert said == f"ping @acme{ZWSP}/security now"
+        assert names_in(said) == Mentioned(people=("acme",), teams=())
+
+    def test_without_the_guard_the_handed_mention_is_the_one_that_disappears(self) -> None:
+        """What the line above is worth, stated as the failure it prevents. Spelled out because the
+        natural reading of #121 is "somebody extra gets pinged", and the slash case is the opposite:
+        `people` comes back EMPTY and a team nobody named takes the ping.
+        """
+        unguarded = "ping @acme/security now"
+
+        assert names_in(unguarded) == Mentioned(people=(), teams=("security",))
+
+    def test_a_name_after_a_non_ascii_letter_is_still_defused(self) -> None:
+        r"""The writer and the reader disagreed, and the writer was the permissive one.
+
+        `defuse` matched the character before the `@` with `\w`, which is Unicode-aware in Python,
+        so an `@` after an accented letter or a CJK character looked to it like part of a longer
+        word and was left alone. `mentions._BEFORE_A_NAME` refuses only ASCII, so the reader that
+        decides who GitHub notifies read exactly that `@` as a live mention. Text somebody typed
+        came out addressing an account.
+
+        A writer may neutralise more than the reader reads. It may never neutralise less.
+        """
+        for before in ("é", "中", "٣"):
+            published = one_message(f"{before}@0 hi")
+
+            assert names_in(published).people == (), f"{before!r} let a typed name stay live"
+            assert ZWSP in published
+
+    def test_an_ascii_word_character_before_a_name_still_leaves_it_alone(self) -> None:
+        """The other arm, and the reason the lookbehind exists at all: `someone@example.com` is an
+        address, not a mention, and neither the writer nor the reader treats it as one."""
+        published = one_message("write to someone@example.com please")
+
+        assert published == "write to someone@example.com please"
+        assert names_in(published).people == ()
+
+    def test_a_slash_cannot_smuggle_a_team_past_an_unlinked_token_either(self) -> None:
+        """A token nobody answered for is defused whole, so the slash after it has no mention to
+        extend. The two rules compose rather than needing a third."""
+        said = one_message(f"<@{ALICE}>/security")
+
+        assert names_in(said) == Mentioned(people=(), teams=())

@@ -26,7 +26,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, URL_WIDTH, Repository
+from shannon.db.models import COLUMN_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
@@ -41,6 +41,12 @@ from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.errors import GitHubAuthError, GitHubNotFoundError, GitHubRateLimitError
 from shannon.github.projects import BoardItem
+from shannon.services.sync.draft_cards import (
+    ReadsBoards,
+    forget_the_mirror,
+    once_each,
+    snapshot_of,
+)
 from shannon.services.sync.items import SyncOutcome, SyncsItems
 from shannon.services.workflow import WorkflowOutcome, WorkflowRefusedError
 
@@ -50,12 +56,6 @@ logger = logging.getLogger(__name__)
 # past that is a header nobody meant, and sitting one out would take the feature off for the rest
 # of the day on the strength of a number nothing here can check.
 RATE_LIMIT_CEILING = 3600
-
-
-class ReadsBoards(Protocol):
-    """Listing what is on a project board, which is all this service asks of GitHub."""
-
-    async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]: ...
 
 
 class SaysAndShuts(PostsToThread, ShutsThread, Protocol):
@@ -205,7 +205,7 @@ class ProjectPoller:
             )
             return 0
 
-        items = _once_each(listed)
+        items = once_each(listed)
 
         # Whether the board's Status field can be read at all, decided from the whole board
         # rather than from one card. A single card with no column is somebody clearing its
@@ -302,31 +302,14 @@ class ProjectPoller:
     async def _forget_the_mirror(
         self, board: _Board, item: BoardItem, stored: datetime | None
     ) -> None:
-        """Put the card's timestamp back to what it was before the sync that failed.
-
-        The database half of a sync commits before the Discord half runs, so a refused thread
-        edit leaves the card recorded as current and its thread showing the state before the
-        move. Nothing else revisits a draft, and the card is only offered again when GitHub's
-        timestamp beats the stored one, which the failed sync just made equal. Without this the
-        thread stays wrong until somebody edits the card on GitHub.
-
-        Back to nothing when there was nothing stored, rather than left alone. That case used
-        to return here, on the grounds that a card with no timestamp or no thread is offered
-        again anyway, which describes the row as it was before the sync and not as the sync has
-        just left it. A first mirror into a text channel opens the thread and sends the metadata
-        as a second call, and a refusal there raises after the thread has been attached to the
-        row that already carries the card's timestamp. The row then holds both, so neither of
-        the two escapes applies: `_has_moved` compares the card's own timestamp with itself for
-        ever, and Discord keeps an empty thread named after a card with no block in it and
-        nothing anywhere revisiting it.
-        """
-        async with self._sessionmaker() as session, session.begin():
-            await TrackedItemStore(session).forget_mirror(
-                repository_id=board.repository_id,
-                object_type=ObjectType.TICKET,
-                github_object_id=item.item_id,
-                to=stored,
-            )
+        """Put the row back as it WAS, which is this caller's answer: the poller revisits a card
+        whose timestamp has moved, so restoring the stored value is what re-arms it."""
+        await forget_the_mirror(
+            self._sessionmaker,
+            repository_id=board.repository_id,
+            card_id=item.item_id,
+            to=stored,
+        )
 
     async def _move_tracked(
         self,
@@ -767,46 +750,13 @@ class ProjectPoller:
             )
 
     def _snapshot(self, board: _Board, item: BoardItem) -> TicketSnapshot:
-        return TicketSnapshot(
+        """The card as the sync path sees it. `polled` is this caller's name for why it looked."""
+        return snapshot_of(
+            item,
             repository=board.snapshot,
-            github_object_id=item.item_id,
-            # A card has no number of its own, so the board's is carried instead. It is what a
-            # reader of the row has to go on to find where the thing came from.
-            number=board.project_number,
-            # Cut to what the row holds. A draft card's Title is a free text field with no cap
-            # on GitHub's side, unlike an issue's, and one card too wide for the column ends the
-            # whole poll rather than that one card.
-            title=item.title[:TITLE_WIDTH],
-            html_url=item.html_url[:URL_WIDTH],
-            state="open",
-            updated_at=item.updated_at,
-            action="polled",
-            column=item.column,
             project_number=board.project_number,
+            action="polled",
         )
-
-
-def _once_each(items: Sequence[BoardItem]) -> list[BoardItem]:
-    """The board's cards, with any the read handed back twice dropped.
-
-    A board is read a page at a time by cursor, and a cursor is not a snapshot: GitHub says
-    outright that a list edited while it is being paged through can hand the same row back on two
-    pages, which is exactly what a board somebody is dragging cards around on is.
-
-    Done to the read rather than inside either half that consumes it, because it is a property of
-    the read. The draft half guarded itself and the wrapped half did not, and both are read from
-    a map built once for the whole board and never written to, so a second copy is judged against
-    the state before the first was acted on. For a draft that meant syncing a thread nothing had
-    changed; for a wrapped card it meant a second GitHub read of the item on every poll that saw
-    it, and the pass counting one move as two.
-    """
-    once: dict[int, BoardItem] = {}
-    for item in items:
-        if item.item_id in once:
-            logger.info("the board listed the card %r more than once", item.title)
-            continue
-        once[item.item_id] = item
-    return list(once.values())
 
 
 def _fits(column: str | None) -> str:

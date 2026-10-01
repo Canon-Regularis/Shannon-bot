@@ -13,7 +13,7 @@ from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
-from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
+from shannon.services.sync.refresh import MissedTickets, RefreshOutcome, RefreshScope
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,22 @@ _KINDS = {
     RefreshScope.EVERYTHING: ("open item", "open items"),
     RefreshScope.PULL_REQUESTS: ("open pull request", "open pull requests"),
     RefreshScope.ISSUES: ("open issue", "open issues"),
+    # No "open" on these two: a draft card has no state to be open in, and `TicketPolicy` holds
+    # every one of them at "open" for ever. Calling them open items would be reporting a field
+    # nobody can change.
+    RefreshScope.TICKETS: ("ticket", "tickets"),
+}
+
+# What to add when a run asked about tickets and could not reach them. Each names the command that
+# puts it right, because that is the only part the person can act on. A derived-set test holds this
+# complete, the same way one holds `_KINDS`.
+_MISSED = {
+    MissedTickets.NO_BOARD: "No board is linked to this server, so tickets were not covered. "
+    "Run /set_board to include them.",
+    MissedTickets.NO_CHANNEL: "No channel is mapped for this board's tickets, so they were not "
+    "covered. Run /set_channel to include them.",
+    MissedTickets.UNREADABLE: "The board could not be read, so tickets were not covered. "
+    "The log says what GitHub answered.",
 }
 
 # Discord shows the description, the value is what reaches the callback, and the choices appear
@@ -31,6 +47,7 @@ _CHOICES = [
     app_commands.Choice(name="all", value=RefreshScope.EVERYTHING.value),
     app_commands.Choice(name="pull requests", value=RefreshScope.PULL_REQUESTS.value),
     app_commands.Choice(name="issues", value=RefreshScope.ISSUES.value),
+    app_commands.Choice(name="tickets", value=RefreshScope.TICKETS.value),
 ]
 
 # True only because the sync services behind this write names in plain text: a block that is
@@ -81,7 +98,24 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
 
 
 def _said(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
-    """The counts, as a sentence somebody can act on.
+    """The counts, and what could not be reached, as one sentence somebody can act on.
+
+    A wrapper around `_counts` rather than another branch inside it, because `_counts` has four
+    exits and three of them are the nothing-to-do cases. `/refresh all` on a quiet repository
+    with no board takes one of those, and that is exactly the run where the note matters most: no
+    numbers moved, and the reason is the thing worth saying.
+    """
+    said = _counts(outcome, kinds)
+    if outcome.tickets_missed is None:
+        return said
+    # After "Nobody was pinged." on the did-work branch, which is deliberate. Threading it in
+    # before would mean repeating the zero-work condition in two places that have to agree, and
+    # two places that have to agree is how the singular-plural bug got in (#147).
+    return f"{said} {_MISSED[outcome.tickets_missed]}"
+
+
+def _counts(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
+    """The numbers alone.
 
     The failures are inside `left` rather than beside it, and are named separately only so nobody
     reads a shortfall as a miscount.

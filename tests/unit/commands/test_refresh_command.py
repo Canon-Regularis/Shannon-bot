@@ -9,10 +9,10 @@ from __future__ import annotations
 import pytest
 from discord import app_commands
 
-from shannon.commands.refresh import _KINDS, build_refresh_command
+from shannon.commands.refresh import _KINDS, _MISSED, build_refresh_command
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubRateLimitError
-from shannon.services.sync.refresh import RefreshOutcome, RefreshScope
+from shannon.services.sync.refresh import MissedTickets, RefreshOutcome, RefreshScope
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import administrator, default_gate, developer, member_with
 
@@ -91,6 +91,64 @@ class TestWhatItSays:
         assert interaction.said == (
             f"{FULL_NAME} has no open items right now, so there was nothing to mirror."
         )
+
+    async def test_no_board_says_which_command_links_one(self) -> None:
+        """The counts AND the note, because a run that mirrored real work must not report itself as
+        a failure just because one of its three kinds was out of reach."""
+        service = StubRefresh(outcome=an_outcome(mirrored=3, tickets_missed=MissedTickets.NO_BOARD))
+
+        interaction = await run(service)
+
+        assert f"Mirrored 3 open items from {FULL_NAME}" in interaction.said
+        assert "No board is linked to this server, so tickets were not covered." in interaction.said
+        assert "/set_board" in interaction.said
+
+    async def test_no_ticket_channel_says_which_command_maps_one(self) -> None:
+        """A different command to run, which is why this is not one flag with one sentence: a board
+        is linked, so `/set_board` would be the wrong advice."""
+        service = StubRefresh(
+            outcome=an_outcome(mirrored=1, tickets_missed=MissedTickets.NO_CHANNEL)
+        )
+
+        interaction = await run(service)
+
+        assert "/set_channel" in interaction.said
+        assert "/set_board" not in interaction.said
+
+    async def test_a_board_that_would_not_read_sends_somebody_to_the_log(self) -> None:
+        """No command to run, because the cause is a credential rather than a setting, and this
+        reply cannot tell a 404 from a 403 from a spent quota - the log can."""
+        service = StubRefresh(outcome=an_outcome(tickets_missed=MissedTickets.UNREADABLE))
+
+        interaction = await run(service)
+
+        assert "The board could not be read, so tickets were not covered." in interaction.said
+        assert "/set_" not in interaction.said
+
+    async def test_the_note_is_said_even_when_there_was_nothing_to_mirror(self) -> None:
+        """The case that made this a wrapper rather than one more clause.
+
+        `_counts` has four exits and three of them are the nothing-to-do sentences, which return
+        early. `/refresh all` on a quiet repository with no board takes one of those - and that is
+        the run where the reason matters most, because no number moved and the only useful thing to
+        say is why.
+        """
+        service = StubRefresh(outcome=an_outcome(tickets_missed=MissedTickets.NO_BOARD))
+
+        interaction = await run(service)
+
+        assert "has no open items right now" in interaction.said
+        assert "/set_board" in interaction.said
+
+    async def test_nothing_is_added_when_tickets_were_covered(self) -> None:
+        """The other arm. A run with nothing to report about tickets must say nothing about them,
+        including on `/refresh pull requests`, which never asks about them at all."""
+        service = StubRefresh(outcome=an_outcome(mirrored=2))
+
+        interaction = await run(service)
+
+        assert "ticket" not in interaction.said
+        assert "/set_" not in interaction.said
 
     async def test_everything_already_mirrored_says_nothing_to_do(self) -> None:
         service = StubRefresh(outcome=an_outcome(already=43))
@@ -175,7 +233,7 @@ class TestWhatItSays:
 
 
 class TestWhatItAsksFor:
-    async def test_no_argument_covers_both_kinds(self) -> None:
+    async def test_no_argument_covers_every_kind(self) -> None:
         service = StubRefresh()
 
         await run(service)
@@ -187,12 +245,15 @@ class TestWhatItAsksFor:
         [
             (RefreshScope.ISSUES, "open issues"),
             (RefreshScope.PULL_REQUESTS, "open pull requests"),
+            # No "open" on this one: a draft card has no state to be open in, and `TicketPolicy`
+            # answers "open" for every card for ever.
+            (RefreshScope.TICKETS, "tickets"),
         ],
     )
     async def test_a_choice_narrows_it_and_is_said_back(
         self, scope: RefreshScope, kind: str
     ) -> None:
-        """The two that narrow. `all` is not one of them, so it is tested beside this rather than
+        """The three that narrow. `all` is not one of them, so it is tested beside this rather than
         folded in: what it has to prove is that it changes nothing."""
         service = StubRefresh(outcome=an_outcome(mirrored=2, already=1))
 
@@ -220,16 +281,22 @@ class TestWhatTheDropdownOffers:
     always could, by leaving the argument out. It is that nobody looking at Discord could tell.
     """
 
-    def test_it_offers_all_three_in_the_order_it_shows_them(self) -> None:
+    def test_it_offers_all_four_in_the_order_it_shows_them(self) -> None:
         """Names as well as values, and order as well as membership. A value the service
         understands, under a name nobody reads as `all`, leaves the issue open with every other
-        test in this file still green."""
+        test in this file still green.
+
+        Written out rather than derived, deliberately, because the ORDER is the claim: `all` first
+        so it reads as the default, and tickets last because that is the order a capped run spends
+        itself in.
+        """
         offered = the_scope_option(a_command()).choices
 
         assert [(c.name, c.value) for c in offered] == [
             ("all", "everything"),
             ("pull requests", "pull_requests"),
             ("issues", "issues"),
+            ("tickets", "tickets"),
         ]
 
     def test_no_scope_this_command_understands_is_left_out(self) -> None:
@@ -257,6 +324,11 @@ class TestWhatTheDropdownOffers:
         """`_KINDS[scope]` is a lookup with no default, on the reply path, after the work is
         already done. A missing key there loses a finished run to a KeyError."""
         assert set(_KINDS) == set(RefreshScope)
+
+    def test_every_reason_tickets_were_missed_has_something_to_say(self) -> None:
+        """`_MISSED[reason]` is the same shape of lookup as `_KINDS` and on the same path: no
+        default, on the reply, after the work is done. A missing key loses a finished run."""
+        assert set(_MISSED) == set(MissedTickets)
 
 
 class TestWhoMayRunIt:

@@ -28,7 +28,14 @@ CLOSING_FENCE = "\n```"
 # `@login` and `@org/team` both notify on GitHub. GitHub reads a mention only where the `@` is
 # not preceded by a word character, so the lookbehind leaves `someone@example.com` as written
 # and still catches a raw `<@123>` that never went through `clean_content`.
-_MENTION = re.compile(r"(?<![\w/])@(?=[A-Za-z0-9])")
+#
+# The class is spelled out rather than written `\w`, and that is the whole of a defect this used to
+# have. `\w` is UNICODE-aware in Python, so it matched `e`-acute, CJK and Arabic-Indic digits -
+# and this is the WRITER. `mentions._BEFORE_A_NAME`, the READER that decides who GitHub would
+# notify, refuses only ASCII. So for `<e-acute>@0` the writer said "not a mention, leave it" while
+# the reader said "that is a mention of @0", and text somebody typed was published live. A writer
+# may neutralise more than the reader reads; it may never neutralise less.
+_MENTION = re.compile(r"(?<![A-Za-z0-9_/])@(?=[A-Za-z0-9])")
 
 # `#123` is a cross-reference: it links the two items and puts a line in the other one's
 # timeline. Digits required, so `# Heading` and a bare `#` are left alone.
@@ -113,9 +120,19 @@ def as_a_tag(name: str) -> str:
 # than out of the text, so Discord had already decided it was a mention.
 _TAGGED = re.compile(r"<@([0-9]{15,20})>")
 
-# What GitHub reads as a continuation of the login before it. Hyphens count: a login may contain
-# them, so a mention this bot built followed by a typed `-two` addresses `@someone-two`.
-_EXTENDS_A_LOGIN = re.compile(r"[A-Za-z0-9-]")
+# What GitHub reads as a continuation of the mention before it. Hyphens count, because a login may
+# contain them, so a mention this bot built followed by a typed `-two` addresses `@someone-two`.
+#
+# A SLASH counts for a different and worse reason: `@org/team` is not a longer login, it is a
+# TEAM, and `mentions._MENTION` tries the team alternative first. So `@acme` with a typed
+# `/security` after it does not merely address somebody else - it stops addressing the person at
+# all, and `names_in` reads the published line as `people=(), teams=("security",)`. The mention
+# this bot was handed is destroyed, which is the half that needs no unusual data to reach.
+#
+# The set is the one `mentions._MENTION`'s user branch already refuses with
+# `(?![A-Za-z0-9/...-])`, and the comment on CLOSING_FENCE above states the invariant it comes
+# from: `@login` and `@org/team` both notify on GitHub.
+_EXTENDS_A_LOGIN = re.compile(r"[A-Za-z0-9/-]")
 
 
 def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
@@ -146,6 +163,10 @@ def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
         # `@octocat-evil`, and `@a` beside a typed `0` publishes `@a0`. Both notify an account
         # this bot was never given, which is the whole of what #121 forbids. A zero-width space
         # ends the name and shows nothing.
+        #
+        # A typed `/` is the same hazard twice over, and is why `_EXTENDS_A_LOGIN` carries one:
+        # `@acme` beside a typed `/security` addresses a TEAM rather than a longer account, and
+        # the person this bot was handed is left addressing nobody at all.
         #
         # One-sided on purpose. A login character BEFORE the `@` makes it inert rather than
         # dangerous, which is the same judgement `_MENTION` above encodes in its lookbehind.
