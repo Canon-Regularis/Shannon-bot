@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import discord
@@ -29,6 +30,20 @@ from tests.fakes.discord_objects import FakeInteraction
 def wrapped(error: Exception) -> app_commands.CommandInvokeError:
     """What discord.py hands its error handler: the real error inside a wrapper."""
     return app_commands.CommandInvokeError(MagicMock(name="command"), error)
+
+
+def a_command(name: str) -> app_commands.Command[Any, ..., Any]:
+    """A real slash command, because a mock's `qualified_name` is a mock.
+
+    `MagicMock(name="x").qualified_name` is another mock, and its repr contains the mock's own
+    name, so `assert "x" in caplog.text` passes whether the handler read that attribute or not.
+    """
+
+    # Never called. `app_commands.Command` only needs one to exist, and all this test reads off
+    # the result is its name.
+    async def callback(interaction: discord.Interaction) -> None: ...
+
+    return app_commands.Command(name=name, description="for the log line", callback=callback)
 
 
 class TestReadingAnError:
@@ -185,12 +200,34 @@ class TestTheBackstop:
     async def test_it_says_which_command_failed_in_the_log(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """The name, not just that one failed. This is one handler for every command and the
+        frames under it are discord.py's own dispatch, so without the name the log says an
+        unknown command broke and leaves the operator nothing to run again.
+
+        Built from a real `app_commands.Command` on purpose. A `MagicMock` answers `.qualified_
+        name` with another mock whose repr contains almost any substring asked of it, so this
+        assertion would have held against a handler that logged nothing of the sort.
+        """
+        bot = ShannonBot(explain_error=reply_for)
+        with caplog.at_level("ERROR", logger="shannon.discord_bot.client"):
+            await bot.tree.on_error(
+                FakeInteraction(command=a_command("set_board")),
+                wrapped(RuntimeError("boom")),
+            )
+
+        assert "the slash command set_board failed" in caplog.text
+        assert "boom" in caplog.text
+
+    async def test_an_interaction_with_no_command_is_still_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Discord can hand back an interaction it could not resolve, and a backstop that reads
+        the name off nothing would raise inside the handler that exists to stop exactly that."""
         bot = ShannonBot(explain_error=reply_for)
         with caplog.at_level("ERROR", logger="shannon.discord_bot.client"):
             await bot.tree.on_error(FakeInteraction(), wrapped(RuntimeError("boom")))
 
-        assert "a slash command failed" in caplog.text
-        assert "boom" in caplog.text
+        assert "the slash command (unknown) failed" in caplog.text
 
 
 async def _refusing(*_args: object, **_kwargs: object) -> None:

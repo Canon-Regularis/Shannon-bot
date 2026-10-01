@@ -104,7 +104,16 @@ class ShannonBot(discord.Client):
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
         """An unanswered interaction leaves the person with a spinner until Discord gives up."""
-        logger.error("a slash command failed", exc_info=error)
+        # Named, because the traceback does not say it. This is one handler for every
+        # command and the frames under it are discord.py's own dispatch, so an operator
+        # reading this learns what went wrong and not what to run again. None is reachable:
+        # an interaction Discord could not resolve to a command carries no command.
+        command = interaction.command
+        logger.error(
+            "the slash command %s failed",
+            command.qualified_name if command is not None else "(unknown)",
+            exc_info=error,
+        )
         # An error handler that raises is worse than not having one: discord.py logs a second
         # traceback and the person is still left waiting. The interaction may also have expired
         # or already been answered, and neither is worth a stack trace.
