@@ -20,6 +20,8 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
 )
 from shannon.domain.enums import DeliveryStatus
+from shannon.domain.models import PullRequestSnapshot
+from shannon.github.webhooks.pull_request import parse_pull_request_event
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway, post_failing_for
 from tests.support import github_payloads as payloads
@@ -29,6 +31,18 @@ from tests.support.stack import build_http_client, build_stack
 pytestmark = pytest.mark.integration
 
 REPO_FULL = f"{payloads.OWNER}/{payloads.REPO}".lower()
+
+# GitHub as it would answer for this pull request. Seeded because an APPROVING review does not
+# only post its note: `after_a_review` rounds up whether everybody has approved, which READS the
+# pull request - and a fake that has never heard of it answers 404, so the delivery failed on
+# every attempt and was parked. The note had already landed, so every assertion here passed
+# while the second half of the review route never ran.
+_PARSED = parse_pull_request_event("opened", payloads.pull_request_event("opened"))
+assert _PARSED is not None, "the pull request payload stopped parsing"
+# Annotated, because a narrowing taken at module level is not carried into a function body:
+# pyright treats a module global as something anything could reassign.
+REVIEWED_PR: PullRequestSnapshot = _PARSED
+PR_KEY = (f"{payloads.OWNER}/{payloads.REPO}".lower(), 7)
 
 
 def a_comment(**overrides):
@@ -61,8 +75,10 @@ def comment_posts(threads: FakeThreadGateway) -> list[str]:
 
 
 async def with_a_thread(client, container) -> None:
+    # `drain` rather than one batch: this is setup, so a delivery that quietly failed here would
+    # leave every test in the file asserting against a thread that was never opened.
     await post(client, "pull_request", payloads.pull_request_event("opened"), delivery="pr-1")
-    await container.worker.run_once()
+    await client.drain()
 
 
 async def test_a_delivery_handled_twice_posts_the_comment_once(
@@ -70,7 +86,9 @@ async def test_a_delivery_handled_twice_posts_the_comment_once(
 ) -> None:
     """The handler succeeds and the write that records it does not, which is the whole gap."""
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     async with client:
@@ -106,7 +124,9 @@ async def test_a_post_that_fails_is_still_owed_and_arrives_on_the_retry(
     the duplicate this claiming exists to prevent.
     """
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     async with client:
@@ -146,7 +166,9 @@ async def test_a_thread_that_was_deleted_gives_the_claim_back_too(
 ) -> None:
     """This path lets go of the dead thread and asks to be retried, so it owes the claim back."""
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     async with client:
@@ -244,7 +266,9 @@ async def test_three_notes_sharing_a_number_are_told_apart(
     of the same repository.
     """
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     shared = 4242
@@ -292,7 +316,9 @@ class TestBeingOutOfTheServerWhenANoteArrives:
         self, registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
     ) -> None:
         threads = FakeThreadGateway()
-        container = build_stack(db_engine, threads=threads)
+        container = build_stack(
+            db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+        )
         client = build_http_client(container)
 
         async with client:
@@ -316,7 +342,9 @@ class TestBeingOutOfTheServerWhenANoteArrives:
         self, registered: Repository, db_engine: AsyncEngine
     ) -> None:
         threads = FakeThreadGateway()
-        container = build_stack(db_engine, threads=threads)
+        container = build_stack(
+            db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+        )
         client = build_http_client(container)
 
         async with client:
@@ -348,7 +376,9 @@ class TestBeingOutOfTheServerWhenANoteArrives:
         """The other side, and the reason the two have to be told apart. Retrying a permission
         nobody has granted is sixteen attempts spent on something waiting does not fix."""
         threads = FakeThreadGateway()
-        container = build_stack(db_engine, threads=threads)
+        container = build_stack(
+            db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+        )
         client = build_http_client(container)
 
         async with client:
