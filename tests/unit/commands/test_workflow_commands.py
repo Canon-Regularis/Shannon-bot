@@ -16,11 +16,13 @@ import pytest
 from discord import app_commands
 
 from shannon.commands.workflow import (
+    MOST_CHOICES,
+    OWN_NAMES,
     PRIORITY_CHOICES,
-    STATUS_CHOICES,
     build_workflow_commands,
 )
-from shannon.domain.enums import Priority, Status
+from shannon.domain.board import status_from_column
+from shannon.domain.enums import Priority, Status, spoken
 from shannon.github import people
 from shannon.github.labels import PRIORITY_LABELS
 from shannon.services.workflow import NotAnItemThreadError, WorkflowOutcome
@@ -42,9 +44,15 @@ class StubWorkflow:
         self.outcome = outcome or WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True)
         self.error = error
         self.calls: list[tuple[str, int, object]] = []
+        # What the command passed down as the board column, which is the text somebody picked
+        # rather than the status it read back as.
+        self.columns: list[str] = []
 
-    async def set_status(self, *, thread_id: int, status: Status) -> WorkflowOutcome:
+    async def set_status(
+        self, *, thread_id: int, status: Status, column: str = ""
+    ) -> WorkflowOutcome:
         self.calls.append(("status", thread_id, status))
+        self.columns.append(column)
         if self.error is not None:
             raise self.error
         return self.outcome
@@ -56,10 +64,29 @@ class StubWorkflow:
         return self.outcome
 
 
+class FakeColumns:
+    """The board columns a server's picker offers, out of a tuple."""
+
+    def __init__(self, *columns: str, error: Exception | None = None) -> None:
+        self.columns = columns
+        self.error = error
+        self.asked: list[int] = []
+
+    async def offered(self, guild_id: int) -> tuple[str, ...]:
+        self.asked.append(guild_id)
+        if self.error is not None:
+            raise self.error
+        return self.columns
+
+
 def commands(
-    service: StubWorkflow, access: FakeAccess | None = None
+    service: StubWorkflow,
+    access: FakeAccess | None = None,
+    columns: FakeColumns | None = None,
 ) -> dict[str, app_commands.Command]:
-    built = build_workflow_commands(service, default_gate(), access or FakeAccess())
+    built = build_workflow_commands(
+        service, default_gate(), access or FakeAccess(), columns or FakeColumns()
+    )
     return {command.name: command for command in built}
 
 
@@ -71,9 +98,11 @@ async def run(
     access: FakeAccess | None = None,
 ) -> FakeInteraction:
     interaction = FakeInteraction(user=member, channel_id=THREAD_ID)
-    await commands(service, access)[name].callback(
-        interaction, app_commands.Choice(name=value, value=value)
-    )
+    # A plain string for status and a choice for priority, because that is the difference
+    # between them now: a priority is the same three everywhere and stays a validated
+    # dropdown, and a status is whatever columns somebody arranged on their board.
+    handed: object = value if name == "status" else app_commands.Choice(name=value, value=value)
+    await commands(service, access)[name].callback(interaction, handed)
     return interaction
 
 
@@ -110,7 +139,7 @@ async def test_each_priority_can_be_picked(priority: Priority) -> None:
 async def test_project_managers_and_administrators_may_run_them(who) -> None:
     service = StubWorkflow()
 
-    await run("status", service, who(), Status.IN_REVIEW.value)
+    await run("status", service, who(), spoken(Status.IN_REVIEW))
 
     assert service.calls, "somebody the requirements allow was refused"
 
@@ -120,7 +149,7 @@ async def test_a_developer_may_not() -> None:
     work done is the review step going missing."""
     service = StubWorkflow()
 
-    interaction = await run("status", service, developer(), Status.DONE.value)
+    interaction = await run("status", service, developer(), spoken(Status.DONE))
 
     assert service.calls == []
     assert "You need one of these roles" in said(interaction)
@@ -130,7 +159,7 @@ async def test_the_reply_names_the_item_and_what_it_became() -> None:
     service = StubWorkflow()
 
     interaction = await run(
-        "status", service, member_with("Project Manager"), Status.IN_REVIEW.value
+        "status", service, member_with("Project Manager"), spoken(Status.IN_REVIEW)
     )
 
     assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now In review."
@@ -139,7 +168,9 @@ async def test_the_reply_names_the_item_and_what_it_became() -> None:
 async def test_a_repeat_says_so_rather_than_claiming_a_change() -> None:
     service = StubWorkflow(outcome=WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=False))
 
-    interaction = await run("status", service, member_with("Project Manager"), Status.BACKLOG.value)
+    interaction = await run(
+        "status", service, member_with("Project Manager"), spoken(Status.BACKLOG)
+    )
 
     assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is already Backlog."
 
@@ -149,7 +180,7 @@ async def test_finishing_says_the_thread_is_locked() -> None:
         outcome=WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True, locked=True)
     )
 
-    interaction = await run("status", service, member_with("Project Manager"), Status.DONE.value)
+    interaction = await run("status", service, member_with("Project Manager"), spoken(Status.DONE))
 
     assert said(interaction).endswith("is now Done, and this thread is locked.")
 
@@ -172,7 +203,7 @@ async def test_a_lock_discord_refused_says_what_did_happen_as_well() -> None:
         )
     )
 
-    interaction = await run("status", service, member_with("Project Manager"), Status.DONE.value)
+    interaction = await run("status", service, member_with("Project Manager"), spoken(Status.DONE))
 
     answer = said(interaction)
     assert answer.startswith("Canon-Regularis/Shannon-bot#7 is Done")
@@ -199,7 +230,7 @@ async def test_a_refused_unlock_says_nobody_can_reply_rather_than_the_opposite()
     )
 
     interaction = await run(
-        "status", service, member_with("Project Manager"), Status.IN_REVIEW.value
+        "status", service, member_with("Project Manager"), spoken(Status.IN_REVIEW)
     )
 
     answer = said(interaction)
@@ -213,7 +244,7 @@ async def test_a_refusal_comes_back_as_a_sentence() -> None:
     service = StubWorkflow(error=NotAnItemThreadError("Run this inside the item's thread."))
 
     interaction = await run(
-        "status", service, member_with("Project Manager"), Status.IN_REVIEW.value
+        "status", service, member_with("Project Manager"), spoken(Status.IN_REVIEW)
     )
 
     assert said(interaction) == "Run this inside the item's thread."
@@ -234,9 +265,7 @@ async def test_it_refuses_outside_a_server() -> None:
     service = StubWorkflow()
     interaction = FakeInteraction(user=member_with("Project Manager"), guild_id=None)
 
-    await commands(service)["status"].callback(
-        interaction, app_commands.Choice(name="In review", value=Status.IN_REVIEW.value)
-    )
+    await commands(service)["status"].callback(interaction, spoken(Status.IN_REVIEW))
 
     assert service.calls == []
     assert said(interaction) == "Run this inside a server channel."
@@ -247,9 +276,7 @@ async def test_it_refuses_with_no_channel_to_act_on() -> None:
     service = StubWorkflow()
     interaction = FakeInteraction(user=member_with("Project Manager"), channel_id=None)
 
-    await commands(service)["status"].callback(
-        interaction, app_commands.Choice(name="In review", value=Status.IN_REVIEW.value)
-    )
+    await commands(service)["status"].callback(interaction, spoken(Status.IN_REVIEW))
 
     assert service.calls == []
     assert said(interaction) == "Run this inside the item's thread."
@@ -265,11 +292,11 @@ def test_the_status_picker_opens_on_the_state_work_starts_in() -> None:
     that this list and that enum disagree on purpose. It also happens to run in the order a
     board's columns usually do, which is worth nothing: the rule that refuses a skipped column
     reads the BOARD's order and never this one."""
-    assert [choice.value for choice in STATUS_CHOICES] == [
-        Status.BACKLOG.value,
-        Status.NOT_REVIEWED.value,
-        Status.IN_REVIEW.value,
-        Status.DONE.value,
+    assert list(OWN_NAMES) == [
+        spoken(Status.BACKLOG),
+        spoken(Status.NOT_REVIEWED),
+        spoken(Status.IN_REVIEW),
+        spoken(Status.DONE),
     ]
 
 
@@ -289,8 +316,13 @@ def test_between_them_the_pickers_offer_every_state_but_the_empty_one() -> None:
     """Re-homed from the domain tests, where it held the same invariant against a table
     of command names that no longer exists. Here rather than there because that file is on
     neither type-suppression list, and putting discord.py's choice types into it would be a
-    new strict-typing surface in a file that has none."""
-    offered: set[Status | Priority] = {Status(c.value) for c in STATUS_CHOICES} | {
+    new strict-typing surface in a file that has none.
+
+    Through `status_from_column` for the status half, which is what the callback does with what
+    the picker hands back. A name this picker offers that reads back as None would be an entry
+    its own command refuses, and that is the failure this catches."""
+    read_back = {status_from_column(name) for name in OWN_NAMES}
+    offered: set[Status | Priority | None] = read_back | {
         Priority(c.value) for c in PRIORITY_CHOICES
     }
 
@@ -306,9 +338,7 @@ class TestWhatGitHubSays:
         access = FakeAccess(refusal="GitHub does not have monalisa as a collaborator.")
         interaction = FakeInteraction(user=member_with("Project Manager"), channel_id=THREAD_ID)
 
-        await commands(service, access)["status"].callback(
-            interaction, app_commands.Choice(name="In review", value=Status.IN_REVIEW.value)
-        )
+        await commands(service, access)["status"].callback(interaction, spoken(Status.IN_REVIEW))
 
         assert service.calls == [], "it wrote to GitHub after GitHub said no"
         assert "not have monalisa as a collaborator" in said(interaction)
@@ -320,9 +350,7 @@ class TestWhatGitHubSays:
         access = FakeAccess(refusal="GitHub says no.")
         interaction = FakeInteraction(user=developer(), channel_id=THREAD_ID)
 
-        await commands(service, access)["status"].callback(
-            interaction, app_commands.Choice(name="In review", value=Status.IN_REVIEW.value)
-        )
+        await commands(service, access)["status"].callback(interaction, spoken(Status.IN_REVIEW))
 
         assert "You need one of these roles" in said(interaction)
         assert access.asked == [], "it asked GitHub about somebody the role already refused"
@@ -333,7 +361,9 @@ class TestWhatGitHubSays:
         service = StubWorkflow()
         access = FakeAccess()
 
-        await run("status", service, member_with("Project Manager"), Status.IN_REVIEW.value, access)
+        await run(
+            "status", service, member_with("Project Manager"), spoken(Status.IN_REVIEW), access
+        )
 
         assert [asked[2] for asked in access.asked] == [people.WRITE]
 
@@ -366,7 +396,7 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow(outcome=self.nowhere())
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.BACKLOG.value
+            "status", service, member_with("Project Manager"), spoken(Status.BACKLOG)
         )
 
         answer = said(interaction)
@@ -377,7 +407,7 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow(outcome=self.nowhere())
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.DONE.value
+            "status", service, member_with("Project Manager"), spoken(Status.DONE)
         )
 
         assert "rename a column to match, or move it by hand" in said(interaction)
@@ -388,7 +418,7 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow(outcome=self.nowhere())
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.DONE.value
+            "status", service, member_with("Project Manager"), spoken(Status.DONE)
         )
 
         assert "is in" not in said(interaction)
@@ -399,7 +429,7 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow(outcome=self.nowhere(changed=False))
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.DONE.value
+            "status", service, member_with("Project Manager"), spoken(Status.DONE)
         )
 
         answer = said(interaction)
@@ -410,7 +440,7 @@ class TestWhenTheBoardHadNowhereToPutIt:
         service = StubWorkflow()
 
         interaction = await run(
-            "status", service, member_with("Project Manager"), Status.IN_REVIEW.value
+            "status", service, member_with("Project Manager"), spoken(Status.IN_REVIEW)
         )
 
         assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now In review."
@@ -423,3 +453,161 @@ class TestWhenTheBoardHadNowhereToPutIt:
         )
 
         assert "no column called High" in said(interaction)
+
+
+class TestThePicker:
+    """The board's own columns, then this bot's own names, and nothing it would then refuse.
+
+    A status used to be a closed list of four baked into the registration at `tree.sync()`. That is
+    once, at boot, globally, so a list that differs per server has to be a picker - and a board is
+    exactly a thing that differs per server. What it costs falls due here: three seconds to answer,
+    nowhere to put a refusal, and a callback that has to parse what comes back.
+    """
+
+    async def suggest(self, columns: FakeColumns, typed: str = "") -> list[str]:
+        picker = commands(StubWorkflow(), columns=columns)["status"]
+        found = await picker._params["to"].autocomplete(  # pyright: ignore[reportPrivateUsage]
+            FakeInteraction(user=project_manager(), channel_id=THREAD_ID), typed
+        )
+        return [choice.name for choice in found]
+
+    async def test_the_boards_own_columns_come_first(self) -> None:
+        """They are what somebody is looking at. A board carrying `In progress` and `In review` has
+        two columns this bot reads as one status, and choosing between them is the whole reason this
+        is a picker rather than a list of four."""
+        offered = await self.suggest(FakeColumns("Backlog", "Ready", "In progress", "In review"))
+
+        assert offered[:4] == ["Backlog", "Ready", "In progress", "In review"]
+
+    async def test_this_bots_own_names_fill_the_gaps_and_nothing_else(self) -> None:
+        """Behind the board's columns, and only for a status the board has no column for at all.
+
+        A board calling it `Todo` where this bot says `Not reviewed` means the same thing, and
+        offering both is two entries doing one job with only one of them written on the board
+        somebody is looking at. What stays is `Done`, which that board genuinely has nowhere for -
+        so picking it gets the sentence saying so rather than silence.
+        """
+        offered = await self.suggest(FakeColumns("Todo", "Doing"))
+
+        assert offered[:2] == ["Todo", "Doing"]
+        assert "Not reviewed" not in offered, "two entries for one status"
+        assert "In review" not in offered, "`Doing` already covers it"
+        assert "Backlog" in offered
+        assert "Done" in offered
+
+    async def test_a_column_this_bot_cannot_read_is_not_offered(self) -> None:
+        """Offering it would be offering an entry its own callback then refuses.
+        `status_from_column` is the same function the callback uses, so the two cannot disagree
+        about what is pickable."""
+        offered = await self.suggest(FakeColumns("Backlog", "Needs design input"))
+
+        assert "Backlog" in offered
+        assert "Needs design input" not in offered
+
+    async def test_a_board_spelling_one_of_our_names_is_offered_once(self) -> None:
+        """`In review` from the board and `In review` from this bot are the same column. Two entries
+        doing one thing is a picker that looks broken."""
+        offered = await self.suggest(FakeColumns("In review"))
+
+        assert offered.count("In review") == 1
+
+    async def test_a_server_with_no_board_still_has_a_picker(self) -> None:
+        offered = await self.suggest(FakeColumns())
+
+        assert offered == list(OWN_NAMES)
+
+    async def test_typing_narrows_it(self) -> None:
+        offered = await self.suggest(FakeColumns("Backlog", "In progress", "In review"), "in")
+
+        assert offered == ["In progress", "In review"]
+
+    async def test_a_column_too_long_for_discord_is_left_out(self) -> None:
+        """Discord rejects a choice whose value runs past a hundred characters, and rejects the
+        whole list rather than the one entry - so one absurd column name would take the picker
+        down for every other. The column this bot stores is a hundred and twenty-eight wide, so
+        this is reachable rather than theoretical.
+
+        Padded with spaces rather than with punctuation, so the name stays one this bot READS as
+        a status - `normalise` collapses the run away. A name full of exclamation marks would be
+        dropped for being unreadable and would prove nothing about the length."""
+        offered = await self.suggest(FakeColumns("Backlog", "Done" + " " * 120))
+
+        assert "Backlog" in offered
+        assert not any(len(name) > 100 for name in offered)
+
+    async def test_it_stays_inside_discords_cap(self) -> None:
+        """Discord sends a longer list back as an error rather than truncating it, so going
+        over takes the whole picker down.
+
+        Contrived on purpose, and worth saying so: a board cannot realistically carry twenty-five
+        columns this bot reads as a status, because `_COLUMNS` has fewer names than that in it.
+        The spellings below are the same few columns cased differently, which is enough to reach
+        the slice. This is the guard being exercised rather than a board anybody has."""
+        spellings = [
+            f"{name}{' ' * pad}"
+            for pad in range(9)
+            for name in ("Backlog", "Todo", "In progress", "Done")
+        ]
+        offered = await self.suggest(FakeColumns(*spellings))
+
+        assert len(spellings) > MOST_CHOICES, "the fixture cannot reach the cap"
+        assert len(offered) == MOST_CHOICES
+
+    async def test_a_board_that_will_not_read_leaves_the_picker_working(self) -> None:
+        """An autocomplete that raises shows the person nothing at all, so a GitHub outage would be
+        indistinguishable from a board with no columns - and there is nowhere here to put a
+        refusal."""
+        offered = await self.suggest(FakeColumns(error=RuntimeError("GitHub is down")))
+
+        assert offered == list(OWN_NAMES)
+
+    async def test_outside_a_server_it_offers_this_bots_own_names(self) -> None:
+        columns = FakeColumns("Backlog")
+        picker = commands(StubWorkflow(), columns=columns)["status"]
+
+        found = await picker._params["to"].autocomplete(  # pyright: ignore[reportPrivateUsage]
+            FakeInteraction(user=project_manager(), channel_id=THREAD_ID, guild_id=None), ""
+        )
+
+        assert [choice.name for choice in found] == list(OWN_NAMES)
+        assert columns.asked == [], "it looked up a board with no server to look one up for"
+
+
+class TestWhatArrivesInTheStatusField:
+    """A suggestion is only a suggestion. discord.py resolved a closed choice list before the
+    callback ran; an autocomplete does not, so what arrives may have been typed, may be a column
+    from the board this repository mirrored last week, or may be prose."""
+
+    async def test_a_board_column_is_read_as_the_status_it_stands_for(self) -> None:
+        service = StubWorkflow()
+
+        await run("status", service, project_manager(), "In progress")
+
+        assert service.calls == [("status", THREAD_ID, Status.IN_REVIEW)]
+
+    async def test_the_column_goes_down_beside_the_status(self) -> None:
+        """The status decides the label, the lock and the block in Discord. The column decides which
+        of the board's own columns the card lands in, and on a board with two columns for one status
+        those are not the same question."""
+        service = StubWorkflow()
+
+        await run("status", service, project_manager(), "In progress")
+
+        assert service.columns == ["In progress"]
+
+    @pytest.mark.parametrize("typed", ["Needs design input", "", "   ", "nonsense"])
+    async def test_something_that_is_not_a_status_is_refused(self, typed: str) -> None:
+        service = StubWorkflow()
+
+        interaction = await run("status", service, project_manager(), typed)
+
+        assert "is not a status this bot knows" in said(interaction)
+        assert service.calls == []
+
+    async def test_the_refusal_names_what_always_works(self) -> None:
+        """Somebody whose picker came back empty has otherwise been handed a text box and no
+        vocabulary."""
+        interaction = await run("status", StubWorkflow(), project_manager(), "nonsense")
+
+        for name in OWN_NAMES:
+            assert name in said(interaction)

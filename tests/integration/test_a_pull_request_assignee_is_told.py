@@ -179,4 +179,15 @@ class TestBeingTold:
                 delivery="p0",
             )
 
-        assert threads.posts == []
+        # Both halves, and the positive one is the point. On its own, `posts == []` is true when the
+        # block named nobody at all - so dropping assignee mentions from the opening block would
+        # spend the notification claim, tell this person nowhere, keep this test green, and reopen
+        # issue #105 in silence. Proved by breaking it: rendering assignees as plain logins left all
+        # five tests in this file passing.
+        #
+        # The two sibling files already pair them this way - test_pr_webhook_create.py:107 and
+        # test_issue_webhook_create.py:107 - and no test anywhere asserted a linked PULL REQUEST
+        # assignee's mention in the block, only the plain text `**Assignees:** hubot`.
+        block = threads.metadata_of(threads.created[0].thread_id)
+        assert f"<@{HUBOT}>" in block, "the block named the assignee without mentioning them"
+        assert threads.posts == [], "a line beside the block would reach the same person twice"

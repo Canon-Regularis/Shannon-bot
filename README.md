@@ -447,16 +447,23 @@ Nothing here is encrypted at rest beyond whatever the database and disk already 
 
 ## Commands
 
-**GitHub decides too, where it can.** Eight commands write to GitHub - `/label`, `/unlabel`,
-`/status`, `/priority`, `/assign`, `/unassign`, `/request_review` and `/unrequest_review` - and
-each now asks GitHub whether the caller's own account may write to the repository, on top of the
-Discord role. It asks only where the caller has proved an account with `/link`: somebody who has
-not is decided by the Discord role alone, exactly as before.
+**GitHub decides too, where it can.** Nine commands write to GitHub - `/label`, `/unlabel`,
+`/status`, `/priority`, `/assign`, `/unassign`, `/request_review`, `/unrequest_review` and
+`/log_conversation` - and each asks GitHub whether the caller's own account may write to the
+repository, on top of the Discord role. It asks only where the caller has proved an account with
+`/link`: somebody who has not is decided by the Discord role alone, unless
+`SHANNON_REQUIRE_PROVED_LINKS` is on.
+
+`/stop_conversation` is the one that writes to GitHub and is deliberately not asked about, for
+the same reason it ignores the capture setting: a thread has been told logging is on, and taking
+away the way to turn it off is worse than letting somebody who has lost access turn it off.
+Stopping writes nothing to GitHub in any case.
 
 That is a deliberate floor rather than a wall. It raises the bar for everybody who has connected
-an account and does not lock out anybody who has not, which also means never running `/link` is a
-way to keep the old behaviour. Closing that needs a setting that refuses an unproved caller
-outright, and that is a decision about a deployment rather than a default.
+an account and does not lock out anybody who has not, which also means never running `/link` was a
+way to keep the old behaviour. `SHANNON_REQUIRE_PROVED_LINKS` closes it by refusing an unproved
+caller outright - off by default, because turning it on takes those commands away from every
+member who has not linked, which is a decision about a deployment rather than a default.
 
 It also **fails open** when GitHub cannot be reached: an outage must not turn every one of those
 commands in every server into a refusal. Anybody who can wait for an outage gets the
@@ -486,9 +493,9 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you`, which is a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
-| `/log_conversation` | Developer, Project Manager | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
+| `/log_conversation` | Developer, Project Manager, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
 | `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
-| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from Backlog, Not reviewed, In review and Done. Done shuts the thread. Where a board is linked, a card may move forward one column at a time and back as far as you like, measured against the board's own column order |
+| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from this server's board columns where a board is linked, and from Backlog, Not reviewed, In review and Done where one is not. Done shuts the thread. A card may move forward one column at a time and back as far as you like, measured against the board's own column order |
 | `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
 
 **The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:

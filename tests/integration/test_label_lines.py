@@ -283,6 +283,13 @@ async def test_an_event_that_moves_no_label_says_nothing(
         )
         await container.worker.run_once()
 
+    # The positive half. `lines(threads) == []` on its own is the answer to "nothing was
+    # announced" and to "nothing ran", and a delivery that raised or was never handled gives
+    # the same empty list as one that deliberately said nothing.
+    assert await client.outcome_of("edit-1") == "processed", "the delivery never ran at all"
+    assert "docs" in threads.metadata_of(threads.created[0].thread_id), (
+        "the edit did not reach the block either, so the labels went nowhere to be announced from"
+    )
     assert lines(threads) == []
 
 

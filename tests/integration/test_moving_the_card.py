@@ -63,18 +63,27 @@ class FakeCards:
         self.order = order
         self.order_error = order_error
         self.moved: list[tuple[str, int, int, Status | Priority]] = []
+        # The board column a command named, where it named one.
+        self.named: list[str] = []
         self.asked: list[tuple[Status, Status]] = []
 
     async def move_card(
-        self, *, owner: str, project_number: int, card_id: int, state: Status | Priority
+        self,
+        *,
+        owner: str,
+        project_number: int,
+        card_id: int,
+        state: Status | Priority,
+        column: str = "",
     ) -> CardMoved:
         self.moved.append((owner, project_number, card_id, state))
+        self.named.append(column)
         if self.error is not None:
             raise self.error
         return CardMoved(self.answer, column=self.column)
 
     async def order_for(
-        self, *, owner: str, project_number: int, frm: Status, to: Status
+        self, *, owner: str, project_number: int, frm: Status, to: Status, column: str = ""
     ) -> BoardOrder | None:
         self.asked.append((frm, to))
         if self.order_error is not None:
@@ -376,11 +385,10 @@ class TestRememberingWhereItPutIt:
         assert item is not None and item.project_column == before
 
 
-# GitHub's own default template, and the columns a command can actually write to on it.
-# `In progress` is missing from the second tuple on purpose: it and `In review` both read as
-# IN_REVIEW, the exact-name pass takes `In review`, so no status writes to `In progress`.
+# GitHub's own default template. Every column counts as a step now, because the picker offers
+# every column - while `/status` took a fixed list of four names nothing could write to
+# `In progress`, and counting it demanded a move nobody could make.
 TEMPLATE = ("Backlog", "Ready", "In progress", "In review", "Done")
-REACHABLE = ("Backlog", "Ready", "In review", "Done")
 
 
 class TestTheOrderTheBoardIsIn:
@@ -392,7 +400,7 @@ class TestTheOrderTheBoardIsIn:
     """
 
     def order(self, *, leaving: str, arriving: str) -> BoardOrder:
-        return BoardOrder(columns=TEMPLATE, reachable=REACHABLE, leaving=leaving, arriving=arriving)
+        return BoardOrder(columns=TEMPLATE, leaving=leaving, arriving=arriving)
 
     async def test_a_skipped_column_is_refused_before_anything_is_written(
         self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
@@ -419,14 +427,11 @@ class TestTheOrderTheBoardIsIn:
             await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
 
         said = refused.value.message
-        assert "would skip Ready, In review" in said
+        assert "would skip Ready, In progress, In review" in said
         assert "Move it to Ready first" in said
-        # The board's real order is named in full, including the column nothing writes to,
-        # because that is what the board looks like. What must not name it is the instruction:
-        # telling somebody to move a card where no command can put one is advice they cannot
-        # take.
+        # The board's own order, in full, because that is what the board looks like - and every
+        # column in it is now a step somebody can take, so naming one is advice they can act on.
         assert "Backlog -> Ready -> In progress -> In review -> Done" in said
-        assert "Move it to In progress" not in said
 
     async def test_one_step_forward_goes_through(
         self, on_a_board: None, workflow_with, thread_id: int
@@ -437,17 +442,19 @@ class TestTheOrderTheBoardIsIn:
 
         assert cards.moved != []
 
-    async def test_a_column_nothing_writes_to_is_not_a_step(
+    async def test_the_column_a_command_named_reaches_the_board(
         self, on_a_board: None, workflow_with, thread_id: int
     ) -> None:
-        """`Ready -> In review` jumps over `In progress`, which no status writes to. Counting it
-        would have left a card in `Ready` with no forward move at all, on the commonest board
-        there is."""
-        cards = FakeCards(order=self.order(leaving="Ready", arriving="In review"))
+        """The point of the picker. `In progress` and `In review` both read as IN_REVIEW, so
+        without a name to go on the exact-name pass takes `In review` every time and nothing
+        could put a card in `In progress` at all."""
+        cards = FakeCards(order=self.order(leaving="Ready", arriving="In progress"))
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, column="In progress"
+        )
 
-        assert cards.moved != []
+        assert cards.named == ["In progress"]
 
     async def test_a_board_whose_columns_will_not_read_refuses_nothing(
         self, on_a_board: None, workflow_with, thread_id: int

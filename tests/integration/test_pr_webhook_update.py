@@ -60,12 +60,30 @@ async def test_a_title_change_renames_the_thread(
     assert threads.renames == [(threads.created[0].thread_id, "#7 Now with signature checks")]
 
 
-async def test_an_unchanged_title_does_not_rename(
+async def test_an_unchanged_title_is_still_computed_and_handed_down(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:
+    """What this can prove, which is not what it used to claim.
+
+    It asserted `threads.renames == []` and could not go red: the fake appends there only when the
+    name CHANGES, which is the same condition the real gateway uses to decide whether to spend a
+    rename - so the assertion re-implemented the thing it was testing. Proved by removing that guard
+    from `DiscordThreadGateway.update`: this test stayed green and only
+    `tests/unit/discord_bot/test_threads.py::test_update_renames_only_when_the_title_changed` went
+    red, which is the right place for it, because the decision is the gateway's and this test runs
+    against a fake.
+
+    So this asserts the half that IS here: the sync recomputed the name from the edited payload and
+    handed it down unchanged. A sync that stopped passing a name, or computed a different one, is
+    what this catches now.
+    """
     await deliver(tracked, "pull_request", payloads.pull_request_event("edited"), delivery="d1")
 
-    assert threads.renames == []
+    thread_id = threads.created[0].thread_id
+    assert threads.names_given == [(thread_id, "#7 Add the webhook endpoint")]
+    # And deliberately NOT `renames == []` beside it. That is the assertion this test was built
+    # out of, for the reason above: it cannot go red here, so keeping it as a second opinion
+    # would put back the thing being removed.
 
 
 async def test_a_new_label_reaches_the_metadata(

@@ -14,7 +14,7 @@ Status options are returned in, which is left to right as somebody arranged them
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 
 from shannon.domain.enums import Status
 
@@ -78,9 +78,7 @@ def status_from_column(column: str | None) -> Status | None:
     return _COLUMNS.get(normalise(column))
 
 
-def must_pass_through(
-    columns: Sequence[str], *, frm: str | None, to: str, reachable: Collection[str]
-) -> tuple[str, ...]:
+def must_pass_through(columns: Sequence[str], *, frm: str | None, to: str) -> tuple[str, ...]:
     """The columns a move has to go through first, empty where the board allows it directly.
 
     Forward one column at a time, backwards as far as you like. The asymmetry is the point rather
@@ -91,17 +89,16 @@ def must_pass_through(
     `In review -> Done` is one step and `Ready -> Done` skips two, so the protection survives
     without this file holding an opinion about what the columns are called.
 
-    `reachable` is the columns some status would actually be written to, and filtering by it is not
-    a refinement - without it this rule brings a board to a halt. GitHub's default template runs
-    Backlog, Ready, In progress, In review, Done, and nothing here writes to `In progress`: the
-    exact-name pass picks `In review` for IN_REVIEW, so `In progress` is a column people drag cards
-    into and no command can name. Counting it as a step made `Ready -> In review` a skip, and since
-    the step it demanded could not be taken by anybody, a card in `Ready` had no forward move left
-    at all. A column nothing can be written to is not a step somebody can be asked to take.
+    Every column counts as a step, and that is only true because the picker offers every column.
+    It was not always. While `/status` took a fixed list of four names, nothing could write to a
+    column called `In progress` - the exact-name pass takes `In review` for IN_REVIEW - so counting
+    it as a step demanded a move nobody could make, and left a card in `Ready` with no way forward
+    at all. That needed a filter over which columns were writable. The picker is the board's own
+    columns now, so a step this refuses is always one somebody can take, and the filter is gone
+    rather than merely unused.
 
-    What survives the filter is the requirement worth keeping. On that same template `Ready -> Done`
-    still skips `In review` and is still refused, which is the retired READY_FOR_MERGE gate, read
-    off the board instead of named in Python.
+    On GitHub's default template `Ready -> Done` still skips `In review` and is still refused, which
+    is the retired READY_FOR_MERGE gate read off the board instead of named in Python.
 
     Empty for anything it cannot reason about: a column not on this board, a board whose options
     could not be read, or an item whose column nobody has recorded yet. A rule derived from a list
@@ -121,5 +118,4 @@ def must_pass_through(
     if here is None or there is None or there <= here:
         return ()
 
-    wanted = {normalise(one) for one in reachable}
-    return tuple(columns[at] for at in range(here + 1, there) if normalise(columns[at]) in wanted)
+    return tuple(columns[at] for at in range(here + 1, there))

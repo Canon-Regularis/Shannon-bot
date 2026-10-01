@@ -71,7 +71,7 @@ from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.access import GitHubAccess
-from shannon.services.boards import BoardLinkingService, OwnerBoards
+from shannon.services.boards import BoardColumns, BoardLinkingService, OwnerBoards
 from shannon.services.channels import ChannelMappingService
 from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
 from shannon.services.delivery.queue import WebhookDeliveryQueue
@@ -697,6 +697,7 @@ def _commands(
     people: ItemPeople,
     conversations: ConversationLog,
     boards: BoardLinkingService,
+    board_columns: BoardColumns,
     access: GitHubAccess,
     *,
     capturing: bool,
@@ -742,9 +743,9 @@ def _commands(
         # Only the start is told whether this deployment can read messages. Turning capture off
         # where it used to be on leaves conversations open, and somebody in one of those threads
         # has been told logging is on, so stopping has to keep working.
-        build_log_conversation_command(conversations, gate, capturing=capturing),
+        build_log_conversation_command(conversations, gate, access, capturing=capturing),
         build_stop_conversation_command(conversations, gate),
-        *build_workflow_commands(workflow, gate, access),
+        *build_workflow_commands(workflow, gate, access, board_columns),
     )
 
 
@@ -918,6 +919,7 @@ def build_container(
             ),
             conversations,
             BoardLinkingService(sessionmaker, boards, OwnerBoards(boards)),
+            BoardColumns(sessionmaker, boards),
             GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),
             capturing=settings.capture_discord_messages,
         ),

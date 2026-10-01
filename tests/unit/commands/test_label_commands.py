@@ -16,7 +16,7 @@ from shannon.commands.labels import (
     build_label_command,
     build_unlabel_command,
 )
-from shannon.commands.workflow import PRIORITY_CHOICES, STATUS_CHOICES
+from shannon.commands.workflow import OWN_NAMES, PRIORITY_CHOICES
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.services.workflow import NotAnItemThreadError, WorkflowOutcome
@@ -249,7 +249,9 @@ def test_every_reserved_name_can_be_picked_in_the_command_it_names() -> None:
     nothing is underivable and the table is gone; what is still worth holding is that the
     refusal cannot name a word nobody can pick.
     """
-    offered = {choice.name for choice in (*STATUS_CHOICES, *PRIORITY_CHOICES)}
+    # Status is a picker over a board's own columns now, so the names this bot offers when a
+    # board cannot be read are the fixed half of what anybody can pick.
+    offered = {*OWN_NAMES, *(choice.name for choice in PRIORITY_CHOICES)}
 
     assert offered == {
         spoken(state) for state in (*Status, *Priority) if state is not Priority.UNSET

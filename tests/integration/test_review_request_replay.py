@@ -16,8 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from shannon.db.models import ItemAssignment, Repository, WebhookEvent
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.domain.enums import ActorRole
+from shannon.domain.models import PullRequestSnapshot
+from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.reviews import ReviewRequestLedger
+from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.signing import post
@@ -28,6 +31,18 @@ pytestmark = pytest.mark.integration
 # The payload the first delivery was captured with. The review lands after it, and a person
 # clicking re-request lands after that.
 OPENED_AT = "2026-08-10T11:00:00Z"
+
+# GitHub as it would answer for this pull request. Seeded because an APPROVING review does not
+# only post its note: `after_a_review` rounds up whether everybody has approved, which READS the
+# pull request - and a fake that has never heard of it answers 404, so the delivery failed on
+# every attempt and was parked. The note had already landed, so every assertion here passed
+# while the second half of the review route never ran.
+_PARSED = parse_pull_request_event("opened", payloads.pull_request_event("opened"))
+assert _PARSED is not None, "the pull request payload stopped parsing"
+# Annotated, because a narrowing taken at module level is not carried into a function body:
+# pyright treats a module global as something anything could reassign.
+REVIEWED_PR: PullRequestSnapshot = _PARSED
+PR_KEY = (f"{payloads.OWNER}/{payloads.REPO}".lower(), 7)
 REQUESTED_AT = "2026-08-10T12:00:00Z"
 RE_REQUESTED_AT = "2026-08-12T09:00:00Z"
 
@@ -49,7 +64,7 @@ async def with_a_thread(client, container) -> None:
         payloads.pull_request_event("opened", requested_reviewers=[], updated_at=OPENED_AT),
         delivery="open-1",
     )
-    await container.worker.run_once()
+    await client.drain()
 
 
 def pings(threads: FakeThreadGateway) -> list[str]:
@@ -78,7 +93,9 @@ async def test_a_delivery_retried_after_the_review_neither_pings_nor_blocks_the_
     registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
 ) -> None:
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     async with client:
@@ -134,7 +151,9 @@ async def test_the_ordinary_request_and_review_still_work(
 ) -> None:
     """Nothing above should cost the plain path anything."""
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
 
     async with client:
@@ -175,7 +194,9 @@ async def test_a_review_delivery_retried_after_a_re_request_does_not_close_it(
     request, cleared it and pinged a third time for the second ask.
     """
     threads = FakeThreadGateway()
-    container = build_stack(db_engine, threads=threads)
+    container = build_stack(
+        db_engine, threads=threads, github=FakeGitHubClient(pull_requests={PR_KEY: REVIEWED_PR})
+    )
     client = build_http_client(container)
     review = parse_review_event("submitted", payloads.pull_request_review_event("submitted"))
 

@@ -66,11 +66,6 @@ def test_no_column_at_all_says_nothing(column: str | None) -> None:
 # transition rule to read and a single-select option carries no position of its own.
 TEMPLATE = ("Backlog", "Ready", "In progress", "In review", "Done")
 
-# The columns a command can actually put a card in, on that same board. `In progress` is absent
-# and that is the whole reason this argument exists: both it and `In review` read as IN_REVIEW,
-# the exact-name pass picks `In review`, and so no status writes to `In progress` at all.
-REACHABLE = ("Backlog", "Ready", "In review", "Done")
-
 
 class TestWhatAMoveHasToPassThrough:
     """Forward one column at a time, backwards as far as you like.
@@ -90,52 +85,44 @@ class TestWhatAMoveHasToPassThrough:
         ],
     )
     def test_one_column_forward_is_allowed(self, frm: str, to: str) -> None:
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm=frm, to=to) == ()
+        assert must_pass_through(TEMPLATE, frm=frm, to=to) == ()
 
-    def test_a_column_nothing_can_be_written_to_is_not_a_step(self) -> None:
-        """Without this the rule brings the board to a halt, and the board is GitHub's own
-        default template. `In progress` and `In review` both read as IN_REVIEW, the exact-name
-        pass picks `In review`, so no status writes to `In progress` - and counting it as a step
-        made `Ready -> In review` a skip whose remedy was a move nobody could make. A card in
-        `Ready` had no forward move left at all."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm="Ready", to="In review") == ()
+    def test_every_column_counts_as_a_step(self) -> None:
+        """`In progress` counts, and for a while it could not. While `/status` took a fixed
+        list of four names, nothing could write to that column - it and `In review` both read as
+        IN_REVIEW and the exact-name pass takes `In review` - so counting it as a step demanded a
+        move nobody could make, and a card in `Ready` had no way forward at all. That needed a
+        filter over which columns were writable.
 
-    def test_the_merge_gate_survives_the_filter(self) -> None:
-        """The thing that must NOT be filtered away. `Ready -> Done` jumps over `In review`,
-        which is reachable, so it is still refused - and that refusal is the retired
-        READY_FOR_MERGE rule, read off the board instead of named in Python."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm="Ready", to="Done") == (
+        The picker offers the board's own columns now, so `In progress` can be picked and the
+        filter is gone. `Ready -> In review` is a skip again, and this time the remedy exists."""
+        assert must_pass_through(TEMPLATE, frm="Ready", to="In review") == ("In progress",)
+
+    def test_the_merge_gate_still_holds(self) -> None:
+        """`Ready -> Done` jumps over two columns and is refused, which is the retired
+        READY_FOR_MERGE rule read off the board instead of named in Python."""
+        assert must_pass_through(TEMPLATE, frm="Ready", to="Done") == (
+            "In progress",
             "In review",
         )
 
-    def test_an_unreachable_column_is_left_out_of_what_was_skipped(self) -> None:
-        """`Backlog -> Done` crosses three columns and only two of them are somewhere a
-        command could put the card. Naming the third would tell somebody to move it where
-        nothing can."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm="Backlog", to="Done") == (
-            "Ready",
-            "In review",
-        )
-
-    def test_a_card_parked_in_an_unreachable_column_can_still_move_on(self) -> None:
-        """Somebody dragged it to `In progress` by hand. It is a real place a card sits even
-        though no command can put one there, so it has to be a place one can leave."""
-        assert (
-            must_pass_through(TEMPLATE, reachable=REACHABLE, frm="In progress", to="In review")
-            == ()
-        )
+    def test_a_card_a_person_dragged_can_still_move_on(self) -> None:
+        """Somebody dragged it to `In progress` themselves rather than picking it. One step
+        forward from there is `In review`, exactly as it would be either way - where a card came
+        from is not a question this asks."""
+        assert must_pass_through(TEMPLATE, frm="In progress", to="In review") == ()
 
     def test_the_step_the_old_rule_protected_is_still_one_step(self) -> None:
         """`In review -> Done` is what the retired READY_FOR_MERGE gate existed to require, and it
         is allowed here for the same reason it was there: a reviewer has had their say."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm="In review", to="Done") == ()
+        assert must_pass_through(TEMPLATE, frm="In review", to="Done") == ()
 
     @pytest.mark.parametrize(
         ("frm", "to", "over"),
         [
             ("Backlog", "In progress", ("Ready",)),
-            ("Backlog", "Done", ("Ready", "In review")),
-            ("Ready", "Done", ("In review",)),
+            ("Backlog", "Done", ("Ready", "In progress", "In review")),
+            ("Ready", "Done", ("In progress", "In review")),
             ("In progress", "Done", ("In review",)),
         ],
     )
@@ -144,13 +131,12 @@ class TestWhatAMoveHasToPassThrough:
     ) -> None:
         """The names come back rather than a bool, because the refusal has to say which column to
         move it to instead. A bool would leave whoever ran it to read the board and work it out."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm=frm, to=to) == over
+        assert must_pass_through(TEMPLATE, frm=frm, to=to) == over
 
     def test_the_names_are_the_boards_own_spelling(self) -> None:
         """Not the normalised form. They go straight into a sentence somebody reads."""
         assert must_pass_through(
             ("backlog", "READY", "In-Progress"),
-            reachable=("backlog", "READY", "In-Progress"),
             frm="backlog",
             to="in progress",
         ) == ("READY",)
@@ -168,14 +154,12 @@ class TestWhatAMoveHasToPassThrough:
         """`Done -> Backlog` crosses three columns and is allowed. Reopening something is not a
         skipped step, and making somebody walk a card back one column at a time would be a rule
         about bookkeeping rather than about review."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm=frm, to=to) == ()
+        assert must_pass_through(TEMPLATE, frm=frm, to=to) == ()
 
     def test_the_same_column_is_allowed(self) -> None:
         """A repeat. `/status` is how a lock that failed on its own gets tried again, so a move to
         where the card already is must not be refused."""
-        assert (
-            must_pass_through(TEMPLATE, reachable=REACHABLE, frm="In review", to="In review") == ()
-        )
+        assert must_pass_through(TEMPLATE, frm="In review", to="In review") == ()
 
     @pytest.mark.parametrize(
         ("frm", "to"),
@@ -189,19 +173,19 @@ class TestWhatAMoveHasToPassThrough:
         """Fails open, and has to. The rule is derived from a list this bot did not write, so a
         board somebody renamed one column on would otherwise refuse every move on it until it was
         renamed back."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm=frm, to=to) == ()
+        assert must_pass_through(TEMPLATE, frm=frm, to=to) == ()
 
     @pytest.mark.parametrize("frm", [None, "", "   "])
     def test_an_item_whose_column_nobody_recorded_is_allowed(self, frm: str | None) -> None:
         """Every item before its board is first polled. There is nothing to measure from."""
-        assert must_pass_through(TEMPLATE, reachable=REACHABLE, frm=frm, to="Done") == ()
+        assert must_pass_through(TEMPLATE, frm=frm, to="Done") == ()
 
     def test_a_board_whose_columns_could_not_be_read_allows_everything(self) -> None:
         """The empty tuple reaches here when the board answered nothing usable."""
-        assert must_pass_through((), reachable=(), frm="Backlog", to="Done") == ()
+        assert must_pass_through((), frm="Backlog", to="Done") == ()
 
     def test_a_board_with_one_column_allows_the_only_move_there_is(self) -> None:
-        assert must_pass_through(("Done",), reachable=("Done",), frm="Done", to="Done") == ()
+        assert must_pass_through(("Done",), frm="Done", to="Done") == ()
 
     def test_two_columns_that_normalise_alike_do_not_reorder_the_board(self) -> None:
         """First wins. A board carrying `In progress` and `in-progress` normalises both to one
@@ -209,7 +193,5 @@ class TestWhatAMoveHasToPassThrough:
         refusing moves that are one step apart on the board somebody is looking at."""
         columns = ("Backlog", "In progress", "in-progress", "Done")
 
-        assert must_pass_through(columns, reachable=columns, frm="Backlog", to="In progress") == ()
-        assert must_pass_through(columns, reachable=columns, frm="In progress", to="Done") == (
-            "in-progress",
-        )
+        assert must_pass_through(columns, frm="Backlog", to="In progress") == ()
+        assert must_pass_through(columns, frm="In progress", to="Done") == ("in-progress",)

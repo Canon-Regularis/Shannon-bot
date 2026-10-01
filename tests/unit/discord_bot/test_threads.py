@@ -343,12 +343,23 @@ async def test_update_posts_a_first_message_when_none_was_stored() -> None:
 
 
 async def test_update_never_creates_a_second_thread() -> None:
-    existing = thread()
-    gateway = DiscordThreadGateway(client_with(existing))
+    """`update` resolves its id to a thread or refuses. Handed a channel it must not fall back to
+    opening a thread inside it, which is how one item ends up with two and the row points at the
+    one nobody is reading.
 
-    await gateway.update(thread_id=500, message_id=600, name="#7 Renamed", panel=Panel.of_text("x"))
+    Asserted against the CHANNEL, because that is the only object with a `create_thread` to call.
+    This used to ask `hasattr(thread, "create_thread")`, which `discord.Thread` has never had, so
+    the `or` short-circuited and the assertion held whatever the gateway did.
+    """
+    channel = a_channel(discord.TextChannel, view_channel=True, create_public_threads=True)
+    gateway = DiscordThreadGateway(client_with(channel))
 
-    assert not hasattr(existing, "create_thread") or not existing.create_thread.await_count
+    with pytest.raises(ThreadNotFoundError):
+        await gateway.update(
+            thread_id=500, message_id=600, name="#7 Renamed", panel=Panel.of_text("x")
+        )
+
+    channel.create_thread.assert_not_called()
 
 
 async def test_a_missing_thread_is_reported() -> None:
