@@ -21,6 +21,7 @@ from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import (
     CheckRun,
     CommitRange,
+    CommitRef,
     CommitStats,
     IssueSnapshot,
     PullRequestSnapshot,
@@ -127,6 +128,19 @@ class ReadsCommits(Protocol):
     async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None: ...
 
 
+class ReadsWhoWroteIt(Protocol):
+    """The commits on one pull request, which is how a CI result finds who to ring.
+
+    Its own protocol rather than a third method on `ReadsCommits`: that one is about what a PUSH
+    did to a branch and answers from a range of two SHAs, while this answers from a pull request
+    number and is read for the people rather than the changes.
+    """
+
+    async def list_pull_request_commits(
+        self, owner: str, name: str, number: int
+    ) -> Sequence[CommitRef] | None: ...
+
+
 class ReadsChecks(Protocol):
     """Every CI job on one commit, which is all the check announcer needs.
 
@@ -153,7 +167,15 @@ class ReadsReviews(Protocol):
     ) -> Sequence[ReviewSnapshot] | None: ...
 
 
-class GitHubClient(ListsOpenItems, LooksUpUsers, ReadsChecks, ReadsCommits, ReadsReviews, Protocol):
+class GitHubClient(
+    ListsOpenItems,
+    LooksUpUsers,
+    ReadsChecks,
+    ReadsCommits,
+    ReadsReviews,
+    ReadsWhoWroteIt,
+    Protocol,
+):
     """The GitHub calls the rest of the project is allowed to make.
 
     Commands and services depend on this rather than on httpx, so nothing outside this module
@@ -357,6 +379,39 @@ class HttpGitHubClient:
                 found.extend(mapping.check_runs(body))
         except GitHubNotFoundError:
             logger.info("GitHub has no commit %s on %s/%s, so no checks", sha, owner, name)
+            return None
+        return found
+
+    async def list_pull_request_commits(
+        self, owner: str, name: str, number: int
+    ) -> Sequence[CommitRef] | None:
+        """Every commit on one pull request, read for the accounts that WROTE them.
+
+        Not for the commits. A CI result rings whoever put the code there, and `CommitRef.author`
+        is the GitHub account GitHub itself resolved from the commit's email address - the only
+        name on a commit that anybody else chose. The message and the SHA come along because the
+        row carries them, and nothing here reads either.
+
+        Paged, for the reason `list_reviews` is paged: a branch argued over for a week runs past
+        one page, and a half-read list here is the shape that silently leaves a contributor out -
+        which is the whole of what this read exists to prevent. `compare_commits` takes the other
+        bargain and documents it, because a push announcement that lists nine of ten commits is
+        still a true announcement; a contributor who is not rung is not a smaller version of the
+        feature, it is the bug.
+
+        None for a pull request that is gone, which is not the empty list: that is a pull request
+        whose commits GitHub could link to nobody, and the caller treats the two differently.
+        """
+        found: list[CommitRef] = []
+        path = f"{_repository(owner, name)}/pulls/{number}/commits"
+        try:
+            async for body in self.get_pages(path, owner=owner, per_page=LIST_PAGE_SIZE):
+                for row in body if is_json_list(body) else []:
+                    commit = mapping.commit_ref(row)
+                    if commit is not None:
+                        found.append(commit)
+        except GitHubNotFoundError:
+            logger.info("GitHub has no commits for %s/%s#%s", owner, name, number)
             return None
         return found
 

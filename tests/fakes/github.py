@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 from shannon.domain.models import (
     CheckRun,
     CommitRange,
+    CommitRef,
     CommitStats,
     IssueSnapshot,
     Label,
@@ -56,6 +57,9 @@ class FakeGitHubClient:
         # push that announces nothing looks identical whether it skipped the reads or made ten
         # of them and threw the answers away.
         self.stats_calls: list[tuple[str, str]] = []
+        # Keyed the way the real path addresses one: a lowered full name and the number.
+        self.pull_request_commits: dict[tuple[str, int], Sequence[CommitRef]] = {}
+        self.commit_list_calls: list[tuple[str, int]] = []
         # Every login exists unless a test says otherwise, because almost no test is about a
         # login that does not. `{}` is how a test says the account is not there, and a mapping
         # rather than a set because what `/link` needs is the account's id, not a yes.
@@ -221,6 +225,21 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return self.commits.get(sha)
+
+    async def list_pull_request_commits(
+        self, owner: str, name: str, number: int
+    ) -> Sequence[CommitRef] | None:
+        """Who wrote the commits on one pull request.
+
+        `None` for a key nobody stocked, which is the real client's answer for a pull request that
+        is gone - NOT the empty list, which is a pull request whose commits link to nobody. A test
+        about a contributor who could not be resolved has to be able to say the second without
+        saying the first.
+        """
+        self.commit_list_calls.append((f"{owner}/{name}".lower(), number))
+        if self.error is not None:
+            raise self.error
+        return self.pull_request_commits.get((f"{owner}/{name}".lower(), number))
 
     async def list_open_pull_requests(
         self, repository: RepositorySnapshot

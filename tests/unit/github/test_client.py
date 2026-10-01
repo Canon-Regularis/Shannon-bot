@@ -1142,6 +1142,144 @@ class TestComparingTwoCommits:
                 await client.compare_commits(payloads.OWNER, payloads.REPO, "b", "a")
 
 
+class TestReadingTheCommitsInAPullRequest:
+    """Who wrote what is on a pull request, which is how a CI result finds who to ring.
+
+    The rows are the same shape a compare sends, so `mapping.commit_ref` is shared. What differs
+    is that this one is read for the PEOPLE: a row whose `author` GitHub could not link to an
+    account is not a broken row, it is a commit by somebody with no GitHub account on that email,
+    and the honest answer is that it names nobody.
+    """
+
+    def row(self, sha: str = "a" * 40, login: str | None = "octocat", parents: int = 1) -> dict:
+        """One commit as the endpoint sends it.
+
+        `author` at the TOP level is the linked account; `commit.author` is the free text the
+        committer put in their git config. The two are different fields and only the first is
+        anybody's to prove, which is why this helper lets a test set them apart.
+        """
+        return {
+            "sha": sha,
+            "commit": {"message": "Add the thing", "author": {"name": "Somebody Else"}},
+            "author": {"login": login, "id": 583231} if login is not None else None,
+            "parents": [{"sha": "b" * 40}] * parents,
+        }
+
+    async def test_it_asks_the_commits_endpoint_for_that_pull_request(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert seen == [f"/repos/{payloads.OWNER}/{payloads.REPO}/pulls/7/commits"]
+
+    async def test_a_page_of_rows_becomes_commits_with_their_accounts(self) -> None:
+        handler = responds(200, [self.row("a" * 40, "octocat"), self.row("c" * 40, "hubot")])
+
+        async with client_with(handler) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is not None
+        assert [commit.author.login for commit in found if commit.author] == ["octocat", "hubot"]
+
+    async def test_a_commit_with_no_linked_account_comes_back_with_no_author(self) -> None:
+        """Not an error and not a gap. Somebody committed under an address no GitHub account
+        holds, so there is nobody to ring, and saying so is the whole answer."""
+        async with client_with(responds(200, [self.row(login=None)])) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is not None
+        assert len(found) == 1
+        assert found[0].author is None
+
+    async def test_the_name_in_the_commit_is_never_read_as_the_account(self) -> None:
+        """`commit.author.name` is whatever the committer typed into `git config`, so anybody who
+        can push could put a colleague's name on their work. Only the resolved account counts."""
+        async with client_with(responds(200, [self.row(login=None)])) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is not None
+        assert found[0].author is None, "the free-text git name was read as an account"
+
+    async def test_a_merge_commit_says_it_is_one(self) -> None:
+        """The caller drops merges, because a merge's account is whoever pressed Update branch
+        rather than whoever wrote anything."""
+        handler = responds(200, [self.row(parents=2), self.row("c" * 40, parents=1)])
+
+        async with client_with(handler) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is not None
+        assert [commit.merge for commit in found] == [True, False]
+
+    async def test_every_page_is_read(self) -> None:
+        """A branch argued over for a week runs past one page, and a half-read list here leaves a
+        contributor out without saying so - which is the defect this read exists to prevent."""
+        asked: list[str] = []
+        following = {"Link": '<https://api.github.com/next?page=2>; rel="next"'}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(str(request.url))
+            if len(asked) == 1:
+                return httpx.Response(
+                    200, content=json.dumps([self.row("a" * 40, "octocat")]), headers=following
+                )
+            return httpx.Response(200, content=json.dumps([self.row("c" * 40, "hubot")]))
+
+        async with client_with(handler) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert len(asked) == 2
+        assert found is not None
+        assert [commit.author.login for commit in found if commit.author] == ["octocat", "hubot"]
+
+    async def test_a_row_with_no_sha_is_dropped_without_losing_the_rest(self) -> None:
+        handler = responds(200, [{"commit": {}}, self.row("c" * 40, "hubot")])
+
+        async with client_with(handler) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is not None
+        assert [commit.sha for commit in found] == ["c" * 40]
+
+    async def test_a_body_that_is_not_an_array_is_read_as_no_commits(self) -> None:
+        """This endpoint sends a bare array, unlike check runs, which wrap theirs in an object. A
+        wrapper arriving here is GitHub changing shape, and reading one as a list of commits would
+        be worse than reading it as none."""
+        async with client_with(responds(200, {"commits": [self.row()]})) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found == []
+
+    async def test_a_pull_request_github_has_lost_answers_none(self) -> None:
+        """None rather than the empty list, and the caller tells them apart: nothing to read is a
+        narrower audience, while no commits with accounts is the same audience said honestly."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            found = await client.list_pull_request_commits(payloads.OWNER, payloads.REPO, 7)
+
+        assert found is None
+
+    async def test_it_escapes_the_repository_in_the_path(self) -> None:
+        """Read off `raw_path`, the bytes that go on the wire. `url.path` hands back the decoded
+        string, so asserting on that would pass against a path that escaped nothing."""
+        wire: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_pull_request_commits("acme", "widget/evil", 7)
+
+        # `startswith`, because this is a paged read and `get_pages` puts `per_page` on the
+        # query string. The check-runs test does the same for the same reason.
+        assert wire[0].startswith(b"/repos/acme/widget%2Fevil/pulls/7/commits")
+
+
 class TestReadingOneCommitsNumbers:
     def commit(self, **overrides: object) -> dict[str, object]:
         body = {"stats": {"additions": 42, "deletions": 7, "total": 49}, "files": [{}, {}, {}]}

@@ -50,6 +50,7 @@ from shannon.github.client import (
     LooksUpUsers,
     ReadsChecks,
     ReadsCommits,
+    ReadsWhoWroteIt,
     SuppliesTokens,
 )
 from shannon.github.installations import (
@@ -147,6 +148,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ReadsCommits, HttpGitHubClient),
     (ReadsChecks, FakeGitHubClient),
     (ReadsChecks, HttpGitHubClient),
+    (ReadsWhoWroteIt, FakeGitHubClient),
+    (ReadsWhoWroteIt, HttpGitHubClient),
     # `ReadsJson` was missing from this table all along, and `get_json` and `get_pages` have just
     # grown a parameter in three places at once. This is exactly the drift the file exists for.
     (ReadsJson, FakeGitHubClient),
