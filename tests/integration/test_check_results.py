@@ -277,11 +277,21 @@ class TestWhatItSaysNothingAbout:
         self, tracked: tuple[DeliveryClient, FakeGitHubClient], threads: FakeThreadGateway
     ) -> None:
         """A push to the default branch. The endpoint that would chase it answers with the pull
-        request the commit was merged by, which is why nothing chases it."""
+        request the commit was merged by, which is why nothing chases it.
+
+        Dropped at the route, before the body is a row, which is the assertion below that the
+        other two cannot make: the parser refuses the same suites, so with the route's own filter
+        taken out nothing is announced and nothing is asked of GitHub either and both of those
+        stay green. What the filter buys is the 25kB of JSONB a protected default branch would
+        otherwise write per push, for a retention window, having never been actionable.
+        """
         client, github = tracked
 
         await a_suite(client, numbers=())
 
+        assert await client.outcome_of("cs-1") == "not queued", (
+            "a suite with nowhere to go was written down anyway"
+        )
         assert announced(threads) == []
         assert github.check_run_calls == [], "GitHub was asked about a suite with nowhere to go"
 
