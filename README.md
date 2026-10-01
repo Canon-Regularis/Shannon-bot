@@ -99,7 +99,29 @@ upserts rather than inserts, compare-and-swap on the thread pointer, claims take
 
 ## Install
 
-Python 3.12 or newer, Docker for the database, and [uv](https://docs.astral.sh/uv/).
+With [Nix](https://nixos.org/download/) installed, the development environment is reproducible and
+does not require installing Python, uv, PostgreSQL, Node, Docker clients, or other project tooling on
+the host:
+
+```bash
+nix develop
+uv sync --extra dev --locked        # runtime and dev dependencies
+cp .env.example .env                # fill in before running against real services
+shannon-db-start                    # PostgreSQL 17 on localhost:5433, from the Nix shell
+uv run alembic upgrade head
+uv run shannon
+```
+
+`nix develop` pins the tool versions through `flake.lock`. The shell also includes the Docker and
+Compose clients, so the existing Compose-based database workflow continues to work from inside the
+shell when a Docker daemon is available:
+
+```bash
+docker compose up -d --wait db
+```
+
+Without Nix, install Python 3.12 or newer, Docker for the database, and
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync --extra dev --locked        # runtime and dev dependencies

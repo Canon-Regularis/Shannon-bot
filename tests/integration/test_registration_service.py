@@ -5,8 +5,10 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import shannon.services.registration as registration
 from shannon.db.models import ChannelMapping, Repository
 from shannon.db.stores.installations import InstallationStore
 from shannon.db.stores.repositories import RepositoryStore
@@ -217,6 +219,28 @@ async def test_a_registration_that_commits_between_the_check_and_the_insert(
 
     db_session.expire_all()
     assert len((await db_session.scalars(select(Repository))).all()) == 1
+
+
+async def test_an_insert_conflict_is_reported_as_a_duplicate(
+    service: RepositoryRegistrationService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ConflictingRepositoryStore:
+        def __init__(self, session: AsyncSession) -> None:
+            pass
+
+        async def get_by_guild(self, guild_id: int) -> None:
+            return None
+
+        async def get_by_github_id(self, github_repo_id: int) -> None:
+            return None
+
+        async def add(self, **values: object) -> None:
+            raise IntegrityError("insert", values, Exception("duplicate key"))
+
+    monkeypatch.setattr(registration, "RepositoryStore", ConflictingRepositoryStore)
+
+    with pytest.raises(DuplicateRegistrationError, match="registered a moment ago"):
+        await service.register(guild_id=1, channel_id=10, login=OCTOCAT, link=REPO_LINK)
 
 
 class TestARepositoryRenamedOnGitHub:

@@ -12,6 +12,7 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
 from shannon.domain.enums import ObjectType, Status
+from shannon.domain.models import CommentSnapshot, RepositorySnapshot
 from shannon.github.webhooks.comments import parse_comment_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.sync.items import build_item_sync
@@ -65,6 +66,40 @@ async def test_the_comment_carries_everything_the_issue_asks_for(
     assert "<t:" in content
     assert "Reproduced on main" in content
     assert f"issuecomment-{payloads.COMMENT_ID}" in content
+
+
+async def test_a_comment_without_an_author_still_reaches_its_thread(
+    tracked: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    threads: FakeThreadGateway,
+) -> None:
+    mirror = ItemNoteMirror(
+        db_sessionmaker,
+        threads,
+        render=lambda note, mentions, roles: Panel.of_text("hello from nobody"),
+        shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+    )
+    snapshot = CommentSnapshot(
+        repository=RepositorySnapshot(
+            github_repo_id=payloads.REPO_ID,
+            owner=payloads.OWNER,
+            name=payloads.REPO,
+            html_url=f"https://github.com/{payloads.OWNER}/{payloads.REPO}",
+        ),
+        item_number=12,
+        comment_id=999001,
+        html_url="https://github.com/Canon-Regularis/Shannon-bot/issues/12#issuecomment-999001",
+        body="A deleted account left this.",
+        object_type=ObjectType.ISSUE,
+        author=None,
+    )
+
+    mirrored = await mirror.mirror(snapshot)
+
+    assert tracked is not None
+    assert mirrored is True
+    assert threads.posts[-1][0] == thread_for(threads, 98)
+    assert threads.posts[-1][1] == "hello from nobody"
 
 
 async def test_a_comment_on_a_pull_request_reaches_the_pull_request_thread(
