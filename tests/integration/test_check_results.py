@@ -92,8 +92,20 @@ def allow_list(threads: FakeThreadGateway) -> Notify:
     return None
 
 
-async def a_suite(client: DeliveryClient, *, delivery: str = "cs-1", **overrides: Any) -> None:
-    await deliver(client, "check_suite", payloads.check_suite_event(**overrides), delivery=delivery)
+async def a_suite(
+    client: DeliveryClient,
+    *,
+    delivery: str = "cs-1",
+    expect_retries: bool = False,
+    **overrides: Any,
+) -> None:
+    await deliver(
+        client,
+        "check_suite",
+        payloads.check_suite_event(**overrides),
+        delivery=delivery,
+        expect_retries=expect_retries,
+    )
 
 
 async def link(session: AsyncSession, login: str, discord_id: int, github_id: int) -> None:
@@ -332,7 +344,10 @@ class TestWhatItSaysNothingAbout:
         async with build_http_client(
             build_stack(db_engine, threads=threads, github=a_github())
         ) as client:
-            await a_suite(client, delivery="cs-retry")
+            # The one call here that means to leave a delivery parked: the whole point is that
+            # it comes back once the backoff is up, so `drain` must not pull it forward and try
+            # again, and must not fail for finding it unfinished.
+            await a_suite(client, delivery="cs-retry", expect_retries=True)
             attempts = await client.attempts_of("cs-retry")
             outcome = await client.outcome_of("cs-retry")
 

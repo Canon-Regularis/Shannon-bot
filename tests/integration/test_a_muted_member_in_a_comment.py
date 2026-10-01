@@ -55,8 +55,21 @@ async def mute(session: AsyncSession, discord_user_id: int) -> None:
 
 
 def last_note(threads: FakeThreadGateway) -> tuple[str, tuple]:
+    """The note this delivery posted, refusing to read anything else as one.
+
+    The assertion is the whole value of this helper and it earned its keep the hard way. Every
+    way a note silently fails to be posted - a claim already spent, an item not tracked here, a
+    delivery id already seen, a handler that raised - ends with the fixture's own `create` as the
+    last write. Read straight through, that becomes a failure about the CONTENT of a message
+    nobody wrote, which is three steps from the cause. `drain` now raises before this is reached
+    for the last of those four; this names the other three.
+    """
     kind, _, content, notify = threads.allowed[-1]
-    assert kind == "post", f"the last write was a {kind}, so this is looking at the wrong message"
+    assert kind == "post", (
+        f"the last write was a {kind}, so no note was posted at all. Something declined "
+        "silently: look for 'already in its thread', 'is not tracked here' or 'already seen' "
+        "in the log above."
+    )
     return content, notify
 
 

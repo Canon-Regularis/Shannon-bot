@@ -311,7 +311,10 @@ class TestANoteThatArrivesTooEarly:
         threads.fail_next_create = True
         await post(client, "issues", payloads.issue_event("opened"), delivery="item")
         await post(client, "issue_comment", payloads.issue_comment_event(), delivery="note")
-        client.worker._settings = WorkerSettings(first_backoff=timedelta(seconds=-1))
+        # No negative backoff here any more. This used to set one, because `drain` stopped as soon
+        # as nothing was DUE and a parked delivery is not due - so the only way to see the retry was
+        # to make the backoff negative. `drain` pulls parked deliveries forward itself now, which is
+        # what a test standing in for a clock should do, and the workaround came out with it.
 
         await client.drain()
 
@@ -904,3 +907,71 @@ class TestWhatGetsWrittenToLastError:
             select(WebhookEvent).where(WebhookEvent.github_delivery_id == "small")
         )
         assert event.last_error == "RuntimeError: the gateway said no"
+
+
+class TestWhatDrainPromises:
+    """`deliver` says "the whole path in one call" and `drain` is the half that has to mean it.
+
+    It did not. `run_once` answers how many deliveries were DUE, and a handler that raised parks its
+    delivery five seconds out - so the loop saw nothing due, returned, and the caller went on to
+    assert about a Discord that had never been written to. Once in thirty files, under coverage,
+    on a loaded machine, with the failure landing three steps from the cause.
+    """
+
+    async def test_a_delivery_that_works_first_time_is_left_alone(
+        self, client: DeliveryClient, db_session: AsyncSession
+    ) -> None:
+        await deliver(client, "issues", payloads.issue_event("opened"), delivery="plain")
+
+        stored_row = await stored(db_session, "plain")
+        assert stored_row.status == DeliveryStatus.PROCESSED
+        # Zero, because `attempts` counts the times a delivery FAILED rather than the times it was
+        # tried - the retry test beside this asserts 1 after exactly one failure. So zero here is
+        # the assertion that nothing was retried and nothing was unparked.
+        assert stored_row.attempts == 0, "it retried something that had not failed"
+        assert stored_row.next_attempt_at is None
+
+    async def test_a_transient_failure_heals_inside_the_call(
+        self, client: DeliveryClient, db_session: AsyncSession
+    ) -> None:
+        """The shape the flake was. One failure, a five second park, and the work has to happen
+        anyway - there is no clock here to wait on."""
+        exploding = Exploding(failures=1)
+        client.worker._dispatch.register("issues", exploding)
+
+        await deliver(client, "issues", payloads.issue_event("opened"), delivery="once")
+
+        assert exploding.calls == 2, "the parked retry was never tried"
+        assert (await stored(db_session, "once")).status == DeliveryStatus.PROCESSED
+
+    async def test_a_handler_that_always_fails_says_so_and_names_it(
+        self, client: DeliveryClient
+    ) -> None:
+        """Loudly, and with the delivery, the attempt count and the error it recorded. The whole
+        cost of the old behaviour was that none of that reached whoever was reading the failure."""
+        client.worker._dispatch.register("issues", Exploding(failures=99))
+
+        with pytest.raises(AssertionError) as refused:
+            await deliver(client, "issues", payloads.issue_event("opened"), delivery="doomed")
+
+        said = str(refused.value)
+        assert "doomed" in said
+        assert "discord is down" in said, "it did not carry the error the handler raised"
+        assert "PENDING" in said
+
+    async def test_a_test_that_means_to_park_one_is_left_alone(
+        self, client: DeliveryClient, db_session: AsyncSession
+    ) -> None:
+        """`expect_retries` exists for the tests asserting on the attempt count, which want the
+        queue exactly as the worker left it. Without it they would see the retry pulled forward."""
+        exploding = Exploding(failures=99)
+        client.worker._dispatch.register("issues", exploding)
+
+        await deliver(
+            client, "issues", payloads.issue_event("opened"), delivery="parked", expect_retries=True
+        )
+
+        assert exploding.calls == 1, "it pulled forward a retry the caller asked it to leave"
+        stored_row = await stored(db_session, "parked")
+        assert stored_row.status == DeliveryStatus.PENDING
+        assert stored_row.next_attempt_at is not None, "it cleared a park it was told to keep"

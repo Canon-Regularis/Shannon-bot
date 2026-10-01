@@ -13,10 +13,12 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
 from shannon.domain.enums import ObjectType, Status
 from shannon.github.webhooks.comments import parse_comment_event
+from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy
 from shannon.services.sync.shutting import KeepsThreadsShut
+from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.stack import deliver, registered_stack
@@ -28,13 +30,27 @@ pytestmark = pytest.mark.integration
 async def tracked(
     db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> AsyncIterator[AsyncClient]:
-    """An issue and a pull request, both already synced."""
-    async with registered_stack(db_engine, db_session, threads) as http_client:
+    """An issue and a pull request, both already synced.
+
+    GitHub knows the pull request, which it did not before and had to. An approving review posts
+    its note and then asks whether everybody has approved, which READS the pull request - and a
+    fake that has never heard of it answered 404, so the delivery was parked five seconds out and
+    never finished. Every test here about an approval was asserting on a note that had landed and
+    a delivery that had failed, and the two negative ones - no metadata touched, no status moved -
+    were passing because nothing had happened at all.
+    """
+    github = FakeGitHubClient(pull_requests={(f"{payloads.OWNER}/{payloads.REPO}".lower(), 7): PR})
+    async with registered_stack(db_engine, db_session, threads, github=github) as http_client:
         await deliver(http_client, "issues", payloads.issue_event("opened"), delivery="i0")
         await deliver(
             http_client, "pull_request", payloads.pull_request_event("opened"), delivery="p0"
         )
         yield http_client
+
+
+# The pull request as GitHub would answer for it, parsed from the same payload the webhook
+# carries so the two cannot describe different things.
+PR = parse_pull_request_event("opened", payloads.pull_request_event("opened"))
 
 
 def thread_for(threads: FakeThreadGateway, channel_id: int) -> int:
