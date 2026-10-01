@@ -5,14 +5,20 @@ what makes this work is outside it. `check_suite` has to survive the endpoint's 
 it could not before this issue added the key, reach the queue, come back out of it, and find a
 thread already open.
 
-The two tests that matter most are the ones about who is rung. A pass goes to the reviewers and a
-failure to the author and the assignees, and getting that backwards is silent: everybody still
-gets a message, it just reaches the wrong people and the ones who needed it hear nothing.
+The tests that matter most are the ones about who is rung, and issue #164 is what they say now.
+Both outcomes reach the same people: the author, the assignees, and whoever has a commit on the
+pull request. The verdict decides what the sentence says, not who hears it.
+
+It used to turn on the verdict. A pass rang the requested reviewers and a failure rang the author
+and the assignees, so somebody whose push went green was told nothing while a reviewer who had not
+looked yet was interrupted - which is how #164 was reported, with a screenshot of exactly that.
+Getting this wrong is silent: everybody still gets a message, it just reaches the wrong people and
+the ones who needed it hear nothing.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
@@ -24,7 +30,7 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.threads import Notify
 from shannon.domain.enums import ObjectType
-from shannon.domain.models import CheckRun
+from shannon.domain.models import Actor, CheckRun, CommitRef
 from shannon.github import mapping
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -40,6 +46,16 @@ REPO_FULL = f"{payloads.OWNER}/{payloads.REPO}".lower()
 AUTHOR = "octocat"
 ASSIGNEE = "hubot"
 REVIEWER = "monalisa"
+# Somebody who pushed to the branch and is neither its author nor assigned to it. Before issue
+# #164 there was no name for this person here, because nothing ever rang them.
+CONTRIBUTOR = "defunkt"
+
+
+def wrote(login: str | None, *, merge: bool = False, sha: str = "a" * 40) -> CommitRef:
+    """One commit on the pull request, as the commits endpoint describes it."""
+    return CommitRef(
+        sha=sha, message="Add the thing", author=Actor(login) if login else None, merge=merge
+    )
 
 
 def run(number: int, name: str, conclusion: str = "success", status: str = "completed") -> CheckRun:
@@ -58,14 +74,22 @@ GREEN = [run(1, "Lint"), run(2, "Tests"), run(3, "Publish", "skipped")]
 RED = [run(1, "Lint"), run(2, "Tests", "failure")]
 
 
-def a_github(**overrides: Any) -> FakeGitHubClient:
-    """A GitHub holding the pull request the thread is about, and the checks on a commit."""
+def a_github(commits: Sequence[CommitRef] | None = None, **overrides: Any) -> FakeGitHubClient:
+    """A GitHub holding the pull request, the checks on its commit, and who wrote them.
+
+    The commits default to one by `CONTRIBUTOR`, because since issue #164 that is the ordinary
+    shape: somebody pushed, the jobs ran, and the result is theirs to hear about. A test that
+    wants the other case passes its own list, or `[]` for a pull request nobody can be resolved
+    from.
+    """
     repo = mapping.repository(payloads.repository())
     assert repo is not None
     snapshot = mapping.pull_request(payloads.pull_request(**overrides), repo)
     assert snapshot is not None
+    commits = [wrote(CONTRIBUTOR)] if commits is None else commits
     github = FakeGitHubClient(pull_requests={(REPO_FULL, 7): snapshot})
     github.check_runs[SHA] = GREEN
+    github.pull_request_commits[(REPO_FULL, 7)] = commits
     return github
 
 
@@ -159,58 +183,194 @@ class TestWhatReachesTheThread:
 
 
 class TestWhoIsRung:
-    async def test_a_pass_rings_the_reviewers(
+    """Issue #164. The audience is everybody who put the code there, on both outcomes.
+
+    It used to turn on the verdict: a pass rang the requested reviewers and a failure rang the
+    author and the assignees. So the people who caused a green run were told nothing, and people
+    who had not looked at it yet were interrupted - which is what the issue reported, with a
+    screenshot of a reviewer being pinged about somebody else's passing build.
+    """
+
+    async def test_a_pass_rings_the_people_who_caused_the_run(
         self,
         tracked: tuple[DeliveryClient, FakeGitHubClient],
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
+        """The regression test for #164, and the reviewer assertion is the half that matters."""
         client, _ = tracked
-        await link(db_session, REVIEWER, 555, 200)
-
-        await a_suite(client)
-
-        assert "<@555>" in announced(threads)[0]
-        assert allow_list(threads) == (555,)
-
-    async def test_a_failure_rings_the_author_and_the_assignees_instead(
-        self,
-        tracked: tuple[DeliveryClient, FakeGitHubClient],
-        threads: FakeThreadGateway,
-        db_session: AsyncSession,
-    ) -> None:
-        """The reviewers are deliberately absent. A broken build is the author's to fix, and
-        ringing the people who have not looked at it yet is the wrong end of the feature."""
-        client, github = tracked
-        github.check_runs[SHA] = RED
         await link(db_session, AUTHOR, 111, 583231)
         await link(db_session, ASSIGNEE, 222, 100)
+        await link(db_session, CONTRIBUTOR, 333, 300)
         await link(db_session, REVIEWER, 555, 200)
 
         await a_suite(client)
 
         said = announced(threads)[0]
-        assert "<@111>" in said
-        assert "<@222>" in said
-        assert "<@555>" not in said, "a reviewer was rung about a build they had not asked to see"
-        assert sorted(allow_list(threads) or ()) == [111, 222]
+        assert sorted(allow_list(threads) or ()) == [111, 222, 333]
+        assert "<@555>" not in said, "#164 again: a pass rang a reviewer who had not looked yet"
 
-    async def test_a_muted_reviewer_is_named_without_being_rung(
+    async def test_a_failure_rings_the_same_people(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """The point is that it is the SAME list. The verdict decides what the sentence says, not
+        who hears it: whoever put the code there wants to know either way."""
+        client, github = tracked
+        github.check_runs[SHA] = RED
+        await link(db_session, AUTHOR, 111, 583231)
+        await link(db_session, ASSIGNEE, 222, 100)
+        await link(db_session, CONTRIBUTOR, 333, 300)
+        await link(db_session, REVIEWER, 555, 200)
+
+        await a_suite(client)
+
+        assert sorted(allow_list(threads) or ()) == [111, 222, 333]
+        assert "<@555>" not in announced(threads)[0]
+
+    async def test_a_contributor_who_is_neither_author_nor_assignee_is_rung(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """The person the old audience could not reach at all. Nothing on the pull request names
+        them - they are only on it because they pushed."""
+        client, _ = tracked
+        await link(db_session, CONTRIBUTOR, 333, 300)
+
+        await a_suite(client)
+
+        assert "<@333>" in announced(threads)[0]
+        assert allow_list(threads) == (333,)
+
+    async def test_the_person_whose_push_broke_it_is_rung_about_their_own_build(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """A deliberate exception to this bot's one self-notification rule.
+
+        `draft_lines` drops whoever pressed the button, because they know - they pressed it. A
+        suite finishing is the opposite kind of event: it is news, and it is most news to the
+        person who pushed, who cannot know the answer until the jobs come back. Anybody who would
+        rather not hear it has `/mentions off`, which is where that choice belongs.
+        """
+        client, github = tracked
+        github.check_runs[SHA] = RED
+        await link(db_session, CONTRIBUTOR, 333, 300)
+
+        await a_suite(client)
+
+        assert 333 in (allow_list(threads) or ()), "the person who broke it was not told"
+
+    async def test_a_reviewer_is_not_rung_by_ci_at_all(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """Stated on its own, because it is a decision rather than a side effect: a reviewer finds
+        out a pull request is ready by being asked for a review, not by CI finishing."""
+        client, _ = tracked
+        await link(db_session, REVIEWER, 555, 200)
+
+        await a_suite(client)
+
+        assert "<@555>" not in announced(threads)[0]
+        assert allow_list(threads) == ()
+
+    async def test_a_commit_github_cannot_link_to_an_account_rings_nobody_extra(
+        self,
+        db_engine: AsyncEngine,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Somebody committed under an address no GitHub account holds. There is nobody to ring,
+        and the author is still told."""
+        await register_repository(db_session, guild_id=1, channel_id=99)
+        await link(db_session, AUTHOR, 111, 583231)
+        github = a_github(commits=[wrote(None)])
+        async with build_http_client(
+            build_stack(db_engine, threads=threads, github=github)
+        ) as client:
+            await deliver(
+                client, "pull_request", payloads.pull_request_event("opened"), delivery="p0"
+            )
+            await a_suite(client)
+
+        assert allow_list(threads) == (111,)
+
+    async def test_a_contributor_who_is_also_the_author_is_rung_once(
+        self,
+        db_engine: AsyncEngine,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The ordinary case: somebody opened the pull request and pushed to it. Capitalised
+        differently because GitHub echoes a login the way it was typed in each place it appears."""
+        await register_repository(db_session, guild_id=1, channel_id=99)
+        await link(db_session, AUTHOR, 111, 583231)
+        github = a_github(commits=[wrote("OctoCat")])
+        async with build_http_client(
+            build_stack(db_engine, threads=threads, github=github)
+        ) as client:
+            await deliver(
+                client, "pull_request", payloads.pull_request_event("opened"), delivery="p0"
+            )
+            await a_suite(client)
+
+        said = announced(threads)[0]
+        assert allow_list(threads) == (111,)
+        assert said.count("<@111>") == 1, "the author was named twice for one event"
+
+    async def test_a_merge_commit_does_not_ring_whoever_pressed_update_branch(
+        self,
+        db_engine: AsyncEngine,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Issue #164 arriving through a side door.
+
+        A merge commit's account is whoever pressed "Update branch", which is very often a
+        reviewer tidying somebody else's pull request. The commit never leaves the branch, so
+        without the filter that reviewer is rung on every suite for the rest of its life - the
+        same wrong person the issue is about, by a different route.
+        """
+        await register_repository(db_session, guild_id=1, channel_id=99)
+        await link(db_session, AUTHOR, 111, 583231)
+        await link(db_session, REVIEWER, 555, 200)
+        github = a_github(commits=[wrote(REVIEWER, merge=True)])
+        async with build_http_client(
+            build_stack(db_engine, threads=threads, github=github)
+        ) as client:
+            await deliver(
+                client, "pull_request", payloads.pull_request_event("opened"), delivery="p0"
+            )
+            await a_suite(client)
+
+        assert allow_list(threads) == (111,)
+        assert "<@555>" not in announced(threads)[0]
+
+    async def test_a_muted_contributor_is_named_without_being_rung(
         self,
         tracked: tuple[DeliveryClient, FakeGitHubClient],
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
         """`/mentions` decides whether your own name notifies you. The thread still records who
-        the result was for."""
+        the result was for - including, now, somebody who only appears on it through a commit."""
         client, _ = tracked
-        await link(db_session, REVIEWER, 555, 200)
-        await MutedMemberStore(db_session).mute(guild_id=1, discord_user_id=555)
+        await link(db_session, CONTRIBUTOR, 333, 300)
+        await MutedMemberStore(db_session).mute(guild_id=1, discord_user_id=333)
         await db_session.commit()
 
         await a_suite(client)
 
-        assert "<@555>" in announced(threads)[0]
+        assert "<@333>" in announced(threads)[0]
         assert allow_list(threads) == ()
 
     async def test_a_draft_posts_the_results_and_rings_nobody(
@@ -219,10 +379,17 @@ class TestWhoIsRung:
         db_session: AsyncSession,
         threads: FakeThreadGateway,
     ) -> None:
-        """GitHub runs CI on a draft like any other pull request, and nobody has been asked to
-        review it yet."""
+        """A draft is the state in which this bot asks nothing of anybody - the same reason its
+        card is grey and the approval round-up refuses one. Somebody iterating on a draft pushes
+        repeatedly, and a ping on every red run in that loop is the cost. The panel is still
+        posted, so the result is in the thread either way.
+
+        It used to be justified by reviewers not having been asked yet. Reviewers are no longer
+        rung by CI at all, so that argument went with them; the rule survives on this one.
+        """
         await register_repository(db_session, guild_id=1, channel_id=99)
-        await link(db_session, REVIEWER, 555, 200)
+        await link(db_session, AUTHOR, 111, 583231)
+        await link(db_session, CONTRIBUTOR, 333, 300)
         github = a_github(draft=True)
         async with build_http_client(
             build_stack(db_engine, threads=threads, github=github)
@@ -235,6 +402,39 @@ class TestWhoIsRung:
         assert announced(threads), "a draft should still report what CI did"
         assert "<@" not in announced(threads)[0]
         assert allow_list(threads) == ()
+        assert github.commit_list_calls == [], "a draft paid for a read it had no use for"
+
+
+class TestWhenGitHubWillNotSayWhoPushed:
+    """The third read can fail, and the message is worth more than the extra names.
+
+    The split is between a 404 and everything else, and the claim is what decides it: `say_once`
+    takes a claim under the report's key, so a post with a narrowed audience is PERMANENT for that
+    set of runs - those contributors are never rung about it. A 404 means there is nothing to read
+    and no later attempt would find any, so narrowing is the whole answer. Anything else is a blip,
+    and being late is cheaper than being quietly incomplete.
+    """
+
+    async def test_a_commit_list_github_has_lost_still_rings_the_author(
+        self,
+        db_engine: AsyncEngine,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        await register_repository(db_session, guild_id=1, channel_id=99)
+        await link(db_session, AUTHOR, 111, 583231)
+        github = a_github()
+        github.pull_request_commits.pop((REPO_FULL, 7))
+        async with build_http_client(
+            build_stack(db_engine, threads=threads, github=github)
+        ) as client:
+            await deliver(
+                client, "pull_request", payloads.pull_request_event("opened"), delivery="p0"
+            )
+            await a_suite(client)
+
+        assert announced(threads), "the result was lost along with the names"
+        assert allow_list(threads) == (111,)
 
 
 class TestWhatItSaysNothingAbout:
@@ -242,13 +442,20 @@ class TestWhatItSaysNothingAbout:
         self, tracked: tuple[DeliveryClient, FakeGitHubClient], threads: FakeThreadGateway
     ) -> None:
         """Two apps report on one commit separately, so the first to finish must wait for the
-        rest rather than announce a fraction of the answer."""
+        rest rather than announce a fraction of the answer.
+
+        The second assertion pins an ORDER rather than an outcome. A repository running two checks
+        apps refuses most of its suites right here, so the audience is worked out after this and
+        not before: the commonest delivery on this path must not pay for a GitHub read it has no
+        use for, nor be able to fail on one.
+        """
         client, github = tracked
         github.check_runs[SHA] = [run(1, "Lint"), run(2, "Tests", "", status="in_progress")]
 
         await a_suite(client)
 
         assert announced(threads) == []
+        assert github.commit_list_calls == [], "a suite that said nothing still read the commits"
 
     async def test_a_suite_for_a_commit_the_branch_has_moved_off(
         self, tracked: tuple[DeliveryClient, FakeGitHubClient], threads: FakeThreadGateway

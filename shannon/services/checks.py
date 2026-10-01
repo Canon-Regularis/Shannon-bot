@@ -18,10 +18,16 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ObjectType
 from shannon.domain.json import JsonObject
-from shannon.domain.models import Actor, CheckReport, CheckRun, PullRequestSnapshot
+from shannon.domain.models import (
+    Actor,
+    CheckReport,
+    CheckRun,
+    CommitRef,
+    PullRequestSnapshot,
+)
 from shannon.github.webhooks.checks import CheckSuiteEvent
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.services.audience import author_and_assignees, reachable
+from shannon.services.audience import everyone_who_worked_on_it, reachable
 from shannon.services.locating import ItemInThread, in_its_thread
 from shannon.services.sync.announcements import ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
@@ -34,13 +40,21 @@ FINISHED = "completed"
 
 
 class ReadsChecksAndItems(Protocol):
-    """The two reads a check result needs, and nothing that could write anything."""
+    """The three reads a check result needs, and nothing that could write anything.
+
+    The third is the commits, and it sits here rather than behind a protocol of its own because
+    one object answers all three: a second handle on it would buy a name and nothing else.
+    """
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def list_check_runs(
         self, owner: str, name: str, sha: str
     ) -> Sequence[CheckRun] | None: ...
+
+    async def list_pull_request_commits(
+        self, owner: str, name: str, number: int
+    ) -> Sequence[CommitRef] | None: ...
 
 
 class Renders(Protocol):
@@ -139,7 +153,33 @@ class CheckSuiteAnnouncer:
         if report is None:
             return False
 
-        return await self._say(event, item, report, found)
+        return await self._say(event, item, report, found, number)
+
+    async def _audience_for(self, item: PullRequestSnapshot, number: int) -> tuple[Actor, ...]:
+        """Everybody this result is news to, and the one read that finds them.
+
+        Asked AFTER the report, not before. A repository running two checks apps gets a suite from
+        each, and most of those are refused for a run still pending, so the commonest delivery on
+        this path must not pay for a third GitHub call - nor be able to fail on one.
+
+        A draft rings nobody, and the reason has changed. It used to be that reviewers had not
+        been asked to look yet; reviewers are no longer rung by CI at all, so that argument is
+        gone. What survives it is the one this bot already applies to a draft everywhere else: a
+        draft is the state in which nothing is asked of anybody, which is why its card is grey and
+        why the approval round-up refuses one. Somebody iterating on a draft pushes repeatedly, and
+        a ping on every red run in that loop is the cost. The panel is still posted, so the result
+        is in the thread either way.
+        """
+        if item.draft:
+            return ()
+
+        owner, name = item.repository.owner, item.repository.name
+        commits = await self._github.list_pull_request_commits(owner, name, number)
+        # `None` is a pull request GitHub would not list, which narrows the audience rather than
+        # losing the message. Anything worse than a 404 is raised by the client and carried out of
+        # here to the retry: the claim `say_once` takes would make a narrowed audience PERMANENT
+        # for this set of runs, so being late is cheaper than being quietly incomplete.
+        return everyone_who_worked_on_it(item, commits or ())
 
     async def _locate(self, event: CheckSuiteEvent, number: int) -> ItemInThread | None:
         async with self._sessionmaker() as session:
@@ -184,10 +224,16 @@ class CheckSuiteAnnouncer:
         item: PullRequestSnapshot,
         report: CheckReport,
         found: ItemInThread,
+        number: int,
     ) -> bool:
-        people, teams = _who_to_tell(item, report)
+        people = await self._audience_for(item, number)
         async with self._sessionmaker() as session:
-            audience = await reachable(session, guild_id=found.guild_id, people=people, teams=teams)
+            # No teams. A team is not somebody who worked on this, and a role mention rings
+            # everybody holding it with no way for one of them to opt out - which is why
+            # `reachable` keeps roles out of the allow-list in the first place. The renderer keeps
+            # its two parameters for the shape it shares with the other audience-taking renderers,
+            # the way `format_everyone_approved` does.
+            audience = await reachable(session, guild_id=found.guild_id, people=people, teams=())
         await self._line.say_once(
             tracked_item_id=found.tracked_item_id,
             thread_id=found.thread_id,
@@ -195,7 +241,7 @@ class CheckSuiteAnnouncer:
             panel=self._render(
                 report,
                 people=people,
-                teams=teams,
+                teams=(),
                 mentions=audience.mentions,
                 roles=audience.roles,
             ),
@@ -209,21 +255,6 @@ class CheckSuiteAnnouncer:
             report.total,
         )
         return True
-
-
-def _who_to_tell(
-    item: PullRequestSnapshot, report: CheckReport
-) -> tuple[tuple[Actor, ...], tuple[Actor, ...]]:
-    """Who this result is for.
-
-    A draft rings nobody: GitHub runs CI on one like any other pull request, but reviewers have not
-    been asked to look yet. The panel is still posted, for the author.
-    """
-    if item.draft:
-        return (), ()
-    if report.passed:
-        return tuple(item.reviewers), tuple(item.reviewer_teams)
-    return author_and_assignees(item), ()
 
 
 def build_check_suite_handler(announcer: Announces, parse: Parses) -> EventHandler:

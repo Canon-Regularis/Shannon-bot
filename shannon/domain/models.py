@@ -382,14 +382,6 @@ class CheckReport:
         return len(self.runs)
 
     @property
-    def passed(self) -> bool:
-        """Whether this is worth telling the reviewers about.
-
-        Not `succeeded == total`: a repository with an always-skipped job would never read as a
-        pass. One success is still required, or a suite where every job skipped would pass."""
-        return not self.broken and bool(self.succeeded)
-
-    @property
     def worth_saying(self) -> bool:
         """Whether anything ran at all. Nothing does on a docs-only push through a path filter."""
         return bool(self.succeeded or self.broken)

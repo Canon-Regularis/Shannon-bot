@@ -1,10 +1,14 @@
-"""How a set of CI jobs is judged. Issue #112.
+"""How a set of CI jobs is sorted into what worked, what broke, and what never ran. Issue #112.
 
-Tested here rather than only through the service, because the service asks these in an order that
-hides one of them: it refuses a suite where nothing ran before it ever asks whether the suite
-passed, so the "at least one success" half of `passed` is unreachable from that direction. It is
-still the property the reviewers' ping hangs off, and a property nothing can reach is a property
-nothing is holding.
+The three buckets are the whole of it. Two would call a skipped job a failure and report a broken
+build on every docs-only push, which is the mistake `other` exists to stop.
+
+There used to be a `passed` property here as well, and a class of tests holding it. Issue #164
+removed its only caller: the audience no longer turns on whether the suite was green, because both
+outcomes now ring the people who caused the run. What was left was a property nothing called,
+whose docstring said it decided "whether this is worth telling the reviewers about" - an invitation
+to put that behaviour back. The renderer asks `broken` directly, which is the same question without
+the claim attached.
 """
 
 from __future__ import annotations
@@ -58,25 +62,8 @@ class TestTheThreeBuckets:
         assert not SUCCEEDED & BROKEN
 
 
-class TestWhetherItPassed:
-    def test_everything_worked(self) -> None:
-        assert report(run(1), run(2)).passed is True
-
-    def test_a_job_that_did_not_run_does_not_stop_it_passing(self) -> None:
-        """The whole reason there are three buckets. `Publish` is skipped on every pull request
-        here, and a stricter reading would mean the reviewers were never told anything."""
-        assert report(run(1), run(2, "skipped")).passed is True
-
-    def test_one_broken_job_is_enough_to_fail(self) -> None:
-        assert report(run(1), run(2, "failure")).passed is False
-
-    def test_a_suite_where_nothing_ran_at_all_did_not_pass(self) -> None:
-        """The half the service can never reach, because it refuses this case earlier. Without it
-        a docs-only push through a path filter would read as a green build and ring the
-        reviewers about a commit nothing was run against."""
-        assert report(run(1, "skipped"), run(2, "cancelled")).passed is False
-
-    def test_and_it_is_not_worth_saying_anything_about(self) -> None:
+class TestWhetherAnythingRan:
+    def test_a_suite_where_nothing_ran_is_not_worth_saying_anything_about(self) -> None:
         assert report(run(1, "skipped")).worth_saying is False
 
     def test_anything_that_ran_is_worth_saying(self) -> None:
