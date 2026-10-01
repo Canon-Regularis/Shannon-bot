@@ -119,7 +119,10 @@ class TestSettingAStatus:
 
         assert github.label_calls, "it did not get as far as writing a label"
         assert threads.metadata_of(thread_id) == before, "Discord was told about a refused write"
-        assert threads.shuts == []
+        # `shut_calls` for the reason the fake gives beside the two lists: a lock that did not
+        # move records nothing in `shuts`, so that assertion held whether Discord was asked or
+        # not. The line above carries this test either way; this one now carries itself.
+        assert threads.shut_calls == []
         assert (await stored(db_session)).status is Status.NOT_REVIEWED
 
     async def test_moving_a_pull_request_out_of_done_gives_its_thread_back(
@@ -142,12 +145,19 @@ class TestSettingAStatus:
     async def test_a_status_change_with_no_done_on_either_side_leaves_the_lock_alone(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
-        """Giving a thread back is worth a call to Discord; saying nothing changed is not."""
-        before = list(threads.shuts)
+        """Giving a thread back is worth a call to Discord; saying nothing changed is not.
+
+        Against `shut_calls`, not `shuts`. The latter records where a thread ENDED UP and only
+        when it moved, so a wasted `set_shut(shut=False)` on an already-open thread records
+        nothing there and the assertion held whether the call was made or not. The fake says so
+        in as many words beside the two lists. Proved by making `set_status` call `set_shut` on
+        every change: this stayed green while every `/status` spent a Discord edit.
+        """
+        before = list(threads.shut_calls)
 
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
-        assert threads.shuts == before
+        assert threads.shut_calls == before
 
     async def test_a_failed_write_leaves_the_stored_status_alone(
         self,

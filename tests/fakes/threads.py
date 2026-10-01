@@ -50,7 +50,14 @@ class FakeThreadGateway:
         # only records a new name, so it cannot show a thread being written twice with the same
         # content, which is what a card mirrored twice looks like.
         self.updates: list[int] = []
+        # The new name, recorded only when it CHANGED. Sound for a test asserting a rename happened,
+        # and useless for one asserting it did not - see `names_given`.
         self.renames: list[tuple[int, str]] = []
+        # Every name handed down, whether or not it differed from the one the thread had. This is
+        # what a test about an UNCHANGED title can use: the decision not to spend a rename belongs
+        # to the real gateway, which an integration test against this fake never reaches, so the
+        # most such a test can honestly say is which name the sync computed and passed on.
+        self.names_given: list[tuple[int, str]] = []
         # Where the thread ENDED UP, recorded only when it moved. A test asking whether a thread
         # is shut wants this one.
         self.shuts: list[tuple[int, bool]] = []
@@ -176,6 +183,15 @@ class FakeThreadGateway:
         self.allowed.append(("update", thread_id, content, notify))
 
         wanted = truncate_thread_name(name)
+        # Recorded whatever happens next, which `renames` below is not. A test saying "it did
+        # not try to rename this" cannot use that one: a rename to the name a thread already
+        # has records nothing there, so the assertion passes whether the name was handed over
+        # or not - and the decision it looks like it is testing belongs to the REAL gateway,
+        # which an integration test running against this never reaches. What this can show is
+        # the name the sync computed and handed down, which is what `names_given` is for.
+        #
+        # `shut_calls` beside `shuts` is the same pair for the same reason.
+        self.names_given.append((thread_id, wanted))
         if thread.name != wanted:
             thread.name = wanted
             self.renames.append((thread_id, wanted))
