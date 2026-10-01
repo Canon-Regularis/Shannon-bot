@@ -706,11 +706,26 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         assert github_client.label_calls == []
 
     async def test_a_column_nobody_taught_us_moves_nothing(
-        self, mirrored_pr: int, poller_for
+        self, mirrored_pr: int, poller_for, db_session: AsyncSession
     ) -> None:
+        """The column is written down anyway, and that is what proves the card was matched.
+
+        `0` is the answer to every other question this poller asks - a board it could not read, a
+        card wrapping nothing, a row with no thread yet - so on its own it holds whether or not
+        the unknown column was ever reached. The memory is the only thing that says it was, and
+        it is also what stops the same card being looked at again on every poll for ever.
+        """
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Needs design input"))
 
         assert await poller_for(board).run_once() == 0
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.project_column == "Needs design input", (
+            "the card never reached its row, so nothing refused anything"
+        )
 
     async def test_a_card_wrapping_something_untracked_is_left_alone(
         self, board_channel: None, poller_for
@@ -1818,7 +1833,10 @@ class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:
 
         opened = threads.created[0].thread_id
         assert threads.threads[opened].locked is False, "it arrived shut before anybody saw it"
-        assert threads.shuts == [], "it touched the lock at all, which costs a call per card"
+        assert threads.shut_calls == [], (
+            "it touched the lock at all, which costs a call per card. Against `shut_calls`: `shuts`"
+            " records only a lock that MOVED, so this held whether the call was made or not"
+        )
 
     async def test_a_card_dragged_back_out_of_done_is_not_left_shut(
         self,

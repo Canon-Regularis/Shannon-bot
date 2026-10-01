@@ -231,3 +231,28 @@ class TestATagInsideAMessage:
         said = one_message(f"<@{ALICE}>", {ALICE: as_a_tag("a`b")})
 
         assert "```" not in said
+
+    def test_text_typed_against_a_mention_cannot_extend_the_login(self) -> None:
+        """The join, which neither of the two rules above can see: each half is right and the pair
+        was not. A login may contain hyphens and digits, so a verified `@octocat` with `-evil`
+        typed straight after it published `@octocat-evil` - a live mention of an account this bot
+        was never handed, which is the whole of what issue #121 forbids.
+
+        Found by the property over generated text, after its strategy was fixed to produce the
+        tokens at all. It is named here because a property cannot say which join broke.
+        """
+        said = one_message(f"<@{ALICE}>-evil", {ALICE: "@octocat"})
+
+        assert said == f"@octocat{ZWSP}-evil"
+        assert "@octocat-evil" not in said
+
+    def test_a_digit_typed_against_a_mention_cannot_extend_it_either(self) -> None:
+        """The same hazard with the shortest spelling there is, which is how the property found it:
+        `@a` beside a typed `0` addresses `@a0`."""
+        assert one_message(f"<@{ALICE}>0", {ALICE: "@a"}) == f"@a{ZWSP}0"
+
+    def test_ordinary_text_after_a_mention_is_left_alone(self) -> None:
+        """The other side of the branch. A space cannot extend a login, so nothing is inserted and
+        the published line reads exactly as it was typed."""
+        assert one_message(f"<@{ALICE}> look", {ALICE: "@octocat"}) == "@octocat look"
+        assert one_message(f"<@{ALICE}>", {ALICE: "@octocat"}) == "@octocat"

@@ -98,7 +98,11 @@ class TestPointingAtABoard:
 
         await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
 
-        assert (await stored(db_session, repository_id)).project_owner is None
+        row = await stored(db_session, repository_id)
+        assert row.project_number == PROJECT, (
+            "no board was written at all, so the null below is the column's own default"
+        )
+        assert row.project_owner is None
 
     async def test_an_owner_somewhere_else_is_recorded(
         self,
@@ -354,6 +358,23 @@ class TestRelinkingForgetsTheOldBoardsCards:
         assert (await self.stored(db_session, item_id)).project_item_id == 999999
 
 
+class _CountingSessions:
+    """A sessionmaker that records how many sessions were opened through it.
+
+    The repository lookup is the half of this cache that a server with NO board still pays for,
+    and it is invisible from the reader: with no board there is nothing to ask GitHub, so `asked`
+    stays empty whether the answer was remembered or looked up again from scratch.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+        self._sessionmaker = sessionmaker
+        self.opened = 0
+
+    def __call__(self) -> AsyncSession:
+        self.opened += 1
+        return self._sessionmaker()
+
+
 class FakeColumnReader:
     """The Status columns of one board, out of a tuple. Records what it was asked."""
 
@@ -455,16 +476,22 @@ class TestTheColumnsThePickerOffers:
         self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
     ) -> None:
         """A server with no board is the common case for a bot in several, and a lookup per
-        keystroke for an answer that is always nothing is the same cost worth avoiding."""
+        keystroke for an answer that is always nothing is the same cost worth avoiding.
+
+        Counted, because nothing else here can see it. `()` is the answer with a cache and
+        without one, and `FakeColumnReader` is never asked either way - there is no board to ask
+        about - so the repository lookup is the only thing that shows the nothing was remembered.
+        """
+        sessions = _CountingSessions(db_sessionmaker)
         reader = FakeColumnReader()
-        columns = self.columns(reader, db_sessionmaker)
-        with_board = registered.discord_guild_id
+        columns = self.columns(reader, sessions)
+        guild = registered.discord_guild_id
 
         for _ in range(5):
-            await columns.offered(with_board)
+            assert await columns.offered(guild) == ()
 
-        # Proved by the answer changing only once the life runs out, below.
-        assert await columns.offered(with_board) == ()
+        assert sessions.opened == 1, "the repository was looked up again for an answer it had"
+        assert reader.asked == [], "a board was read for a server that has none"
 
     async def test_a_column_renamed_on_the_board_arrives_once_the_life_runs_out(
         self,

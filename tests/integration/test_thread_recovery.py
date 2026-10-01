@@ -821,11 +821,14 @@ class TestAStaleDeliveryThatRebuiltTheThread:
         """An open issue's thread is one people are meant to be talking in, so a stale delivery
         for one is owed nothing at all."""
         await issues.sync(issue_event("opened", updated_at="2026-08-11T12:00:00Z"))
-        opened = len(threads.shuts)
+        # `shut_calls`, because the claim is about a call being MADE. `shuts` records only a
+        # lock that moved, and asking an open thread to be open moves nothing - so the old
+        # assertion held whether the gateway was asked or not.
+        opened = len(threads.shut_calls)
 
         await issues.sync(issue_event("edited", updated_at="2026-08-11T09:00:00Z"))
 
-        assert threads.shuts[opened:] == [], "it went looking for a lock on an open issue"
+        assert threads.shut_calls[opened:] == [], "it went looking for a lock on an open issue"
 
 
 class TestTheLockSurvivingAnOrdinaryDelivery:

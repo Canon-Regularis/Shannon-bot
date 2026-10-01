@@ -7,7 +7,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import discord
-from discord import Message, MessageType, ui
+from discord import Message, MessageType, app_commands, ui
 
 from shannon.discord_bot import layout
 from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
@@ -213,8 +213,13 @@ class FakeInteraction:
         user: FakeMember | None = None,
         channel: object | None = None,
         app_permissions: discord.Permissions | None = None,
+        command: app_commands.Command[Any, ..., Any] | app_commands.ContextMenu | None = None,
         **options: object,
     ) -> None:
+        # Which command Discord resolved this interaction to, which the error backstop names in
+        # its log line. None by default and None on a real interaction Discord could not resolve,
+        # so the branch that says "(unknown)" is the one every other test here exercises.
+        self.command = command
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.user = user or FakeMember()

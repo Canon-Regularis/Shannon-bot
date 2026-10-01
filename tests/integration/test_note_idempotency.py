@@ -287,8 +287,10 @@ async def test_three_notes_sharing_a_number_are_told_apart(
             payloads.pull_request_review_comment_event("created", id=shared),
             delivery="review-comment-1",
         )
-        while await container.worker.run_once():
-            pass
+        # `drain`, not a bare loop: the loop returns the moment the queue is empty, and a
+        # delivery parked for a retry leaves it empty too, so one note failing transiently is
+        # read here as one note being dropped as a duplicate - which is the opposite finding.
+        await client.drain()
 
     keys = set((await db_session.scalars(select(MirroredNote.note_key))).all())
     assert keys == {f"comment:{shared}", f"review:{shared}", f"review-comment:{shared}"}
