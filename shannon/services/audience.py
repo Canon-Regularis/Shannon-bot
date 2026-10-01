@@ -17,7 +17,7 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.threads import Notify
-from shannon.domain.models import Actor, PullRequestSnapshot
+from shannon.domain.models import Actor, CommitRef, PullRequestSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +52,49 @@ def author_and_assignees(item: PullRequestSnapshot) -> tuple[Actor, ...]:
     author = (item.author,) if item.author else ()
     people = {person.login.lower(): person for person in (*author, *item.assignees)}
     return tuple(people.values())
+
+
+# What one message may ring. `MutedMemberStore.may_be_pinged` takes no cap of its own, and says
+# why: every caller before this one was bounded by GitHub, which allows ten assignees and fifteen
+# requested reviewers. Commit authors are bounded by nothing a server controls - a long-lived
+# branch can carry contributions from dozens of accounts - and Discord refuses a message naming
+# more than a hundred, which costs the whole announcement rather than the extra names.
+PEOPLE_RUNG = 50
+
+
+def everyone_who_worked_on_it(
+    item: PullRequestSnapshot, commits: Sequence[CommitRef]
+) -> tuple[Actor, ...]:
+    """Everybody a CI result is news to: the author, the assignees, and whoever wrote the code.
+
+    `author_and_assignees` generalised. A pull request's commits are read for their accounts, so
+    somebody who pushed to a branch they neither opened nor were assigned is told their jobs went
+    green - which is the whole of issue #164, and the thing a snapshot alone cannot answer.
+
+    **Whoever caused the run is deliberately kept, not dropped.** That is the opposite of
+    `draft_lines._who_to_tell`, which removes whoever pressed the button because "they know: they
+    pressed it". The two sit one directory apart and the difference is the point: pressing a
+    button is an act somebody already knows the outcome of, while a suite finishing is NEWS, and
+    the person it is most news to is the one who pushed. `format_everyone_approved` argues the
+    same way about the last approver. Somebody who would rather not hear it has `/mentions off`,
+    which is the one place this is anybody's choice.
+
+    Merges are dropped. A merge commit's account is whoever pressed "Update branch", which is
+    frequently a reviewer tidying somebody else's pull request - and because the commit never
+    leaves the branch, keeping it would ring that reviewer on every suite for the rest of the pull
+    request's life. That is the bug this function exists to fix, arriving through a side door.
+
+    A commit GitHub could not link to an account adds nobody, which is the honest answer rather
+    than a gap: the address it was written under holds no account, so there is no one to ring.
+
+    Capped at `PEOPLE_RUNG`, with the author and assignees first so the names that fall off are
+    contributors to a branch long enough for the count to matter.
+    """
+    wrote_it = (
+        commit.author for commit in commits if commit.author is not None and not commit.merge
+    )
+    people = {person.login.lower(): person for person in (*author_and_assignees(item), *wrote_it)}
+    return tuple(people.values())[:PEOPLE_RUNG]
 
 
 async def reachable(
