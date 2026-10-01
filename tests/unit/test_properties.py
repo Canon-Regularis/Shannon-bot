@@ -54,6 +54,7 @@ from shannon.domain.text import ZERO_WIDTH_SPACE
 from shannon.domain.time import as_utc
 from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
+from shannon.github.mentions import names_in
 from shannon.github.safe_text import one_message
 from shannon.github.urls import parse_issue_url, parse_pull_request_url
 from shannon.services.sync.staleness import is_superseded
@@ -615,6 +616,15 @@ _MARKUP_HAZARDS = st.sampled_from(
         "<@&777000>",
         "@",
         "\\",
+        # The three that must appear immediately AFTER a mention to do anything, which is why they
+        # are written as tails rather than as standalone noise. A `/` turns the mention this bot
+        # handed over into a team; the accented and CJK letters are what the writer used to read as
+        # word characters and the reader did not. Without them in the pool the property cannot
+        # reach either class, and both were real bugs.
+        "/security",
+        "/",
+        "é@0",
+        "中@0",
     )
 )
 _NOISE = st.one_of(text, _AT_HAZARDS, _MARKUP_HAZARDS)
@@ -661,11 +671,21 @@ class TestNothingTypedBecomesAMention:
 
         published = one_message(said, spelled)
 
-        live = {
-            match.group(1)
-            for match in re.finditer(r"(?<![\w/])@([A-Za-z0-9][A-Za-z0-9-]*)", published)
-        }
-        assert live <= set(people.values()), "text that was typed came out as a live mention"
+        # Read back with the project's OWN reader rather than a regex written here. The regex this
+        # used to carry, `(?<![\w/])@([A-Za-z0-9][A-Za-z0-9-]*)`, could not see a TEAM: handed
+        # `@acme` with a typed `/security` after it, it matched `@acme`, found it in the map and
+        # passed - while the published line addressed the team `security` and nobody at all. A
+        # real bug lived behind that blind spot. An oracle that re-implements the grammar can only
+        # ever be as right as whoever wrote it twice.
+        read = names_in(published)
+
+        assert set(read.people) <= set(people.values()), (
+            "text that was typed came out as a live mention"
+        )
+        assert read.teams == (), (
+            "a team was addressed, and a team is never handed over - the map carries account "
+            "logins, so any live team came out of text somebody typed"
+        )
 
     # 300/300 draws hold an `@` followed by an alphanumeric, which is the only thing `defuse` has
     # anything to do. The old strategy held one in 0/300.
