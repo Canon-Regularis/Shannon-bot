@@ -113,6 +113,10 @@ def as_a_tag(name: str) -> str:
 # than out of the text, so Discord had already decided it was a mention.
 _TAGGED = re.compile(r"<@([0-9]{15,20})>")
 
+# What GitHub reads as a continuation of the login before it. Hyphens count: a login may contain
+# them, so a mention this bot built followed by a typed `-two` addresses `@someone-two`.
+_EXTENDS_A_LOGIN = re.compile(r"[A-Za-z0-9-]")
+
 
 def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
     """One captured Discord message, made safe and cut to what it may contribute.
@@ -136,6 +140,17 @@ def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
         pieces.append(defuse(text[typed_from : token.start()]))
         pieces.append(mention)
         typed_from = token.end()
+        # The JOIN is a third hazard, and neither rule above can see it: each half is correct and
+        # the pair is not. A mention this bot was handed, with a login character typed straight
+        # after it, is one longer name to GitHub - `@octocat` beside a typed `-evil` publishes
+        # `@octocat-evil`, and `@a` beside a typed `0` publishes `@a0`. Both notify an account
+        # this bot was never given, which is the whole of what #121 forbids. A zero-width space
+        # ends the name and shows nothing.
+        #
+        # One-sided on purpose. A login character BEFORE the `@` makes it inert rather than
+        # dangerous, which is the same judgement `_MENTION` above encodes in its lookbehind.
+        if _EXTENDS_A_LOGIN.match(text, typed_from):
+            pieces.append(ZERO_WIDTH_SPACE)
     pieces.append(defuse(text[typed_from:]))
     return balanced("".join(pieces))
 
