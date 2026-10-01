@@ -42,6 +42,16 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   and archived out of the channel, and opened again if the item is. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
+- **What CI made of a commit.** When every job on a commit has finished, its thread says how many
+  passed, links the logs of the ones that did not, and rings the people who put the code there:
+  the author, the assignees, and anybody with a commit on the pull request. Both outcomes reach
+  the same people, because a green run is as much news as a red one to whoever pushed — including
+  you, for your own push, which is deliberate and is the one place this bot rings somebody for
+  their own action. A requested reviewer is not rung by CI; they are asked for a review instead.
+  A merge commit names nobody, since its account is whoever pressed "Update branch" rather than
+  whoever wrote anything. Said once per set of runs, so two CI apps on one commit produce one
+  message, and not said at all until every job has stopped. A draft posts its results and rings
+  nobody. `/mentions off` opts you out.
 - **Every review in, and approving.** When the last person a pull request was waiting on approves
   it, its thread says so and rings the author and the assignees, who are who it waits on next. Read
   from GitHub at the moment it is asked rather than tallied from what has arrived: a review is
@@ -53,8 +63,8 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   Withdrawing the last outstanding request says it too: at that moment everybody remaining has
   approved and no further review is coming, so nothing else would ever notice.
 - **The draft switch.** A draft rings nobody on purpose: GitHub runs CI on one like any other
-  pull request, but nobody has been asked to look yet, and the card is grey rather than green to
-  say so. Both moments that changes now post a header naming whoever pressed the button, and both
+  pull request, but a draft is the state in which this bot asks nothing of anybody, and the card
+  is grey rather than green to say so. Both moments that changes now post a header naming whoever pressed the button, and both
   reach everybody GitHub still lists on the item: its author, its assignees, its reviewers and
   its review teams, once each, minus the person who pressed it, because they know. Going out of
   draft is an ask. Going back in withdraws one, which is worth telling the people who were about
