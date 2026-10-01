@@ -27,6 +27,11 @@ from tests.support.signing import SECRET, post
 # the test in three attempts rather than after a minute of doubling backoffs.
 _DRAIN_ROUNDS = 3
 
+# What counts as work left over. The live two are a delivery still owed an attempt; FAILED is one
+# that ran out of them, which is terminal and still not done. IGNORED is deliberately absent - a
+# handler answering "nothing to do" has finished.
+_UNFINISHED = (*DeliveryStatus.live(), DeliveryStatus.FAILED)
+
 
 def build_stack(
     engine: AsyncEngine,
@@ -106,12 +111,26 @@ class DeliveryClient:
 
         raise AssertionError(
             "drain gave up with deliveries unfinished after "
-            f"{_DRAIN_ROUNDS} rounds: {await self._unfinished()}. A handler is raising every "
-            "time rather than transiently; the error above is the one it recorded."
+            f"{_DRAIN_ROUNDS} rounds: {await self._unfinished()}. Either a handler is raising "
+            "every time rather than transiently, or one raised a PermanentError and the delivery "
+            "is FAILED with no attempt left to make - the status above says which. The error "
+            "beside it is the one the worker recorded. If the test MEANS to leave a delivery "
+            "unfinished, say so with expect_retries=True."
         )
 
     async def _unfinished(self) -> list[str]:
-        """Every delivery still in a live state, described well enough to act on."""
+        """Every delivery that did not finish its work, described well enough to act on.
+
+        FAILED as well as the live two, which it was not at first. A delivery whose attempts ran
+        out leaves `give_up` behind and a terminal status, so asking for `DeliveryStatus.live()`
+        alone walked straight past it - the same silence this whole guard exists to break, one
+        state further on. A test asserting about Discord after a delivery gave up is in exactly
+        the position that started this.
+
+        IGNORED stays out, and that is the whole of the distinction: it is the handler saying
+        there was nothing to do, which is an answer rather than a failure. Several tests are
+        about reaching it.
+        """
         async with self._sessionmaker() as session:
             rows = (
                 await session.execute(
@@ -121,7 +140,7 @@ class DeliveryClient:
                         WebhookEvent.status,
                         WebhookEvent.attempts,
                         WebhookEvent.last_error,
-                    ).where(WebhookEvent.status.in_(DeliveryStatus.live()))
+                    ).where(WebhookEvent.status.in_(_UNFINISHED))
                 )
             ).all()
         return [

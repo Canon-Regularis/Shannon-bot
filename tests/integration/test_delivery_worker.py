@@ -959,6 +959,40 @@ class TestWhatDrainPromises:
         assert "discord is down" in said, "it did not carry the error the handler raised"
         assert "PENDING" in said
 
+    async def test_a_delivery_that_gave_up_is_not_silent_either(
+        self, client: DeliveryClient
+    ) -> None:
+        """FAILED is terminal and still not done, which is not the same thing.
+
+        A `PermanentError` goes straight to `give_up`, so asking only for the live statuses walked
+        past it - the same silence this guard exists to break, one state on. A test asserting about
+        Discord after a delivery gave up is in exactly the position that started all this.
+        """
+
+        async def refuses(action: str, payload: Mapping[str, Any], arrived: int | None = None):
+            raise DiscordPermissionError("the bot cannot open threads in that channel")
+
+        client.worker._dispatch.register("issues", refuses)
+
+        with pytest.raises(AssertionError) as refused:
+            await deliver(client, "issues", payloads.issue_event("opened"), delivery="given-up")
+
+        said = str(refused.value)
+        assert "given-up" in said
+        assert "FAILED" in said
+        assert "cannot open threads" in said, "it did not carry the reason the handler gave"
+
+    async def test_a_handler_answering_nothing_to_do_is_left_alone(
+        self, client: DeliveryClient, db_session: AsyncSession
+    ) -> None:
+        """IGNORED is the one terminal state that stays silent, and the distinction is the point: a
+        handler saying there was nothing to do has finished. Several tests are about reaching it."""
+        payload = payloads.issue_comment_event(on=payloads.issue(id=999, number=999))
+
+        await deliver(client, "issue_comment", payload, delivery="nothing-to-do")
+
+        assert (await stored(db_session, "nothing-to-do")).status == DeliveryStatus.IGNORED
+
     async def test_a_test_that_means_to_park_one_is_left_alone(
         self, client: DeliveryClient, db_session: AsyncSession
     ) -> None:
