@@ -7210,3 +7210,42 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Three tests that asserted the opposite are now the other way round**, and one that used
   `edited` as its example of a *refused* action had to find another: the parser still refuses the
   actions that reach no thread, and those must stop before the hook beside them rather than after.
+
+## An author is told when their own pull request changes state
+
+- **The one person a draft switch did not reach was the one it belonged to** (#161). Marking a pull
+  request ready for review rang every reviewer and assignee on it and said nothing to its author —
+  because the author had pressed the button, and the rule dropped whoever did that.
+- **The rule was right about everybody except the author.** *"The initiator is dropped because they
+  know: they pressed it"* holds for a maintainer marking somebody else's work ready; they just
+  acted. It does not hold for the author, because an author pressing that button is not a corner
+  case, it is the ordinary one — and what changed is not only an act they performed but the state of
+  their own work.
+- **So the drop now spares the author and nobody else.** A maintainer who presses it is still left
+  out. An author is told whether or not they pressed anything, which keeps the case the old rule was
+  built for — *"a maintainer marking somebody else's pull request ready is exactly when its author
+  wants telling"* — working exactly as it did.
+- **Both halves, on purpose.** Ready-for-review and back-to-draft share one audience function, so a
+  rule that held on the way out of draft and not on the way back would be one nobody could remember.
+- **A self-marking author is named twice in the one line**, and that is accepted rather than worked
+  around: once as the mention that rings them, once in the sentence as the person who acted. The
+  sentence names them through `_account`, which is plain text and rings nobody, so the repetition
+  costs a word — where teaching the renderer to spot the overlap would cost a rule in the one place
+  that has no business knowing who pressed what. **Nothing about the formatter changed**; all 25 of
+  its tests were untouched by this.
+- **`/mentions off` is still the answer for anybody who would rather not hear about their own
+  button.** That is where the choice belongs, and it is the same answer the CI path gives for a run
+  it deliberately tells the pusher about.
+- **Three docstrings that compared the two rules were corrected.** `audience.py`,
+  `formatting.py` and a test in `test_check_results.py` all explained themselves as the *opposite*
+  of the draft switch's drop. They now say the two differ by degree: the draft path spares its
+  author and still drops anybody else who acted. Those comments are the only places the rules are
+  compared, so they are where a reader goes to understand either one.
+- **One test now carries the drop on its own.** Every other case on this path has the author
+  pressing the button, and the author is never dropped — so
+  `test_whoever_pressed_the_button_is_not_rung`, where a reviewer presses it instead, is the only
+  thing exercising that arm of the rule. Its docstring says so, because deleting it would leave the
+  branch unexercised and nothing else would complain.
+- **A test whose name stopped being true was renamed.** There is no longer a pull request "with
+  nobody on it": the author is always on it. What it holds now is that the line is said at all with
+  both lists empty, which is the case the sentence has to survive.
