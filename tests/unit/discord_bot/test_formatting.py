@@ -7,6 +7,7 @@ import pytest
 
 from shannon.discord_bot.formatting import (
     OPEN_ON_GITHUB,
+    format_card_converted,
     format_pull_request,
     format_thread_moved,
     format_thread_moving,
@@ -407,6 +408,94 @@ class TestSayingWhereAnItemWent:
     def test_both_are_subtext(self, line: str) -> None:
         """Quieter than the headers beside them: this is a signpost, not news."""
         assert line.startswith("-# ")
+
+
+class TestSayingACardBecameAnIssue:
+    """The panel left in a draft card's thread once somebody converts it. Issue #184.
+
+    An END, like a closed issue's or a merged pull request's thread, and it is dressed like one on
+    purpose: the issue asked for the same treatment those get. Which is why this is a headed,
+    accented panel rather than the bare subtext line it used to be - `Panel.of_text` carries no
+    accent, and without an accent `layout` sends the whole thing as plain text with no bar.
+
+    Unlike the two signposts above it, this one is written AFTER the lock has been attempted. That
+    is the whole reason it may say whether the thread is locked, and it is why `shut` is a
+    parameter rather than an assumption.
+    """
+
+    ISSUE = "https://github.com/Canon-Regularis/Shannon-bot/issues/12"
+
+    def test_it_names_the_issue_rather_than_a_thread(self) -> None:
+        """The issue's own thread is opened by its `opened` webhook, which may not have arrived
+        when this is written and may still be being retried - so a thread id here would be a
+        guess, while the issue's page exists the moment GitHub converted it."""
+        assert self.ISSUE in format_card_converted(self.ISSUE, shut=True).text
+
+    def test_a_shut_thread_is_told_it_is_shut(self) -> None:
+        """The sentence the issue asked for, in the wording the closed and merged panels already
+        use - one phrasing for the lock across the whole bot."""
+        assert (
+            "This thread is locked and archived."
+            in format_card_converted(self.ISSUE, shut=True).text
+        )
+
+    def test_a_thread_that_would_not_shut_is_told_nothing_about_locks(self) -> None:
+        """Not the `_WOULD_NOT_SHUT` line the state changes use, and not a claim either.
+
+        That line names a permission to go and grant, which is worth saying to somebody who just
+        ran a command and is looking at the thread. This is a poller: nobody ran anything, nobody
+        is watching, and the thread pointer is already gone - so granting Manage Threads would
+        never make the hand-over run again. Offering a fix that cannot work is no better than
+        claiming a lock that did not land.
+        """
+        said = format_card_converted(self.ISSUE, shut=False).text
+
+        assert "locked" not in said
+        assert "Manage Threads" not in said
+
+    def test_it_still_says_where_the_work_went_when_the_lock_was_refused(self) -> None:
+        """The half that must survive a refusal. The pointer is already gone, so this line is the
+        only thing that will ever tell a reader of this thread where to go."""
+        assert self.ISSUE in format_card_converted(self.ISSUE, shut=False).text
+
+    def test_it_does_not_promise_silence_twice(self) -> None:
+        """The old line ended "Nothing more will be posted here", which the lock line now says
+        better and - unlike that sentence - only when it is true."""
+        assert "Nothing more" not in format_card_converted(self.ISSUE, shut=True).text
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_it_is_purple_either_way(self, shut: bool) -> None:
+        """Purple is "this went somewhere and is finished". Red would read as abandoned, which a
+        conversion is the opposite of, and the colour must not depend on whether a permission
+        happened to be granted - the card was converted regardless.
+        """
+        assert format_card_converted(self.ISSUE, shut=shut).accent is Accent.CONVERTED
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_the_heading_comes_first_and_is_the_only_one(self, shut: bool) -> None:
+        """Order rather than presence, the same rule the state changes are held to: a panel over
+        budget drops from the end, so the heading is what survives."""
+        kinds = [block.kind for block in format_card_converted(self.ISSUE, shut=shut).blocks]
+
+        assert kinds[0] is BlockKind.HEADING
+        assert BlockKind.HEADING not in kinds[1:]
+
+    def test_both_lines_live_in_one_block(self) -> None:
+        """Two blocks would be drawn as two sections with a rule between them, because a heading
+        takes the single subheading after it and no more. It would also quietly break any
+        assertion spanning them: `layout` sends each block as its own text display, so a test
+        matching across a boundary matches something nothing produces.
+        """
+        panel = format_card_converted(self.ISSUE, shut=True)
+
+        assert len(panel.blocks) == 2
+        assert panel.blocks[1].kind is BlockKind.SUBHEADING
+        assert "locked and archived" in panel.blocks[1].text
+
+    def test_it_is_a_card_and_not_a_message(self) -> None:
+        """What the old line was not. Without an accent `layout` sends the panel as ordinary text
+        with no coloured bar, which is how this read as a quiet aside rather than an end state."""
+        assert format_card_converted(self.ISSUE, shut=True).is_plain is False
 
 
 class TestTheCardTheBlockIsDrawnOn:

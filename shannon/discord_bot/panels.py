@@ -34,6 +34,7 @@ class Accent(IntEnum):
     DRAFT = 0x8B949E
 
     MERGED = 0xA371F7
+    CONVERTED = 0xA371F7
 
     CLOSED = 0xF85149
     FAILED = 0xF85149

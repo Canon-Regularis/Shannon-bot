@@ -1990,7 +1990,8 @@ class TestHandingTheThreadOver:
 
         said = said_in(threads, mirrored_draft)
         assert len(said) == 1, "it handed the same thread over twice"
-        assert "Nothing more will be posted here" in said[0]
+        assert "### 🟣 Converted" in said[0]
+        assert "This thread is locked and archived." in said[0]
 
     async def test_it_names_the_issue_rather_than_a_thread(
         self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
@@ -2003,14 +2004,39 @@ class TestHandingTheThreadOver:
         said = "\n".join(said_in(threads, mirrored_draft))
         assert "https://github.com/" in said
 
-    async def test_the_old_thread_is_shut(
+    async def test_the_old_thread_ends_locked_and_archived(
         self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
     ) -> None:
+        """Both halves, because the shut happens twice and only the second one archives.
+
+        `threads.shuts` cannot see this. It records transitions of `locked`, and the second shut
+        changes only `archived` - so the obvious assertion, `(thread, True) in shuts`, passes
+        whether the second shut exists or not, which is to say it asserts nothing about the
+        ordering this whole path is built around. The state the thread is left in is the only
+        witness. Archived but unlocked and it quietly reopens on the next reply; locked but
+        unarchived and it sits in the channel list until Discord's own window closes it.
+        """
         await poller_for(converted).run_once()
 
-        assert (mirrored_draft, True) in threads.shuts
+        thread = threads.threads[mirrored_draft]
+        assert (thread.locked, thread.archived) == (True, True)
 
-    async def test_a_discord_refusal_costs_the_line_and_nothing_else(
+    async def test_it_shuts_posts_and_shuts_again(
+        self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
+    ) -> None:
+        """The order, pinned directly. Shut first so the line can say whether the lock landed,
+        then post, then shut again because posting reopens an archived thread.
+
+        Two asks and one transition is the signature of exactly this sequence: `shut_calls` records
+        every ask and `shuts` only the ones that changed `locked`.
+        """
+        await poller_for(converted).run_once()
+
+        assert threads.shut_calls == [(mirrored_draft, True), (mirrored_draft, True)]
+        assert threads.shuts == [(mirrored_draft, True)]
+        assert threads.unarchived == [mirrored_draft], "the post did not reopen what the shut shut"
+
+    async def test_a_refused_post_costs_the_line_and_keeps_the_lock(
         self,
         mirrored_draft: int,
         poller_for,
@@ -2019,9 +2045,11 @@ class TestHandingTheThreadOver:
         db_session: AsyncSession,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Forget first, say second. The pointer is already gone by the time Discord is
-        asked, so a refusal costs the signpost and the lock on a thread nothing will write
-        to again - not the hand-over itself, which is the part that matters.
+        """Forget first, say second. The pointer is already gone by the time Discord is asked, so
+        a refusal costs the signpost - not the hand-over itself, which is the part that matters.
+
+        The LOCK survives it now, which it did not before: the shut is asked for first, so a thread
+        whose signpost was refused is still closed rather than left open with nothing said in it.
         """
         threads.post_error = DiscordGatewayError("Missing Access")
 
@@ -2032,6 +2060,37 @@ class TestHandingTheThreadOver:
         row = await ticket(db_session)
         assert row is not None and row.discord_thread_id is None, "the pointer survived"
         assert "could not hand thread" in caplog.text
+
+        thread = threads.threads[mirrored_draft]
+        assert (thread.locked, thread.archived) == (True, True), "a refused line cost the lock"
+
+    async def test_a_refused_shut_costs_the_lock_and_says_nothing_about_it(
+        self,
+        mirrored_draft: int,
+        poller_for,
+        converted: FakeBoard,
+        threads: FakeThreadGateway,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The other arm, and the reason the line is told whether the lock landed.
+
+        A server without Manage Threads refuses the shut. The hand-over still has to happen and
+        the signpost is the only thing that will ever tell a reader of this thread where the work
+        went - so the line goes in regardless, minus the sentence it can no longer stand behind.
+        Claiming a lock here would tell somebody they cannot reply somewhere they can.
+        """
+        threads.refuses_every_shut = True
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            await poller_for(converted).run_once()
+
+        said = said_in(threads, mirrored_draft)
+        assert len(said) == 1, "the signpost went down with the lock"
+        assert "https://github.com/" in said[0], "it stopped saying where the work went"
+        assert "locked" not in said[0], "it claimed a lock Discord refused"
+        assert "could not shut thread" in caplog.text
+
+        assert threads.threads[mirrored_draft].locked is False
 
     async def test_a_second_poll_hands_nothing_over_again(
         self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
@@ -2056,6 +2115,10 @@ class TestHandingTheThreadOver:
         ).run_once()
 
         assert threads.posts == []
+        # The lock, not only the line. Under shut-first the lock is the FIRST thing the hand-over
+        # does, so a guard that stopped holding here would shut a live thread before anything was
+        # ever posted into it, and watching only the posts would not notice.
+        assert threads.shut_calls == []
 
     async def test_a_draft_that_is_still_a_draft_is_left_alone(
         self, mirrored_draft: int, poller_for, threads: FakeThreadGateway
@@ -2067,6 +2130,9 @@ class TestHandingTheThreadOver:
         await poller_for(FakeBoard(card(item_id=CARD))).run_once()
 
         assert len(said_in(threads, mirrored_draft)) == before
+        # And it is still a thread somebody can reply in. The hand-over shuts before it speaks, so
+        # a draft wrongly taken for converted would be locked on every poll while saying nothing.
+        assert threads.threads[mirrored_draft].locked is False
 
 
 class TestRememberingWhichCardWrapsWhat:

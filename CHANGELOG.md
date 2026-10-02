@@ -7102,3 +7102,56 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Draft cards are unaffected and still refused.** `/status` addresses an item by
   `(owner, name, number)` and a draft has none, so this covers the cards that wrap issues and pull
   requests. The board moves a draft's own column, which is its status.
+
+## A converted ticket's thread says so and is closed
+
+- **A draft converted to an issue left its thread looking ordinary** (#184). The hand-over already
+  happened — the pointer was let go of, a line was left behind, the thread was shut — but the line
+  was a grey `-#` aside with no heading and no colour, so a thread that had ended read like a thread
+  that had merely gone quiet. The issue asked for the treatment a closed issue's or merged pull
+  request's thread already gets, and that is what this is.
+- **It is a headed, purple panel now.** `### 🟣 Converted`, the issue's URL, and the same
+  *"This thread is locked and archived."* sentence the closed and merged panels use — one wording
+  for the lock across the whole bot. Purple because purple already means *this went somewhere and is
+  finished*; red would read as abandoned, which a conversion is the opposite of.
+- **`Accent.CONVERTED` rather than reusing `MERGED`**, because the enum asks for that: *"names say
+  what the colour means"*, and every other shared colour has its own name. A converted card is not a
+  merged pull request. Same value, so nothing about the rendering changes.
+- **The colour is what made it a panel at all.** `Panel.of_text` carries no accent, and without one
+  `layout` sends the whole thing as plain text with no bar. That is why the old line could not have
+  been dressed up by rewording it.
+- **It shuts, then speaks, then shuts again** — the opposite order to the relocation signposts, and
+  the whole reason it may claim the lock. Those lines go in *before* the shut because posting
+  reopens an archived thread, and the cost of that order is they cannot know whether the lock
+  landed, so they never claim it. This one is an end state and does claim it, so it has to ask
+  first. The second shut puts back what the post reopened, the way every write path here does.
+- **A refused lock costs the sentence, not the signpost.** A server without Manage Threads still
+  gets the line saying where the work went — that line is the only thing that will ever tell a
+  reader of this thread anything — minus the claim it can no longer stand behind.
+- **It does not offer a fix that cannot work.** The state changes answer a refused lock with *"the
+  bot needs Manage Threads"*, which is worth saying to somebody who just ran a command and is
+  looking at the thread. This is a poller: nobody ran anything, nobody is watching, and the pointer
+  is already gone, so granting the permission would never make the hand-over run again. Silence was
+  the honest answer, and it is what `format_state_change` itself does for a thread it could not shut.
+- **One handler around the post and the second shut, not one each.** A third `except` could not be
+  reached by any test — a failure of the second shut needs the first to have succeeded, and neither
+  fake switch can say that — so its log line would be unreachable under the coverage floor. Nothing
+  may escape either: this runs before the cards that have moved are moved, so an exception here
+  would cost every one of them for the whole pass.
+- **The lock is terminal by construction, so nothing guards it.** `TicketPolicy` answers `None` to
+  `shut` and `False` to `shut_for_state`, `KeepsThreadsShut` only ever shuts, `_wake` clears
+  `archived` alone, and `/status`, `/label` and `/regenerate` all refuse a ticket. Nothing in the
+  project can reopen that thread, so the panel's sentence cannot go stale.
+- **The lock is deliberately not written to the row.** `forget_thread` nulls `discord_thread_locked`
+  in the same statement as the pointer, so it could only be recorded before the hand-over and would
+  then be wiped by it. Nothing needs it: nothing posts into that thread again, so nothing ever asks.
+- **The test that looked like it covered this covered nothing.** `(thread, True) in threads.shuts`
+  records transitions of `locked`, and the second shut changes only `archived` — so it passed
+  whether the re-shut existed or not. It is now the state the thread is left in, plus `shut_calls`
+  against `shuts` to pin shut → post → shut. Three more of the eight were weak the same way: both
+  negatives watched `posts`, which under shut-first is no longer the first thing to happen, so a
+  regression that locked a live draft thread on every poll would have passed them unchanged.
+- **`/refresh tickets` still does not hand over**, deliberately. It filters on `is_draft` and a
+  converted card is not one, so the poller remains the only detector — which catches it within the
+  minute on any deployment that polls. Sharing the hand-over would mean lifting it into a leaf
+  module for the benefit of a configuration that has turned polling off.
