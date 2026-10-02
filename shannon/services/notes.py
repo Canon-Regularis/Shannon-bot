@@ -16,7 +16,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
-from shannon.discord_bot.threads import KnowsItsServers, PostsToThread
+from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, RevisesMessages
 from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import ItemNote
@@ -39,11 +39,11 @@ Follow = Callable[[ItemNote], Awaitable[None]]
 
 
 class MirrorsNotes(Protocol):
-    async def mirror(self, snapshot: ItemNote) -> bool: ...
+    async def mirror(self, snapshot: ItemNote, *, edited: bool = False) -> bool: ...
 
 
-class PostsAndKnowsServers(PostsToThread, KnowsItsServers, Protocol):
-    """What this path needs of Discord: the post, and whether the server is still there."""
+class PostsAndKnowsServers(PostsToThread, RevisesMessages, KnowsItsServers, Protocol):
+    """What this path needs of Discord: the post, the rewrite, and whether the server is there."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,11 +78,17 @@ class ItemNoteMirror:
         self._shut_again = shut_again
         self._worth_posting = worth_posting
 
-    async def mirror(self, snapshot: ItemNote) -> bool:
+    async def mirror(self, snapshot: ItemNote, *, edited: bool = False) -> bool:
         """Post the note, returning whether it belonged to anything mirrored here.
 
         True also covers deciding the note was not worth posting. That check runs after the
         thread is found, so an untracked item still answers `ignored` rather than `processed`.
+
+        `edited` is whether GitHub called this an edit rather than a creation (issue #165). A
+        boolean through this one call rather than a field on the snapshot: all three note kinds are
+        frozen dataclasses behind a Protocol of properties, so a field would have to be added to
+        every one of them to say something none of them is about - what the DELIVERY was, not what
+        the comment is.
         """
         try:
             target = await self._find_thread(snapshot)
@@ -97,7 +103,7 @@ class ItemNoteMirror:
                 # No claim is taken, so a later decision to post these would replay them all
                 # rather than find them recorded as mirrored.
                 return True
-            return await self._post(snapshot, target)
+            return await self._post(snapshot, target, edited=edited)
         except ItemNotReadyError:
             # Both ways of having nowhere to post arrive here: a thread never built, and one
             # deleted between read and post. The second branch clears the dead pointer as it
@@ -154,11 +160,17 @@ class ItemNoteMirror:
                 guild_id=found.guild_id,
             )
 
-    async def _post(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
+    async def _post(self, snapshot: ItemNote, target: _NoteTarget, *, edited: bool = False) -> bool:
         # Claimed before the post, not recorded after it. The queue is at-least-once: a delivery
         # whose status could not be written comes back when the lease runs out and is handled
         # from the top, and recording afterwards put the same comment in the thread twice.
         if not await self._claim(target.tracked_item_id, snapshot.note_key):
+            # The claim already tells the two cases apart, so issue #165 needed no second guard.
+            # A claim that fails means the note is in the thread, which is the one circumstance in
+            # which there is a message to rewrite; a claim that succeeds means there is not, and an
+            # edit of a comment that never got mirrored falls through and posts, repairing the gap.
+            if edited:
+                return await self._revise(snapshot, target)
             logger.info(
                 "a note on %s#%s is already in its thread, not posting it again",
                 snapshot.repository.full_name,
@@ -167,7 +179,7 @@ class ItemNoteMirror:
             return True
 
         try:
-            await self._threads.post(
+            message_id = await self._threads.post(
                 thread_id=target.thread_id,
                 panel=self._render(snapshot, target.mentions, target.roles),
                 notify=target.notify,
@@ -201,6 +213,20 @@ class ItemNoteMirror:
             await self._hand_back(target.tracked_item_id, snapshot.note_key)
             raise
 
+        # Which message it went out as, so an edit on GitHub can be mirrored onto it rather than
+        # posted underneath it (issue #165). After the post and outside its handler on purpose: the
+        # post has landed by now, so a failure to write this down must not undo it or re-raise. What
+        # it costs is the ability to mirror a later edit of this one comment, which is why it is
+        # recorded at all rather than read back from somewhere - there is nowhere to read it from.
+        #
+        # Written whatever came back, including None. The gateway's return is typed `int | None` and
+        # every implementation of it answers with an id, so guarding here would add a branch no test
+        # could reach; and None is a truthful answer anyway - a null column already means "nobody
+        # knows which message holds this note", which an edit handles by saying so.
+        await self._remember_the_message(
+            target.tracked_item_id, snapshot.note_key, message_id=message_id
+        )
+
         # Posting reopened the thread: Discord takes no message into an archived one, and people
         # go on commenting after an item is closed.
         await self._shut_again.again(
@@ -209,6 +235,74 @@ class ItemNoteMirror:
 
         logger.info("mirrored a note on %s#%s", snapshot.repository.full_name, snapshot.item_number)
         return True
+
+    async def _revise(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
+        """Rewrite the message this note already went out as. Issue #165.
+
+        Rendered from the CURRENT maps, which `_find_thread` built from the body this delivery
+        carries - so a name that has been linked to a Discord account since the original post
+        resolves now, and the edited comment shows the tag the original could not.
+
+        Nobody is pinged, and nothing here chooses that: Discord sends no notification for an edit
+        whatever the content says. It is the whole reason this is an edit rather than a replacement
+        posted underneath - everybody named in the comment keeps their mention, and not one of them
+        is rung again for a typo somebody fixed.
+
+        No claim is taken and none is handed back. The claim belongs to the original post and still
+        does; a redelivered edit simply writes the same content over the same message, which is why
+        an edit needs no guard of its own to be safe under an at-least-once queue.
+        """
+        message_id = await self._message_for(target.tracked_item_id, snapshot.note_key)
+        if message_id is None:
+            # A note mirrored before the id was recorded. It cannot be found now - GitHub's comment
+            # says nothing about which Discord message holds it - so the edit is dropped rather than
+            # posted a second time under the stale one. Self-healing: notes mirrored from here on
+            # all record one.
+            logger.info(
+                "a note on %s#%s was mirrored before its message id was kept, so an edit to it "
+                "cannot be shown",
+                snapshot.repository.full_name,
+                snapshot.item_number,
+            )
+            return True
+
+        revised = await self._threads.revise(
+            thread_id=target.thread_id,
+            message_id=message_id,
+            panel=self._render(snapshot, target.mentions, target.roles),
+        )
+        if not revised:
+            logger.info(
+                "the message mirroring a note on %s#%s has been deleted, so an edit to it cannot "
+                "be shown",
+                snapshot.repository.full_name,
+                snapshot.item_number,
+            )
+            return True
+
+        # The rewrite reopened the thread exactly as a post does, so it is shut again the same way.
+        await self._shut_again.again(
+            tracked_item_id=target.tracked_item_id, thread_id=target.thread_id
+        )
+
+        logger.info(
+            "mirrored an edit to a note on %s#%s",
+            snapshot.repository.full_name,
+            snapshot.item_number,
+        )
+        return True
+
+    async def _remember_the_message(
+        self, tracked_item_id: int, note_key: str, *, message_id: int | None
+    ) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await MirroredNoteStore(session).remember_the_message(
+                tracked_item_id, note_key, message_id=message_id
+            )
+
+    async def _message_for(self, tracked_item_id: int, note_key: str) -> int | None:
+        async with self._sessionmaker() as session:
+            return await MirroredNoteStore(session).message_for(tracked_item_id, note_key)
 
     async def _claim(self, tracked_item_id: int, note_key: str) -> bool:
         async with self._sessionmaker() as session, session.begin():
@@ -306,7 +400,10 @@ def build_note_handler(
         if then is not None:
             await then(snapshot)
 
-        posted = await mirror.mirror(snapshot)
+        # What GitHub called this delivery. `edited` is in every one of the three action sets this
+        # handler serves, and means the same thing in each: the note is already in its thread and
+        # its text has moved on.
+        posted = await mirror.mirror(snapshot, edited=action == "edited")
         if not posted:
             return WebhookOutcome.IGNORED
         if after is not None:

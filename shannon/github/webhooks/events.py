@@ -51,17 +51,26 @@ ISSUE_ACTIONS = frozenset(
     }
 )
 
-# Edits and deletions are not mirrored, so a comment in Discord is a record of what was said
-# when it was said.
-COMMENT_ACTIONS = frozenset({"created"})
+# Edits are mirrored; deletions are not. Issue #165 reversed the first half of that, and the
+# reason it used to give - "a comment in Discord is a record of what was said when it was said" -
+# is exactly what went wrong: the thread is where people are reading, so a comment somebody fixed a
+# typo in or added a name to left Discord showing text that exists nowhere any more. A mirrored
+# note now tracks what its comment SAYS.
+#
+# Deletions stay out. The mirrored message is where a conversation happened and people reply under
+# it, so taking it away would strand those replies - and nothing would ever put it back, because a
+# deleted comment sends no further events.
+COMMENT_ACTIONS = frozenset({"created", "edited"})
 
-# `dismissed` and `edited` reviews are not mirrored, for the reason the comment actions give.
-REVIEW_ACTIONS = frozenset({"submitted"})
+# `edited` for the same reason as the comments above: a review body is a comment with a verdict on
+# it, and it goes through the same mirror. `dismissed` stays out - it changes the review's standing
+# on GitHub, not a word of what the review says.
+REVIEW_ACTIONS = frozenset({"submitted", "edited"})
 
 # One inline comment on the diff. GitHub sends one of these per comment and a
 # `pull_request_review` wrapping the lot, so a review round costs one delivery more than the
 # number of notes in it.
-REVIEW_COMMENT_ACTIONS = frozenset({"created"})
+REVIEW_COMMENT_ACTIONS = frozenset({"created", "edited"})
 
 # Only a suite that has finished. `requested` and `rerequested` say CI has STARTED, and acting on
 # either would announce an empty result. This fires for a push to ANY branch running CI, not only

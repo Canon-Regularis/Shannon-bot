@@ -50,6 +50,18 @@ class FakeThreadGateway:
         # only records a new name, so it cannot show a thread being written twice with the same
         # content, which is what a card mirrored twice looks like.
         self.updates: list[int] = []
+        # Issue #165. Every rewrite of ONE message that landed, as (thread, message, content).
+        # Separate from `updates` above, which is the metadata block's whole-thread rewrite and
+        # renames the thread in the same call; these two are different operations and a test that
+        # confuses them would pass on the wrong one.
+        self.revisions: list[tuple[int, int, str]] = []
+        # Every message rewrite ASKED for, including the ones that found nothing to rewrite. The
+        # pair works like `shuts` and `shut_calls`: a test saying "the edit was shown" wants
+        # `revisions`, and one saying "it tried and the message was gone" wants this.
+        self.revise_calls: list[tuple[int, int]] = []
+        # Raised instead of rewriting, for the path where Discord refuses the edit. No note hands
+        # a claim back for this, so what it pins is that the delivery is retried, not swallowed.
+        self.revise_error: Exception | None = None
         # The new name, recorded only when it CHANGED. Sound for a test asserting a rename happened,
         # and useless for one asserting it did not - see `names_given`.
         self.renames: list[tuple[int, str]] = []
@@ -250,6 +262,32 @@ class FakeThreadGateway:
         self.posts.append((thread_id, content))
         self.allowed.append(("post", thread_id, content, notify))
         return message_id
+
+    async def revise(self, *, thread_id: int, message_id: int, panel: Panel) -> bool:
+        """Rewrite one message, answering whether it was still there to rewrite.
+
+        Woken BEFORE the message is looked for, the way the real gateway does it: Discord refuses
+        every edit to an archived thread, so the wake is not conditional on the message existing.
+        A test asserting the thread was reopened must hold either way.
+
+        No `allowed` entry, and that is the assertion worth having rather than an omission. `revise`
+        takes no allow-list because Discord notifies nobody for an edit whatever it says, so a test
+        can show an edit rang nobody by watching that `allowed` did not grow.
+        """
+        content = self._drawn(panel)
+        if self.revise_error is not None:
+            raise self.revise_error
+        thread = self._wake(thread_id)
+        self.revise_calls.append((thread_id, message_id))
+        if message_id not in thread.messages:
+            return False
+        thread.messages[message_id] = content
+        self.revisions.append((thread_id, message_id, content))
+        return True
+
+    def forget_message(self, thread_id: int, message_id: int) -> None:
+        """Somebody deleted the message in Discord. A test helper, on no Protocol."""
+        self.threads[thread_id].messages.pop(message_id, None)
 
     async def delete(self, *, thread_id: int) -> None:
         thread = self.threads.pop(thread_id, None)

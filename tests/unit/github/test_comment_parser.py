@@ -31,8 +31,28 @@ class TestCommentParsing:
         assert snapshot is not None
         assert snapshot.item_number == 7
 
-    @pytest.mark.parametrize("action", ["edited", "deleted", ""])
-    def test_only_creation_is_mirrored(self, action: str) -> None:
+    def test_an_edit_is_mirrored_too(self) -> None:
+        """Issue #165. A comment edited on GitHub left the thread showing text that existed
+        nowhere any more, because the parser turned the delivery away before anything saw it.
+
+        The same payload shape as a creation, which is why the gate is the whole of the change
+        here: nothing below this line reads the action again.
+        """
+        payload = payloads.issue_comment_event()
+        created = parse_comment_event("created", payload)
+
+        snapshot = parse_comment_event("edited", payload)
+
+        assert snapshot is not None
+        assert created is not None
+        assert snapshot.note_key == created.note_key, "an edit must key on the comment it edits"
+
+    @pytest.mark.parametrize("action", ["deleted", ""])
+    def test_a_deletion_is_not(self, action: str) -> None:
+        """Deletions stay out, unlike edits. The mirrored message is where a conversation
+        happened and people reply under it, so removing it would take those replies out of
+        their context - and nothing would ever put it back.
+        """
         assert parse_comment_event(action, payloads.issue_comment_event()) is None
 
     def test_a_payload_without_a_comment_is_ignored(self) -> None:
