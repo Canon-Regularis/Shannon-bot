@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
@@ -241,6 +242,65 @@ class TestSayingWhenNoAppIsConfigured:
             )
 
         assert "no GitHub App is configured" not in caplog.text
+
+
+class TestWhatTurningOffCardWritesTurnsOff:
+    """Issue #179. `SHANNON_BOARD_MAY_MOVE_CARDS` stops the bot WRITING to a board, and that is
+    the whole of what it is for.
+
+    It used to withhold the board object from the workflow entirely, which also withheld
+    `order_for` - so a deployment that merely did not want its board written to silently lost the
+    rule that refuses a move the board's column order forbids. One flag, two failures, and a
+    `/status` that wrote the label, left the card where it was, and enforced nothing.
+
+    Asserted through the POLLER, which is handed the same board object the workflow is. That is
+    the only reachable end of the wire: `Container` deliberately exposes "only the pieces somebody
+    outside the wiring asks for by name", and the workflow is not one of them. So what these pin
+    is that the flag now reaches the writer rather than the object; that the workflow is handed
+    the object at all is held by `test_moving_the_card.py`, which pins what "off" now MEANS - a
+    board that answers NO_WRITER rather than a board that is absent.
+    """
+
+    def a_container(self, *, may_move: bool, token: str = "ghp_board") -> object:
+        return container_with(
+            DisposableEngine(),
+            FakeGitHubClient(),
+            Settings(
+                github_webhook_secret="s",
+                github_project_token=token,
+                board_may_move_cards=may_move,
+            ),
+        )
+
+    def board_of(self, container: object) -> Any:
+        """The one board reader every caller shares, reached through the poller."""
+        return container.poller._projects  # type: ignore[attr-defined]
+
+    async def test_with_writes_off_the_board_has_no_writer(self) -> None:
+        """ "Off" as a fact of the wiring rather than a check somebody could forget, which is the
+        same way having no project token at all turns it off."""
+        board = self.board_of(self.a_container(may_move=False))
+
+        assert board._writer is None
+
+    async def test_with_writes_on_the_board_has_one(self) -> None:
+        board = self.board_of(self.a_container(may_move=True))
+
+        assert board._writer is not None
+
+    async def test_the_reader_survives_either_way(self) -> None:
+        """The half that broke. Whatever the flag says, the board can still be READ - which is
+        what refusing a move the column order forbids costs, and all it costs."""
+        assert self.board_of(self.a_container(may_move=False))._client is not None
+        assert self.board_of(self.a_container(may_move=True))._client is not None
+
+    async def test_no_project_token_still_means_no_writer_whatever_the_flag_says(self) -> None:
+        """The older of the two gates, unchanged. The App client holds no Projects permission of
+        any kind, so a write through it could only ever 403 - and the flag being on must not
+        conjure a writer out of a client that cannot write."""
+        board = self.board_of(self.a_container(may_move=True, token=""))
+
+        assert board._writer is None
 
 
 class TestABoardWithNoTokenToReadItWith:
