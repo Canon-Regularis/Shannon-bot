@@ -4,10 +4,15 @@ The board has been read and never written since the poller was built. A status s
 the labels on GitHub, the stored row and the thread, and left the card sitting in whatever column
 it was in - so the one place a reader of the board looks went on saying the old thing.
 
-Two gates stand in front of this and both are wiring rather than a check: a deployment with no
-project token has no writer at all, and one with `SHANNON_BOARD_MAY_MOVE_CARDS` off is handed no
-card mover. What is tested here is that the write happens when both are open, that it does not
-when either is shut, and the two cases where there is nothing to write to.
+Two gates stand in front of the WRITE and both are wiring rather than a check: a deployment with
+no project token has no writer at all, and `SHANNON_BOARD_MAY_MOVE_CARDS` off empties the writer
+too. Neither withholds the board itself, which is issue #179: the flag used to hand the workflow
+no board at all, so turning off card writes also turned off the rule that refuses a move the
+board's own column order forbids - a read, costing nothing but a read.
+
+What is tested here is that the write happens when both gates are open, that it does not when
+either is shut, that the column rules apply either way, and the two cases where there is nothing
+to write to.
 """
 
 from __future__ import annotations
