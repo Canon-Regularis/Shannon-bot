@@ -326,32 +326,57 @@ _WOULD_NOT_SHUT = "-# This thread could not be closed: the bot needs Manage Thre
 # Left in a thread the item has been moved off, because Discord cannot move a thread between
 # channels and the only honest thing to do with the old one is say where its item went.
 #
-# Neither line claims the thread is locked, and that is deliberate rather than an omission. This
-# has to be posted BEFORE the lock, because posting reopens an archived thread and shutting first
-# would be undone by the line itself; at the moment these words are written nobody knows whether
-# the lock will land. A server without Manage Threads would otherwise be told it cannot reply
-# somewhere it can. "Nothing more will be posted here" is true either way, because the row has
-# already stopped pointing at this thread.
+# Neither of THESE two lines claims the thread is locked, and that is deliberate rather than an
+# omission. Both have to be posted BEFORE the lock, because posting reopens an archived thread and
+# shutting first would be undone by the line itself; at the moment these words are written nobody
+# knows whether the lock will land. A server without Manage Threads would otherwise be told it
+# cannot reply somewhere it can. "Nothing more will be posted here" is true either way, because the
+# row has already stopped pointing at this thread.
+#
+# `_CONVERTED` below used to sit under this rule and no longer does: it is posted after the lock
+# rather than before it, so it knows the answer and says it. See `format_card_converted`.
 _MOVED = "-# This item is now mirrored in {}. Nothing more will be posted in this thread."
-_CONVERTED = (
-    "-# This card became {} on GitHub, which is mirrored in a thread of its own. "
-    "Nothing more will be posted here."
-)
 _MOVING = "-# This item will be mirrored in {} from now on. Nothing more will be posted here."
 
+# Issue #184. A converted card's thread is an END, like a closed issue's or a merged pull request's,
+# so it gets the same shape those get: a heading worth finding by scrolling, a colour, and a line
+# saying what became of the thread.
+#
+# Purple because purple already means "this went somewhere and is finished" (`MERGED`), and red
+# `CLOSED` would read as abandoned - which a conversion is the opposite of. Its own name rather
+# than `Accent.MERGED` because the enum asks for one: a converted card is not a merged pull request.
+#
+# No "Nothing more will be posted here": the lock line below says it, and says it truthfully.
+_CONVERTED_HEADING = "### 🟣 Converted"
+_CONVERTED = "-# This card became {} on GitHub, which is mirrored in a thread of its own."
 
-def format_card_converted(html_url: str) -> str:
-    """Point a draft card's thread at the issue it has become.
+
+def format_card_converted(html_url: str, *, shut: bool) -> Panel:
+    """Point a draft card's thread at the issue it has become, and say the thread is finished.
 
     The ISSUE rather than its thread, deliberately. The issue's own thread is opened by its
     `opened` webhook, which may not have arrived when this is written and may not arrive at
     all if that delivery is still being retried - so naming a thread id here would be a
     guess, while the issue's page exists the moment GitHub converted it.
 
+    `shut` is what the caller has already DONE, not what it intends: the hand-over shuts the
+    thread, posts this, and shuts it again, because the post reopens what the shut closed. That
+    order is the whole reason this may claim the lock where `_MOVED` and `_MOVING` may not, and
+    it is the order `format_state_change` is written for as well.
+
+    Nothing is said when the lock was refused, rather than the `_WOULD_NOT_SHUT` line the state
+    changes use. That line names a permission to go and grant, which is worth saying to somebody
+    who just ran a command and is looking at the thread - but this is a poller, nobody is
+    watching, and the thread pointer is already gone, so granting it would never make this run
+    again. A sentence offering a fix that cannot work is no better than the one it replaced.
+
     No untrusted text: the URL is one GitHub gave us for an item it has just created, and
-    the words are this module's.
+    the words are this module's. One block rather than two, because a heading takes the single
+    subheading after it and anything further would be drawn as a section of its own.
     """
-    return _CONVERTED.format(html_url)
+    said = _CONVERTED.format(html_url)
+    under = f"{said}\n{_SHUT}" if shut else said
+    return _headed(_CONVERTED_HEADING, under, Accent.CONVERTED)
 
 
 def format_thread_moved(thread_id: int) -> str:

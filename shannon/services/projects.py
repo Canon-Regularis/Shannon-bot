@@ -32,7 +32,6 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_card_converted
-from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread, ShutsThread
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
@@ -599,15 +598,45 @@ class ProjectPoller:
     async def _say_it_moved(self, thread_id: int, html_url: str) -> None:
         """Point the old thread at the issue, and shut it.
 
-        Swallowed on a refusal, like the relocation path this copies: the pointer is already
-        gone, so what a failure costs is the signpost and the lock on a thread nothing will
-        write to again.
+        Shut FIRST, then post, then shut again - the opposite order to the relocation path this
+        used to copy, and deliberately. `ThreadRelocation` says its signpost goes in before the
+        shut because posting reopens an archived thread; the cost of that order is that the line
+        cannot say whether the thread ended up locked, so its lines do not claim it. This one is
+        an end state and does claim it (issue #184), so it has to know, and the only way to know
+        is to have already asked. The second shut is what puts back what the post reopened, the
+        way every write path in this project does.
+
+        Swallowed on a refusal, as before. The pointer is already gone by the time Discord is
+        asked, so what a refusal costs is never the hand-over, which has happened. It costs less
+        than it used to as well, and that is the one behaviour this reordering changes: a refused
+        shut costs the lock and a refused post costs the signpost, where posting first meant a
+        refused post took the lock down with it and left the thread open with nothing said in it.
+
+        One handler around the post and the second shut rather than one each. A third `except`
+        could not be reached by any test - a failure of the second shut needs the first to have
+        succeeded, and neither `fail_next_shut` nor `refuses_every_shut` can say that - so its
+        log line would be an unreachable statement under the coverage floor. Nothing may escape
+        either: this runs before the cards that have moved are moved, so an exception here would
+        cost every one of them for the whole pass.
         """
+        shut = True
+        try:
+            await self._threads.set_shut(thread_id=thread_id, shut=True)
+        except DiscordGatewayError as refusal:
+            logger.warning(
+                "could not shut thread %s before handing it over to %s: %s",
+                thread_id,
+                html_url,
+                refusal,
+            )
+            shut = False
+
         try:
             await self._threads.post(
-                thread_id=thread_id, panel=Panel.of_text(format_card_converted(html_url))
+                thread_id=thread_id, panel=format_card_converted(html_url, shut=shut)
             )
-            await self._threads.set_shut(thread_id=thread_id, shut=True)
+            if shut:
+                await self._threads.set_shut(thread_id=thread_id, shut=True)
         except DiscordGatewayError as refusal:
             logger.warning("could not hand thread %s over to %s: %s", thread_id, html_url, refusal)
 
