@@ -123,24 +123,35 @@ class TestWhatReachesTheThread:
         assert "<@606>" in inline_posts(threads)[-1]
 
 
-class TestWhatItLeavesAlone:
-    async def test_an_edited_comment_is_not_mirrored(
+class TestAnEditedInlineComment:
+    async def test_it_rewrites_its_message_rather_than_posting_another(
         self, tracked: AsyncClient, threads: FakeThreadGateway
     ) -> None:
-        """The thread records what was said when it was said, which is the rule every other note
-        on this path already follows."""
+        """Issue #165 reached all three note kinds, because all three go through one mirror. An
+        inline note on a diff is a comment, and one whose text has moved on was stale in exactly
+        the way an issue comment was.
+        """
+        await deliver(
+            tracked,
+            "pull_request_review_comment",
+            payloads.pull_request_review_comment_event(),
+            delivery="rc1",
+        )
         before = len(threads.posts)
 
         response = await deliver(
             tracked,
             "pull_request_review_comment",
-            payloads.pull_request_review_comment_event("edited"),
-            delivery="rc1",
+            payloads.pull_request_review_comment_event("edited", body="Actually this is fine"),
+            delivery="rc2",
         )
 
-        assert response.json()["status"] == "ignored"
-        assert len(threads.posts) == before
+        assert response.json()["status"] == "accepted"
+        assert len(threads.posts) == before, "the edit was posted as a second message"
+        assert "Actually this is fine" in threads.revisions[-1][2]
 
+
+class TestWhatItLeavesAlone:
     async def test_a_comment_on_an_untracked_pull_request_is_ignored(
         self, tracked: AsyncClient, threads: FakeThreadGateway
     ) -> None:

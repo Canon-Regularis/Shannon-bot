@@ -172,6 +172,17 @@ class PostsToThread(Protocol):
     async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None: ...
 
 
+class RevisesMessages(Protocol):
+    """Rewriting one message already in a thread, in place.
+
+    Its own role rather than part of `OpensThreads.update`, which rewrites the metadata block: that
+    one renames the thread in the same breath and falls back to posting a replacement when the
+    message has gone. Neither is wanted for a mirrored comment.
+    """
+
+    async def revise(self, *, thread_id: int, message_id: int, panel: Panel) -> bool: ...
+
+
 class ShutsThread(Protocol):
     """Shut means locked against replies and archived out of the channel, in one edit."""
 
@@ -192,7 +203,13 @@ class KnowsItsServers(Protocol):
 
 
 class ThreadGateway(
-    OpensThreads, PostsToThread, ShutsThread, FindsThreads, KnowsItsServers, Protocol
+    OpensThreads,
+    PostsToThread,
+    RevisesMessages,
+    ShutsThread,
+    FindsThreads,
+    KnowsItsServers,
+    Protocol,
 ):
     """Everything this project does to Discord threads, in one object.
 
@@ -306,6 +323,41 @@ class DiscordThreadGateway:
             await self._wake(thread)
             message = await _post(thread, content, view, notify)
         return message.id
+
+    async def revise(self, *, thread_id: int, message_id: int, panel: Panel) -> bool:
+        """Rewrite one message in place, answering whether it was still there to rewrite.
+
+        False where somebody has deleted it in Discord. No replacement is posted, unlike the
+        metadata block's `update`: the block is the thread's own header and a thread without one is
+        broken, while a mirrored comment is a record of something said - and a message a person
+        removed from their thread is not one to put back under them. The caller logs it and stops.
+
+        Nobody is notified, and nothing here could change that. Discord sends no notification for an
+        edit whatever the content says, which is why an allow-list is not even a parameter: offering
+        one would imply this can ping somebody newly named by the edit, and it cannot.
+
+        Waking first for the same reason every write path does it: Discord refuses every edit to an
+        archived thread, and a thread goes quiet while the item it belongs to is still open. The
+        caller shuts it again afterwards.
+        """
+        content, view = as_message(panel)
+        thread = await self._thread(thread_id)
+        with _translated("rewrite the message"):
+            await self._wake(thread)
+            try:
+                message = await thread.fetch_message(message_id)
+            except discord.NotFound:
+                logger.info(
+                    "message %s in thread %s is gone, so there was nothing to rewrite",
+                    message_id,
+                    thread_id,
+                )
+                return False
+            # Nulling `embed` and `attachments` is what discord.py requires to attach a view to a
+            # message that had none, and a link preview left in would refuse the edit - the same
+            # dance `_edit_or_post` does for the block.
+            await message.edit(content=content, embed=None, attachments=[], view=view)
+        return True
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
         thread = await self._thread(thread_id)

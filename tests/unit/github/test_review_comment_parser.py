@@ -54,8 +54,21 @@ def test_its_key_is_its_own() -> None:
     assert snapshot.note_key == "review-comment:12"
 
 
-@pytest.mark.parametrize("action", ["edited", "deleted", "", "created "])
-def test_only_a_new_comment_is_mirrored(action: str) -> None:
+def test_an_edit_is_mirrored_too() -> None:
+    """Issue #165, and for the same reason as an issue comment: an inline note on a diff is a
+    comment, and one whose text has moved on is one the thread is showing wrongly."""
+    payload = payloads.pull_request_review_comment_event()
+    created = parse_review_comment_event("created", payload)
+
+    snapshot = parse_review_comment_event("edited", payload)
+
+    assert snapshot is not None
+    assert created is not None
+    assert snapshot.note_key == created.note_key, "an edit must key on the comment it edits"
+
+
+@pytest.mark.parametrize("action", ["deleted", "", "created "])
+def test_a_deletion_or_a_malformed_action_is_not(action: str) -> None:
     assert parse_review_comment_event(action, payloads.pull_request_review_comment_event()) is None
 
 

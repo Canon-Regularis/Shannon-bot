@@ -238,6 +238,18 @@ class MirroredNote(TimestampMixin, Base):
     # `comment:123` or `review:123`. GitHub numbers the two separately and they collide, so the
     # kind belongs in the key rather than in a column nothing would think to filter on.
     note_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The Discord message this note was posted as, so an edit on GitHub can be mirrored onto it
+    # rather than posted again underneath (issue #165).
+    #
+    # Nullable with no backfill, on the pattern `0019`, `0026` and `0027` set. Null means the note
+    # was mirrored before this column existed: the id the post returned was thrown away and cannot
+    # be recovered, because GitHub's comment carries no record of which Discord message holds it.
+    # An edit for such a row has nothing to point at and says so. It self-heals - every note
+    # mirrored from now on records one.
+    #
+    # BigInteger because a Discord snowflake is past 2**31, the same reason every other id column
+    # here is one.
+    discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class WebhookEvent(Base):

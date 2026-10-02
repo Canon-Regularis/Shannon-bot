@@ -5,10 +5,10 @@ import logging
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.models import MirroredNote, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadStartedEmptyError
 from shannon.discord_bot.panels import Panel
@@ -925,6 +925,76 @@ class TestAClaimThatCouldNotBeGivenBack:
             await mirror.mirror(parse_comment_event("created", payloads.issue_comment_event()))
 
         assert "could not give back the claim" in caplog.text, "the comment was lost in silence"
+
+
+class TestARewriteDiscordRefused:
+    """Issue #165. A rewrite that Discord turns down has to be retried, not swallowed.
+
+    It is the one failure on this path with nothing to undo: the claim belongs to the original post
+    and stays with it, so there is no hand-back to get wrong. What there is to get wrong is catching
+    the error - an edit quietly dropped leaves the thread showing text the comment no longer has,
+    which is the whole of what this issue was about.
+    """
+
+    async def test_it_is_raised_so_the_delivery_comes_back(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        mirror = ItemNoteMirror(
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+        )
+        comment = parse_comment_event("created", payloads.issue_comment_event())
+        assert comment is not None
+        await mirror.mirror(comment)
+
+        threads.revise_error = DiscordGatewayError("Discord would not take that edit")
+
+        with pytest.raises(DiscordGatewayError):
+            await mirror.mirror(comment, edited=True)
+
+    async def test_the_claim_is_left_where_it_was(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        issue_event,
+    ) -> None:
+        """The other half, and the reason an edit needs no hand-back of its own. The claim records
+        that the comment IS in the thread, which is still true - a refused rewrite changes nothing
+        about that, and releasing it would make the retry post the comment a second time.
+        """
+        issues = build_item_sync(db_sessionmaker, threads, IssuePolicy())
+        await issues.sync(issue_event("opened"))
+        mirror = ItemNoteMirror(
+            db_sessionmaker,
+            threads,
+            render=lambda note, mentions, roles: Panel.of_text("hello"),
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+        )
+        comment = parse_comment_event("created", payloads.issue_comment_event())
+        assert comment is not None
+        await mirror.mirror(comment)
+        threads.revise_error = DiscordGatewayError("Discord would not take that edit")
+
+        with pytest.raises(DiscordGatewayError):
+            await mirror.mirror(comment, edited=True)
+
+        db_session.expire_all()
+        held = await db_session.scalar(
+            select(func.count())
+            .select_from(MirroredNote)
+            .where(MirroredNote.note_key == comment.note_key)
+        )
+        assert held == 1, "a refused rewrite gave the claim back, so a retry would post it twice"
 
 
 class TestARebuildThatDidNotWorkTheFirstTime:

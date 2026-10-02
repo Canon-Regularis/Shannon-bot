@@ -5,10 +5,10 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.models import MirroredNote, Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.panels import Panel
 from shannon.domain.enums import ObjectType, Status
@@ -55,6 +55,12 @@ PR = parse_pull_request_event("opened", payloads.pull_request_event("opened"))
 
 def thread_for(threads: FakeThreadGateway, channel_id: int) -> int:
     return next(t.thread_id for t in threads.created if t.channel_id == channel_id)
+
+
+def note_message(threads: FakeThreadGateway, thread_id: int) -> int:
+    """The message a note was posted as: the one that is not the thread's metadata block."""
+    thread = threads.threads[thread_id]
+    return next(mid for mid in thread.messages if mid != thread.metadata_message_id)
 
 
 async def test_a_comment_on_an_issue_reaches_its_thread(
@@ -174,17 +180,223 @@ async def test_a_repeated_comment_delivery_posts_once(
     assert len(threads.posts) == before + 1
 
 
-async def test_an_edited_comment_is_not_mirrored(
-    tracked: AsyncClient, threads: FakeThreadGateway
-) -> None:
-    before = len(threads.posts)
+class TestAnEditedCommentIsShown:
+    """Issue #165. A comment edited on GitHub used to leave Discord showing text that existed
+    nowhere any more, because the delivery was turned away at the gate.
 
-    response = await deliver(
-        tracked, "issue_comment", payloads.issue_comment_event("edited"), delivery="c1"
-    )
+    Rewritten in place rather than posted again underneath. A second message would say the same
+    thing twice and would ring everybody the comment names for a typo somebody fixed; an edit says
+    it once and rings nobody, because Discord sends no notification for an edit whatever it says.
+    """
 
-    assert response.json()["status"] == "ignored"
-    assert len(threads.posts) == before
+    async def mirrored(self, tracked: AsyncClient) -> None:
+        await deliver(tracked, "issue_comment", payloads.issue_comment_event(), delivery="c1")
+
+    async def test_the_edit_rewrites_the_message_rather_than_posting_another(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """The whole of the issue, in two numbers: one more rewrite, not one more message."""
+        await self.mirrored(tracked)
+        thread_id = thread_for(threads, 98)
+        message_id = note_message(threads, thread_id)
+        before = len(threads.posts)
+
+        response = await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event("edited", body="Reproduced on main, and on 1.2 as well"),
+            delivery="c2",
+        )
+
+        assert response.json()["status"] == "accepted"
+        assert len(threads.posts) == before, "the edit was posted as a second message"
+        assert threads.revisions[-1][:2] == (thread_id, message_id)
+        assert "and on 1.2 as well" in threads.revisions[-1][2]
+
+    async def test_the_thread_keeps_the_new_text_and_loses_the_old(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """What a reader of the thread actually sees afterwards, read off the message itself
+        rather than off the call that wrote it."""
+        await self.mirrored(tracked)
+        thread_id = thread_for(threads, 98)
+        message_id = note_message(threads, thread_id)
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event("edited", body="Actually it was the cache"),
+            delivery="c2",
+        )
+
+        shown = threads.threads[thread_id].messages[message_id]
+        assert "Actually it was the cache" in shown
+        assert "Reproduced on main" not in shown, "the thread still shows the text that was edited"
+
+    async def test_a_name_the_edit_adds_becomes_a_real_discord_mention(
+        self,
+        tracked: AsyncClient,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The half of #165 that is about people rather than text.
+
+        Somebody added to a comment by an edit shows up as the tagged individual, exactly as they
+        would had the comment named them from the start - the renderer is handed the same map
+        either way, built from the body THIS delivery carries.
+        """
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="whaletheree", github_user_id=404, discord_user_id=707
+        )
+        await db_session.commit()
+        await self.mirrored(tracked)
+        assert "<@707>" not in threads.posts[-1][1], "the original already named them"
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event("edited", body="cc @whaletheree on this"),
+            delivery="c2",
+        )
+
+        assert "<@707>" in threads.revisions[-1][2]
+
+    async def test_the_edit_rings_nobody(
+        self,
+        tracked: AsyncClient,
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Nobody already named is rung again for a typo, and that is not a decision this code
+        gets to make: Discord notifies nobody for an edit, so `revise` is not even offered an
+        allow-list to spend. Watching `allowed` is how that shows from outside.
+        """
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=909
+        )
+        await db_session.commit()
+        await self.mirrored(tracked)
+        spent = len(threads.allowed)
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event("edited", body="cc @monalisa again"),
+            delivery="c2",
+        )
+
+        assert threads.revisions, "nothing was rewritten, so this proves nothing"
+        assert len(threads.allowed) == spent, "the edit spent an allow-list, so it rang somebody"
+
+    async def test_an_edit_of_a_comment_never_mirrored_posts_it(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """No create first. The claim is what tells the two cases apart, so an edit that finds no
+        claim taken has nothing to rewrite and posts instead - which repairs a comment whose own
+        delivery never arrived rather than dropping it for good.
+        """
+        before = len(threads.posts)
+
+        response = await deliver(
+            tracked, "issue_comment", payloads.issue_comment_event("edited"), delivery="c1"
+        )
+
+        assert response.json()["status"] == "accepted"
+        assert len(threads.posts) == before + 1
+        assert threads.revisions == [], "it rewrote a message that was never posted"
+
+    async def test_an_edit_of_a_message_somebody_deleted_is_dropped(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """A message a person removed from their thread is not one to put back under them, so no
+        replacement is posted. It tried, which is the part worth pinning: `revise_calls` records
+        the ask and `revisions` only the ones that found something.
+        """
+        await self.mirrored(tracked)
+        thread_id = thread_for(threads, 98)
+        threads.forget_message(thread_id, note_message(threads, thread_id))
+        before = len(threads.posts)
+
+        response = await deliver(
+            tracked, "issue_comment", payloads.issue_comment_event("edited"), delivery="c2"
+        )
+
+        assert response.json()["status"] == "accepted"
+        assert threads.revise_calls, "it never even looked for the message"
+        assert threads.revisions == [], "it rewrote something that was not there"
+        assert len(threads.posts) == before, "a deleted message was replaced"
+
+    async def test_an_edit_of_a_note_mirrored_before_the_id_was_kept_is_dropped(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """Every row written before this column existed. The id was thrown away and GitHub's
+        comment says nothing about which Discord message holds it, so the edit cannot be shown and
+        must not be posted a second time under the stale one. It self-heals as notes arrive.
+        """
+        await self.mirrored(tracked)
+        await db_session.execute(update(MirroredNote).values(discord_message_id=None))
+        await db_session.commit()
+        before = len(threads.posts)
+
+        response = await deliver(
+            tracked, "issue_comment", payloads.issue_comment_event("edited"), delivery="c2"
+        )
+
+        assert response.json()["status"] == "accepted"
+        assert threads.revise_calls == [], "it asked Discord about a message it had no id for"
+        assert len(threads.posts) == before
+
+    async def test_the_message_id_is_recorded_when_the_note_lands(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """Without this every test above is unreachable in production. The id exists only in the
+        instant the post returns, so it is written down then or not at all."""
+        await self.mirrored(tracked)
+
+        recorded = await db_session.scalar(select(MirroredNote.discord_message_id))
+        assert recorded == note_message(threads, thread_for(threads, 98))
+
+    async def test_a_redelivered_edit_is_harmless(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """No claim is taken for an edit and none needs to be: writing the same content over the
+        same message twice is the same as writing it once, which is why an at-least-once queue
+        needs no extra guard here. The webhook ledger stops a repeat of one delivery id, so this
+        sends the same edit under two.
+        """
+        await self.mirrored(tracked)
+        payload = payloads.issue_comment_event("edited", body="the same correction")
+
+        await deliver(tracked, "issue_comment", payload, delivery="c2")
+        await deliver(tracked, "issue_comment", payload, delivery="c3")
+
+        assert len(threads.revisions) == 2
+        assert threads.revisions[0] == threads.revisions[1]
+
+    async def test_the_thread_is_left_shut_after_an_edit(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """Rewriting reopens an archived thread exactly as posting does, so it has to be shut
+        again afterwards. Without this, editing a comment on a closed issue would drag its thread
+        back into the channel and leave it there - and people edit comments after closing.
+        """
+        await self.mirrored(tracked)
+        await deliver(
+            tracked,
+            "issues",
+            payloads.issue_event("closed", state="closed", closed_at="2026-08-11T12:00:00Z"),
+            delivery="i1",
+        )
+        thread_id = thread_for(threads, 98)
+        assert threads.threads[thread_id].archived is True
+
+        await deliver(
+            tracked, "issue_comment", payloads.issue_comment_event("edited"), delivery="c2"
+        )
+
+        assert threads.revisions, "nothing was rewritten, so this proves nothing"
+        assert threads.unarchived[-1] == thread_id, "the rewrite did not reopen the thread to land"
+        assert threads.threads[thread_id].archived is True, "the rewrite left the thread open"
 
 
 async def test_a_comment_on_a_closed_issue_lands_and_leaves_the_thread_shut(
@@ -289,6 +501,27 @@ class TestReviewMirroring:
 
         assert await tracked.outcome_of("r1") == "ignored"
         assert len(threads.posts) == before
+
+    async def test_an_edited_review_rewrites_its_message(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """The third of the three note kinds. A review body is a comment with a verdict on it and
+        shares the mirror, so the same gate change covers it."""
+        await deliver(
+            tracked, "pull_request_review", payloads.pull_request_review_event(), delivery="r1"
+        )
+        before = len(threads.posts)
+
+        response = await deliver(
+            tracked,
+            "pull_request_review",
+            payloads.pull_request_review_event("edited", body="On reflection, one nit"),
+            delivery="r2",
+        )
+
+        assert response.json()["status"] == "accepted"
+        assert len(threads.posts) == before, "the edit was posted as a second message"
+        assert "On reflection, one nit" in threads.revisions[-1][2]
 
     async def test_a_dismissed_review_is_not_mirrored(
         self, tracked: AsyncClient, threads: FakeThreadGateway
@@ -395,8 +628,10 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
 ) -> None:
     """`then` closes a review request, so it must not run for a note that was never read.
 
-    The check sits ahead of it deliberately. An edited comment reaches this every time, and it
-    is the one place the handler can answer without touching the database at all.
+    The check sits ahead of it deliberately: it is the one place the handler can answer without
+    touching the database at all. A DELETED comment is the example since issue #165, because an
+    edited one is mirrored now - the parser still refuses the actions that reach no thread, and
+    those must stop before the hook rather than after it.
     """
     mirror = ItemNoteMirror(
         db_sessionmaker,
@@ -410,7 +645,7 @@ async def test_a_payload_the_parser_refuses_stops_before_anything_runs(
         ran.append(snapshot)
 
     handler = build_note_handler(mirror, parse_comment_event, then=then)
-    outcome = await handler("edited", payloads.issue_comment_event())
+    outcome = await handler("deleted", payloads.issue_comment_event())
 
     assert outcome == "ignored"
     assert ran == []

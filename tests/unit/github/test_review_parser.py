@@ -35,8 +35,23 @@ def test_an_uppercase_state_is_normalised() -> None:
     assert snapshot.verdict == "approved"
 
 
-@pytest.mark.parametrize("action", ["edited", "dismissed", "", "submitted "])
-def test_only_submission_is_mirrored(action: str) -> None:
+def test_an_edit_is_mirrored_too() -> None:
+    """Issue #165. A review body is a comment with a verdict on it and goes through the same
+    mirror, so an edited one was stale in exactly the same way."""
+    payload = payloads.pull_request_review_event()
+    submitted = parse_review_event("submitted", payload)
+
+    snapshot = parse_review_event("edited", payload)
+
+    assert snapshot is not None
+    assert submitted is not None
+    assert snapshot.note_key == submitted.note_key, "an edit must key on the review it edits"
+
+
+@pytest.mark.parametrize("action", ["dismissed", "", "submitted "])
+def test_a_dismissal_or_a_malformed_action_is_not(action: str) -> None:
+    """`dismissed` stays out although `edited` came in: it changes where the review stands on
+    GitHub, not a word of what the review says, and the mirror shows what it says."""
     assert parse_review_event(action, payloads.pull_request_review_event()) is None
 
 

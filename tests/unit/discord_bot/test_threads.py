@@ -398,6 +398,96 @@ async def test_a_discord_failure_surfaces_as_a_gateway_error() -> None:
         await gateway.post(thread_id=500, panel=Panel.of_text("x"))
 
 
+class TestRewritingOneMessage:
+    """Issue #165. Editing the message a comment was mirrored as, rather than posting its new text
+    underneath the old.
+
+    Driven against the real gateway because nothing else can be: every integration test on this
+    path holds a fake, so the discord.py call this makes - and the one failure mode it has to
+    survive - are reachable from here and nowhere else.
+    """
+
+    async def test_it_edits_the_message_it_is_given(self) -> None:
+        existing = thread()
+        edited = message(600)
+        existing.fetch_message.return_value = edited
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        revised = await gateway.revise(
+            thread_id=500, message_id=600, panel=Panel.of_text("the corrected comment")
+        )
+
+        assert revised is True
+        edited.edit.assert_awaited_once_with(
+            content="the corrected comment", embed=None, attachments=[], view=None
+        )
+        existing.send.assert_not_awaited()
+
+    async def test_a_card_is_rewritten_as_components(self) -> None:
+        """The same bargain `post` strikes: Discord refuses components beside content, so a panel
+        carrying an accent goes out as one and the content is emptied."""
+        existing = thread()
+        edited = message(600)
+        existing.fetch_message.return_value = edited
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.revise(thread_id=500, message_id=600, panel=a_card())
+
+        kwargs = edited.edit.await_args.kwargs
+        assert kwargs["content"] is None
+        assert kwargs["view"] is not None
+
+    async def test_a_message_somebody_deleted_is_reported_rather_than_replaced(self) -> None:
+        """What makes this its own method instead of the block's `update`, which posts a
+        replacement here. A mirrored comment is a record of something said, and a message a person
+        removed from their thread is not one to put back under them.
+        """
+        existing = thread()
+        existing.fetch_message.side_effect = discord.NotFound(MagicMock(status=404), "gone")
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        revised = await gateway.revise(
+            thread_id=500, message_id=600, panel=Panel.of_text("too late")
+        )
+
+        assert revised is False
+        existing.send.assert_not_awaited()
+
+    async def test_it_reopens_an_archived_thread_first(self) -> None:
+        """Discord refuses every edit to an archived thread, and a thread goes quiet while the
+        item it belongs to is still open - so a comment edited a day later would never land."""
+        existing = thread(archived=True)
+        existing.fetch_message.return_value = message(600)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.revise(thread_id=500, message_id=600, panel=Panel.of_text("late edit"))
+
+        assert existing.edit.await_args_list[0].kwargs == {"archived": False}
+
+    async def test_an_open_thread_is_not_edited_just_to_reopen_it(self) -> None:
+        existing = thread(archived=False)
+        existing.fetch_message.return_value = message(600)
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.revise(thread_id=500, message_id=600, panel=Panel.of_text("an edit"))
+
+        existing.edit.assert_not_awaited()
+
+    async def test_a_discord_failure_surfaces_as_a_gateway_error(self) -> None:
+        """Rather than escaping as an HTTPException. No claim is handed back for a rewrite - the
+        original post owns it - so what a refusal buys is the delivery being retried, and that
+        needs the typed error the worker knows to retry on.
+        """
+        existing = thread()
+        edited = message(600)
+        edited.edit.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
+        existing.fetch_message.return_value = edited
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway.revise(thread_id=500, message_id=600, panel=Panel.of_text("x"))
+
+
 def test_long_thread_names_are_truncated() -> None:
     name = truncate_thread_name("x" * 500)
 
