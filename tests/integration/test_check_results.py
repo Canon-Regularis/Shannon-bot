@@ -116,6 +116,21 @@ def allow_list(threads: FakeThreadGateway) -> Notify:
     return None
 
 
+def allow_lists(threads: FakeThreadGateway) -> list[Notify]:
+    """Every announcement's allow-list, in the order they were posted.
+
+    `allow_list` answers about the first and is right for the tests that post once. A test that
+    has to compare two announcements against EACH OTHER needs both, and comparing them is the only
+    way to assert that two outcomes reach the same people rather than asserting the same literal
+    twice and hoping.
+    """
+    return [
+        notify
+        for kind, _, body, notify in threads.allowed
+        if kind == "post" and "succeeded." in body
+    ]
+
+
 async def a_suite(
     client: DeliveryClient,
     *,
@@ -210,25 +225,40 @@ class TestWhoIsRung:
         assert sorted(allow_list(threads) or ()) == [111, 222, 333]
         assert "<@555>" not in said, "#164 again: a pass rang a reviewer who had not looked yet"
 
-    async def test_a_failure_rings_the_same_people(
+    async def test_a_failure_rings_exactly_who_a_pass_rings(
         self,
         tracked: tuple[DeliveryClient, FakeGitHubClient],
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
-        """The point is that it is the SAME list. The verdict decides what the sentence says, not
-        who hears it: whoever put the code there wants to know either way."""
+        """Both outcomes in ONE test, compared against each other rather than against a literal.
+
+        This used to drive a failure alone and assert `[111, 222, 333]`, under a name and a
+        docstring claiming the two outcomes reach the same people. It could not show that: a
+        regression in the pass path only - which is precisely the shape of issue #164 - left it
+        green, because it never ran a passing suite. Measured, not supposed: restoring the old
+        `if report.passed: return reviewers` kept this test passing while seven others went red.
+
+        Two suites rather than two tests, because the claim is about SAMENESS. `note_key` is
+        `checks:{count}:{largest id}`, so a different set of runs is a different claim and the
+        second announcement is really posted.
+        """
         client, github = tracked
-        github.check_runs[SHA] = RED
         await link(db_session, AUTHOR, 111, 583231)
         await link(db_session, ASSIGNEE, 222, 100)
         await link(db_session, CONTRIBUTOR, 333, 300)
         await link(db_session, REVIEWER, 555, 200)
 
-        await a_suite(client)
+        await a_suite(client, delivery="cs-green")
+        github.check_runs[SHA] = RED
+        await a_suite(client, delivery="cs-red")
 
-        assert sorted(allow_list(threads) or ()) == [111, 222, 333]
-        assert "<@555>" not in announced(threads)[0]
+        passed, failed = allow_lists(threads)
+        assert sorted(passed or ()) == [111, 222, 333], "the pass rang the wrong people"
+        assert sorted(failed or ()) == sorted(passed or ()), (
+            "the two outcomes reach different people, which is the whole of issue #164"
+        )
+        assert all("<@555>" not in said for said in announced(threads))
 
     async def test_a_contributor_who_is_neither_author_nor_assignee_is_rung(
         self,
@@ -258,14 +288,22 @@ class TestWhoIsRung:
         suite finishing is the opposite kind of event: it is news, and it is most news to the
         person who pushed, who cannot know the answer until the jobs come back. Anybody who would
         rather not hear it has `/mentions off`, which is where that choice belongs.
+
+        Green as well as red. "Your build is fixed" is as much news as "your build broke", and a
+        test that only ever broke the build could not see a pass-path regression.
         """
         client, github = tracked
-        github.check_runs[SHA] = RED
         await link(db_session, CONTRIBUTOR, 333, 300)
 
-        await a_suite(client)
+        await a_suite(client, delivery="cs-green")
+        github.check_runs[SHA] = RED
+        await a_suite(client, delivery="cs-red")
 
-        assert 333 in (allow_list(threads) or ()), "the person who broke it was not told"
+        # Both outcomes, because the exception is not about bad news. Driving only the failure
+        # left this blind to a regression in the pass path, which is the half #164 was about.
+        assert [sorted(notify or ()) for notify in allow_lists(threads)] == [[333], [333]], (
+            "the person whose push caused the run was not told about it"
+        )
 
     async def test_a_reviewer_is_not_rung_by_ci_at_all(
         self,
@@ -390,6 +428,11 @@ class TestWhoIsRung:
         await register_repository(db_session, guild_id=1, channel_id=99)
         await link(db_session, AUTHOR, 111, 583231)
         await link(db_session, CONTRIBUTOR, 333, 300)
+        # Linked on purpose, so a reviewer who reached the audience would arrive as a live mention
+        # rather than as plain text. Without this the old assertion passed while the panel read
+        # "monalisa Everything that ran passed." - nobody rung, but a name said on a draft, which
+        # is not what "rings nobody" claims.
+        await link(db_session, REVIEWER, 555, 200)
         github = a_github(draft=True)
         async with build_http_client(
             build_stack(db_engine, threads=threads, github=github)
@@ -399,8 +442,12 @@ class TestWhoIsRung:
             )
             await a_suite(client)
 
-        assert announced(threads), "a draft should still report what CI did"
-        assert "<@" not in announced(threads)[0]
+        said = announced(threads)[0]
+        assert said, "a draft should still report what CI did"
+        assert "<@" not in said, "a draft named somebody as a mention"
+        assert not any(login in said for login in (AUTHOR, ASSIGNEE, CONTRIBUTOR, REVIEWER)), (
+            f"a draft named somebody in plain text: {said!r}"
+        )
         assert allow_list(threads) == ()
         assert github.commit_list_calls == [], "a draft paid for a read it had no use for"
 
