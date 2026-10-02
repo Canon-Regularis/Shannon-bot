@@ -71,13 +71,15 @@ def everyone_who_worked_on_it(
     somebody who pushed to a branch they neither opened nor were assigned is told their jobs went
     green - which is the whole of issue #164, and the thing a snapshot alone cannot answer.
 
-    **Whoever caused the run is deliberately kept, not dropped.** That is the opposite of
-    `draft_lines._who_to_tell`, which removes whoever pressed the button because "they know: they
-    pressed it". The two sit one directory apart and the difference is the point: pressing a
-    button is an act somebody already knows the outcome of, while a suite finishing is NEWS, and
-    the person it is most news to is the one who pushed. `format_everyone_approved` argues the
-    same way about the last approver. Somebody who would rather not hear it has `/mentions off`,
-    which is the one place this is anybody's choice.
+    **Whoever caused the run is deliberately kept, not dropped.** The comparison worth drawing is
+    `draft_lines._who_to_tell`, which still removes whoever pressed the button - except its author,
+    who since issue #161 is never dropped. So the two paths now differ by degree rather than
+    flatly: pressing a button is an act somebody already knows the outcome of, which is why a
+    non-author initiator is left out there, while a suite finishing is NEWS and the person it is
+    most news to is the one who pushed, which is why nobody is left out here.
+    `format_everyone_approved` argues the same way about the last approver. Somebody who would
+    rather not hear any of it has `/mentions off`, which is the one place this is anybody's
+    choice.
 
     Merges are dropped. A merge commit's account is whoever pressed "Update branch", which is
     frequently a reviewer tidying somebody else's pull request - and because the commit never

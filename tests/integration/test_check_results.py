@@ -282,10 +282,11 @@ class TestWhoIsRung:
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
-        """A deliberate exception to this bot's one self-notification rule.
+        """Where this bot's self-notification rules part company.
 
-        `draft_lines` drops whoever pressed the button, because they know - they pressed it. A
-        suite finishing is the opposite kind of event: it is news, and it is most news to the
+        `draft_lines` drops whoever pressed the button - except the pull request's author, who is
+        never dropped (issue #161). Nothing is dropped here at all: a suite finishing is a
+        different kind of event from pressing a button. It is news, and it is most news to the
         person who pushed, who cannot know the answer until the jobs come back. Anybody who would
         rather not hear it has `/mentions off`, which is where that choice belongs.
 
