@@ -18,6 +18,7 @@ to write to.
 from __future__ import annotations
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -646,7 +647,7 @@ class TestTheWireFromTheContainer:
             # and every read here would 401. It costs nothing that matters to this test - with
             # writes off there is no writer either way, and what is under test is whether the
             # board is READ at all.
-            settings=Settings(github_webhook_secret=SECRET, board_may_move_cards=False),
+            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
         )
 
         interaction = await self.run_status(container, "Done", thread_id)
@@ -676,7 +677,7 @@ class TestTheWireFromTheContainer:
             # and every read here would 401. It costs nothing that matters to this test - with
             # writes off there is no writer either way, and what is under test is whether the
             # board is READ at all.
-            settings=Settings(github_webhook_secret=SECRET, board_may_move_cards=False),
+            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
         )
 
         interaction = await self.run_status(container, "Ready", thread_id)
