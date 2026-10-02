@@ -7155,3 +7155,58 @@ feature end to end rather than assuming a predecessor the file never recorded.
   converted card is not one, so the poller remains the only detector — which catches it within the
   minute on any deployment that polls. Sharing the hand-over would mean lifting it into a leaf
   module for the benefit of a configuration that has turned polling off.
+
+## An edited comment is edited in the thread
+
+- **A comment edited on GitHub left Discord showing text that existed nowhere any more** (#165).
+  The thread is where people are actually reading, so a typo somebody fixed, a correction, or a
+  name somebody added never arrived. The screenshots on the issue are a mirrored comment beside the
+  edited GitHub one it was supposed to be.
+- **This reverses a decision, and the old reason is worth keeping on the record.** The gate said
+  *"edits and deletions are not mirrored, so a comment in Discord is a record of what was said when
+  it was said"*. That is a defensible rule for an archive and the wrong one for a thread people are
+  talking in. A mirrored note now tracks what its comment **says**.
+- **Three note kinds, one mirror, one gate change.** `issue_comment`, `pull_request_review` and
+  `pull_request_review_comment` all accept `edited` now. Covering only the first would have left
+  review bodies stale while deleting the justification for it. Each parser gates on the same
+  frozenset the router does, so adding the action opened both at once.
+- **Deletions stay out.** The mirrored message is where a conversation happened and people reply
+  under it, so removing it would take those replies out of their context — and nothing would ever
+  put it back. `dismissed` reviews stay out too: that changes where a review stands on GitHub, not
+  a word of what it says.
+- **The message id is now written down**, because there was nothing to edit. `mirrored_notes`
+  recorded that a note had been mirrored and never where, and the id the post returned was thrown
+  away. Migration `0029` adds it, nullable with no backfill: null means a note mirrored before the
+  column existed, and an edit for one of those says so rather than posting a second copy under the
+  stale one. It self-heals as comments arrive.
+- **It cannot be derived later**, which is why it is recorded at all. GitHub's comment says nothing
+  about which Discord message holds it, and Discord cannot be searched for the message mirroring a
+  given one. The only moment the two are in scope together is the instant the post returns.
+- **The claim already told a create from an edit, so no second guard was needed.** A claim that
+  fails means the note is in the thread, which is the one circumstance in which there is a message
+  to rewrite. A claim that succeeds means there is not — so an edit of a comment whose own delivery
+  never arrived falls through and posts it, repairing the gap instead of dropping it.
+- **A redelivered edit needs no guard of its own.** Writing the same content over the same message
+  twice is the same as writing it once, which is the whole reason an edit takes no claim.
+- **Nobody is pinged by an edit, and that is Discord's rule rather than a choice made here.** An
+  edit notifies nobody whatever it says. So everybody the comment names keeps their mention and not
+  one of them is rung again for a correction. `revise` is not even offered an allow-list, because
+  offering one would imply it could ring somebody newly named, and it cannot.
+- **Somebody added by an edit still shows up as the tagged individual.** The rewrite is rendered
+  from the maps built out of the body *this* delivery carries, so a name linked to a Discord account
+  at any point resolves now — they appear exactly as they would had the comment named them from the
+  start. They are tagged, not alerted.
+- **A message somebody deleted in Discord is left deleted.** No replacement is posted, unlike the
+  metadata block, which rebuilds itself: the block is a thread's header and a thread without one is
+  broken, while a mirrored comment is a record of something said, and a message a person removed
+  from their thread is not one to put back under them.
+- **The rewrite shuts the thread again afterwards.** Editing reopens an archived thread exactly as
+  posting does, so without that, editing a comment on a closed issue would drag its thread back
+  into the channel and leave it there. People edit comments after closing.
+- **A declined note that becomes worth posting now gets posted.** A `commented` review wrapping
+  nothing but inline replies earns no message and takes no claim, so one later edited to add a body
+  is posted on the edit. That is right — it has become worth posting — and it is a change beyond the
+  literal issue, so it is written down here.
+- **Three tests that asserted the opposite are now the other way round**, and one that used
+  `edited` as its example of a *refused* action had to find another: the parser still refuses the
+  actions that reach no thread, and those must stop before the hook beside them rather than after.
