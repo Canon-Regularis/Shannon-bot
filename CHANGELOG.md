@@ -7070,3 +7070,35 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Asked after the role and after the defer**, which is what `github_allows` documents: it makes a
   network call and Discord allows three seconds for a first response, and somebody without the role
   should hear about the role rather than about a GitHub account they never linked.
+
+## Tickets move on the board again
+
+- **`/status` wrote the label and left the card where it was** (#179). A server that had run
+  `/set_board` saw the thread say `Status set: IN_REVIEW` while the board went on showing the old
+  column — the one place a reader of the board looks. Board linking worked; everything past it did
+  not.
+- **One flag was gating two things, and only one of them was its business.**
+  `SHANNON_BOARD_MAY_MOVE_CARDS` decided whether the workflow was handed a board at all. Withholding
+  it did stop the card being written, and also took `order_for` with it — so a deployment that
+  merely did not want its board written to lost the rule that refuses a move the board's own column
+  order forbids. Two failures from one switch, and the second had nothing to do with writing.
+- **The flag now empties the writer instead**, which is where `HttpProjectBoards` already said that
+  decision belongs: *"leaving it None makes 'no token means no board writes' a fact of the wiring
+  rather than a check somebody could forget."* `move_card` already answered `NO_WRITER` for it. Both
+  gates now mean one thing, and the board is read either way.
+- **Turning it off costs the card write and nothing else.** The column order is still read, and a
+  move that skips a column is still refused. That rule costs a read this bot already makes.
+- **Default is now on**, because a board somebody linked is a board they want kept. It needs a token
+  that may write — Projects: Read and write for an organisation's board, a classic `project` token
+  for a personal one. A read-only token answers 403, which is logged and swallowed: the label, the
+  row and the thread have all landed by then, so reporting a failure would report one that did not
+  happen.
+- **Pinned by a test that had to go the long way round.** The bug was one line of wiring no test
+  could see — reverting it alone left all fifty-four green. `Container` exposes "only the pieces
+  somebody outside the wiring asks for by name" and the workflow is not one of them, so the new test
+  builds the real container, pulls `/status` out of `container.commands`, and drives a move that
+  skips three columns with card writes off. `build_stack` grew an optional `settings=` for it, which
+  it had hardcoded — part of why this wire was untestable at all.
+- **Draft cards are unaffected and still refused.** `/status` addresses an item by
+  `(owner, name, number)` and a draft has none, so this covers the cards that wrap issues and pull
+  requests. The board moves a draft's own column, which is its status.

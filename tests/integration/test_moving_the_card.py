@@ -4,18 +4,25 @@ The board has been read and never written since the poller was built. A status s
 the labels on GitHub, the stored row and the thread, and left the card sitting in whatever column
 it was in - so the one place a reader of the board looks went on saying the old thing.
 
-Two gates stand in front of this and both are wiring rather than a check: a deployment with no
-project token has no writer at all, and one with `SHANNON_BOARD_MAY_MOVE_CARDS` off is handed no
-card mover. What is tested here is that the write happens when both are open, that it does not
-when either is shut, and the two cases where there is nothing to write to.
+Two gates stand in front of the WRITE and both are wiring rather than a check: a deployment with
+no project token has no writer at all, and `SHANNON_BOARD_MAY_MOVE_CARDS` off empties the writer
+too. Neither withholds the board itself, which is issue #179: the flag used to hand the workflow
+no board at all, so turning off card writes also turned off the rule that refuses a move the
+board's own column order forbids - a read, costing nothing but a read.
+
+What is tested here is that the write happens when both gates are open, that it does not when
+either is shut, that the column rules apply either way, and the two cases where there is nothing
+to write to.
 """
 
 from __future__ import annotations
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.config import Settings
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Priority, Status
 from shannon.github.errors import GitHubRefusedError
@@ -26,9 +33,16 @@ from shannon.services.workflow import (
     WorkflowRefusedError,
     build_item_workflow,
 )
+from tests.fakes.discord_objects import (
+    FakeGuildPermissions,
+    FakeInteraction,
+    FakeMember,
+)
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.signing import SECRET
+from tests.support.stack import build_stack
 
 pytestmark = pytest.mark.integration
 
@@ -177,8 +191,14 @@ class TestWhenThereIsNothingToWriteTo:
     async def test_no_card_mover_writes_nothing(
         self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
     ) -> None:
-        """Which is `SHANNON_BOARD_MAY_MOVE_CARDS` off: the container passes None, so the write
-        cannot be reached rather than being skipped by a check."""
+        """No board object at all, which is a service built without one rather than a setting.
+
+        `SHANNON_BOARD_MAY_MOVE_CARDS` used to produce this, and issue #179 is what that cost:
+        withholding the object took `order_for` with it, so turning off card WRITES also turned
+        off the rule that refuses a move the board forbids. The flag now empties the writer and
+        leaves the reader, and what "off" looks like from here is `CardMove.NO_WRITER` - pinned
+        in `TestTheOrderTheBoardIsIn` below.
+        """
         outcome = await workflow_with(None).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert outcome.changed is True
@@ -433,6 +453,43 @@ class TestTheOrderTheBoardIsIn:
         # column in it is now a step somebody can take, so naming one is advice they can act on.
         assert "Backlog -> Ready -> In progress -> In review -> Done" in said
 
+    async def test_the_rule_still_applies_when_the_bot_may_not_write(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """Issue #179, and the whole of why the flag moved to the writer.
+
+        A deployment that does not want this bot touching its board still wants its board's own
+        column order respected - reading it costs a read the bot already makes, and the columns
+        are the thing the server set up. With writes off the board answers `NO_WRITER`, which is
+        what the flag now produces, and the refusal must land exactly as it does with writes on.
+
+        Before this, "off" meant the workflow was handed no board at all: the order was never
+        read, nothing was ever refused, and `/status` wrote a label and called it done.
+        """
+        cards = FakeCards(
+            answer=CardMove.NO_WRITER, order=self.order(leaving="Ready", arriving="Done")
+        )
+
+        with pytest.raises(WorkflowRefusedError, match="In review"):
+            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert cards.moved == [], "it tried to write to a board it may not write to"
+        assert github.label_calls == [], "a refused command still wrote to GitHub"
+
+    async def test_a_legal_move_with_writes_off_still_lands_everywhere_else(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """The other arm. Writes being off must cost the CARD and nothing else: the label, the row
+        and the thread are the parts that do not need anybody's board token."""
+        cards = FakeCards(
+            answer=CardMove.NO_WRITER, order=self.order(leaving="In review", arriving="Done")
+        )
+
+        outcome = await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+
+        assert outcome.changed is True
+        assert github.label_calls, "the label did not land, so this proves nothing"
+
     async def test_one_step_forward_goes_through(
         self, on_a_board: None, workflow_with, thread_id: int
     ) -> None:
@@ -498,3 +555,132 @@ class TestTheOrderTheBoardIsIn:
         assert cards.moved != [], "a board it could not read stopped the move"
         assert "API rate limit exceeded" in caplog.text
         assert f"board {BOARD}" in caplog.text
+
+
+# The Status column of GitHub's own default project template, which is what most boards look
+# like. Read as JSON rather than as a `BoardOrder`, because the test below goes through the real
+# board reader: option ids are strings and a name arrives as a {raw, html} pair, both of which a
+# hand-built order would quietly skip. The canonical copy lives in
+# `tests/unit/github/test_project_boards.py`.
+STATUS_FIELD = {
+    "id": 353672864,
+    "name": "Status",
+    "data_type": "single_select",
+    "options": [
+        {"id": "f75ad846", "name": {"raw": "Backlog", "html": "Backlog"}, "color": "GREEN"},
+        {"id": "e18bf179", "name": {"raw": "Ready", "html": "Ready"}, "color": "BLUE"},
+        {
+            "id": "47fc9ee4",
+            "name": {"raw": "In progress", "html": "In progress"},
+            "color": "YELLOW",
+        },
+        {"id": "aba860b9", "name": {"raw": "In review", "html": "In review"}, "color": "PURPLE"},
+        {"id": "98236657", "name": {"raw": "Done", "html": "Done"}, "color": "ORANGE"},
+    ],
+}
+
+
+class TestTheWireFromTheContainer:
+    """That the workflow is handed a board at all, which nothing else here can see.
+
+    Issue #179 was one line of wiring: `cards=boards if settings.board_may_move_cards else None`.
+    Withholding the object did stop the card being written, and also took `order_for` with it - so
+    a deployment that merely did not want its board written to lost the rule that refuses a move
+    the board's own column order forbids, and `/status` wrote a label and called it done.
+
+    Every other test in this file builds the workflow directly and hands it a board, so none of
+    them could see a container that handed it none. `Container` exposes "only the pieces somebody
+    outside the wiring asks for by name" and the workflow is not one of them, so this goes the
+    long way round: the real container, the real `/status` out of `container.commands`, and the
+    real board reader answering out of the fake's JSON.
+
+    With card writes OFF, deliberately. That is the configuration the bug hid in, and the one
+    where the rule still has to apply.
+    """
+
+    def a_board_github(self, pr_event) -> FakeGitHubClient:
+        """The file's own fake, plus the two reads the BOARD half makes.
+
+        The pull request has to be stocked as well: this goes through the whole command, so the
+        workflow reads the item from GitHub before it ever asks the board anything.
+        """
+        github = FakeGitHubClient(pull_requests={REPO_KEY: pr_event("opened")})
+        # What the board reader asks for, in the order it asks: the kind of account, then the
+        # board's fields. A person's board, so the path prefix is `users`.
+        github.bodies[f"/users/{payloads.OWNER}"] = {"type": "User"}
+        github.bodies[f"/users/{payloads.OWNER}/projectsV2/{BOARD}/fields"] = [
+            {"id": 39516, "name": "Title"},
+            STATUS_FIELD,
+        ]
+        return github
+
+    async def run_status(self, container: object, to: str, thread_id: int) -> FakeInteraction:
+        command = next(c for c in container.commands if c.name == "status")  # type: ignore[attr-defined]
+        interaction = FakeInteraction(
+            channel_id=thread_id,
+            user=FakeMember(id=909, roles=[], guild_permissions=FakeGuildPermissions(True)),
+        )
+        await command.callback(interaction, to)
+        return interaction
+
+    async def test_a_skipped_column_is_refused_with_card_writes_off(
+        self,
+        on_a_board: None,
+        db_engine: AsyncEngine,
+        threads: FakeThreadGateway,
+        thread_id: int,
+        pr_event,
+    ) -> None:
+        """The whole of issue #179, from the end a person touches.
+
+        The item is in Backlog and the board goes Backlog, Ready, In progress, In review, Done -
+        so `Done` skips three columns and must be refused. Before the fix the workflow held no
+        board, nothing was read, nothing was refused, and the label went on regardless.
+        """
+        github = self.a_board_github(pr_event)
+        container = build_stack(
+            db_engine,
+            threads=threads,
+            github=github,
+            # No project token on purpose, so the board reads through the FAKE rather than a
+            # real HTTP client: with one set the container gives the board a client of its own
+            # and every read here would 401. It costs nothing that matters to this test - with
+            # writes off there is no writer either way, and what is under test is whether the
+            # board is READ at all.
+            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
+        )
+
+        interaction = await self.run_status(container, "Done", thread_id)
+
+        assert "skip" in interaction.reply, (
+            f"the board's column order was never consulted: {interaction.reply!r}"
+        )
+        assert github.label_calls == [], "a refused command still wrote the label to GitHub"
+
+    async def test_a_legal_move_still_goes_through_with_card_writes_off(
+        self,
+        on_a_board: None,
+        db_engine: AsyncEngine,
+        threads: FakeThreadGateway,
+        thread_id: int,
+        pr_event,
+    ) -> None:
+        """The other arm, so the test above is refusing the right thing rather than everything.
+        One column forward is allowed, and the parts that need no board token still land."""
+        github = self.a_board_github(pr_event)
+        container = build_stack(
+            db_engine,
+            threads=threads,
+            github=github,
+            # No project token on purpose, so the board reads through the FAKE rather than a
+            # real HTTP client: with one set the container gives the board a client of its own
+            # and every read here would 401. It costs nothing that matters to this test - with
+            # writes off there is no writer either way, and what is under test is whether the
+            # board is READ at all.
+            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
+        )
+
+        interaction = await self.run_status(container, "Ready", thread_id)
+
+        assert "skip" not in interaction.reply, f"a legal move was refused: {interaction.reply!r}"
+        assert github.label_calls, "the label did not land, so this proves nothing"

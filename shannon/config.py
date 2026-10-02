@@ -102,12 +102,20 @@ class Settings(BaseSettings):
     # commands ask. A draft card is unaffected either way - its status is its column.
     board_may_set_status: bool = False
     # Whether a status set HERE may drag the card on the board, which is the mirror of the
-    # line above. Off, because turning it on needs a token that may WRITE - Projects: Read
-    # and write for an organisation's board, a classic `project` token for a personal one -
-    # and an existing read-only token answers 403, which would report a failure for a command
-    # that had already succeeded on GitHub and in Discord. Off, every deployment behaves
-    # exactly as it did.
-    board_may_move_cards: bool = False
+    # line above. ON: a server that has run `/set_board` has asked for its board to be the
+    # truth, and a `/status` that writes the label and leaves the card where it was does half
+    # the job silently (issue #179).
+    #
+    # It needs a token that may WRITE - Projects: Read and write for an organisation's board,
+    # a classic `project` token for a personal one. A read-only token answers 403, which is
+    # logged and swallowed: the label, the row and the thread have all already landed by then,
+    # so reporting a failure would be reporting one that did not happen.
+    #
+    # Turning this OFF stops the card being written and nothing else. It used to withhold the
+    # whole board reader, which also took away the rule that refuses a move the board's own
+    # column order forbids - a READ, costing nothing but a read, that has no business behind a
+    # write flag. That was the other half of #179.
+    board_may_move_cards: bool = True
 
     # The webhook endpoint only writes a delivery down; these govern the worker that acts on it.
     # The defaults ride out roughly two hours of Discord being unreachable.

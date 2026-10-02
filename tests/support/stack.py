@@ -38,15 +38,20 @@ def build_stack(
     *,
     threads: FakeThreadGateway | None = None,
     github: GitHubClient | None = None,
+    settings: Settings | None = None,
 ) -> Container:
     """The real container with Discord and GitHub swapped for fakes.
 
     Everything else is production code: the same router, the same sync service, the same
     signature check, the same database.
+
+    `settings` for a test about WIRING rather than about behaviour - what the container builds
+    out of a setting is not reachable any other way, and a test that has to assemble its own
+    container to vary one field is a test that stops using the production assembly.
     """
     return build_container(
         threads=threads or FakeThreadGateway(),
-        settings=Settings(github_webhook_secret=SECRET),
+        settings=settings or Settings(github_webhook_secret=SECRET),
         engine=engine,
         github=github or FakeGitHubClient(),
     )

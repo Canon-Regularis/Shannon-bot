@@ -863,19 +863,31 @@ def build_container(
     # their own field cache, and the command would be warming a cache the poller never sees.
     # The writer is `board_client` alone, never the App fallback: the App holds no
     # Projects permission of any kind, so a write through it could only ever 403.
-    boards = HttpProjectBoards(board_client or github, writer=board_client)
+    #
+    # SHANNON_BOARD_MAY_MOVE_CARDS is applied HERE, to the writer, and not by withholding the
+    # whole object from the workflow. Both gates then mean one thing - no writer, no write -
+    # and `move_card` already answers NO_WRITER for it. Withholding the object also withheld
+    # `order_for`, so a deployment that merely did not want the bot writing to its board
+    # silently lost the rule that refuses a move the board's column order forbids. That is
+    # issue #179: one flag, two failures, and only one of them was the flag's business.
+    boards = HttpProjectBoards(
+        board_client or github,
+        writer=board_client if settings.board_may_move_cards else None,
+    )
 
-    # After the board reader, because the workflow is handed it: a status set in Discord
-    # drags the card to match. Two independent ways that stays off, both of them wiring
-    # rather than a check - no project token leaves the reader with no writer at all, and
-    # SHANNON_BOARD_MAY_MOVE_CARDS off passes no card mover here in the first place.
+    # After the board reader, because the workflow is handed it: a status set in Discord drags
+    # the card to match, and the board's own column order decides whether the move is allowed
+    # at all. Handed over unconditionally - what a deployment can turn off is the WRITE, which
+    # is gated on the writer above. Reading a board to refuse an illegal move costs a read this
+    # bot already makes, and a server with a linked board asked for those columns to mean
+    # something.
     workflow = build_item_workflow(
         sessionmaker,
         github,
         threads,
         pr_sync=pr_sync,
         issue_sync=issue_sync,
-        cards=boards if settings.board_may_move_cards else None,
+        cards=boards,
     )
 
     return Container(
