@@ -20,7 +20,8 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubRefusedError,
 )
-from shannon.github.projects import CardMove, HttpProjectBoards, parse_item
+from shannon.github.paging import PagedRead
+from shannon.github.projects import PAGE_SIZE, CardMove, HttpProjectBoards, parse_item
 
 PROJECT = 3
 
@@ -74,10 +75,16 @@ class FakeJson:
     that answered with a plain list would let a caller that still counted pages pass.
     """
 
-    def __init__(self, pages: list[Any] | None = None, **bodies: Any) -> None:
+    def __init__(self, pages: list[Any] | None = None, *, etag: str | None = None, **bodies: Any):
         self.bodies = bodies
         self.pages = pages
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        # What this board hands out as a validator, and None by default. A board that offers none
+        # is one the reader cannot cache against, so every test written before conditional reads
+        # existed keeps reading the board whole exactly as it did. A test about the conditional
+        # path names an etag and gets a board that answers 304 to its own.
+        self.etag = etag
+        self.asked_with: list[str | None] = []
 
     async def get_json(self, path: str, **params: Any) -> Any:
         self.calls.append((path, params))
@@ -100,6 +107,27 @@ class FakeJson:
             return
         for page in self.pages if self.pages is not None else [self.bodies.get("items", [])]:
             yield page
+
+    async def get_pages_since(
+        self, path: str, *, etag: str | None = None, owner: str = "", **params: Any
+    ) -> PagedRead:
+        """The conditional read, modelled closely enough to be worth testing against.
+
+        It answers 304 only to its OWN validator, which is what GitHub does: a tag from a different
+        request describes a different body, so it cannot match.
+
+        The validator is withheld for a list that arrived in more than one page, because the real
+        client withholds it there for a reason worth preserving in the fake - GitHub's ETag covers
+        one response body, so one page of several speaks for none of the rest. A fake that handed
+        one out anyway would let a reader that trusted it pass.
+        """
+        self.calls.append((path, params))
+        self.asked_with.append(etag)
+        if etag is not None and etag == self.etag:
+            return PagedRead(etag=etag, pages=None)
+
+        pages = tuple(self.pages) if self.pages is not None else (self.bodies.get("items", []),)
+        return PagedRead(etag=self.etag if len(pages) == 1 else None, pages=pages)
 
 
 class TestReadingOneCard:
@@ -386,7 +414,200 @@ class TestReadingABoard:
     async def test_an_answer_that_is_not_a_list_reads_as_an_empty_board(self) -> None:
         client = FakeJson(fields={"message": "Not Found"}, items={"message": "Not Found"})
 
-        assert await HttpProjectBoards(client).list_board_items("monalisa", PROJECT) == []
+        # A tuple rather than a list, and not merely because the return type says `Sequence`. The
+        # cards from a read are now KEPT and handed out again on a 304, so a mutable answer would
+        # let one caller's `.append` or `.clear` rewrite what every later poll believes the board
+        # holds. Immutable is what makes sharing them safe.
+        assert await HttpProjectBoards(client).list_board_items("monalisa", PROJECT) == ()
+
+
+class TestReadingABoardOnlyWhenItChanged:
+    """Issue #189. A board nobody touched is read for nothing at all.
+
+    The items endpoint honours `If-None-Match`, and a 304 to it spends no rate-limit budget and
+    carries no body. That is the whole reason the poll interval could drop from sixty seconds to
+    two: the expensive part of a poll was the megabyte, and an unchanged board no longer sends one.
+
+    What every test here is really about is the one way this could be worse than useless. A wrong
+    "nothing changed" is not a slow update, it is an update that never arrives - so the rule for
+    when a validator may be kept is narrow, and these pin it from both sides.
+    """
+
+    def _board(self, rows: list[Any], *, etag: str | None = '"v1"') -> FakeJson:
+        return FakeJson(
+            fields=[{"id": 1, "name": "Title"}, {"id": 2, "name": "Status"}],
+            items=rows,
+            etag=etag,
+        )
+
+    async def test_the_first_read_asks_with_no_validator(self) -> None:
+        """Nothing has been seen yet, so there is nothing to ask with."""
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with == [None]
+
+    async def test_the_next_read_asks_with_the_validator_it_was_given(self) -> None:
+        """The saving does not happen unless the question gets asked."""
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with == [None, '"v1"']
+
+    async def test_an_unchanged_board_answers_with_the_cards_it_already_parsed(self) -> None:
+        """Sound by construction rather than by hope. A 304 means the body was byte-identical, and
+        `parse_item` is a pure function of the body, so re-parsing could only produce these.
+        """
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        first = await boards.list_board_items("monalisa", PROJECT)
+        again = await boards.list_board_items("monalisa", PROJECT)
+
+        assert again == first
+        assert [item.item_id for item in again] == [74106766]
+
+    async def test_a_changed_board_is_parsed_again_rather_than_remembered(self) -> None:
+        """The other arm, and the one a cache gets wrong. A 200 carries a new body, so the cards
+        come out of it and the ones kept from last time go.
+
+        The title is overridden on the `Title` FIELD rather than on `content`, because that is
+        where a card's name is read from - which is the sort of thing a test asserting only an id
+        would not have noticed either way.
+        """
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        first = await boards.list_board_items("monalisa", PROJECT)
+        # A different board behind a different validator, which is what an edit looks like.
+        client.bodies["items"] = [
+            draft(
+                id=99,
+                fields=[
+                    {
+                        "id": 39516,
+                        "name": "Title",
+                        "data_type": "title",
+                        "value": {"raw": "Something else", "html": "Something else"},
+                    }
+                ],
+            )
+        ]
+        client.etag = '"v2"'
+        moved = await boards.list_board_items("monalisa", PROJECT)
+
+        assert [item.item_id for item in moved] == [99]
+        assert [item.title for item in moved] == ["Something else"]
+        assert moved != first, "it answered with the cards it had kept"
+
+    async def test_a_full_page_keeps_no_validator(self) -> None:
+        """THE soundness test. GitHub's ETag hashes one response body, so a FULL page cannot prove
+        there is nothing behind it: a board of exactly `PAGE_SIZE` cards that gains one leaves page
+        one byte-identical, and a 304 against that validator would hide the new card for ever. A
+        304 carries no Link header, so there is nothing to ask afterwards either.
+
+        An unfull page cannot be hiding anything, and that is the only case worth trusting.
+        """
+        client = self._board([draft(id=index) for index in range(1, PAGE_SIZE + 1)])
+        boards = HttpProjectBoards(client)
+
+        read = await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert len(read) == PAGE_SIZE, "the fixture did not fill the page"
+        assert client.asked_with == [None, None], "it kept a validator a full page cannot justify"
+
+    async def test_a_page_one_short_of_full_keeps_its_validator(self) -> None:
+        """The boundary from the other side, so the rule is pinned rather than merely satisfied."""
+        client = self._board([draft(id=index) for index in range(1, PAGE_SIZE)])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with == [None, '"v1"']
+
+    async def test_a_board_read_in_several_pages_keeps_no_validator(self) -> None:
+        """A validator covering page one of three covers nothing, so none is kept and the board is
+        read whole on every poll - correct, and simply not optimised."""
+        client = FakeJson(
+            [[draft(id=1)], [draft(id=2)]],
+            fields=[{"id": 1, "name": "Title"}, {"id": 2, "name": "Status"}],
+            etag='"v1"',
+        )
+        boards = HttpProjectBoards(client)
+
+        read = await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert [item.item_id for item in read] == [1, 2], "it did not read every page"
+        assert client.asked_with == [None, None]
+
+    async def test_a_board_that_grows_past_one_page_stops_being_trusted(self) -> None:
+        """The transition, which is the case a rule checked only on the first read would miss. The
+        board is cached while it fits in a page and must stop being cached the moment it does not.
+        """
+        client = self._board([draft(id=1)])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        client.pages = [[draft(id=1)], [draft(id=2)]]
+        client.etag = '"v2"'
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with == [None, '"v1"', None], "it kept a paged board's validator"
+
+    async def test_whether_a_recheck_is_cheap_is_answered_for_the_poller(self) -> None:
+        """The contract the poller's cadence rests on, asked of the real reader rather than of a
+        stand-in.
+
+        Every other test in this class reads the decision off the validator that went out on the
+        wire, which is the behaviour but not the promise. This is the promise, and it had no test
+        at all until the coverage floor said so: a poller that believed a paged board was cheap
+        would read a megabyte every two seconds for ever.
+        """
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        assert not boards.can_recheck_cheaply("monalisa", PROJECT), "nothing has been read yet"
+
+        await boards.list_board_items("monalisa", PROJECT)
+        assert boards.can_recheck_cheaply("monalisa", PROJECT)
+
+        # Grown past one page, so there is no validator that speaks for the whole of it.
+        client.pages = [[draft(id=1)], [draft(id=2)]]
+        client.etag = '"v2"'
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert not boards.can_recheck_cheaply("monalisa", PROJECT)
+
+    async def test_a_board_that_offers_no_validator_is_read_whole_every_time(self) -> None:
+        """GitHub sending no ETag at all. Nothing to ask with, so nothing is kept."""
+        client = self._board([draft()], etag=None)
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with == [None, None]
+
+    async def test_two_boards_are_remembered_apart(self) -> None:
+        """One reader serves every board, so a validator belongs to a board rather than to the
+        reader. Keyed on the pair, because a project number is a sequence GitHub keeps per account.
+        """
+        client = self._board([draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        await boards.list_board_items("octocat", PROJECT)
+
+        assert client.asked_with == [None, None], "it asked one board with another's validator"
 
 
 class TestListingTheBoardsAnOwnerHas:
@@ -534,6 +755,50 @@ class TestWhichKindOfAccountOwnsTheBoard:
 
         assert any(path.startswith(f"/users/acme/projectsV2/{PROJECT}") for path, _ in client.calls)
         assert "kind of account" in caplog.text
+
+    async def test_an_answer_it_cannot_read_is_complained_about_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Same shape as the fields warning, same reason. The REQUEST still repeats - a guess must
+        not decide the prefix for the life of the process - but the line about it does not.
+        """
+        client = FakeJson(account={}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        with caplog.at_level("WARNING"):
+            await boards.list_board_items("acme", PROJECT)
+            await boards.list_board_items("acme", PROJECT)
+            await boards.list_board_items("acme", PROJECT)
+
+        assert caplog.text.count("did not say what kind of account") == 1
+        assert sum(path == "/users/acme" for path, _ in client.calls) == 3, (
+            "it stopped asking, which is the thing that must not be cached"
+        )
+
+    async def test_an_owner_github_names_after_all_can_be_complained_about_again(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The other arm: an answer arriving clears the record, so a later blip is heard."""
+        client = FakeJson(account={}, items=[draft()])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("acme", PROJECT)
+        client.bodies["account"] = {"type": "User"}
+        await boards.list_board_items("acme", PROJECT)
+
+        # Remembered now, so the prefix is settled and the lookup stops; clearing it is what a
+        # fresh reader would see, which is the case this is really about. `caplog` is cleared with
+        # it because it collects for the whole test, so the first read's warning would otherwise
+        # still be sitting in it when the third one is counted.
+        boards._kinds.clear()
+        client.bodies["account"] = {}
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            await boards.list_board_items("acme", PROJECT)
+
+        assert caplog.text.count("did not say what kind of account") == 1, (
+            "it stayed quiet about an owner GitHub stopped naming"
+        )
 
     async def test_an_answer_it_cannot_read_is_asked_again_next_poll(self) -> None:
         """A guess is not an answer worth keeping. Remembered, one blip would decide the prefix
@@ -761,6 +1026,53 @@ class TestTheStatusFieldsChoices:
 
         assert found.wanted == (39516, 39518)
         assert found.status.field_id == 39518
+
+    async def test_a_board_with_no_status_field_is_complained_about_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The answer is deliberately not cached, so the read repeats on every poll - which issue
+        #189 turned from a line a minute into a line every couple of seconds. Loud the first time
+        and DEBUG after it: what it reports cannot change between two polls, and a warning that
+        repeats eighteen hundred times an hour is one whoever reads the log learns to scroll past.
+        """
+        client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
+        boards = HttpProjectBoards(client)
+
+        with caplog.at_level("WARNING"):
+            await boards.list_board_items("monalisa", PROJECT)
+            await boards.list_board_items("monalisa", PROJECT)
+            await boards.list_board_items("monalisa", PROJECT)
+
+        assert caplog.text.count("no 'Status' field") == 1
+
+    async def test_a_board_that_gets_its_status_field_back_can_complain_again(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The other arm, and the reason this is a set rather than a flag: staying quiet for ever
+        would mean a board that loses the field a SECOND time says nothing about it at all.
+
+        The two cache clears are what make this test about anything. A board that answers with a
+        Status field gets cached, and a cached board never re-reads its fields - so without
+        clearing, the third read never reaches the complaint and the test passes having proven
+        nothing. `caplog` is cleared for the same kind of reason: it collects for the whole test,
+        so the first read's warning is still in it when the third one is counted.
+        """
+        client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
+        boards = HttpProjectBoards(client)
+
+        await boards.list_board_items("monalisa", PROJECT)
+        client.bodies["fields"] = [{"id": 1, "name": "Title"}, {"id": 2, "name": "Status"}]
+        await boards.list_board_items("monalisa", PROJECT)
+
+        client.bodies["fields"] = [{"id": 1, "name": "Title"}]
+        boards._fields.clear()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            await boards.list_board_items("monalisa", PROJECT)
+
+        assert caplog.text.count("no 'Status' field") == 1, (
+            "it stayed quiet about a field the board lost a second time"
+        )
 
     async def test_a_board_with_no_status_field_caches_nothing_at_all(self) -> None:
         """One entry holds the ids and the choices together so this rule cannot be honoured for

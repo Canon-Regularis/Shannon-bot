@@ -96,7 +96,20 @@ class Settings(BaseSettings):
     # answer with a real board belonging to somebody else, and its cards would be mirrored in
     # here as if they were this repository's work.
     github_project_owner: str = ""
-    project_poll_seconds: float = Field(default=60.0, gt=0)
+    # How often a linked board is read. Two seconds, matching the delivery worker, and that
+    # parity is the point: a ticket and an issue now reach Discord on the same clock, where a
+    # ticket used to wait a mean of thirty seconds for a sixty-second one. Issue #189.
+    #
+    # Affordable because of exactly one fact, measured rather than assumed: GitHub honours
+    # `If-None-Match` on the project items endpoint, and a 304 carries no body AND spends no
+    # rate-limit budget. A board nobody touched therefore costs one request and nothing else, so
+    # thirty times the passes cost no more units per hour than sixty-second polling did.
+    #
+    # Floored at one second rather than merely positive. Below that the primary budget is still
+    # untouched - 304s are free - but the request RATE starts to matter: GitHub's secondary limit
+    # is about how fast requests arrive, and tripping it lengthens with every request made during
+    # one. The floor is the one part of this nobody should be able to tune into a ban.
+    project_poll_seconds: float = Field(default=2.0, ge=1.0)
     # Whether dragging a card may change the item's status. Off: nothing GitHub sends with a
     # board says who moved a card, so the poller cannot ask the permission question the slash
     # commands ask. A draft card is unaffected either way - its status is its column.

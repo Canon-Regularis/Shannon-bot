@@ -12,6 +12,58 @@ and an organisation one work on the same code path, with no second webhook to in
 
 The board answers with every card every time, so the work is deciding which of them moved. That
 is one query for what is stored and a comparison in memory, rather than a question per card.
+
+The latency floor, and why it is where it is
+--------------------------------------------
+Issue #189, which opened because a ticket took thirty to forty-five seconds to reach Discord while
+an issue was instant. Both go through the same `ItemSyncService.sync()`; the whole of the
+difference was the clock. A webhook is queued and picked up by a worker polling every two seconds;
+a board was read every sixty. A change lands uniformly inside that window, so the mean wait was
+half of it - thirty seconds, which is exactly what was being reported.
+
+There is no event to wait on, so the floor cannot be zero. It is:
+
+    mean  =  interval / 2  +  one read  +  the sync
+    worst =  interval      +  one read  +  the sync
+
+At the interval this now ships with, that is a mean of roughly three seconds.
+
+The interval is two seconds, and the reason it can be is one measured fact: **GitHub honours
+`If-None-Match` on the project items endpoint, and a 304 carries no body AND spends no rate-limit
+budget.** Ten conditional polls two seconds apart left `x-ratelimit-remaining` untouched. So a
+board nobody has touched costs one request and nothing else, and thirty times the passes cost no
+more per hour than sixty-second polling did. `Cache-Control: max-age=60` on that response is advice
+to a client rather than a staleness floor - GitHub sends no `Age` and its `Date` advances on every
+request - which is what makes a short interval mean anything at all.
+
+`HttpProjectBoards` keeps the validator and the cards it describes, so an unchanged board answers
+out of memory. That is sound rather than hopeful: a 304 proves the body was byte-identical, and
+parsing is a pure function of the body. **Nothing in this module behaves differently for it.** The
+cheap read is a transport saving and not a short circuit - every comparison, every retry and every
+card with no thread yet is reached exactly as often as before - which is why the change could be
+made without re-deriving what the poll is allowed to skip.
+
+One board cannot be read that way: a validator hashes ONE response body, so a board too big for a
+single page cannot be checked without downloading it. Such a board is polled on the slow clock
+instead - see `UNVALIDATED_POLL_SECONDS` - because a megabyte every two seconds is the one way this
+would cost more than it saves.
+
+What would remove the floor: move the board to an organisation and subscribe to `projects_v2_item`.
+The board then joins the same queue as everything else and the latency becomes the worker's, with
+this module not needed at all. Two caveats, both already true elsewhere in the tree - those events
+are organisation-scope and in public preview, and granting an installed App a new permission
+suspends its deliveries until an admin accepts.
+
+Things deliberately not done, so they are not re-litigated:
+
+- **Per-card concurrency.** discord.py buckets thread creation on the parent channel, so the calls
+  that cost would serialise anyway; at this interval the common case is one changed card, where
+  concurrency buys nothing; and `ItemLock` pins a connection per sync, so going wide would mean
+  raising `BACKGROUND_CONNECTIONS`. Measured, and the serial part was never the cost.
+- **GraphQL.** It would cut a megabyte to a few kilobytes and lose on the axis that matters: a POST
+  cannot be ETagged, so every poll would spend budget where a 304 spends none.
+- **Waking the poller from a command.** It would couple the command table to this instance to save
+  two seconds, once.
 """
 
 from __future__ import annotations
@@ -60,6 +112,23 @@ logger = logging.getLogger(__name__)
 # past that is a header nobody meant, and sitting one out would take the feature off for the rest
 # of the day on the strength of a number nothing here can check.
 RATE_LIMIT_CEILING = 3600
+
+# How long to wait before reading a board that cannot be checked cheaply. Issue #189.
+#
+# The short interval is affordable because of one thing only: GitHub honours `If-None-Match` on
+# the items endpoint, and a 304 to it carries no body and spends no rate-limit budget. A board
+# that arrives in more than one page cannot be validated that way - an ETag hashes one response
+# body, so page one's says nothing about page two - so every read of one is the whole board.
+#
+# At the fast interval that would be a megabyte every couple of seconds, for ever, which is the
+# one way this change could cost more than it saves. So a board nobody can check cheaply keeps
+# roughly the cadence it had before any of this: slower, which is the direction a surprise should
+# always fail in. It is said once, at INFO, because a board quietly polling thirty times less
+# often than its neighbour is not something anybody should have to infer.
+#
+# Deliberately not an environment knob. It is the cost of a megabyte rather than a preference,
+# and an operator lowering it would be choosing a bandwidth bill they cannot see.
+UNVALIDATED_POLL_SECONDS = 60.0
 
 
 class SaysAndShuts(PostsToThread, ShutsThread, Protocol):
@@ -120,6 +189,14 @@ class ProjectPoller:
         self._said = False
         self._stopping = False
         self._stopped = asyncio.Event()
+        # Whether every board the last pass read can be re-read for a conditional request. Set
+        # per pass by `run_once`, so this initial value is only ever read by a poller that is
+        # switched off - and True is the right answer there, because a pass that returns without
+        # reading anything has nothing expensive in it to slow down for.
+        self._cheap_to_recheck = True
+        # The boards already named in the log as too big to check cheaply, so the line is said
+        # once each rather than once a pass. Discarded again if a board shrinks back under a page.
+        self._expensive: set[tuple[str, int]] = set()
 
     @property
     def enabled(self) -> bool:
@@ -156,13 +233,18 @@ class ProjectPoller:
 
         Boards are re-read from the database at the top of every pass rather than resolved once
         at boot, which is the whole of how `/set_board` takes effect without a restart. A board
-        linked at 12:00:05 is polled at 12:01:00, and the command's reply says so. Pushing a
+        linked at 12:00:05 is polled at 12:00:07, and the command's reply says so. Pushing a
         wake-up from the command instead would couple the command table to the poller instance
-        to save fifty-nine seconds, once.
+        to save two seconds, once - an argument that was thin when the interval was a minute and
+        is now not an argument at all.
         """
         if not self.enabled:
             return 0
 
+        # Reset per pass, and read by `run_forever` afterwards to pick the next wait. True until
+        # a board says otherwise, so a deployment with nothing linked keeps the fast cadence and
+        # pays one indexed query for it.
+        self._cheap_to_recheck = True
         moved = 0
         for board in await self._boards():
             moved += await self._poll(board)
@@ -208,6 +290,10 @@ class ProjectPoller:
                 unreadable,
             )
             return 0
+
+        # Asked after the read rather than before it, because the read is what decides the answer:
+        # a board is only known cheap once one of its pages has come back unfull and validated.
+        self._note_what_a_recheck_costs(board)
 
         items = once_each(listed)
 
@@ -750,6 +836,11 @@ class ProjectPoller:
             wait = self._interval
             try:
                 await self.run_once()
+                # After the pass, because only the pass knows. A board that cannot be checked with
+                # a conditional request costs its whole body every read, and reading a megabyte
+                # every couple of seconds is the one way this interval could cost more than it
+                # saves. See `UNVALIDATED_POLL_SECONDS`.
+                wait = max(wait, self._wait_for_an_expensive_board())
             except asyncio.CancelledError:
                 raise
             except GitHubRateLimitError as limit:
@@ -767,6 +858,39 @@ class ProjectPoller:
             except Exception:
                 logger.exception("could not read the project board, carrying on")
             await self._wait(wait)
+
+    def _note_what_a_recheck_costs(self, board: _Board) -> None:
+        """Record whether this board can be read again for a conditional request.
+
+        Said once per board rather than once per pass: at the fast interval a line per pass is
+        eighteen hundred an hour, and the thing worth knowing - that this board polls on a slower
+        clock than the rest - does not change between passes.
+        """
+        key = (board.board_owner, board.project_number)
+        if self._projects.can_recheck_cheaply(*key):
+            self._expensive.discard(key)
+            return
+
+        self._cheap_to_recheck = False
+        if key not in self._expensive:
+            self._expensive.add(key)
+            logger.info(
+                "board %s belonging to %r does not fit in one page, so it cannot be checked "
+                "without reading the whole of it; polling it every %ss instead of every %ss",
+                board.project_number,
+                board.board_owner,
+                int(UNVALIDATED_POLL_SECONDS),
+                self._interval,
+            )
+
+    def _wait_for_an_expensive_board(self) -> float:
+        """The floor the last pass earned: nothing, or the slow clock if a board needs it.
+
+        A one-line conditional rather than an `if`. Coverage records arcs between line numbers,
+        so written as a branch this would be two arms to reach where the sentence is the same
+        either way.
+        """
+        return 0.0 if self._cheap_to_recheck else UNVALIDATED_POLL_SECONDS
 
     async def _wait(self, seconds: float) -> None:
         """Sleep, or wake at once if a stop arrives.

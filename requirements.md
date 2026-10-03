@@ -269,6 +269,40 @@ owned by a user account emits none of them at all. Since this bot registers agai
 owned by a personal account, there is no event to subscribe to, so the board is polled through the
 Projects v2 REST API instead. See `shannon/services/projects.py`.
 
+### What polling costs, and why it costs that
+
+Polling means a floor on how fast a card can reach Discord, because there is no event to wait on.
+The floor is half the interval on average and a whole one at worst, plus the read and the sync. An
+issue has no such floor: its webhook is queued and a worker takes it within two seconds.
+
+The interval is **two seconds**, so a ticket and an issue now arrive on the same clock. It used to
+be sixty, which is why a ticket took thirty to forty-five seconds - that was the window, halved.
+
+Two seconds is affordable because of one measured fact: GitHub honours `If-None-Match` on the
+project items endpoint, and **a 304 carries no body and spends no rate-limit budget**. Ten
+conditional polls two seconds apart left the remaining-requests counter untouched. A board nobody
+has touched therefore costs one request and nothing else, and thirty times as many passes cost no
+more per hour than the old interval did. The `Cache-Control: max-age=60` on that response is advice
+to a client rather than a staleness floor - GitHub sends no `Age` header and its `Date` advances on
+every request - so a short interval genuinely sees a change promptly.
+
+The saving is in the transport only. An unchanged board answers out of the cards parsed last time,
+which is sound because a 304 proves the body was byte-identical, and nothing downstream behaves any
+differently for it: every comparison the poll makes, and every card still waiting for a thread, is
+reached exactly as often as before.
+
+A board with more than one page of cards is the exception. A validator hashes one response body, so
+such a board cannot be checked without downloading the whole of it, and it is polled on the slow
+clock instead - slower rather than more expensive, which is the direction a surprise should fail
+in. It is logged once when it happens. The current board has eighty cards against a page of a
+hundred, so this will arrive eventually and should not be a mystery when it does.
+
+**What would remove the floor entirely:** move the board to an organisation and subscribe to
+`projects_v2_item`. The board then joins the same delivery queue as everything else and inherits
+the worker's latency, with no poller involved. Two caveats: those events are in public preview, and
+granting a new permission to an already-installed App suspends its deliveries until an admin
+accepts. Until then the floor is GitHub's, not this bot's.
+
 ---
 
 ## Required Database Tables
