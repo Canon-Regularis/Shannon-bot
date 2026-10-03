@@ -7249,3 +7249,68 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **A test whose name stopped being true was renamed.** There is no longer a pull request "with
   nobody on it": the author is always on it. What it holds now is that the line is said at all with
   both lists empty, which is the case the sentence has to survive.
+
+## Every message shows the formatting it was written with
+
+- **Only the first message in a thread rendered a GitHub body properly** (#166). A comment, a
+  review, an inline note on a diff and a commit description all arrived with their markdown
+  backslashed into literal characters — `\#\# Repro steps`, `\- run \`make test\`` — while the
+  block at the top of the same thread showed the same text as what it meant.
+- **It was a documented scope rather than an oversight**, which is why the fix is a widening and
+  not a patch. `rich_text` opened with *"this keeps most of it, for the description block alone"*.
+  Two converters existed and each body went through exactly one.
+- **One converter now, with the two things the description had hard-coded as arguments:** the
+  preview limit, and what becomes of images. Nothing about the top block moved — its defaults are
+  what it always passed, and it has only ever had one caller.
+- **Nothing that was refused is allowed now.** The guarantee — *"every `](` in what comes out is
+  one this module wrote, and points at a host GitHub serves"* — is asserted over three thousand
+  characters of generated text, so it is a property of the transform and not of where the text came
+  from. Widening the callers could not widen what gets out.
+- **Images in a note become links, not a gallery.** A gallery under every screenshot-heavy comment
+  is noise, and a commit carries no repository, so the private-repo gate a card's pictures go
+  through would have nothing to read. Only the bang is dropped, which hands the rest to the same
+  host rule every other link gets — an address off GitHub is named rather than followed.
+- **Two live defects went with it**, both measured rather than assumed. A body with a blank line
+  before a bullet list published a stray backslash on a line of its own and left the bullet
+  unescaped anyway. And a list written with `+` arrived as a paragraph of plus signs: GitHub reads
+  one as a bullet, Discord does not, and nothing escaped it either.
+- **Forging the bot's own subtext got harder, not easier.** `-#` is Discord's small grey text and
+  every footnote this bot writes uses one. It was dead by accident before — the `-` happened to be
+  escaped — and is broken deliberately now, by the rule the description block already had.
+- **A mention inside a code span is left alone, which is what GitHub does.** The divergence was
+  written down rather than discovered: the escaping turned the backticks into literal text before
+  the swap ran, so there was no span left to respect. Keeping the backticks made respecting them
+  possible and ignoring them untenable — a `<@id>` inside a code span is shown by Discord as the
+  text it is, while the notification is delivered anyway off the raw content. A ping with nothing
+  to see.
+- **The reader and the renderer go through one function.** The note path decides which names to
+  look up and the renderer swaps them in; the two must be handed the same string to the character,
+  and a disagreement is silent in both directions. They used to be two spellings of one recipe and
+  are now one call each to `as_note_text`. The pipelines really do differ: the rich conversion
+  strips HTML comments before it cuts, so a name sitting behind a long template is inside the
+  window for one and past the cut for the other.
+- **The test guarding that was rigged, and is not now.** It derived the string itself with the old
+  recipe, so moving production would have left it passing about a string nothing produced. It asks
+  the production function now, and an integration test covers what it structurally cannot: whether
+  the two callers derived the same string at all.
+- **A review of nothing but an unfilled template no longer posts a header over an empty block.**
+  The worth-posting gate judged the raw body, where an HTML comment is truthy; it judges the shown
+  text now, the same correction the description label made for itself.
+- **One row builder for all three blocks.** The `**Label:** value` shape was written out twice and
+  the second copy was a ticket's, three rows deep and drifting — which is the duplication the issue
+  named. A row a block has no data for is left out by not being passed rather than passed empty and
+  filtered, so there is no branch nothing can take.
+- **A ticket's block gained `Type` and `Last Updated`** and nothing else. The board sends a card's
+  timestamp and the block was throwing it away. `Author`, `Assignees`, `Tags` and `Priority` stay
+  off because the board read fetches Title and Status only, so each would read `None` for ever;
+  `State` stays off because a ticket's is open and nothing can close it, a board column not being a
+  closed state. A description is not withheld but impossible — a board item carries no body text.
+- **`requirements.md` is amended rather than overruled in silence**, the way it already was three
+  times over for the pull request block.
+- **`format_ticket` had no unit test at all**, which is how the duplication sat there unnoticed: it
+  was covered only end to end, by one assertion comparing three lines against a list. It has its
+  own file now, and most of it is about which rows are left out and why.
+- **Deliberately untouched:** check results, the commit subject, job names, labels and file paths.
+  Each is inside a code span or a `**`-matched line by explicit design, and rendering any of them
+  would unbalance its line or let GitHub-authored text build a link. `format_commit` also still
+  takes no mentions map, which is a requirement rather than an oversight.
