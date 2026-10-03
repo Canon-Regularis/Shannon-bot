@@ -27,6 +27,14 @@ COMMIT_MESSAGE_LIMIT = 250
 # below it down with it, leaving half a title and nothing else.
 COMMIT_TITLE_LIMIT = 120
 
+# What one value in a card's change line is cut to. Issue #182.
+#
+# A change line is a signpost rather than a diff: it says a field moved and roughly to what, and
+# the block directly above it carries the full current value. Without a cut this would be
+# unbounded - eleven fields, two values each, and a description that may be seven hundred
+# characters on its own would put the line past what Discord takes and cost the whole message.
+CARD_FIELD_LIMIT = 80
+
 # The file an inline review comment sits on, and nothing bounds a path's length. The file and
 # line are the FIRST line of that message, so `fit` has nothing it can keep: it falls back to
 # cutting characters, and the comment body and the link to GitHub go with it.

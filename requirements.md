@@ -202,11 +202,20 @@ Description:
 
 A change to any of these except `Creator` is announced in the thread, in ONE message listing
 everything that moved since the last poll - a board read sees a card's fields together, so somebody
-dragging a card and setting its points did one thing and hears about it once. `Creator` is excluded
-because a card's creator does not change. `Created` and `Updated` are excluded for a sharper reason:
-a created-at cannot change, and an updated-at changes whenever anything else does, so including it
-would put the same redundant pair of timestamps in every message. The block shows both; the
-announcement is for what a reader did not already know.
+dragging a card and setting its points did one thing and hears about it once. `Creator` is the only
+exclusion, because a card's creator does not change.
+
+`Ticket Name` and `Description` are announced as well, and they are in the list because `Updated`
+is. The poll only looks at a card whose timestamp moved, so `Updated` differs every time a message
+is posted; on its own that would report that a card changed without saying what. A title and a
+description are the two edits that move a timestamp without moving anything else, so naming them
+is what gives such a message a cause. A message carrying nothing but a timestamp now means what it
+says: GitHub re-stamped the card and nothing a reader can see moved with it.
+
+Each value in such a message is cut short. The message is a signpost rather than a diff, and the
+block directly above it carries every value in full - without a cut, a description of several
+hundred characters on each side would put the message past what Discord accepts and cost all of it
+rather than the extra words.
 
 A card seen for the first time announces nothing. Its fields are recorded and the block itself is
 the announcement, which is what stops every card on a board reporting every field at once the first

@@ -19,6 +19,7 @@ from shannon.discord_bot.panels import (
 )
 from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
 from shannon.discord_bot.safe_text import (
+    CARD_FIELD_LIMIT,
     COMMIT_MESSAGE_LIMIT,
     COMMIT_TITLE_LIMIT,
     EMPTY,
@@ -215,9 +216,9 @@ def format_ticket(
                 *_if_set("Area", snapshot.area),
                 *_if_set("Tags", _tags(snapshot.label_names) if snapshot.label_names else None),
                 *_if_set(
-                    "Created", _timestamp(snapshot.created_at) if snapshot.created_at else None
+                    "Created", as_timestamp(snapshot.created_at) if snapshot.created_at else None
                 ),
-                ("Last Updated", _timestamp(snapshot.updated_at)),
+                ("Last Updated", as_timestamp(snapshot.updated_at)),
             ),
             # Last, and dropped entirely for a card nobody wrote anything on - the same shape and
             # the same guard the other two blocks use.
@@ -453,16 +454,22 @@ def format_card_changed(moved: Sequence[tuple[str, str, str]]) -> Panel:
     did one thing and hears about it once. Per-field lines would ring three times for one action,
     and the webhook-driven announcers only look granular because a webhook arrives per change.
 
-    Every value here is board-authored - an option somebody named, a login, a label - so all of it
-    goes through `as_plain_text`. A board owner is not an attacker, but a label name is repository
-    content and the rule in this module is that GitHub-authored text is defused wherever it lands.
+    Every value here is board-authored - an option somebody named, a login, a label, a title, a
+    description - so all of it goes through `clipped`, which cuts and then defuses. A board owner
+    is not an attacker, but a label name is repository content and the rule in this module is that
+    GitHub-authored text is defused wherever it lands.
+
+    CUT, and not only for tidiness. A description runs to seven hundred characters on its own and
+    there are eleven fields carrying two values each, so an uncut line would go past what Discord
+    accepts and cost the whole message rather than the extra words. The block directly above
+    carries every value in full, which is what makes a short form the right one here.
 
     A field that was unset reads as the same `None` an empty row reads as, which is deliberate:
     "None to HIGH" is what setting a priority for the first time actually did.
     """
     said = "\n".join(
-        f"-# {label}: {as_plain_text(was) if was else EMPTY} → "
-        f"{as_plain_text(now) if now else EMPTY}"
+        f"-# {label}: {clipped(was, limit=CARD_FIELD_LIMIT) if was else EMPTY} → "
+        f"{clipped(now, limit=CARD_FIELD_LIMIT) if now else EMPTY}"
         for label, was, now in moved
     )
     return _headed(_CARD_CHANGED_HEADING, said, Accent.SAID)
@@ -797,7 +804,7 @@ def _metadata(
         ("Status", spoken(status)),
         ("Priority", spoken(priority)),
         ("Tags", _tags(snapshot.label_names)),
-        ("Last Updated", _timestamp(snapshot.updated_at)),
+        ("Last Updated", as_timestamp(snapshot.updated_at)),
     ]
     # Not `fit`, which cut this to a MESSAGE and is the wrong budget twice over: a card
     # holds twice a message, and the description under this block is what should give way
@@ -883,7 +890,7 @@ def _note(
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
-    said = f"**{author}** {verb} {_timestamp(snapshot.created_at)}"
+    said = f"**{author}** {verb} {as_timestamp(snapshot.created_at)}"
     blocks = [Block(BlockKind.HEADING, said)]
     # Unquoted since issue #113: the rule above it separates the comment from the line
     # naming its author, which is what the `> ` markers were there to do.
@@ -974,7 +981,7 @@ def _tags(names: Iterable[str]) -> str:
     return ", ".join(rendered) if rendered else EMPTY
 
 
-def _timestamp(value: datetime | None) -> str:
+def as_timestamp(value: datetime | None) -> str:
     if value is None:
         return UNKNOWN
     # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a

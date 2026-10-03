@@ -31,7 +31,11 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
-from shannon.discord_bot.formatting import format_card_changed, format_card_converted
+from shannon.discord_bot.formatting import (
+    as_timestamp,
+    format_card_changed,
+    format_card_converted,
+)
 from shannon.discord_bot.threads import PostsToThread, ShutsThread
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
@@ -850,23 +854,34 @@ class ProjectPoller:
         )
 
 
-# What a change line reports, as {stored key: the label a reader sees}. Issue #182.
+# What a change line reports, as {stored key: the label a reader sees}, in the order the block
+# puts them. Issue #182.
 #
-# Creator is absent because the issue asked for it: a card's creator does not change, and being
-# told who made something is not news about it moving.
+# Creator is the only field left out, and the issue asked for that: a card's creator does not
+# change, and being told who made something is not news about it moving.
 #
-# `Created` and `Updated` are absent for a sharper reason than scope. A created-at cannot change,
-# and an updated-at changes whenever ANYTHING else does - so including it would put the same
-# redundant pair of timestamps in every line this ever posts, saying only "something moved" beside
-# the lines that say what. The block shows both; a change line is for what a reader did not know.
+# `Updated` is in, and `Ticket Name` and `Description` are in BECAUSE it is. The poll only looks at
+# a card whose timestamp moved, so `Updated` differs every single time this runs - which on its own
+# would post a line saying a card changed without saying what. The title and the description are
+# the two things that move a timestamp without moving anything else here, so watching them is what
+# gives that line a cause to name. A bare timestamp line is the rare case rather than the common
+# one now, and it means what it says: GitHub re-stamped a card and nothing a reader can see moved
+# with it.
+#
+# `Created` can never differ in practice. It is here because the field list asked for it and
+# because a row that silently ignored one of them would be the kind of gap nobody finds.
 _WATCHED: dict[str, str] = {
+    "title": "Ticket Name",
+    "assignees": "Assignees",
     "status": "Status",
     "priority": "Priority",
     "story_point": "Story Point",
     "iteration": "Iteration",
     "area": "Area",
-    "assignees": "Assignees",
     "labels": "Tags",
+    "created": "Created",
+    "updated": "Updated",
+    "body": "Description",
 }
 
 
@@ -882,13 +897,19 @@ def _board_fields_of(item: BoardItem) -> JsonObject:
     comparison a string compare.
     """
     return {
+        "title": item.title,
+        "assignees": ", ".join(person.login for person in item.assignees),
         "status": item.column or "",
         "priority": item.priority_name or "",
         "story_point": item.story_point or "",
         "iteration": item.iteration or "",
         "area": item.area or "",
-        "assignees": ", ".join(person.login for person in item.assignees),
         "labels": ", ".join(label.name for label in item.labels),
+        # Through the renderer the block uses rather than a second copy of Discord's timestamp
+        # syntax: what a change line says a field moved to has to be what the row above it shows.
+        "created": as_timestamp(item.created_at) if item.created_at else "",
+        "updated": as_timestamp(item.updated_at) if item.updated_at else "",
+        "body": item.body,
     }
 
 

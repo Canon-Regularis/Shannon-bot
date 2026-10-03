@@ -20,6 +20,7 @@ from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.safe_text import CARD_FIELD_LIMIT
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.models import Actor
 from shannon.github.errors import (
@@ -2037,7 +2038,12 @@ class TestSayingWhatMovedOnACard:
         moved = replace(filled(), priority_name="LOW", updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
 
-        assert self.lines(threads) == ["### 📋 Ticket updated\n-# Priority: HIGH → LOW"]
+        said = self.lines(threads)
+        assert len(said) == 1
+        assert "Priority: HIGH → LOW" in said[0]
+        # `Updated` rides along on every line, because the poll only looks at a card whose
+        # timestamp moved - so it is always one of the things that did.
+        assert "Updated: <t:" in said[0]
 
     async def test_three_changed_fields_still_say_one_line(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
@@ -2060,31 +2066,111 @@ class TestSayingWhatMovedOnACard:
             assert expected in said[0]
         assert "Story Point: 05 → 13" in said[0]
 
-    async def test_a_card_that_did_not_move_says_nothing_again(
+    async def test_a_card_nobody_touched_never_reaches_the_comparison(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
     ) -> None:
-        """The guard, and that it is not once a minute. A board is read whole every poll, so a
-        card nobody touched is offered again for ever."""
+        """The guard, and that this is not once a minute. A board is read whole every poll, so a
+        card nobody touched is offered again for ever - and stopped before any of this by the
+        timestamp not having moved. That gate is what makes the rest cheap: a quiet board asks the
+        database nothing and says nothing.
+        """
         await self.first_seen(poller_for, threads)
 
-        # A newer timestamp with the same fields, which is what a card edited and put back looks
-        # like - the poll sees it as moved and the comparison finds nothing in it that did.
-        await poller_for(FakeBoard(replace(filled(), updated_at=LATER))).run_once()
+        await poller_for(FakeBoard(filled())).run_once()
 
         assert self.lines(threads) == []
 
-    async def test_a_creator_changing_says_nothing(
+    async def test_a_re_stamp_with_nothing_else_says_only_that(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """A newer timestamp and not one other field different, which is GitHub re-stamping a card.
+
+        It used to be silent and is not any more, because issue #182 asked for `Updated` to be
+        reported like the rest. What makes that tolerable rather than noise is that the title and
+        the description are watched too: the two edits that move a timestamp without moving
+        anything else here now name themselves, so a line carrying ONLY a timestamp means what it
+        says instead of hiding a change the reader cannot see.
+        """
+        await self.first_seen(poller_for, threads)
+
+        await poller_for(FakeBoard(replace(filled(), updated_at=LATER))).run_once()
+
+        said = self.lines(threads)
+        assert len(said) == 1
+        assert said[0].count("-# ") == 1, "something other than the timestamp was reported"
+        assert "Updated: <t:" in said[0]
+
+    async def test_a_card_with_no_timestamp_is_compared_every_poll_and_stays_quiet(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The one card the timestamp gate does not stop, and the reason the comparison keeps its
+        own guard.
+
+        `_has_moved` syncs a card with no `updated_at` unconditionally - deliberately, because
+        GitHub always sends one, so that arm is a guard rather than a case and re-syncing is a
+        wasted edit where skipping is a change nobody sees. The cost is that such a card reaches
+        this comparison on EVERY poll, with a stored record and a thread to post in. Nothing moved,
+        so nothing is said; without the guard it would post an empty line once a minute for as long
+        as the card existed, which is the worst failure available here.
+        """
+        timeless = replace(filled(), updated_at=None)
+        await poller_for(FakeBoard(timeless)).run_once()
+
+        await poller_for(FakeBoard(timeless)).run_once()
+
+        assert self.lines(threads) == []
+
+    async def test_a_creator_changing_is_never_named(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
     ) -> None:
         """ "Updates to all aside from creator", which is the issue's own words. A card's creator
         does not change in practice, and being told who made something is not news about it
-        moving - so it is shown in the block and never announced."""
+        moving - so it is shown in the block and never announced.
+
+        The line is not empty any more, because the timestamp moved and a timestamp that moved is
+        reported. What this pins is the one field left out of the comparison: the creator is
+        nowhere in it, under either name.
+        """
         await self.first_seen(poller_for, threads)
 
         moved = replace(filled(), creator=Actor("somebody-else"), updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
 
-        assert self.lines(threads) == []
+        said = self.lines(threads)[0]
+        assert "Creator" not in said
+        assert "somebody-else" not in said
+
+    async def test_a_renamed_card_names_its_title(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """Watched BECAUSE `Updated` is. A title edit moves the timestamp and nothing else here,
+        so without this the line would report that a card changed without saying what - and after
+        its column, the title is the commonest thing about a card to change."""
+        await self.first_seen(poller_for, threads)
+
+        moved = replace(filled(), title="Write the poller properly", updated_at=LATER)
+        await poller_for(FakeBoard(moved)).run_once()
+
+        assert "Ticket Name: Write the poller → Write the poller properly" in self.lines(threads)[0]
+
+    async def test_a_rewritten_description_names_itself_and_is_cut(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The other edit that moves a timestamp on its own, and the one that would break the
+        message if it were not cut: a description runs to seven hundred characters, two values of
+        one would be most of what Discord takes, and the block directly above carries it in full.
+        """
+        await self.first_seen(poller_for, threads)
+
+        moved = replace(filled(), body="x" * 400, updated_at=LATER)
+        await poller_for(FakeBoard(moved)).run_once()
+
+        said = self.lines(threads)[0]
+        assert "Description: what the card asks for →" in said
+        assert said.count("x") == CARD_FIELD_LIMIT, "the new description was not cut"
+        # `cut` keeps the whole budget and then appends its mark, so the count is the
+        # limit exactly rather than one short of it.
+        assert "…" in said
 
     async def test_a_field_set_for_the_first_time_reads_from_none(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
@@ -2096,6 +2182,26 @@ class TestSayingWhatMovedOnACard:
         await poller_for(FakeBoard(replace(filled(), updated_at=LATER))).run_once()
 
         assert "Area: None → General" in self.lines(threads)[0]
+
+    async def test_a_created_stamp_is_watched_like_the_rest(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """`Created` is in the watched set because issue #182's field list named it, and this is
+        the test that says so.
+
+        The cause here is artificial and the behaviour is not. A real card's created-at cannot
+        change, so nothing else in this class can ever make this row appear - which is precisely
+        why it needs its own test: dropping the row from the watched set broke no test at all, and
+        a field the issue asked for that nothing checks is the kind of gap nobody finds.
+        """
+        await poller_for(FakeBoard(replace(filled(), created_at=LATER))).run_once()
+
+        moved = replace(filled(), created_at=LATER_STILL, updated_at=LATER)
+        await poller_for(FakeBoard(moved)).run_once()
+
+        said = self.lines(threads)[0]
+        assert "Created: <t:" in said
+        assert said.count("Created") == 1, "the Last Updated row was read as this one"
 
     async def test_a_discord_refusal_costs_the_line_and_not_the_record(
         self,
@@ -2124,7 +2230,12 @@ class TestSayingWhatMovedOnACard:
             FakeBoard(replace(filled(), priority_name="LOW", updated_at=LATER_STILL))
         ).run_once()
 
-        assert self.lines(threads) == [], "it said the change it had already recorded"
+        # Not an empty line any more: the second poll carries a third timestamp, and a
+        # timestamp that moved is reported. What proves the record landed is the PRIORITY being
+        # absent - that was the change the refused line carried, and nothing says it twice.
+        said = self.lines(threads)[0]
+        assert "Priority" not in said, "it said the change it had already recorded"
+        assert "Updated: <t:" in said
 
 
 # ---------------------------------------------------------------------------------------
