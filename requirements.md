@@ -168,13 +168,30 @@ Last Updated:
 Description:
 ```
 
-For every synced ticket, the bost must generate a Discord message (in the relevant thread) with:
+For every synced ticket, the bot must generate a Discord message (in the relevant thread) with the
+fields below. Two differences from the list as first written, both for the reasons the PR list
+gives: a `Type:` line, so the three blocks read alike and are built by one thing rather than three;
+and a `Last Updated:` line, because the board read already carries it and the block was throwing it
+away.
+
+The rest of the PR list stays off a ticket, and that is the same rule rather than a different one.
+A draft card on a board has no author, no assignees and no labels, and the board read asks GitHub
+for Title and Status only - so `Author:`, `Assignees:`, `Tags:` and `Priority:` would each read
+`None` for ever, which is noise rather than information. `State:` is off for the same reason once
+removed: a ticket's state is open and nothing can close it, because a board column is not a closed
+state. `Description:` is not withheld but impossible - a board item carries no body text at all.
 
 ```text
 Ticket Name:
+Type: Ticket
 GitHub Link:
 Status:
+Last Updated:
 ```
+
+All of these blocks, and every other message this bot posts into a thread, show the formatting the
+text was written with: a heading, a list, a code span or a link in a GitHub body arrives as what it
+means rather than as the characters somebody typed. One conversion does it for all of them.
 
 ---
 

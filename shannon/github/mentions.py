@@ -1,15 +1,16 @@
 """The names a GitHub body writes, and putting something else in their place.
 
-Reading and swapping live together because they must agree about what counts as a name. Text
-reaching `rewrite` has already been through `safe_text.as_plain_text`, which backslash-escapes an
-underscore and puts a zero-width space inside anything that already looked like a mention, so the
-pattern below has to accommodate both shapes.
+Reading and swapping live together because they must agree about what counts as a name. Text may
+have been through `safe_text.as_plain_text`, which backslash-escapes an underscore and puts a
+zero-width space inside anything that already looked like a mention, so the pattern below has to
+accommodate both shapes - and since issue #166 a note's body may instead arrive with its markdown
+intact, which is what `skipping_code` is for.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from shannon.domain.text import ZERO_WIDTH_SPACE
@@ -57,6 +58,13 @@ _CUT_SHORT = "…"
 # own header line carries mentions this bot built; `/` keeps a name out of a pasted URL.
 _BEFORE_A_NAME = f"(?<![A-Za-z0-9_@/<{ZERO_WIDTH_SPACE}-])"
 
+# A code span is the one place GitHub does not read a mention, and issue #166 is the first time
+# this module could respect that: a note's body used to arrive with its backticks escaped into
+# literal characters, so there was no span left to see. Fenced blocks first, so one block is one
+# span rather than three, and `.` crosses newlines for the same reason.
+_CODE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
+
+
 # The team alternative is first: an organisation can share a name with somebody who has linked an
 # account, and trying the person first would ping them in their team's place.
 _MENTION = re.compile(
@@ -91,19 +99,54 @@ class Mentioned:
     teams: tuple[str, ...]
 
 
-def names_in(text: str) -> Mentioned:
+def _runs(text: str, *, skipping_code: bool) -> Iterator[tuple[str, bool]]:
+    """The text in runs, and whether a name in each one counts.
+
+    One split, shared by the reader and the swap, because the two have to answer the same question
+    about the same characters. Everything else in this module is arranged around them agreeing;
+    this is the only thing here that could make them disagree, so there is one of it.
+
+    Safe for `_BEFORE_A_NAME`'s lookbehind, which is the thing a split like this usually breaks. A
+    run can only begin where a span ended, so the character in front of it is always a backtick -
+    and a backtick is not one of the characters that refuses a name. A split therefore never turns
+    a refusal into a match, which the whole-string and split answers agreeing is what pins.
+    """
+    if not skipping_code:
+        yield text, True
+        return
+
+    typed_from = 0
+    for span in _CODE.finditer(text):
+        yield text[typed_from : span.start()], True
+        yield span.group(0), False
+        typed_from = span.end()
+    yield text[typed_from:], True
+
+
+def _mentions_in(text: str, *, skipping_code: bool) -> Iterator[re.Match[str]]:
+    """Every name-shaped thing worth reading, in the order it appears."""
+    for run, counts in _runs(text, skipping_code=skipping_code):
+        if counts:
+            yield from _MENTION.finditer(run)
+
+
+def names_in(text: str, *, skipping_code: bool = False) -> Mentioned:
     """Every name this body writes, up to the limit.
 
-    Asked of the same text that will be shown: the preview is cut before the escaping and
-    mid-word, so a body ending `@monalisa` shows as `@mona` and reading the whole body would ask
-    about `monalisa` while the swap pings whoever is linked as `mona`. Asking too widely wastes a
-    query entry; asking too narrowly loses the mention in silence.
+    Asked of the same text that will be shown: the preview is cut mid-word, so a body ending
+    `@monalisa` shows as `@mona` and reading the whole body would ask about `monalisa` while the
+    swap pings whoever is linked as `mona`. Asking too narrowly loses the mention in silence, and
+    asking too widely is not merely wasteful - the budget below is shared, so a reader that looks
+    further than the swap can spend it on names the swap will never reach.
+
+    `skipping_code` leaves out the names inside a code span, which is what GitHub does and what a
+    caller wants when the text still has its backticks. It has to match what the swap was asked.
     """
     people: list[str] = []
     teams: list[str] = []
     seen: set[tuple[bool, str]] = set()
 
-    for match in _MENTION.finditer(text):
+    for match in _mentions_in(text, skipping_code=skipping_code):
         is_team, name = _read(match)
         key = (is_team, name)
         if key in seen:
@@ -116,11 +159,16 @@ def names_in(text: str) -> Mentioned:
     return Mentioned(people=tuple(people), teams=tuple(teams))
 
 
-def rewrite(text: str, *, person: Render, team: Render) -> str:
+def rewrite(text: str, *, person: Render, team: Render, skipping_code: bool = False) -> str:
     """Put each name the caller answers for in its place, and leave the rest as written.
 
     The budget counts distinct names, as `names_in` does, so the two reach the same distance
     into a body. Counting occurrences would rewrite names the lookup never asked about.
+
+    `skipping_code` must match whatever the reader was asked, for the same reason the budget is
+    counted the same way in both. Not the default, so the one other thing that reads with this
+    module - the property asserting a published transcript mentions only the accounts it was handed
+    - goes on being asked about every name-shaped thing in the text rather than a subset of them.
     """
     answered: dict[tuple[bool, str], str | None] = {}
 
@@ -133,7 +181,26 @@ def rewrite(text: str, *, person: Render, team: Render) -> str:
             answered[key] = team(name) if is_team else person(name)
         return answered[key] or match.group(0)
 
-    return _MENTION.sub(swap, text)
+    return "".join(
+        _MENTION.sub(swap, run) if counts else run
+        for run, counts in _runs(text, skipping_code=skipping_code)
+    )
+
+
+def names_a_note_writes(text: str) -> Mentioned:
+    """The names in a note's body, read the way a note's body has to be read.
+
+    Its own name so that nothing has to remember a flag. `skipping_code` has to be the same
+    answer on both sides or the reader and the swap disagree, and a disagreement between them is
+    silent in both directions - so the pairing lives here, once, rather than at two call sites
+    that are checked against each other by a test. `rewrite_a_note` below is the other half.
+    """
+    return names_in(text, skipping_code=True)
+
+
+def rewrite_a_note(text: str, *, person: Render, team: Render) -> str:
+    """The other half of `names_a_note_writes`, and the reason both exist."""
+    return rewrite(text, person=person, team=team, skipping_code=True)
 
 
 def _read(match: re.Match[str]) -> tuple[bool, str]:

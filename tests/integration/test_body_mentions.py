@@ -60,6 +60,74 @@ def last_post(threads: FakeThreadGateway) -> str:
     return threads.posts[-1][1]
 
 
+class TestTheReaderAndTheRendererReadOneString:
+    """Issue #166. The two halves have to be handed the SAME text, to the character.
+
+    The note path decides which names to look up; the renderer swaps them in. Neither can see the
+    other, and a disagreement is silent in both directions - a name the reader missed renders
+    exactly as an unlinked name renders, and nothing anywhere reports a mention that was owed and
+    never made. They go through one function for that reason, and this is what would notice if
+    they stopped.
+
+    The unit invariant next door cannot catch this. It asks whether the reader covers the swap for
+    one given string; it cannot tell whether the two callers in production derived the same string
+    in the first place.
+    """
+
+    async def test_a_name_behind_a_template_comment_is_still_reached(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """The case that separates the two preparations, which is why it is this one.
+
+        The rich conversion strips an HTML comment BEFORE it cuts; the escaping it replaced kept
+        the comment and spent the preview limit on it. So a name sitting behind a long template is
+        inside the window for one of them and past the cut for the other - and if the reader were
+        still cutting the old way it would look up nobody, while the renderer went looking for a
+        row that was never fetched and showed the name as plain text.
+        """
+        await link_person(db_session, "hubot", github_user_id=100, discord=909)
+        buried = "<!-- " + ("x" * 900) + " -->\ncc @hubot please"
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event(body=buried),
+            delivery="c1",
+        )
+
+        said = last_post(threads)
+        assert "<@909>" in said, (
+            "the reader and the renderer disagreed about where the body was cut"
+        )
+        assert "x" not in said, "the template comment was published"
+
+    async def test_a_name_inside_a_code_span_is_reached_by_neither(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """The other direction. GitHub does not resolve a mention inside a code span and neither
+        does this now, so the reader must not fetch a row for one either - the two share a budget
+        of ten distinct names, and a reader that looks further than the swap can spend it on names
+        the swap will never reach.
+
+        Pinned on the allow-list as well as the text, because that is the half a reader working
+        alone would get wrong: a row fetched for a name nothing renders still lets the id through.
+        """
+        await link_person(db_session, "hubot", github_user_id=100, discord=909)
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event(body="the `@hubot` helper is fine"),
+            delivery="c1",
+        )
+
+        thread_id, said = threads.posts[-1]
+        allowed = [spent for _, where, _, spent in threads.allowed if where == thread_id]
+        assert "<@909>" not in said
+        assert "`@hubot`" in said, "the name is still recorded, exactly as written"
+        assert allowed == [()] or allowed[-1] == (), "a row was fetched for a name nothing shows"
+
+
 async def test_a_linked_name_in_a_body_is_mentioned(
     tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:

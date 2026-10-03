@@ -50,7 +50,6 @@ from shannon.domain.models import (
     RepositorySnapshot,
 )
 from shannon.domain.priority import parse_priority
-from shannon.domain.text import ZERO_WIDTH_SPACE
 from shannon.domain.time import as_utc
 from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
@@ -423,6 +422,52 @@ class TestRendering:
         assert rendered.length() <= PANEL_BUDGET
         assert "**octocat** commented" in rendered.blocks[0].text
 
+    # The names a body might write, against a map that answers for some of them and not others.
+    # `@octocat` is the comment's own author as well, which is the case worth drawing: the heading
+    # above the body carries a live mention this bot built, so a swap handed the assembled message
+    # rather than the body alone could read it back as a name and rewrite it into somebody else.
+    _NAMEABLE = st.sampled_from(
+        ("@hubot", "@octocat", "@canon/backend", "@everyone", "@here", "<@7>", "@a-b", "@1")
+    )
+    bodies_naming_people = st.builds(
+        lambda pieces: "\n".join(pieces), st.lists(st.one_of(text, _NAMEABLE), max_size=10)
+    )
+
+    @given(bodies_naming_people)
+    @settings(max_examples=300)
+    def test_every_live_mention_in_a_comment_is_one_the_map_answered_for(self, body: str) -> None:
+        """Issue #166's half of `TestNothingTypedBecomesAMention`, which guards the other
+        direction. A comment body is rendered rather than escaped now, so what stops text somebody
+        typed becoming a live mention is no longer a backslash in front of every marker - it is
+        the zero-width space `rich_text` puts inside anything already mention-shaped, and the
+        lookbehind that refuses an `@` sitting against one.
+
+        Asserted over the BODY block alone, which is also the rule the renderer follows: the line
+        above it carries a mention this bot built, live and never defused, and a GitHub login may
+        be all digits - so handing the assembled message to the swap would let `<@7>` be read as
+        the name `7` and rewritten into whoever is linked under it.
+        """
+        linked = {"hubot": 909}
+        roles = {"backend": 777}
+
+        card = format_comment(self.a_comment(body), linked, roles)
+        quoted = next((block.text for block in card.blocks if block.kind is BlockKind.BODY), "")
+
+        assert set(re.findall(r"<@(\d+)>", quoted)) <= {"909"}, (
+            "a live person mention came out of text nobody answered for"
+        )
+        assert set(re.findall(r"<@&(\d+)>", quoted)) <= {"777"}, (
+            "a live role mention came out of text nobody answered for"
+        )
+        assert "@everyone" not in quoted
+        assert "@here" not in quoted
+
+        # The markers stay balanced through the swap as well as through the conversion. `rewrite`
+        # only ever inserts `<@id>`, which carries neither - but it is the swap that runs last, so
+        # this is where the claim has to hold rather than where `rich_text` leaves it.
+        assert quoted.count("**") % 2 == 0
+        assert quoted.count("```") % 2 == 0
+
     @given(long_bodies)
     @settings(max_examples=120)
     def test_a_long_comment_body_is_always_cut(self, body: str) -> None:
@@ -433,10 +478,17 @@ class TestRendering:
         the panel bound holds for an uncut body too, so the preview cut could have been deleted
         outright and both would have stayed green.
 
-        The escapes are removed before the length is counted. `clipped` cuts the RAW text and
-        only then escapes it, so the published string can be longer than the limit by one
-        backslash per character of markup - which is a property of the escaping, not a failure to
-        cut.
+        Two things changed with issue #166, which rendered a comment body rather than escaping
+        it. The cut mark is no longer the LAST thing in the string: `_balanced` closes a marker the
+        cut took the other half of, and it appends after the ellipsis. And there are no escapes to
+        remove, so the old normalisation measured nothing.
+
+        What is left is a generous bound rather than an exact width, and deliberately so. The cut
+        is what enforces the limit; everything after it can only add a bounded amount - a
+        zero-width space per construct, the markers `_balanced` closes, and a host named in place
+        of a link pointing off GitHub. Twice the limit is comfortably above all of that and still
+        far below the panel bound the property above it asserts, so a body cut to the wrong limit,
+        or not cut at all, still fails here.
         """
         quoted = next(
             block.text
@@ -444,10 +496,8 @@ class TestRendering:
             if block.kind is BlockKind.BODY
         )
 
-        assert quoted.endswith("…"), "a body over the preview limit was published whole"
-        plain = quoted.replace("\\", "").replace(ZERO_WIDTH_SPACE, "")
-        # Plus one for the cut mark `cut` appends.
-        assert len(plain) <= COMMENT_PREVIEW_LIMIT + 1, "cut, but not to the comment limit"
+        assert "…" in quoted, "a body over the preview limit was published whole"
+        assert len(quoted) <= 2 * COMMENT_PREVIEW_LIMIT, "cut, but not to the comment limit"
 
 
 class TestThreadNames:

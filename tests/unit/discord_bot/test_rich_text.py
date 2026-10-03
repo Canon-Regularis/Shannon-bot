@@ -21,11 +21,17 @@ from shannon.discord_bot.rich_text import (
     _LINK,
     ALT_LIMIT,
     IMAGES_SHOWN,
+    Images,
     _host_of,
     _is_github,
+    as_note_text,
     as_rich_text,
 )
-from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT, MESSAGE_LIMIT
+from shannon.discord_bot.safe_text import (
+    COMMENT_PREVIEW_LIMIT,
+    DESCRIPTION_PREVIEW_LIMIT,
+    MESSAGE_LIMIT,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -199,6 +205,74 @@ class TestWhereALinkGoes:
 
     def test_a_name_in_a_label_cannot_ping(self) -> None:
         assert "<@7>" not in said("[<@7>](https://github.com/o/r)")
+
+
+class TestWhereThePicturesAreNotLifted:
+    """Issue #166. The same conversion for a body that gets no gallery under it.
+
+    A note and a commit message take this policy. A gallery under every screenshot-heavy comment
+    is noise, and a commit carries no repository at all, so the private-repo gate a card's
+    pictures go through would have nothing to read.
+    """
+
+    def links(self, body: str) -> str:
+        return as_rich_text(body, images=Images.AS_LINKS).text
+
+    def test_an_image_keeps_its_address_as_a_link(self) -> None:
+        """The regression this policy exists to avoid. `_shown` leaves the alt text where the
+        markup was, which deletes the address - right when the picture is shown underneath, and a
+        bare word when it is not."""
+        said_it = self.links(f"look: ![the stack trace]({SHOT})")
+
+        assert f"[the stack trace]({SHOT})" in said_it
+        assert said_it.count("](") == 1, "the bang was left in front of the link"
+
+    def test_nothing_is_lifted(self) -> None:
+        assert as_rich_text(f"![shot]({SHOT})", images=Images.AS_LINKS).images == ()
+
+    def test_an_image_pointing_off_github_is_named_rather_than_followed(self) -> None:
+        """The same host rule every other link gets, because dropping the bang is all this does -
+        what is left is a link, and `_linked` judges it like any other."""
+        said_it = self.links("![shot](https://elsewhere.example/a.png)")
+
+        assert "](" not in said_it
+        assert "elsewhere.example" in said_it
+
+    def test_the_block_still_lifts_by_default(self) -> None:
+        """The parameterisation moved nothing: the default is what the description always did."""
+        assert as_rich_text(f"![shot]({SHOT})").images != ()
+
+
+class TestANoteBody:
+    """`as_note_text`, which the renderer and the service are both handed. Issue #166."""
+
+    def test_markup_survives(self) -> None:
+        said_it = as_note_text("## Repro\n- run `make test`")
+
+        assert "- run `make test`" in said_it
+        assert "\\" not in said_it, "the markup this keeps was escaped"
+
+    def test_it_is_cut_to_the_comment_limit(self) -> None:
+        """Not the description's, though the two share a value today. A note that borrowed the
+        wrong name would follow it the day they stop agreeing."""
+        assert as_note_text("y" * (COMMENT_PREVIEW_LIMIT + 400)).count("y") == (
+            COMMENT_PREVIEW_LIMIT
+        )
+
+    def test_a_plus_list_becomes_a_list(self) -> None:
+        """GitHub reads `+` as a bullet and Discord does not. A comment used to arrive as a
+        paragraph of plus signs - neither escaped nor converted, which was a defect rather than
+        formatting lost on purpose."""
+        assert as_note_text("+ one\n+ two").startswith("- one")
+
+    def test_bot_subtext_cannot_be_forged(self) -> None:
+        """`-#` is Discord's subtext and every footnote this bot writes uses it, so a body able to
+        produce one could put words in the bot's mouth. It was dead by accident before - the `-`
+        happened to be escaped - and is broken deliberately now."""
+        assert not as_note_text("-# posted by the maintainers").startswith("-#")
+
+    def test_an_image_keeps_its_address(self) -> None:
+        assert SHOT in as_note_text(f"![shot]({SHOT})")
 
 
 class TestThePictures:

@@ -238,11 +238,29 @@ class TestCommentFormatting:
         assert "<@1234567>" not in message
         assert "1234567" in message
 
-    def test_markup_in_the_body_does_not_restyle_the_thread(self) -> None:
+    def test_a_review_body_is_shown_the_same_way(self) -> None:
+        """Issue #166 reached all three note kinds, because all three go through one renderer.
+        `REVIEW` is defined below this class, which is fine - the name is read when the test runs,
+        not when it is written."""
+        said_it = format_review(replace(REVIEW, body="- one nit\n- and `another`")).text
+
+        assert "- one nit" in said_it
+        assert "`another`" in said_it
+
+    def test_markup_in_the_body_is_shown_as_it_was_written(self) -> None:
+        """Issue #166, and the whole of it from this end. This asserted the opposite until then:
+        the escaping backslashed every marker, so a comment arrived as the characters somebody had
+        typed rather than as what they meant by them.
+
+        What stopped markup restyling the rest of the thread was the escaping, and it is now two
+        other things. `_balanced` closes a marker the writer left open or the cut took the other
+        half of, which the test below pins; and every block goes out as its own component, so a
+        marker in a body cannot reach the line naming its author or the link back to GitHub.
+        """
         message = format_comment(replace(COMMENT, body="**bold** and `code`")).text
 
-        assert "**bold**" not in message
-        assert "bold" in message
+        assert "**bold**" in message
+        assert "`code`" in message
 
 
 REVIEW = ReviewSnapshot(
@@ -303,20 +321,32 @@ class TestReviewFormatting:
 
 
 class TestMarkupGluedToALink:
-    """`escape_markdown` skips whatever its URL pattern matches, and that runs to the next space.
+    """A fence stuck to the end of a URL, which used to be a hole exactly the width of one.
 
-    Left at its default, the escaping this module relies on has a hole exactly the width of a
-    URL: anything markdown-shaped stuck to the end of one reaches Discord intact.
+    `escape_markdown` skips whatever its URL pattern matches and that runs to the next space, so
+    anything markdown-shaped glued to a URL reached Discord intact while everything around it was
+    escaped. Issue #166 retired the escaping for a comment body, so the hole is gone with it -
+    and what keeps the fence harmless now is stated rather than inherited.
     """
 
-    def test_a_fence_stuck_to_a_url_cannot_open_a_code_block(self) -> None:
-        """An unclosed fence eats the rest of the message, including the link back to GitHub."""
+    def test_a_fence_stuck_to_a_url_cannot_eat_the_rest_of_the_message(self) -> None:
+        """The hazard was never the fence; it was an UNCLOSED fence swallowing everything after
+        it, including the link back to GitHub.
+
+        Two things stop it now, and this pins both. `_balanced` closes what the body left open, so
+        the block ends with its code block shut - the spoof line ends up inside one, rendered as
+        the characters it is rather than as bold. And the link back to GitHub is a block of its
+        own, which `layout` sends as its own component, so no marker in a body can reach it.
+        """
         hostile = replace(COMMENT, body="lgtm https://example.com/```\n**SHIPPED BY ADMIN**")
 
-        rendered = format_comment(hostile).text
+        card = format_comment(hostile)
+        body = next(block for block in card.blocks if block.kind is BlockKind.BODY)
+        footnote = next(block for block in card.blocks if block.kind is BlockKind.FOOTNOTE)
 
-        assert "```" not in rendered
-        assert "**SHIPPED BY ADMIN**" not in rendered
+        assert body.text.count("```") % 2 == 0, "an unclosed fence was published"
+        assert "SHIPPED BY ADMIN" in body.text, "the words are kept; it is the styling that is not"
+        assert footnote.text == f"<{COMMENT.html_url}>", "the pointer that matters was eaten"
 
     def test_the_link_back_to_github_is_still_a_link(self) -> None:
         """The cost of escaping links is paid by the preview, not by the pointer that matters."""

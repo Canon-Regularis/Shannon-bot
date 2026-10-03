@@ -185,9 +185,16 @@ class TestTheMessageStillFits:
             assert fragment + ">" in line, f"a mention was left half written: {fragment!r}"
 
 
-def test_a_name_inside_backticks_still_resolves() -> None:
-    """A divergence from GitHub, written down rather than discovered later. GitHub does not
-    resolve a mention inside a code span; the escaping here has already turned the backticks
-    into literal text by the time the swap runs, so there is no code span left to respect.
+def test_a_name_inside_backticks_is_left_alone() -> None:
+    """The divergence from GitHub is over. It was written down rather than discovered: the
+    escaping turned the backticks into literal text before the swap ran, so there was no code
+    span left to respect and a name inside one resolved.
+
+    Issue #166 kept the backticks, which made respecting them possible and also made ignoring
+    them untenable - a `<@id>` inside a code span is shown by Discord as the text it is, while
+    the notification is still delivered off the raw content. A ping with nothing to see.
     """
-    assert "<@111>" in said("the `@john` variable", {"john": 111})
+    said_it = said("the `@john` variable", {"john": 111})
+
+    assert "<@111>" not in said_it
+    assert "`@john`" in said_it, "the name is still recorded, exactly as written"

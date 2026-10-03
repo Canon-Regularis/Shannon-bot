@@ -110,6 +110,26 @@ class TestWhatItCarries:
         assert "commented on" in rendered.text
 
 
+class TestWhatTheBodyKeeps:
+    """Issue #166. An inline note on a diff is a comment, and was stale in the same way."""
+
+    def test_markup_is_shown_as_it_was_written(self) -> None:
+        said = format_review_comment(replace(COMMENT, body="use `cls` here\n- not `self`")).text
+
+        assert "`cls`" in said
+        assert "- not `self`" in said
+
+    def test_a_suggestion_block_survives(self) -> None:
+        """The most common markdown in an inline comment by far, and the one most obviously
+        broken when every backtick arrived backslashed."""
+        fenced = "```suggestion\nreturn None\n```"
+
+        said = format_review_comment(replace(COMMENT, body=fenced)).text
+
+        assert fenced in said
+        assert said.count("```") % 2 == 0
+
+
 class TestAPathNobodyChoseCarefully:
     def test_a_mention_in_a_file_name_does_not_ring_anybody(self) -> None:
         """A code span stops markdown reading a name. It does not stop Discord reading a mention,

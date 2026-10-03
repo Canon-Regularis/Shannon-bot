@@ -1,19 +1,27 @@
-"""Keeping the formatting a description was written with.
+"""Keeping the formatting GitHub-authored text was written with.
 
-`safe_text` strips GitHub markup; this keeps most of it, for the description block alone. Every
-`](` in what comes out is one this module wrote, and points at a host GitHub serves.
+`safe_text` strips GitHub markup; this keeps most of it. Every `](` in what comes out is one this
+module wrote, and points at a host GitHub serves.
+
+It was the description block alone until issue #166, when the thread was showing every other body -
+a comment, a review, a commit message - with its markdown backslashed into literal characters. The
+guarantee above is a property of the transform rather than of where the text came from, so widening
+the callers did not widen what can get out; what it needed was the two things the description had
+hard-coded to become arguments, which is `limit` and `images` below.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlparse
 
 import discord
 
 from shannon.discord_bot.panels import PanelImage
 from shannon.discord_bot.safe_text import (
+    COMMENT_PREVIEW_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
     LINK_JOIN,
     cut,
@@ -76,21 +84,65 @@ class Described:
     images: tuple[PanelImage, ...] = ()
 
 
-def as_rich_text(body: str) -> Described:
-    """A description with the formatting it was written with, and its pictures lifted out.
+class Images(StrEnum):
+    """What becomes of the pictures a body writes. Issue #166.
 
-    Images come out before the cut, so a report whose screenshots all sit past the preview limit
-    still shows them. A cut can land inside a link or a marker, which the two steps after it undo.
+    `LIFT` takes GitHub-hosted ones out of the prose and into the card's gallery, leaving the alt
+    text where the markup was. That is right for the block at the top of a thread, which is one
+    message per item and has room under it.
+
+    `AS_LINKS` leaves them where they were written, as links. Right for everything posted into a
+    thread afterwards: a gallery under every screenshot-heavy comment is noise, and a commit
+    carries no repository for the private-repo gate `_pictures` applies to read.
+    """
+
+    LIFT = "lift"
+    AS_LINKS = "links"
+
+
+def as_rich_text(
+    body: str, *, limit: int = DESCRIPTION_PREVIEW_LIMIT, images: Images = Images.LIFT
+) -> Described:
+    """GitHub-authored text with the formatting it was written with, cut to `limit`.
+
+    Images are dealt with before the cut, so a report whose screenshots all sit past the preview
+    limit still shows them. A cut can land inside a link or a marker, which the two steps after it
+    undo.
+
+    The defaults are what the description block has always passed, so adding them moved nothing.
+    `limit` has a ceiling worth knowing rather than discovering: nothing here shrinks text after the
+    cut and the growth is bounded - one cut mark, at most six characters from `_balanced`, and one
+    zero-width space per construct - so the published string stays inside Discord's own message
+    ceiling for any limit under about thirteen hundred. Every caller is far below that.
     """
     text = _LINE_ENDINGS.sub("\n", body or "")
     text = _HTML_COMMENT.sub("", text)
-    text, images = _shown(text)
+    if images is Images.LIFT:
+        text, lifted = _shown(text)
+    else:
+        text, lifted = _as_links(text), ()
     text = _HEADING.sub("", text)
     text = _PLUS_BULLET.sub(r"\1-\2", text)
     text = _SUBTEXT.sub("\\1" + ZERO_WIDTH_SPACE + "\\2", text)
     text = _BLANK_RUN.sub("\n\n", text)
-    text = cut(text, limit=DESCRIPTION_PREVIEW_LIMIT)
-    return Described(text=_balanced(_linked(text)), images=images)
+    text = cut(text, limit=limit)
+    return Described(text=_balanced(_linked(text)), images=lifted)
+
+
+def as_note_text(body: str) -> str:
+    """A comment, a review or an inline review comment as its thread actually shows it.
+
+    Its own name because two callers have to agree about this string to the character, and spelling
+    the recipe twice is how they stop agreeing. The renderer swaps names into it; the service reads
+    the names to look up out of it, and a disagreement between the two is silent in both directions
+    - a name the reader missed renders exactly as an unlinked name renders, and nothing anywhere
+    reports a mention that was owed and never made. `notes.py` says the same thing from its end.
+
+    Over-reading is not a safe way out of that either: the reader and the swap share one budget of
+    ten distinct names, so a reader looking further into the body than the swap does can spend the
+    budget on names the swap will never reach.
+    """
+    return as_rich_text(body, limit=COMMENT_PREVIEW_LIMIT, images=Images.AS_LINKS).text
 
 
 def _defused(text: str) -> str:
@@ -186,6 +238,20 @@ def _shown(body: str) -> tuple[str, tuple[PanelImage, ...]]:
         if len(lifted) < IMAGES_SHOWN and host is not None and _is_github(host):
             lifted.setdefault(url, PanelImage(url=url, alt=_alt(image.group(1))))
     return _IMAGE.sub(lambda image: image.group(1), body), tuple(lifted.values())
+
+
+def _as_links(text: str) -> str:
+    """Image markup rewritten as an ordinary link, for a body whose pictures are not lifted.
+
+    Not `_shown`, which leaves the alt text alone where the markup was. That is right when the
+    picture itself is shown underneath and wrong here, because it would delete the address and
+    leave a bare word - which is worse than what this issue set out to fix.
+
+    Only the bang goes. What is left is a link like any other, so `_linked` judges its host by the
+    same rule and an address off GitHub is named rather than followed. Dropping the bang is also
+    what stops `_LINK` matching the inside of the markup and leaving a stray `!` in front of it.
+    """
+    return _IMAGE.sub(lambda image: f"[{image.group(1)}]({image.group(2)})", text)
 
 
 def _alt(alt: str) -> str | None:
