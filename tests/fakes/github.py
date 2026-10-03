@@ -18,6 +18,7 @@ from shannon.domain.models import (
     ReviewSnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
+from shannon.github.paging import PagedRead
 
 # The same shape the real client uses, so one helper answers for both stores.
 _Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
@@ -449,6 +450,26 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         yield self.bodies.get(path, [])
+
+    async def get_pages_since(
+        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+    ) -> PagedRead:
+        """One page, and never a 304.
+
+        Answering `pages=None` would need this fake to model what it last handed out, and nothing
+        asking it for a container wants that: the board reader's conditional path has its own
+        stand-in beside its own tests. Here the honest answer is "changed, here it is", which is
+        what every caller of this fake already expects.
+
+        No validator either, which keeps the reader from caching against a fake that cannot
+        validate. One page with nothing in it is also not a full one, so this stays truthful about
+        the one thing the reader checks.
+        """
+        self.json_calls.append((path, params))
+        self.json_owners.append(owner)
+        if self.error is not None:
+            raise self.error
+        return PagedRead(etag=None, pages=(self.bodies.get(path, []),))
 
     def _restate(self, key: tuple[str, int]) -> None:
         """Put the labels back on the stored snapshot, so a later fetch agrees with the writes.
