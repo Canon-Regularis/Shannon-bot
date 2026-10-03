@@ -14,9 +14,17 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.discord_bot.rich_text import as_note_text
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
 from shannon.github import mentions
-from shannon.github.mentions import MENTION_LIMIT, Mentioned, names_in, rewrite
+from shannon.github.mentions import (
+    MENTION_LIMIT,
+    Mentioned,
+    names_a_note_writes,
+    names_in,
+    rewrite,
+    rewrite_a_note,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -25,13 +33,24 @@ TEAMS = {"backend": 900, "back_end": 901}
 
 
 def previewed(body: str) -> str:
-    """A body as the renderer cuts it, which is what the swap is handed.
+    """A body as the ESCAPING leaves it, which is what a note used to be handed.
 
-    Named here rather than spelled out at each call, because the point of half this file is
-    that the reader and the swap see the SAME text. Two spellings of the same cut is how
-    they drift apart.
+    Not what the renderer sends any more - see `shown` below - but still a shape this module has
+    to read, which is why it is still here rather than deleted. `_SLUG_IN_TEXT` accommodates both
+    `_` and `\\_` on purpose, and the defusing these tests lean on is what puts a zero-width space
+    inside anything already mention-shaped. Those branches have to be exercised by something.
     """
     return clipped(body, limit=COMMENT_PREVIEW_LIMIT)
+
+
+def shown(body: str) -> str:
+    """A body as the thread actually shows it, which is what BOTH halves are handed.
+
+    The production function rather than a second spelling of what it does. Issue #166 is exactly
+    why: this file used to derive the string itself, and when the renderer moved to the rich
+    conversion the invariant below went on passing about a string nothing produced any more.
+    """
+    return as_note_text(body)
 
 
 def swapped(text: str) -> str:
@@ -43,7 +62,13 @@ def swapped(text: str) -> str:
 
 
 def asked_about(text: str) -> set[tuple[bool, str]]:
-    """Every name the swap would look up, which is what the reader has to have covered."""
+    """Every name the note swap would look up, which is what the reader has to have covered.
+
+    Through `rewrite_a_note`, the function the renderer calls, rather than `rewrite` with a flag
+    this file chose. Handing the two halves different answers about code spans is the one way the
+    invariant below could be made to pass while being false, and going through the paired
+    functions is what takes that away rather than watching for it.
+    """
     seen: set[tuple[bool, str]] = set()
 
     def note(is_team: bool):
@@ -53,7 +78,7 @@ def asked_about(text: str) -> set[tuple[bool, str]]:
 
         return render
 
-    rewrite(text, person=note(False), team=note(True))
+    rewrite_a_note(text, person=note(False), team=note(True))
     return seen
 
 
@@ -219,9 +244,19 @@ class TestHowManyAreAnswered:
 
 
 class TestTheReaderCoversTheSwap:
-    """The invariant. A name the swap looks up that the reader never asked about is a mention
-    that silently does not happen, because a name with no row renders exactly as a name nobody
-    has linked and nothing records the difference."""
+    """The invariant, in both directions. The two halves must read exactly the same names.
+
+    A name the swap looks up that the reader never asked about is a mention that silently does not
+    happen: a name with no row renders exactly as a name nobody has linked, and nothing records the
+    difference. That is the direction this class was written for.
+
+    The other direction is not merely wasteful, which is why it is asserted too. The reader and the
+    swap share one budget of ten distinct names, so a reader that reads WIDER than the swap can
+    spend the budget on names the swap will never ask about - and the real name behind them is then
+    never fetched, which is the same silent loss arriving by the opposite road. A subset assertion
+    cannot see that, and a mutation that changed the reader's mind alone passed seven hundred tests
+    before this said equality.
+    """
 
     @pytest.mark.parametrize(
         "body",
@@ -233,13 +268,35 @@ class TestTheReaderCoversTheSwap:
             "x" * (COMMENT_PREVIEW_LIMIT - 5) + "@monalisa",
             "**@john** `@octo-cat` [@canon](https://x)",
             " ".join(f"@u{i}" for i in range(MENTION_LIMIT + 5)),
+            # Issue #166. A code span and a fenced block, which the swap now steps over - so the
+            # reader has to step over the same ones or it spends the shared budget on names the
+            # swap will never reach.
+            "`@john` and @octo-cat",
+            "```\n@john\n```\n@canon/backend after it",
+            "@john `@octo-cat` @canon/back_end `@nobody`",
+            # The budget, starved on purpose: ten distinct names inside code spans and a real
+            # one behind them. A reader that read wider than the swap would spend the whole
+            # allowance on names nothing renders and never fetch a row for `@john`.
+            " ".join(f"`@u{i}`" for i in range(MENTION_LIMIT)) + " @john",
         ],
     )
     def test_everything_the_swap_asks_about_was_read_first(self, body: str) -> None:
-        read = names_in(body.strip()[:COMMENT_PREVIEW_LIMIT])
+        # One string, prepared once by the production function, and asked of the two paired
+        # functions production calls. Nothing here chooses a policy, which is the point: this test
+        # cannot be made to pass by asking the halves different questions.
+        said = shown(body)
+        read = names_a_note_writes(said)
         covered = {(False, name) for name in read.people} | {(True, name) for name in read.teams}
 
-        assert asked_about(previewed(body)) <= covered
+        asked = asked_about(said)
+        assert asked <= covered, (
+            "the swap looked up a name the reader never asked about, which is a mention that "
+            "silently does not happen"
+        )
+        assert covered <= asked, (
+            "the reader read a name the swap will never ask about - they share a budget of ten "
+            "distinct names, so reading wider spends it on names nothing will render"
+        )
 
 
 class TestTheShapesThisAlsoOwns:

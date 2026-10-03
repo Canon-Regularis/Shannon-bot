@@ -135,17 +135,30 @@ class TestReadingABoard:
 
         assert threads.created[0].name == "Write the poller"
 
-    async def test_the_block_is_the_three_lines_the_requirements_ask_for(
+    async def test_the_block_is_the_rows_a_draft_card_can_fill(
         self, board_channel: None, poller_for, threads: FakeThreadGateway
     ) -> None:
+        """Was "the three lines the requirements ask for" until issue #166, which routed this
+        block through the same row builder the other two use and let it show `Type` and the
+        `Last Updated` the board already sends and this threw away.
+
+        `requirements.md` is amended rather than overruled in silence - the same way it already
+        was for the pull request block, three times over.
+
+        Still only what a draft card HAS. No author, assignees or tags: the board read fetches
+        Title and Status and nothing else, so each of those would read `None` for ever. The unit
+        test beside this one says which rows are left out and why.
+        """
         await poller_for(FakeBoard(card())).run_once()
 
         thread = threads.created[0]
         block = thread.messages[thread.metadata_message_id]
         assert block.splitlines() == [
             "**Ticket Name:** Write the poller",
+            "**Type:** Ticket",
             f"**GitHub Link:** https://github.com/users/Canon-Regularis/projects/{PROJECT}",
             "**Status:** In review",
+            "**Last Updated:** <t:1787220000:f>",
         ]
 
     async def test_the_column_becomes_the_status(

@@ -10,6 +10,7 @@ from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.rich_text import as_note_text
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import (
@@ -92,9 +93,15 @@ def is_worth_a_message(snapshot: ItemNote) -> bool:
     Asked by the mirror rather than by the parser: a review this declines still has to run the
     ledger that closes the request it answers, or the reviewer is pinged again for the review
     they just gave.
+
+    Asked of the SHOWN text rather than the raw body since issue #166, which is the same correction
+    `_the_description` made for its own label. The rich conversion strips an HTML comment, so a
+    review whose whole body is a template left unfilled renders to nothing - and judged on the raw
+    body it is truthy, posts, and puts a header over an empty block. The escaping this replaced kept
+    that text, so the gap did not exist before.
     """
     assert isinstance(snapshot, ReviewSnapshot)
-    return snapshot.verdict != "commented" or bool(snapshot.body.strip())
+    return snapshot.verdict != "commented" or bool(as_note_text(snapshot.body))
 
 
 # Skipped rather than counted. A COMMENTED review is a note and not a verdict — GitHub's own rule

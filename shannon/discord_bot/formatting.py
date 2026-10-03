@@ -17,9 +17,8 @@ from shannon.discord_bot.panels import (
     PanelImage,
     PanelLink,
 )
-from shannon.discord_bot.rich_text import as_rich_text
+from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
 from shannon.discord_bot.safe_text import (
-    COMMENT_PREVIEW_LIMIT,
     COMMIT_MESSAGE_LIMIT,
     COMMIT_TITLE_LIMIT,
     EMPTY,
@@ -50,7 +49,7 @@ from shannon.domain.models import (
     TrackedSnapshot,
 )
 from shannon.domain.time import as_utc
-from shannon.github.mentions import rewrite
+from shannon.github.mentions import rewrite_a_note
 
 UNKNOWN = "Unknown"
 
@@ -159,22 +158,36 @@ def format_issue(
 def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> Panel:
     """Render the block at the top of a ticket's thread.
 
-    Three lines, which is what the requirements ask for and all a draft item has to say. The
-    other blocks carry an author, assignees and tags; a draft on a board has none of those, and
-    a row of empty fields would read as data missing rather than data absent.
+    Built by `_rows`, the same way the other two blocks are, which is the half of issue #166 about
+    duplication: these labels used to be written out a second time here and had already drifted to
+    three of them.
+
+    What it shows is still only what a draft card HAS. The other blocks carry an author, assignees
+    and tags; the board read fetches Title and Status and nothing else, so each of those would read
+    `None` for ever - and a row of empty fields reads as data missing rather than data absent, which
+    is the same rule that keeps a reviewers line off an issue. `Last Updated` joins the three it
+    always had because the board does send it and this threw it away. `State` does not, for exactly
+    the reason the rest are left out: a ticket's state is hard-coded open and nothing can close it,
+    so the row could only ever say `Open`.
+
+    A description is not withheld but impossible: a board item carries no body text at all, so
+    there is nothing to render even if a row were wanted. `_the_description` would drop it anyway.
 
     `priority` and `mentions` are accepted and ignored, because the policies all render through
     one signature and a ticket has nobody to mention.
     """
-    lines = [
-        f"**Ticket Name:** {_title(snapshot)}",
-        f"**GitHub Link:** {snapshot.html_url}",
-        f"**Status:** {spoken(status)}",
-    ]
     # Grey, because a draft on a board has no state of its own to colour by. It is also the
     # only block with no author, so it is the only one that never carries a picture.
     return Panel(
-        blocks=(Block(BlockKind.FIELDS, "\n".join(lines)),),
+        blocks=(
+            _rows(
+                ("Ticket Name", _title(snapshot)),
+                ("Type", "Ticket"),
+                ("GitHub Link", snapshot.html_url),
+                ("Status", spoken(status)),
+                ("Last Updated", _timestamp(snapshot.updated_at)),
+            ),
+        ),
         accent=Accent.DRAFT,
         link=_opens_github(snapshot.html_url),
     )
@@ -659,6 +672,22 @@ def _where(snapshot: ReviewCommentSnapshot) -> str:
     return f"{named} L{snapshot.start_line}-{snapshot.line}"
 
 
+def _rows(*rows: tuple[str, str]) -> Block:
+    """The fields of a block, as one component. Issue #166.
+
+    One block rather than one each. Discord allows forty components in a view and a row apiece
+    would spend a quarter of them on a single message, and the rows are read as a table anyway: a
+    rule between every two of them is worse than none at all.
+
+    Shared by every block that has fields, which is what the issue asked for: the label shape was
+    written out twice and the second copy was a ticket's, three rows deep and drifting. A row a
+    caller has no data for is left out by not being passed, rather than passed empty and filtered
+    here - an always-empty field is noise, which is the rule `format_issue` already follows for
+    reviewers, and a filter would be a branch nothing could take.
+    """
+    return Block(BlockKind.FIELDS, "\n".join(f"**{label}:** {value}" for label, value in rows))
+
+
 def _metadata(
     snapshot: TrackedSnapshot,
     *,
@@ -672,34 +701,32 @@ def _metadata(
 ) -> Panel:
     """The block both kinds of item share; only the noun and the reviewers line differ.
 
-    The eleven rows are ONE block rather than one each. Discord allows forty components in a
-    view and a row apiece would spend a quarter of them on a single message, and the rows are
-    read as a table anyway: a rule between every two of them is worse than none at all.
+    The rows go through `_rows`, which a ticket's block shares since issue #166.
     """
-    lines = [
-        f"**{noun} Name:** {_title(snapshot)}",
-        f"**Type:** {noun}",
-        f"**State:** {snapshot.display_state.capitalize()}",
-        f"**GitHub Link:** {snapshot.html_url}",
-        f"**Author:** {_people([snapshot.author] if snapshot.author else [], mentions)}",
-        f"**Assignees:** {_people(snapshot.assignees, mentions)}",
+    rows = [
+        (f"{noun} Name", _title(snapshot)),
+        ("Type", noun),
+        ("State", snapshot.display_state.capitalize()),
+        ("GitHub Link", snapshot.html_url),
+        ("Author", _people([snapshot.author] if snapshot.author else [], mentions)),
+        ("Assignees", _people(snapshot.assignees, mentions)),
     ]
     if reviewers is not None:
         # Teams named plainly and never looked up in `mentions`, which maps logins to accounts.
         # A slug that happens to match a login is not that person, and rendering one as the other
         # would put somebody's name against a team they have nothing to do with.
         asked = [*(_person(person, mentions) for person in reviewers), *(t.login for t in teams)]
-        lines.append(f"**Reviewers:** {', '.join(asked) if asked else EMPTY}")
-    lines += [
-        f"**Status:** {spoken(status)}",
-        f"**Priority:** {spoken(priority)}",
-        f"**Tags:** {_tags(snapshot.label_names)}",
-        f"**Last Updated:** {_timestamp(snapshot.updated_at)}",
+        rows.append(("Reviewers", ", ".join(asked) if asked else EMPTY))
+    rows += [
+        ("Status", spoken(status)),
+        ("Priority", spoken(priority)),
+        ("Tags", _tags(snapshot.label_names)),
+        ("Last Updated", _timestamp(snapshot.updated_at)),
     ]
     # Not `fit`, which cut this to a MESSAGE and is the wrong budget twice over: a card
     # holds twice a message, and the description under this block is what should give way
     # first. `Panel.trimmed` does both, at the send, over the blocks it can see.
-    blocks = [Block(BlockKind.FIELDS, "\n".join(lines))]
+    blocks = [_rows(*rows)]
     described = as_rich_text(snapshot.body)
     blocks += _the_description(described.text)
     return Panel(
@@ -784,7 +811,9 @@ def _note(
     blocks = [Block(BlockKind.HEADING, said)]
     # Unquoted since issue #113: the rule above it separates the comment from the line
     # naming its author, which is what the `> ` markers were there to do.
-    body = _named_in(clipped(snapshot.body, limit=COMMENT_PREVIEW_LIMIT), mentions, roles)
+    # `as_note_text` rather than a recipe spelled out here, because `services.notes` reads the
+    # names to look up out of the very same string and the two have to agree to the character.
+    body = _named_in(as_note_text(snapshot.body), mentions, roles)
     if body:
         blocks.append(Block(BlockKind.BODY, body))
     if snapshot.html_url:
@@ -803,8 +832,18 @@ def _named_in(
     Anybody not linked is left exactly as written, which is the bargain every other renderer in
     this module already makes: the thread records who was named even where the server has no way
     to reach them.
+
+    `rewrite_a_note` rather than `rewrite`, so that nothing here chooses whether a name inside a
+    code span counts: that answer has to match the one the note path reads with, and it is paired
+    with it at the other end rather than passed from both.
+
+    Code spans are skipped, which GitHub does and this could not until issue #166: the escaping
+    used to turn the backticks into literal characters before the swap ran, so there was no span
+    left to respect and a name inside one resolved. Keeping that once the backticks survive would
+    put a `<@id>` inside a code span, where Discord shows it as the text it is - while delivering
+    the notification anyway off the raw content. A ping with nothing to see.
     """
-    return rewrite(
+    return rewrite_a_note(
         body,
         person=lambda login: _mention(login, mentions, "<@{}>"),
         team=lambda slug: _mention(slug, roles, "<@&{}>"),
@@ -1014,7 +1053,11 @@ def format_commit(commit: Commit) -> Panel:
     said = f"{_COMMIT_MARK} **{_account(commit.author)}** has committed {_subject(commit)}"
     # Unquoted since issue #113. The rule above it does the separating the `> ` markers were
     # doing, and doing badly.
-    body = clipped(commit.description, limit=COMMIT_MESSAGE_LIMIT)
+    # Issue #166. The subject above stays escaped - it sits inside a `**`-matched line, and
+    # rendering it could leave that line unbalanced - but the description is prose and is shown as
+    # it was written. Images become links rather than a gallery: a `Commit` carries no repository,
+    # so the private-repo gate a card's pictures go through has nothing to read here.
+    body = as_rich_text(commit.description, limit=COMMIT_MESSAGE_LIMIT, images=Images.AS_LINKS).text
 
     blocks = [Block(BlockKind.HEADING, said)]
     if body:

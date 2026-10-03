@@ -97,6 +97,35 @@ class TestWhatOneCommitLineSays:
         assert said.splitlines()[1] == "Straight into the body"
 
 
+class TestWhatTheDescriptionKeeps:
+    """Issue #166. The description under the subject line, shown as it was written.
+
+    The SUBJECT is deliberately left escaped - it sits inside a `**`-matched heading line, and a
+    marker rendered there could leave that line unbalanced. Only the prose below it changed.
+    """
+
+    def said(self, message: str) -> str:
+        return formatting.format_commit(commit(message)).text
+
+    def test_a_bullet_list_in_the_body_is_a_list(self) -> None:
+        said = self.said("Fix the poller\n\n- drop the retry\n- widen the gate")
+
+        assert "- drop the retry" in said
+        assert "- widen the gate" in said
+
+    def test_a_code_span_survives(self) -> None:
+        assert "`--cov`" in self.said("Add coverage\n\nPass `--cov` in CI.")
+
+    def test_a_plus_list_becomes_a_list(self) -> None:
+        """A conventional-commit body written with `+` arrived as plus signs: GitHub reads one as
+        a bullet, Discord does not, and nothing escaped it either."""
+        assert self.said("Tidy\n\n+ one\n+ two").splitlines()[1] == "- one"
+
+    def test_the_subject_is_still_escaped(self) -> None:
+        """Unchanged, and the reason is in this class's docstring."""
+        assert "Fix \\*\\*/\\*.py" in self.said("Fix **/*.py\n\nbody")
+
+
 class TestTheNumbersUnderIt:
     def test_one_file_is_one_file(self) -> None:
         said = formatting.format_commit(commit("Tidy", changed_files=1)).text

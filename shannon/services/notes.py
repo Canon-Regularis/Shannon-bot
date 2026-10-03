@@ -15,12 +15,12 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.panels import Panel
-from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
+from shannon.discord_bot.rich_text import as_note_text
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, RevisesMessages
 from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import ItemNote
-from shannon.github.mentions import names_in
+from shannon.github.mentions import names_a_note_writes
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.locating import in_its_thread
 from shannon.services.sync.shutting import KeepsThreadsShut
@@ -128,10 +128,18 @@ class ItemNoteMirror:
             if found is None:
                 return None
 
-            # Read from the very string the renderer swaps names in, not the body it came from.
-            # The preview is cut mid-word before the escaping, so the raw body would name
-            # `monalisa` where the renderer is handed `mona`.
-            named = names_in(clipped(snapshot.body, limit=COMMENT_PREVIEW_LIMIT))
+            # Read from the very string the renderer swaps names in, and through the very same
+            # function. The preview is cut mid-word, so the raw body would name `monalisa` where
+            # the renderer is handed `mona` - and since issue #166 the two differ by more than the
+            # escaping, because the rich conversion strips HTML comments and image markup before it
+            # cuts, so the window lands somewhere else entirely.
+            #
+            # One function for the text, and one for how to read it. A name that one of these
+            # sees and the other does not renders exactly as an unlinked name renders, and nothing
+            # anywhere reports a mention that was owed and never made - so neither the string nor
+            # the rule for reading it is spelled out twice. `names_a_note_writes` is paired with
+            # the `rewrite_a_note` the renderer calls.
+            named = names_a_note_writes(as_note_text(snapshot.body))
 
             # The author last: `resolve_many` lowercases into a fresh mapping, so the last entry
             # for a name wins and the author's is the one carrying a GitHub id. That id is what
