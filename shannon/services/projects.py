@@ -31,11 +31,12 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
-from shannon.discord_bot.formatting import format_card_converted
+from shannon.discord_bot.formatting import format_card_changed, format_card_converted
 from shannon.discord_bot.threads import PostsToThread, ShutsThread
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
+from shannon.domain.json import JsonObject
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
 from shannon.github.errors import GitHubAuthError, GitHubNotFoundError, GitHubRateLimitError
@@ -277,6 +278,11 @@ class ProjectPoller:
             # counting those reports a board being mirrored while nothing is written.
             if result.synced:
                 mirrored += 1
+                # Issue #182. Always called, including for a card seen for the first time: the
+                # recording is what the FIRST poll is for, and skipping it would leave the baseline
+                # unwritten and slip every announcement by one poll. `thread_id` is the one from
+                # before this sync, so None says the card had no thread a moment ago.
+                await self._say_what_moved(board, item, thread_id)
                 continue
 
             # The check stays explicit and the branch coverage floor is told not to look for
@@ -595,6 +601,62 @@ class ProjectPoller:
             )
             await self._say_it_moved(ghost.thread_id, item.html_url)
 
+    async def _say_what_moved(self, board: _Board, item: BoardItem, thread_id: int | None) -> None:
+        """Say what changed on a card, in one line, and write down what a reader has now seen.
+
+        Issue #182. Record FIRST and say second, which is the order `_hand_over_converted` uses and
+        for the same reason: a poller is a loop rather than a queue, so a Discord refusal after the
+        write costs this one announcement, where a refusal before it would say the same thing on
+        every poll for as long as the permission was missing.
+
+        A card whose fields have never been recorded says nothing at all. That is every card on
+        every board the minute this ships, and without the rule each of them would announce every
+        field it has at once - which is the loudest possible way to deploy a quiet feature. It is
+        also how a card mirrored before this column existed catches up: recorded once, silent once,
+        and ordinary from then on.
+
+        Nothing is claimed in `mirrored_notes`. The stored values ARE the guard: a second poll
+        comparing a card against what it just wrote finds nothing moved and says nothing, which is
+        the same work the claim would do and one query instead of two.
+        """
+        now = _board_fields_of(item)
+        before = await self._shown_fields(board.repository_id, item.item_id)
+        # Recorded first and unconditionally, which is what makes a first poll silent rather than
+        # unrecorded: the row exists by now because the sync above just wrote it, and its
+        # `shown_fields` is null until this write.
+        await self._remember_shown_fields(board.repository_id, item.item_id, now)
+
+        # Nothing to compare against, or nowhere to say it. The second is not redundant: the
+        # conversion hand-over keeps a card's row and lets go of its thread, so a card can have
+        # recorded fields and no thread to tell.
+        if before is None or thread_id is None:
+            return
+
+        moved = _what_moved(before, now)
+        if not moved:
+            return
+
+        try:
+            await self._threads.post(thread_id=thread_id, panel=format_card_changed(moved))
+        except DiscordGatewayError as refusal:
+            # Swallowed, and the record already written. The alternative is saying it again every
+            # minute until somebody grants Manage Messages, which is worse than missing it once.
+            logger.warning("could not say what moved on the card %r: %s", item.title, refusal)
+
+    async def _shown_fields(self, repository_id: int, card_id: int) -> JsonObject | None:
+        async with self._sessionmaker() as session:
+            return await TrackedItemStore(session).shown_fields(
+                repository_id=repository_id, card_id=card_id
+            )
+
+    async def _remember_shown_fields(
+        self, repository_id: int, card_id: int, fields: JsonObject
+    ) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).remember_shown_fields(
+                repository_id=repository_id, card_id=card_id, fields=fields
+            )
+
     async def _say_it_moved(self, thread_id: int, html_url: str) -> None:
         """Point the old thread at the issue, and shut it.
 
@@ -786,6 +848,66 @@ class ProjectPoller:
             project_number=board.project_number,
             action="polled",
         )
+
+
+# What a change line reports, as {stored key: the label a reader sees}. Issue #182.
+#
+# Creator is absent because the issue asked for it: a card's creator does not change, and being
+# told who made something is not news about it moving.
+#
+# `Created` and `Updated` are absent for a sharper reason than scope. A created-at cannot change,
+# and an updated-at changes whenever ANYTHING else does - so including it would put the same
+# redundant pair of timestamps in every line this ever posts, saying only "something moved" beside
+# the lines that say what. The block shows both; a change line is for what a reader did not know.
+_WATCHED: dict[str, str] = {
+    "status": "Status",
+    "priority": "Priority",
+    "story_point": "Story Point",
+    "iteration": "Iteration",
+    "area": "Area",
+    "assignees": "Assignees",
+    "labels": "Tags",
+}
+
+
+def _board_fields_of(item: BoardItem) -> JsonObject:
+    """A card's watched fields, as the text a reader was shown.
+
+    Stored as text rather than as ids, which is what makes the comparison and the block agree: the
+    row holds what the thread said, so a renamed option reads as a change because to a reader it
+    IS one - the thread said `HIGH` yesterday and says `URGENT` today.
+
+    The two lists are joined rather than kept as arrays. A change line names them in one phrase
+    either way, and ordering is GitHub's to decide, so a join keeps the stored shape flat and the
+    comparison a string compare.
+    """
+    return {
+        "status": item.column or "",
+        "priority": item.priority_name or "",
+        "story_point": item.story_point or "",
+        "iteration": item.iteration or "",
+        "area": item.area or "",
+        "assignees": ", ".join(person.login for person in item.assignees),
+        "labels": ", ".join(label.name for label in item.labels),
+    }
+
+
+def _what_moved(before: JsonObject, now: JsonObject) -> list[tuple[str, str, str]]:
+    """Every watched field whose text differs, in the order a reader scans the block.
+
+    A key missing from `before` is read as empty rather than skipped, which is what a card
+    recorded before a board gained a field looks like: the field appearing IS the change, and
+    "None to General" is what setting it did.
+    """
+    moved: list[tuple[str, str, str]] = []
+    for key, label in _WATCHED.items():
+        was = before.get(key)
+        is_now = now.get(key)
+        said = was if isinstance(was, str) else ""
+        says = is_now if isinstance(is_now, str) else ""
+        if said != says:
+            moved.append((label, said, says))
+    return moved
 
 
 def _fits(column: str | None) -> str:

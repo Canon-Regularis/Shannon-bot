@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.json import JsonObject
 from shannon.domain.time import as_utc
 
 
@@ -261,6 +262,49 @@ class TrackedItemStore:
             update(TrackedItem)
             .where(TrackedItem.id == tracked_item_id)
             .values(project_column=column)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def shown_fields(self, *, repository_id: int, card_id: int) -> JsonObject | None:
+        """The board fields a reader was last shown for one card, or None for never seen.
+
+        Issue #182. Keyed by the CARD id, which is what a ticket row is keyed by and what the
+        poller has in hand - so this needs no tracked item id and no second lookup to find one.
+
+        None and an empty object are different answers and the caller leans on it: None means this
+        card's fields have never been recorded, which is how the first poll after this shipped says
+        nothing instead of announcing every field of every card at once.
+
+        Read only for a card the board says has moved, so this is one query per CHANGED card rather
+        than one per card per poll. A board where nothing moved asks nothing.
+        """
+        return await self._session.scalar(
+            select(TrackedItem.shown_fields).where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == ObjectType.TICKET,
+                TrackedItem.github_object_id == card_id,
+            )
+        )
+
+    async def remember_shown_fields(
+        self, *, repository_id: int, card_id: int, fields: JsonObject
+    ) -> None:
+        """Record the board fields a reader has now been shown for one card.
+
+        Written before the line is posted, never after, and that order is the whole of the
+        idempotency here: a poller is a loop rather than a queue, so a Discord refusal after the
+        write costs that one announcement, where a refusal before it would say the same thing on
+        every poll until somebody fixed the permission. `_hand_over_converted` strikes the same
+        bargain and says so at more length.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == ObjectType.TICKET,
+                TrackedItem.github_object_id == card_id,
+            )
+            .values(shown_fields=fields)
             .execution_options(synchronize_session=False)
         )
 
