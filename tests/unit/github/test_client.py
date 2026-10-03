@@ -530,6 +530,254 @@ class TestPagingThroughAList:
         assert caplog.text == ""
 
 
+class TestAskingWhetherAListChanged:
+    """`get_pages_since` is the conditional read that makes a two-second board poll affordable.
+
+    A 304 to `If-None-Match` costs no rate-limit budget at all and carries no body, so the whole
+    value of this method sits in the answers that bring nothing back. Every test here is about one
+    of two things: that the question gets asked, and that "nothing changed" is never confused with
+    "there is nothing there".
+    """
+
+    def _answers(
+        self, status: int, body: object = None, headers: dict[str, str] | None = None
+    ) -> tuple[list[httpx.Request], Callable[[httpx.Request], httpx.Response]]:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if status == 304:
+                # No body and no Location, which is what GitHub actually sends.
+                return httpx.Response(304, headers=headers or {})
+            return httpx.Response(status, content=json.dumps(body), headers=headers or {})
+
+        return seen, handler
+
+    async def test_no_validator_is_sent_when_none_is_held(self) -> None:
+        seen, handler = self._answers(200, [{"id": 1}], {"ETag": '"abc"'})
+
+        async with client_with(handler) as client:
+            await client.get_pages_since("/items", per_page=100)
+
+        assert "If-None-Match" not in seen[0].headers
+
+    async def test_a_held_validator_is_sent(self) -> None:
+        """The saving does not happen unless the question is asked."""
+        seen, handler = self._answers(200, [{"id": 1}], {"ETag": '"new"'})
+
+        async with client_with(handler) as client:
+            await client.get_pages_since("/items", etag='"held"', per_page=100)
+
+        assert seen[0].headers["If-None-Match"] == '"held"'
+
+    async def test_a_304_says_nothing_changed_rather_than_raising(self) -> None:
+        """The ordering this pins is load-bearing. `_raise_for_status` passes a 2xx and nothing
+        else, so a 304 reaching it answers `GitHubUnavailableError("GitHub returned 304")` - an
+        outage, once per poll, for the one reply that means everything is fine.
+        """
+        _, handler = self._answers(304)
+
+        async with client_with(handler) as client:
+            read = await client.get_pages_since("/items", etag='"held"')
+
+        assert read.pages is None
+        assert read.etag == '"held"', "the validator it answered to is still the one to send"
+
+    async def test_a_304_is_not_mistaken_for_a_redirect(self) -> None:
+        """A 304 sits inside httpx's redirect range and the real client follows redirects. It is
+        spared only because it carries no Location, so this runs against a client built the way the
+        real one is - a transport told to follow nothing is where that would stay invisible.
+        """
+        seen, handler = self._answers(304)
+
+        async with client_with(handler) as client:
+            read = await client.get_pages_since("/items", etag='"held"')
+
+        assert read.pages is None
+        assert len(seen) == 1, "it followed the 304 somewhere"
+
+    async def test_an_unchanged_list_is_not_an_empty_one(self) -> None:
+        """What the whole return type exists for. A board that answered 304 has every card it had;
+        a board that answered `[]` has none. One spelling for both would either wipe a board or
+        hide one, and which of those you got would depend on the caller.
+        """
+        _, unchanged = self._answers(304)
+        _, empty = self._answers(200, [], {"ETag": '"e"'})
+
+        async with client_with(unchanged) as client:
+            nothing_changed = await client.get_pages_since("/items", etag='"held"')
+        async with client_with(empty) as client:
+            nothing_there = await client.get_pages_since("/items", etag='"held"')
+
+        assert nothing_changed.pages is None
+        assert nothing_there.pages == ([],)
+
+    async def test_a_changed_list_carries_its_new_validator(self) -> None:
+        _, handler = self._answers(200, [{"id": 1}], {"ETag": '"fresh"'})
+
+        async with client_with(handler) as client:
+            read = await client.get_pages_since("/items", etag='"stale"')
+
+        assert read.pages == ([{"id": 1}],)
+        assert read.etag == '"fresh"'
+
+    async def test_a_list_with_no_validator_offers_none(self) -> None:
+        """Nothing to ask with next time, which the board reader reads as do not keep this."""
+        _, handler = self._answers(200, [{"id": 1}])
+
+        async with client_with(handler) as client:
+            read = await client.get_pages_since("/items")
+
+        assert read.etag is None
+
+    async def test_a_paged_list_offers_no_validator_and_is_read_whole(self) -> None:
+        """The safety rule, at the client end. GitHub's ETag hashes ONE response body, so page
+        one's tag says nothing about page two - and a 304 carries no Link header to ask with. A tag
+        kept here would let a change confined to a later page go unseen for ever.
+        """
+        pages = [[{"id": 1}], [{"id": 2}], [{"id": 3}]]
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            index = calls["n"]
+            calls["n"] += 1
+            headers = {"ETag": f'"page{index}"'}
+            if index < len(pages) - 1:
+                headers["Link"] = f'<https://api.github.com/items?after=c{index}>; rel="next"'
+            return httpx.Response(200, content=json.dumps(pages[index]), headers=headers)
+
+        async with client_with(handler) as client:
+            read = await client.get_pages_since("/items", per_page=100)
+
+        assert read.pages == tuple(pages), "it did not read the whole list"
+        assert read.etag is None, "it kept a validator covering one page of three"
+
+    async def test_the_original_parameters_are_not_repeated_after_the_first_page(self) -> None:
+        """The cursor is in the next URL already. Sending the first request's parameters beside it
+        is how a caller ends up asking for the same page twice.
+        """
+        seen: list[httpx.Request] = []
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            index = calls["n"]
+            calls["n"] += 1
+            links = (
+                {"Link": '<https://api.github.com/items?after=c>; rel="next"'} if index == 0 else {}
+            )
+            return httpx.Response(200, content=json.dumps([index]), headers=links)
+
+        async with client_with(handler) as client:
+            await client.get_pages_since("/items", per_page=100)
+
+        assert seen[0].url.params.get("per_page") == "100"
+        assert "per_page" not in seen[1].url.params
+
+    async def test_a_body_that_will_not_parse_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html>maintenance</html>")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="non-JSON"):
+                await client.get_pages_since("/items")
+
+    async def test_a_later_page_that_will_not_parse_is_reported(self) -> None:
+        """The second read has its own decode, so it needs its own test: a first page that parsed
+        proves nothing about the one the cursor leads to.
+        """
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200,
+                    content=json.dumps([{"id": 1}]),
+                    headers={"Link": '<https://api.github.com/items?after=c>; rel="next"'},
+                )
+            return httpx.Response(200, content=b"<html>maintenance</html>")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="non-JSON"):
+                await client.get_pages_since("/items")
+
+    async def test_a_refusal_is_reported(self) -> None:
+        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+            with pytest.raises(GitHubAuthError):
+                await client.get_pages_since("/items")
+
+    async def test_a_refusal_on_a_later_page_is_reported(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200,
+                    content=json.dumps([{"id": 1}]),
+                    headers={"Link": '<https://api.github.com/items?after=c>; rel="next"'},
+                )
+            return httpx.Response(403, content=json.dumps({"message": "Forbidden"}))
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubAuthError):
+                await client.get_pages_since("/items")
+
+    async def test_a_list_that_never_arrives_is_reported(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
+                await client.get_pages_since("/items")
+
+    async def test_a_cursor_that_points_at_itself_does_not_read_for_ever(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The same bound `get_pages` keeps, for the same reason: the cursor is opaque, so a Link
+        header looping back cannot be told from a real next page by inspection.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content="[]",
+                headers={"Link": '<https://api.github.com/items?after=same>; rel="next"'},
+            )
+
+        async with client_with(handler) as client:
+            with caplog.at_level("WARNING"):
+                read = await client.get_pages_since("/items")
+
+        assert read.pages is not None
+        assert len(read.pages) == MAX_PAGES
+        assert "stopped following pages" in caplog.text
+
+    async def test_a_list_that_ends_on_its_last_allowed_page_is_not_cut_short(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A warning that fires when nothing is wrong teaches whoever reads the log to skip it."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            links = (
+                {"Link": '<https://api.github.com/items?after=c>; rel="next"'}
+                if calls["n"] < MAX_PAGES
+                else {}
+            )
+            return httpx.Response(200, content=json.dumps([calls["n"]]), headers=links)
+
+        async with client_with(handler) as client:
+            with caplog.at_level("WARNING"):
+                read = await client.get_pages_since("/items")
+
+        assert read.pages is not None
+        assert len(read.pages) == MAX_PAGES, "it did not read the whole list"
+        assert caplog.text == ""
+
+
 class TestFetchingAnyJson:
     """`get_json` hands the body over as it came, for endpoints that answer with arrays."""
 

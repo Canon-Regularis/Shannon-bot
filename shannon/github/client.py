@@ -36,6 +36,7 @@ from shannon.github.errors import (
     GitHubRefusedError,
     GitHubUnavailableError,
 )
+from shannon.github.paging import PagedRead
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,10 @@ class GitHubClient(
     def get_pages(
         self, path: str, *, owner: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
+
+    async def get_pages_since(
+        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+    ) -> PagedRead: ...
 
 
 class HttpGitHubClient:
@@ -779,6 +784,79 @@ class HttpGitHubClient:
         # it means a board is being truncated looks exactly like the times it does not.
         if url is not None:
             logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
+
+    async def get_pages_since(
+        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+    ) -> PagedRead:
+        """Every page of a list endpoint, unless GitHub says none of it changed.
+
+        The conditional sibling of `get_pages`, and a separate method rather than a parameter on
+        it. That one is an async generator, and a generator has nowhere to put an answer that is
+        not a page; six callers read it as a stream of bodies and none of them wants to learn
+        about validators.
+
+        `If-None-Match` goes on the FIRST request only. A 304 to it costs **no rate-limit budget
+        at all** - GitHub's counter does not move - and carries no body, which is the whole reason
+        a board can now be read every couple of seconds for less than it used to cost to read it
+        every minute.
+
+        Pages are collected rather than yielded, because the answer "or nothing changed" is not a
+        page and a generator cannot say it. Nothing is held that was not held before: the one
+        caller accumulated every item into a list anyway.
+        """
+        headers = await self._authorization(owner)
+        if etag:
+            headers = {**headers, "If-None-Match": etag}
+
+        response = await self._fetch(path, params=params or None, headers=headers)
+
+        # Checked BEFORE `_raise_for_status`, which reads anything outside the 2xx range as a
+        # failure. A 304 is the opposite of a failure: it is GitHub confirming the copy already
+        # held, and the validator sent is still the right one to send again.
+        if response.status_code == 304:
+            return PagedRead(etag=etag, pages=None)
+
+        _raise_for_status(response, path)
+        validator = response.headers.get("etag")
+        pages: list[object] = [self._body(response, path)]
+
+        # The next URL carries the cursor already, so the original parameters must not be sent
+        # again beside it.
+        url: str | None = response.links.get("next", {}).get("url")
+        paged = url is not None
+
+        for _ in range(MAX_PAGES - 1):
+            if url is None:
+                break
+            response = await self._fetch(url, params=None, headers=await self._authorization(owner))
+            _raise_for_status(response, path)
+            pages.append(self._body(response, path))
+            url = response.links.get("next", {}).get("url")
+
+        # The same bound `get_pages` keeps, for the same reason: the cursor is opaque, so a Link
+        # header pointing at itself cannot be told from a real next page by inspection.
+        if url is not None:
+            logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
+
+        # A one-line conditional on purpose. Written as an `if` it would be a branch whose arms
+        # the coverage floor counts separately, and the reason for it is one sentence either way:
+        # a validator that covers one page of several covers nothing. See `PagedRead`.
+        return PagedRead(etag=None if paged else validator, pages=tuple(pages))
+
+    async def _fetch(
+        self, url: str, *, params: dict[str, str | int] | None, headers: dict[str, str]
+    ) -> httpx.Response:
+        """One GET, with a failure to reach GitHub told apart from a GitHub that answered."""
+        try:
+            return await self._client.get(url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
+
+    def _body(self, response: httpx.Response, path: str) -> object:
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
     async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
         """Whatever GitHub answers at a path, list or object alike.

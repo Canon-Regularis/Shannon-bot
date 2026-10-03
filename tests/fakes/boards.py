@@ -107,13 +107,21 @@ def wraps(kind: ObjectType, content_id: int, column: str = "Done", item_id: int 
 class FakeBoard:
     """A project board that answers with whatever it was last set to hold."""
 
-    def __init__(self, *items: BoardItem) -> None:
+    def __init__(self, *items: BoardItem, cheap: bool = True) -> None:
         self.items = list(items)
         self.reads: list[tuple[str, int]] = []
         self.error: Exception | None = None
+        # Whether the poller is told this board can be re-read for a conditional request. True by
+        # default, which is what a board small enough to fit in one page answers and therefore
+        # what nearly every test wants. `cheap=False` is the board that has outgrown a page, and
+        # the only thing that changes is how long the poller waits before reading it again.
+        self.cheap = cheap
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
         self.reads.append((owner, project_number))
         if self.error is not None:
             raise self.error
         return list(self.items)
+
+    def can_recheck_cheaply(self, owner: str, project_number: int) -> bool:
+        return self.cheap

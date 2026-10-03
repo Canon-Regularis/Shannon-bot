@@ -547,6 +547,99 @@ class TestTheLoop:
         await asyncio.wait_for(running, timeout=5)
 
 
+class TestHowOftenTheBoardIsRead:
+    """Issue #189. The interval is short because a read is usually free - and it stops being short
+    for a board where it is not.
+
+    GitHub answers an unchanged board with 304: no body, and no rate-limit budget spent. That is
+    what makes two seconds affordable where sixty used to be the careful number. But the validator
+    behind it hashes ONE response body, so a board too big for a single page cannot be checked that
+    way, and every read of one is its whole megabyte. Reading a megabyte every two seconds is the
+    one way this change could cost more than it saved, so a board like that is polled on the slow
+    clock instead. The guard fails in the safe direction: such a board gets slower, never dearer.
+    """
+
+    async def test_a_cheap_board_is_read_again_at_the_interval(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The ordinary case, and what the whole change is for.
+
+        An EMPTY board, here and in the test below, and that is the load-bearing part rather than
+        tidiness. A board with a card on it spends the first pass mirroring: a thread, several
+        queries and a Discord write, which is far longer than the interval being measured. A
+        version of this that polled a board with a card passed with the guard ripped out, because
+        the window it allowed was swallowed by one pass's own work and no second pass ever began.
+        An empty board makes a pass cost nothing, so what is left to measure is the wait.
+        """
+        board = FakeBoard(cheap=True)
+        poller = poller_for(board)
+
+        running = asyncio.create_task(poller.run_forever())
+        await until(lambda: len(board.reads) >= 5)
+        poller.stop()
+        await asyncio.wait_for(running, timeout=5)
+
+        assert len(board.reads) >= 5, "it did not go back round at the interval"
+
+    async def test_a_board_too_big_to_check_cheaply_is_not_read_again_at_the_interval(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The guard. `cheap=False` is a board that has outgrown one page, so every read is its
+        whole body - and at the fast interval that is a megabyte every couple of seconds, for ever.
+
+        The sleep is not waiting for something to happen, which is why it is a sleep: against an
+        interval of a hundredth of a second it gives the failure twenty passes of room to appear
+        in, and the point is that it does not.
+        """
+        board = FakeBoard(cheap=False)
+        poller = poller_for(board)
+
+        running = asyncio.create_task(poller.run_forever())
+        await until(lambda: len(board.reads) >= 1)
+        await asyncio.sleep(0.2)
+        poller.stop()
+        await asyncio.wait_for(running, timeout=5)
+
+        assert len(board.reads) == 1, "it read a board it cannot check cheaply at the fast interval"
+
+    async def test_the_slow_clock_is_said_once_rather_than_every_pass(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway, caplog
+    ) -> None:
+        """A board polling thirty times less often than its neighbour is not something anybody
+        should have to infer from a graph, so it is logged - but once, because at the fast interval
+        a line per pass is eighteen hundred an hour and that is how a log becomes unreadable.
+        """
+        board = FakeBoard(card(), cheap=False)
+        poller = poller_for(board)
+
+        with caplog.at_level("INFO"):
+            await poller.run_once()
+            await poller.run_once()
+            await poller.run_once()
+
+        assert caplog.text.count("cannot be checked without reading the whole of it") == 1
+
+    async def test_a_board_that_becomes_cheap_is_read_at_the_interval_again(
+        self, board_channel: None, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The other arm, and not a hypothetical: the fields a read asks for change when somebody
+        adds a column, which changes the request, which is a board that could not be validated
+        becoming one that can. Nothing here should be a one-way door.
+        """
+        board = FakeBoard(cheap=False)
+        poller = poller_for(board)
+
+        await poller.run_once()
+        board.cheap = True
+
+        running = asyncio.create_task(poller.run_forever())
+        await until(lambda: len(board.reads) >= 5)
+        poller.stop()
+        await asyncio.wait_for(running, timeout=5)
+
+        assert len(board.reads) >= 5
+
+
 class TestABoardThatMayNotSetAStatus:
     """The shipped default, and the reason for it.
 

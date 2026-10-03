@@ -35,6 +35,16 @@ class ReadsBoards(Protocol):
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]: ...
 
+    def can_recheck_cheaply(self, owner: str, project_number: int) -> bool:
+        """Whether another read of this board would cost a conditional request or the whole body.
+
+        Here rather than on a protocol of the poller's own because it is a fact about the reader's
+        last answer, and the poller is the only caller that acts on it: `/refresh` reads a board
+        once because somebody asked it to, where the poller reads one over and over and has to
+        care what each read costs.
+        """
+        ...
+
 
 def snapshot_of(
     item: BoardItem, *, repository: RepositorySnapshot, project_number: int, action: str

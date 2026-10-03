@@ -29,6 +29,7 @@ from shannon.domain.models import Actor, Label
 from shannon.domain.priority import parse_priority
 from shannon.github import mapping
 from shannon.github.errors import GitHubAuthError, GitHubNotFoundError
+from shannon.github.paging import PagedRead
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,10 @@ class ReadsJson(Protocol):
         self, path: str, *, owner: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
 
+    async def get_pages_since(
+        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+    ) -> PagedRead: ...
+
 
 class HttpProjectBoards:
     """`ReadsBoards` on top of GitHub's REST API for project boards."""
@@ -274,6 +279,22 @@ class HttpProjectBoards:
         self._writer = writer
         self._fields: dict[tuple[str, int], BoardFields] = {}
         self._kinds: dict[str, str] = {}
+        # The last read of each board, as {(owner, number): (validator, the cards it describes)}.
+        #
+        # This is what makes a two-second poll cost less than the one-minute poll it replaced. The
+        # items endpoint answers a conditional GET with 304 and no body, and a 304 spends NO
+        # rate-limit budget at all, so a board nobody touched is read for nothing. The cards are
+        # kept beside the validator because a 304 proves the body was identical, which makes the
+        # parse that produced them reproducible rather than merely likely.
+        #
+        # In memory and not a table. A restart costs one full read, which is the cheapest possible
+        # price for not having a migration, and nothing here is worth surviving a deploy.
+        self._listed: dict[tuple[str, int], tuple[str, tuple[BoardItem, ...]]] = {}
+        # Boards and owners already complained about, so each complaint is loud once and then
+        # drops to DEBUG. Both paths re-read on every poll by design, and issue #189 turned that
+        # from a line a minute into a line every couple of seconds.
+        self._fieldless: set[tuple[str, int]] = set()
+        self._unnamed: set[str] = set()
         # Boards already complained about for one state, so the complaint is said once
         # rather than once per command. Keyed on the state too: a board with no column for
         # one status very likely has one for another, and keying on the board alone would
@@ -435,13 +456,60 @@ class HttpProjectBoards:
         if fields is not None:
             params["fields"] = ",".join(str(field) for field in fields.wanted)
 
-        items: list[BoardItem] = []
-        async for body in self._client.get_pages(f"{board}/items", owner=owner, **params):
-            rows = body if is_json_list(body) else []
-            items.extend(
-                item for row in rows if (item := parse_item(row, project_number)) is not None
-            )
+        key = (owner, project_number)
+        read = await self._client.get_pages_since(
+            f"{board}/items", etag=self._validator(key), owner=owner, **params
+        )
+        if read.pages is None:
+            # GitHub said nothing changed, so the cards parsed last time ARE this read's answer.
+            # Sound by construction rather than by hope: a 304 means the body was byte-identical,
+            # and `parse_item` is a pure function of the body, so re-parsing could only produce
+            # what is already here.
+            #
+            # Indexed rather than fetched defensively. This line is reachable only having SENT a
+            # validator, and `_validator` only ever answers with one taken from this same entry,
+            # so the entry exists whenever this runs.
+            return self._listed[key][1]
+
+        rows = [row for body in read.pages for row in (body if is_json_list(body) else [])]
+        items = tuple(item for row in rows if (item := parse_item(row, project_number)) is not None)
+
+        # Two conditions, and the second is not belt-and-braces. A validator may only be kept for
+        # a board that provably arrived WHOLE, because GitHub's ETag hashes one response body:
+        #
+        #  - more than one page, and it speaks for the first of them only;
+        #  - a FULL page, and it cannot prove there is nothing behind it. A board of exactly
+        #    PAGE_SIZE cards that gains one leaves page one byte-identical, so a 304 against that
+        #    validator would hide the new card for ever - and a 304 carries no Link header to ask.
+        #
+        # A page that is not full cannot be hiding anything, which is the one case worth trusting.
+        if read.etag is not None and len(rows) < PAGE_SIZE:
+            self._listed[key] = (read.etag, items)
+        else:
+            # Dropped rather than left to go stale. Correctness does not need this - GitHub
+            # validates against the live body, so a stale validator answers 200 - but an entry
+            # that cannot be trusted is not worth the reading.
+            self._listed.pop(key, None)
         return items
+
+    def _validator(self, key: tuple[str, int]) -> str | None:
+        """The ETag to ask with, when one has been kept for this board."""
+        remembered = self._listed.get(key)
+        return remembered[0] if remembered else None
+
+    def can_recheck_cheaply(self, owner: str, project_number: int) -> bool:
+        """Whether reading this board again would cost a conditional request or a megabyte.
+
+        True once a read has kept a validator, which happens only for a board that arrived whole
+        in one unfull page. The poller asks because its cadence has to follow what a re-read
+        costs, and only this object knows: a board that can be checked for nothing is worth
+        checking every couple of seconds, and a board that cannot be checked without downloading
+        the whole of it is emphatically not.
+
+        False before the first read, which is the right answer rather than a missing one - nothing
+        has been proven cheap yet.
+        """
+        return (owner, project_number) in self._listed
 
     async def _board_path(self, owner: str, project_number: int) -> str:
         """Where this board lives, which the kind of account owning it decides.
@@ -471,12 +539,22 @@ class HttpProjectBoards:
         account: JsonObject = body if is_json_object(body) else {}
         kind = account.get("type")
         if not isinstance(kind, str):
-            logger.warning(
+            # Loud once per owner, then quiet, for the reason the fields warning above is: the
+            # guess is deliberately not remembered, so this path repeats on every poll, and issue
+            # #189 made that thirty times an hour into eighteen hundred. The request it repeats is
+            # left alone - the comment above refuses to let a blip decide the prefix for the life
+            # of the process, and that judgement is not this change's to overturn.
+            level = logging.WARNING if owner not in self._unnamed else logging.DEBUG
+            self._unnamed.add(owner)
+            logger.log(
+                level,
                 "GitHub did not say what kind of account %r is, so its board is read as a "
                 "person's; an organisation's board will answer 404 until it does",
                 owner,
             )
             return "users"
+
+        self._unnamed.discard(owner)
 
         decided = "orgs" if kind == "Organization" else "users"
         self._kinds[owner] = decided
@@ -570,12 +648,27 @@ class HttpProjectBoards:
         }
         status = named.get(STATUS_FIELD)
         if status is None:
-            logger.warning(
+            # Loud once per board, then quiet. This answer is deliberately not cached, so the read
+            # repeats on every poll - sixty lines an hour before issue #189 and eighteen hundred
+            # after it. A warning that repeats that often is one whoever reads the log learns to
+            # scroll past, which costs more than the line is worth, and what it reports cannot
+            # change between two polls. Dropped to DEBUG rather than silenced, so a log turned up
+            # on purpose still shows the board being re-read.
+            #
+            # The level is a one-line conditional because the coverage floor counts the arms of an
+            # `if`, and there is nothing to say in either that is not said here.
+            level = logging.WARNING if key not in self._fieldless else logging.DEBUG
+            self._fieldless.add(key)
+            logger.log(
+                level,
                 "project %s answered with no %r field, so no card can carry a status",
                 project_number,
                 STATUS_FIELD,
             )
             return None
+
+        # Found after all, so the next board to lose it is a new complaint rather than a repeat.
+        self._fieldless.discard(key)
 
         status_id = status["id"]
         assert isinstance(status_id, int)
