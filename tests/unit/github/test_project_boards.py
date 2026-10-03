@@ -130,6 +130,148 @@ class TestReadingOneCard:
         assert item.title == "Write the migration runbook", "it lost the title with the fields"
 
 
+# The board's own fields, as a real board answered for a real draft card. Copied from the wire
+# rather than invented: a single-select carries its chosen option under a `name` that is itself a
+# `{raw, html}` pair, a story point is a single-select of zero-padded strings and not a number, and
+# an iteration is the one shape in this API that is nobody else's.
+BOARD_FIELDS: list[dict[str, Any]] = [
+    {
+        "id": 353672863,
+        "name": "Assignees",
+        "data_type": "assignees",
+        "value": [
+            {"login": "hubot", "id": 100, "avatar_url": "https://avatars.githubusercontent.com/u/1"}
+        ],
+    },
+    {
+        "id": 353672865,
+        "name": "Labels",
+        "data_type": "labels",
+        "value": [{"name": "high priority", "color": "b60205"}],
+    },
+    {
+        "id": 353672876,
+        "name": "Priority",
+        "data_type": "single_select",
+        "value": {"id": "79628723", "name": {"raw": "HIGH", "html": "HIGH"}, "color": "RED"},
+    },
+    {
+        "id": 353672877,
+        "name": "Story Point",
+        "data_type": "single_select",
+        "value": {"id": "61c53f5d", "name": {"raw": "21", "html": "21"}, "color": "PINK"},
+    },
+    {
+        "id": 353672878,
+        "name": "Iteration",
+        "data_type": "iteration",
+        "value": {
+            "id": "01da4d3e",
+            "start_date": "2026-06-15",
+            "duration": 16,
+            "title": {"raw": "Iteration 1", "html": "Iteration 1"},
+            "completed": True,
+        },
+    },
+    {
+        "id": 353672879,
+        "name": "Area",
+        "data_type": "single_select",
+        "value": {
+            "id": "d82f6c73",
+            "name": {"raw": "General", "html": "General"},
+            "color": "ORANGE",
+        },
+    },
+]
+
+
+class TestTheMetadataACardCarries:
+    """Issue #182. The read asks for the board's own fields now, so a card arrives with metadata.
+
+    Every payload here was observed rather than imagined - a real draft on a real board, through
+    the same endpoint this code calls. That matters more than usual, because two of these shapes
+    were guessed wrong in planning: a story point reads like a number and is a single-select of
+    zero-padded options, and the iteration shape appears nowhere else in this project.
+    """
+
+    def carrying(self) -> Any:
+        return parse_item(
+            draft(
+                creator={"login": "octocat", "id": 1, "avatar_url": "https://avatars.example/u/1"},
+                created_at="2026-10-03T01:47:18Z",
+                content={"title": "Write the migration runbook", "body": "test description"},
+                fields=[*draft()["fields"], *BOARD_FIELDS],
+            ),
+            PROJECT,
+        )
+
+    def test_the_creator_comes_off_the_item_rather_than_its_fields(self) -> None:
+        """Along with the created-at beside it. Neither is a project field: they describe the
+        card's place on the board, so they are there whatever fields the board has."""
+        item = self.carrying()
+
+        assert item.creator is not None and item.creator.login == "octocat"
+        assert item.creator.avatar_url == "https://avatars.example/u/1"
+        assert item.created_at is not None and item.created_at.year == 2026
+
+    def test_the_assignees_are_a_list_of_people(self) -> None:
+        assert [person.login for person in self.carrying().assignees] == ["hubot"]
+
+    def test_the_labels_keep_their_colour(self) -> None:
+        labels = self.carrying().labels
+
+        assert [(label.name, label.color) for label in labels] == [("high priority", "b60205")]
+
+    def test_a_single_select_reads_its_chosen_option(self) -> None:
+        item = self.carrying()
+
+        assert item.priority_name == "HIGH"
+        assert item.area == "General"
+
+    def test_a_story_point_keeps_the_padding_the_board_gave_it(self) -> None:
+        """`21` here, but `05` on the board that prompted this: the options are zero-padded
+        strings rather than numbers, so nothing may read them as integers."""
+        assert self.carrying().story_point == "21"
+
+    def test_an_iteration_reads_its_title_and_nothing_else(self) -> None:
+        """The one field shape that is nobody else's. GitHub sends the start date, the duration
+        and whether it finished alongside the name, and a one-line row in a thread wants none of
+        that."""
+        assert self.carrying().iteration == "Iteration 1"
+
+    def test_a_drafts_own_text_is_read(self) -> None:
+        """Documented as impossible until a real draft was read off a real board: a card wrapping
+        an issue has its body mirrored from its own webhook, and a DRAFT keeps its text under
+        `content` and has nowhere else to keep it."""
+        assert self.carrying().body == "test description"
+
+    def test_a_card_with_none_of_them_set_carries_none_of_them(self) -> None:
+        """Which is every card on a board that has not got these fields, and the reason the block
+        leaves a row out rather than rendering it empty. The default fixture has Title and Status
+        and nothing else."""
+        item = parse_item(draft(), PROJECT)
+
+        assert item.creator is None
+        assert item.created_at is None
+        assert (item.assignees, item.labels) == ((), ())
+        assert (item.priority_name, item.story_point, item.iteration, item.area) == (
+            None,
+            None,
+            None,
+            None,
+        )
+        assert item.body == ""
+
+    def test_a_field_whose_value_is_null_carries_nothing(self) -> None:
+        """A card on a board that HAS the field with nothing chosen in it, which is a different
+        payload from the field being absent and has to read the same way."""
+        unset = [{"id": 353672878, "name": "Iteration", "value": None}]
+        item = parse_item(draft(fields=[*draft()["fields"], *unset]), PROJECT)
+
+        assert item.iteration is None
+
+
 class TestCardsThatWrapSomethingElse:
     """Not skipped. A card wrapping an issue is most of what a board actually holds, and moving
     it is most of what "mirror board movement" means; the poller uses the content id to find the
@@ -1006,13 +1148,33 @@ class TestSettingAPriority:
 
         assert [sent[2]["fields"][0]["id"] for sent in writer.sent] == [353672876, 353672864]
 
-    async def test_the_request_does_not_ask_for_the_priority_field(self) -> None:
-        """`fields=` governs the READ, and nothing reads a card's priority back. Naming it there
-        would send a field per card per poll that nothing parses."""
+    async def test_the_request_asks_for_the_priority_field(self) -> None:
+        """The opposite of what this asserted until issue #182, and the reason is the whole of why
+        that issue needed a change to the READ at all.
+
+        It used to say "`fields=` governs the READ, and nothing reads a card's priority back.
+        Naming it there would send a field per card per poll that nothing parses." That was true
+        and is not: a card's block shows its priority now, so the read has to ask for it. What the
+        old reasoning still gets right is the cost, which is bytes rather than requests - the same
+        one call per page, carrying more of each card.
+        """
         client = FakeJson(
             fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE, PRIORITY_FIELD_ROW],
             items=[],
         )
+
+        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+
+        asked = next(params for path, params in client.calls if path.endswith("/items"))
+        assert asked["fields"] == "353672862,353672864,353672876"
+
+    async def test_a_board_without_the_newer_fields_is_still_read(self) -> None:
+        """The common case for anybody else's board, and the rule the new fields are held to: a
+        field the board has not got is a row a card has no value for, never a read that fails.
+
+        Only Title and Status here, which is GitHub's own default template.
+        """
+        client = FakeJson(fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE], items=[])
 
         await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
 

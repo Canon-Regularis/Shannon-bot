@@ -7314,3 +7314,89 @@ feature end to end rather than assuming a predecessor the file never recorded.
   Each is inside a code span or a `**`-matched line by explicit design, and rendering any of them
   would unbalance its line or let GitHub-authored text build a link. `format_commit` also still
   takes no mentions map, which is a requirement rather than an oversight.
+
+## A ticket carries its board metadata, and says when it changes
+
+- **A card's thread showed five rows and announced nothing** (#182). It was not a rendering gap: the
+  board read asked GitHub for Title and Status alone, and said so - *"nothing reads a card's
+  priority back, so naming Priority here would send a field per card per poll that nothing
+  parses"*. Something reads them all back now, so the read asks for them.
+- **Verified against a real board before a line was written.** The issue's screenshots did not come
+  through, so the field list was confirmed with a read-only probe of the live board: every one of
+  the nine fields is readable over the existing REST path, no GraphQL and no new client.
+- **The probe caught two things the issue text would have got wrong.** The field is `Story Point`,
+  SINGULAR, and it holds zero-padded single-select options rather than numbers - the plural anybody
+  would write by reflex matches nothing, silently, on every card for ever. And `creator` and
+  `created_at` are top-level keys on the project ITEM rather than project fields, so they are there
+  whatever fields a board has.
+- **It also corrected something this project had written down as impossible.** The ticket block's
+  docstring said a description was *"not withheld but impossible: a board item carries no body text
+  at all"*. True of a card wrapping an issue, whose body reached its thread from its own webhook -
+  and false of a DRAFT, which keeps its text under `content.body` and has nowhere else to keep it.
+  A real draft card had `"test description"` sitting right there. The block shows it now, through
+  the same conversion every other body goes through.
+- **Zero new parsers for four of the fields.** `mapping.actor`, `actors`, `labels` and
+  `parse_timestamp` already tolerate a missing object, a null and a wrong shape, so creator,
+  assignees, labels and the timestamps are calls rather than code. Only the iteration field needed
+  one, because its shape is nobody else's.
+- **A board without these fields still reads.** The names belong to whoever owns the board, so a
+  missing field is a row the card has no value for and never a read that fails. The rule #166 set
+  holds: a row with nothing in it is left out rather than rendered `None`.
+- **`mentions` is wired through and `priority` still is not.** A card names a creator and assignees
+  now, so a linked person renders as a real mention; a card's priority is the board's single-select
+  and arrives on the snapshot, where the row's label-derived one is `UNSET` for a draft whatever the
+  board says.
+- **The assignee notifier is deliberately still off for cards.** `TicketPolicy.assignments` answers
+  nobody, and that is now a decision rather than a fact: it feeds the ledger that pings somebody the
+  first time they are put on an item, and answering would ring every assignee on a whole board at
+  once. The refresh wiring already guarded against exactly this - *"a card that one day carries an
+  assignee cannot start notifying a backlog by inheriting a default"*.
+- **One message lists everything that moved**, rather than one per field. A board read sees a card's
+  fields together, so dragging a card and setting its points is one action and one notification;
+  the webhook-driven announcers only look granular because a webhook arrives per change.
+- **Migration `0030` stores what a reader was last shown**, as one JSON column rather than a column
+  per field. The set of fields belongs to the board owner - they can add an `Area` this afternoon -
+  so a column apiece means a migration every time somebody does.
+- **A card seen for the first time says nothing.** Null means never recorded, which is what stops
+  every card on a board announcing every field it has the minute this deploys. **Recording still
+  happens on that first poll**, which is a distinction worth having in writing: an earlier cut of
+  this skipped the write along with the line, left the baseline unwritten, and slipped every
+  announcement by a poll. Four tests caught it.
+- **Recorded first, said second.** A poller is a loop rather than a queue, so a Discord refusal
+  after the write costs that one announcement - where a refusal before it would repeat the same
+  line every minute until somebody fixed the permission. The test proves it by polling again
+  afterwards and finding nothing left to say.
+- **Nothing is claimed in `mirrored_notes`.** The stored values are the guard: a poll comparing a
+  card against what it just wrote finds nothing moved, which is the work a claim would do in one
+  query instead of two.
+- **The fixtures are observed, not invented.** Every payload shape in the new parse tests was copied
+  off the wire from a real draft on a real board, which matters more than usual here: two of these
+  shapes were guessed wrong in planning before the probe settled them.
+
+## A card reports every field it was asked to
+
+- **`Created` and `Updated` are announced now, which completes issue #182's list.** They were shown
+  in the block and left out of the change message, on the argument that a created-at cannot change
+  and an updated-at changes whenever anything else does. The issue said *"updates to all aside from
+  creator"*, and that is what it now does.
+- **Which made two more fields necessary rather than optional.** The poll only looks at a card whose
+  timestamp moved, so `Updated` differs on every message there is - and on its own it would report
+  that a card changed without saying what. `Ticket Name` and `Description` are the two edits that
+  move a timestamp without moving anything else watched, so they are watched too. A message carrying
+  nothing but a timestamp is the rare case now, and it means what it says: GitHub re-stamped the
+  card and nothing a reader can see moved with it.
+- **A title or description edit used to be completely silent.** The block was rewritten in place and
+  Discord says nothing about an edit, so renaming a card changed the thread's first message and told
+  nobody. That was a gap, not a decision.
+- **Every value in a change message is cut to eighty characters**, which stopped being optional the
+  moment a description became one of them. A description runs to seven hundred characters on its
+  own; eleven fields carrying two values each would have put the message past what Discord accepts
+  and cost the whole thing rather than the extra words. The block above carries every value in full,
+  which is what makes a short form the right one.
+- **The timestamp renderer is public now rather than copied.** A change message shows a date the
+  same way the block does, and the alternative was a second copy of Discord's timestamp syntax in
+  the poller - which is the duplication #166 was about.
+- **Four tests inverted and two arrived.** The ones asserting silence for a re-stamped card and for
+  a creator change now assert what the message says and what it does not; the refusal test proves
+  its record landed by the absence of the PRIORITY it had already written, rather than by an empty
+  thread. The new ones cover a renamed card and a rewritten description.

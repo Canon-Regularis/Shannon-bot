@@ -63,6 +63,23 @@ def snapshot_of(
         action=action,
         column=item.column,
         project_number=project_number,
+        # Issue #182. All of it optional at the source: a board without the field, or a card with
+        # nothing set in it, answers None or an empty tuple, and the block leaves that row out.
+        #
+        # The creator goes in `author`, which is where every other snapshot keeps the person a
+        # thread is about - so the block's Author row and the avatar beside it start working for a
+        # card without either of them learning that a ticket exists.
+        author=item.creator,
+        assignees=item.assignees,
+        # A draft's own text. `BoardItem.body` is empty for anything else, and an issue's body
+        # reached its thread from its own webhook long before any board was read.
+        body=item.body,
+        labels=item.labels,
+        created_at=item.created_at,
+        priority_name=item.priority_name,
+        story_point=item.story_point,
+        iteration=item.iteration,
+        area=item.area,
     )
 
 

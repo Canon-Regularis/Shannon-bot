@@ -143,6 +143,19 @@ class TrackedItem(TimestampMixin, Base):
     # POSTED block and by a tag line that was said, never by an edit, because Discord tells a
     # reader nothing about an edit. Cleared with the pointer; null means no evidence.
     shown_labels: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    # Issue #182. The board fields a reader has last been SHOWN for a card, as {name: text}, so a
+    # poll can tell what moved. Tickets only; null for everything else, which reaches its thread
+    # from its own webhooks and has no board fields to compare.
+    #
+    # One JSON column rather than a column each. The set of fields is the board owner's to change -
+    # they can add an `Area` this afternoon - and a column apiece means a migration every time
+    # somebody does. The values are the board's own text, which is also what the block shows, so a
+    # comparison here and a row there cannot disagree about what a field says.
+    #
+    # **Null means never seen, and that is what keeps the first poll after this shipped silent.**
+    # Every card on a board would otherwise look like nine fields changing at once. An empty object
+    # is a different answer and means seen with nothing set.
+    shown_fields: Mapped[JsonObject | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # The lock this bot last set on the thread it points at. Null means it has not set one, and
     # it is cleared when the pointer moves, because a replacement thread starts open. Asking
     # Discord on every delivery instead would retry a refused permission for ever.

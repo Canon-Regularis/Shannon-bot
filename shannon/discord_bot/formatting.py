@@ -19,6 +19,7 @@ from shannon.discord_bot.panels import (
 )
 from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
 from shannon.discord_bot.safe_text import (
+    CARD_FIELD_LIMIT,
     COMMIT_MESSAGE_LIMIT,
     COMMIT_TITLE_LIMIT,
     EMPTY,
@@ -155,42 +156,89 @@ def format_issue(
     )
 
 
-def format_ticket(snapshot: TicketSnapshot, *, status: Status, **_: object) -> Panel:
+def format_ticket(
+    snapshot: TicketSnapshot,
+    *,
+    status: Status,
+    mentions: Mapping[str, int] | None = None,
+    **_: object,
+) -> Panel:
     """Render the block at the top of a ticket's thread.
 
     Built by `_rows`, the same way the other two blocks are, which is the half of issue #166 about
     duplication: these labels used to be written out a second time here and had already drifted to
     three of them.
 
-    What it shows is still only what a draft card HAS. The other blocks carry an author, assignees
-    and tags; the board read fetches Title and Status and nothing else, so each of those would read
-    `None` for ever - and a row of empty fields reads as data missing rather than data absent, which
-    is the same rule that keeps a reviewers line off an issue. `Last Updated` joins the three it
-    always had because the board does send it and this threw it away. `State` does not, for exactly
-    the reason the rest are left out: a ticket's state is hard-coded open and nothing can close it,
-    so the row could only ever say `Open`.
+    Five rows until issue #182, because the board read asked GitHub for Title and Status alone and
+    a card could carry nothing else. It asks for the board's own fields now, so the rows below are
+    the ones a draft card can actually fill.
 
-    A description is not withheld but impossible: a board item carries no body text at all, so
-    there is nothing to render even if a row were wanted. `_the_description` would drop it anyway.
+    **A row with nothing in it is still left out**, which is the rule #166 set and the reason this
+    stayed additive. The names are the board owner's to change, so a board calling its field
+    something else - or a card with that field unset - has no value for the row and the row does
+    not appear. That is deliberately not the same as rendering `None`: an always-empty field reads
+    as data missing rather than data absent, which is what keeps a reviewers line off an issue.
 
-    `priority` and `mentions` are accepted and ignored, because the policies all render through
-    one signature and a ticket has nobody to mention.
+    `State` is still left out, for the reason the empty rows were: a ticket's state is hard-coded
+    open and nothing in this project can close it, because a board column is not a closed state.
+    The row could only ever say `Open`.
+
+    **A description was documented here as impossible, and that was wrong.** The claim was that a
+    board item carries no body text at all. It is true of a card wrapping an issue, whose own body
+    reached its thread from its own webhook - and false of a DRAFT, which keeps its text under
+    `content.body` and has nowhere else to keep it. Issue #182 read a real draft off a real board
+    and found it there. It is shown now, through the same `_the_description` every other block uses,
+    so it arrives with the formatting it was written with.
+
+    `mentions` is read now and `priority` still is not, which is a split worth naming. A card
+    carries a creator and assignees since issue #182, so the map has somebody to resolve; a card's
+    priority is the board's single-select rather than the row's label-derived enum, and it arrives
+    on the snapshot - reading the parameter would show whatever the row happened to hold.
     """
-    # Grey, because a draft on a board has no state of its own to colour by. It is also the
-    # only block with no author, so it is the only one that never carries a picture.
+    # Grey, because a draft on a board has no state of its own to colour by.
     return Panel(
         blocks=(
             _rows(
                 ("Ticket Name", _title(snapshot)),
                 ("Type", "Ticket"),
                 ("GitHub Link", snapshot.html_url),
+                *_if_set(
+                    "Creator", _person(snapshot.author, mentions) if snapshot.author else None
+                ),
+                *_if_set(
+                    "Assignees",
+                    _people(snapshot.assignees, mentions) if snapshot.assignees else None,
+                ),
                 ("Status", spoken(status)),
-                ("Last Updated", _timestamp(snapshot.updated_at)),
+                *_if_set("Priority", snapshot.priority_name),
+                *_if_set("Story Point", snapshot.story_point),
+                *_if_set("Iteration", snapshot.iteration),
+                *_if_set("Area", snapshot.area),
+                *_if_set("Tags", _tags(snapshot.label_names) if snapshot.label_names else None),
+                *_if_set(
+                    "Created", as_timestamp(snapshot.created_at) if snapshot.created_at else None
+                ),
+                ("Last Updated", as_timestamp(snapshot.updated_at)),
             ),
+            # Last, and dropped entirely for a card nobody wrote anything on - the same shape and
+            # the same guard the other two blocks use.
+            *_the_description(as_rich_text(snapshot.body).text),
         ),
         accent=Accent.DRAFT,
+        thumbnail_url=snapshot.author.avatar_url if snapshot.author else None,
         link=_opens_github(snapshot.html_url),
     )
+
+
+def _if_set(label: str, value: str | None) -> tuple[tuple[str, str], ...]:
+    """One row, or none at all where the card has nothing to put in it. Issue #182.
+
+    Splatted into the `_rows` call rather than filtered inside it, and that is a coverage decision
+    as much as a style one: a filter in the builder would be a branch every caller with a full set
+    of rows could never take, and the floor here is a hundred per cent of branches. A one-line
+    conditional expression records no arc at all, so this costs nothing to cover either way.
+    """
+    return ((label, value),) if value else ()
 
 
 def format_reviewer_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> Panel:
@@ -390,6 +438,41 @@ def format_card_converted(html_url: str, *, shut: bool) -> Panel:
     said = _CONVERTED.format(html_url)
     under = f"{said}\n{_SHUT}" if shut else said
     return _headed(_CONVERTED_HEADING, under, Accent.CONVERTED)
+
+
+# Issue #182. A card's board metadata moved. Blue, like every other line that reports something
+# somebody did rather than a state the item reached: a card gaining a story point is news, not a
+# verdict, and the greens and reds are spoken for by things that are.
+_CARD_CHANGED_HEADING = "### 📋 Ticket updated"
+
+
+def format_card_changed(moved: Sequence[tuple[str, str, str]]) -> Panel:
+    """One line for everything that moved on a card since the last poll.
+
+    ONE line rather than one per field, which is the shape the poll gives it: a board read sees a
+    card's fields together, so somebody dragging a card and setting its points in the same minute
+    did one thing and hears about it once. Per-field lines would ring three times for one action,
+    and the webhook-driven announcers only look granular because a webhook arrives per change.
+
+    Every value here is board-authored - an option somebody named, a login, a label, a title, a
+    description - so all of it goes through `clipped`, which cuts and then defuses. A board owner
+    is not an attacker, but a label name is repository content and the rule in this module is that
+    GitHub-authored text is defused wherever it lands.
+
+    CUT, and not only for tidiness. A description runs to seven hundred characters on its own and
+    there are eleven fields carrying two values each, so an uncut line would go past what Discord
+    accepts and cost the whole message rather than the extra words. The block directly above
+    carries every value in full, which is what makes a short form the right one here.
+
+    A field that was unset reads as the same `None` an empty row reads as, which is deliberate:
+    "None to HIGH" is what setting a priority for the first time actually did.
+    """
+    said = "\n".join(
+        f"-# {label}: {clipped(was, limit=CARD_FIELD_LIMIT) if was else EMPTY} → "
+        f"{clipped(now, limit=CARD_FIELD_LIMIT) if now else EMPTY}"
+        for label, was, now in moved
+    )
+    return _headed(_CARD_CHANGED_HEADING, said, Accent.SAID)
 
 
 def format_thread_moved(thread_id: int) -> str:
@@ -721,7 +804,7 @@ def _metadata(
         ("Status", spoken(status)),
         ("Priority", spoken(priority)),
         ("Tags", _tags(snapshot.label_names)),
-        ("Last Updated", _timestamp(snapshot.updated_at)),
+        ("Last Updated", as_timestamp(snapshot.updated_at)),
     ]
     # Not `fit`, which cut this to a MESSAGE and is the wrong budget twice over: a card
     # holds twice a message, and the description under this block is what should give way
@@ -807,7 +890,7 @@ def _note(
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
-    said = f"**{author}** {verb} {_timestamp(snapshot.created_at)}"
+    said = f"**{author}** {verb} {as_timestamp(snapshot.created_at)}"
     blocks = [Block(BlockKind.HEADING, said)]
     # Unquoted since issue #113: the rule above it separates the comment from the line
     # naming its author, which is what the `> ` markers were there to do.
@@ -898,7 +981,7 @@ def _tags(names: Iterable[str]) -> str:
     return ", ".join(rendered) if rendered else EMPTY
 
 
-def _timestamp(value: datetime | None) -> str:
+def as_timestamp(value: datetime | None) -> str:
     if value is None:
         return UNKNOWN
     # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a
