@@ -214,10 +214,22 @@ class TicketPolicy:
         mentions: Mapping[str, int],
     ) -> Panel:
         assert isinstance(snapshot, TicketSnapshot)
-        return formatting.format_ticket(snapshot, status=status)
+        # `mentions` goes through since issue #182, because a card names a creator and assignees
+        # now. `priority` still does not: a card's is the board's single-select, carried on the
+        # snapshot, and the row's label-derived one is `UNSET` for a draft whatever the board says.
+        return formatting.format_ticket(snapshot, status=status, mentions=mentions)
 
     def assignments(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
-        """Nobody. A draft item carries no author, assignee or reviewer to record or to ping."""
+        """Still nobody, and since issue #182 that is a decision rather than a fact.
+
+        A card does carry a creator and assignees now, and the block shows them. What this method
+        feeds is something else: the assignment ledger, and the notifier that pings somebody the
+        first time they are put on an item. Answering here would turn that on for every card on a
+        board at once, which is the thing `container`'s refresh wiring already guards against -
+        "a card that one day carries an assignee cannot start notifying a backlog by inheriting a
+        default". Issue #182 asked for a card's metadata to be shown and its changes announced, and
+        neither of those goes through here.
+        """
         return {}
 
     def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:

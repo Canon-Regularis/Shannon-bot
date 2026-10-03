@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from shannon.domain.enums import ObjectType
+from shannon.domain.models import Actor, Label
 from shannon.github.projects import BoardItem
 
 # The board number every one of these cards claims to be on. A card carries no number of its own,
@@ -27,15 +28,62 @@ def card(
     title: str = "Write the poller",
     column: str | None = "In Progress",
     at: str = "2026-08-20T10:00:00Z",
+    *,
+    creator: Actor | None = None,
+    assignees: tuple[Actor, ...] = (),
+    labels: tuple[Label, ...] = (),
+    priority_name: str | None = None,
+    story_point: str | None = None,
+    iteration: str | None = None,
+    area: str | None = None,
+    body: str = "",
 ) -> BoardItem:
     """A DRAFT card: `BoardItem.kind` defaults to TICKET and `content_id` to None, which is what
-    `is_draft` reads. There is nothing on GitHub behind it."""
+    `is_draft` reads. There is nothing on GitHub behind it.
+
+    Everything after `at` is the board metadata issue #182 added, and every one of them defaults to
+    ABSENT rather than set. That is not laziness: a board that has not got the field and a card
+    nobody filled in reach the same place, and most tests want a card that carries nothing so the
+    thing they are about is the only thing in the block. A test about the metadata names what it
+    needs; see `filled` below for one that carries the lot.
+    """
     return BoardItem(
         item_id=item_id,
         title=title,
         column=column,
         html_url=f"https://github.com/users/Canon-Regularis/projects/{PROJECT}",
         updated_at=datetime.fromisoformat(at.replace("Z", "+00:00")),
+        creator=creator,
+        assignees=assignees,
+        labels=labels,
+        priority_name=priority_name,
+        story_point=story_point,
+        iteration=iteration,
+        area=area,
+        body=body,
+    )
+
+
+def filled() -> BoardItem:
+    """A card with every board field set, as a real board answered for a real draft.
+
+    The values are shapes observed on the wire rather than invented ones: a single-select priority
+    of `HIGH`, a story point of `05` zero-padded rather than numbered, an iteration named for
+    itself, and an area.
+
+    No overrides parameter, deliberately. A `**kwargs` passthrough would need a `type: ignore` to
+    get past the checkers this file is deliberately held to, and `dataclasses.replace` says the
+    same thing in the test that wants it - typed, and next to the assertion it is for.
+    """
+    return card(
+        creator=Actor("octocat", github_user_id=1, avatar_url="https://avatars.example/u/1"),
+        assignees=(Actor("hubot"),),
+        labels=(Label("high priority"),),
+        priority_name="HIGH",
+        story_point="05",
+        iteration="Iteration 1",
+        area="General",
+        body="what the card asks for",
     )
 
 

@@ -171,13 +171,28 @@ class IssueSnapshot(ItemSnapshot):
 class TicketSnapshot(ItemSnapshot):
     """A draft item on a GitHub project board, belonging to no repository of its own.
 
-    Inherited author, assignee, label and state fields keep their empty defaults. `repository` is
-    the one the guild registered, because resolving a Discord guild goes through a repository row.
+    `repository` is the one the guild registered, because resolving a Discord guild goes through a
+    repository row.
+
+    The inherited author, assignee and label fields were empty until issue #182: the board read
+    asked GitHub for Title and Status alone, so a card could carry nothing else. They are filled
+    now, from the project item and from the board's own fields.
     """
 
     # The board's own column name, not one of our statuses; the mapping lives with the policies.
     column: str | None = None
     project_number: int | None = None
+    # Issue #182. The board's own fields, carried as the TEXT the board holds rather than as one of
+    # this project's enums - the same bargain `column` above already makes, and for the same reason:
+    # turning a board's option into a status is a domain decision that lives with the policies.
+    #
+    # `priority_name` rather than reusing the inherited `priority`, which is derived from labels and
+    # is `UNSET` for a card whatever the board says. A draft has no labels to derive one from.
+    created_at: datetime | None = None
+    priority_name: str | None = None
+    story_point: str | None = None
+    iteration: str | None = None
+    area: str | None = None
 
     object_type: ObjectType = field(default=ObjectType.TICKET, init=False)
 

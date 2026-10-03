@@ -169,25 +169,48 @@ Description:
 ```
 
 For every synced ticket, the bot must generate a Discord message (in the relevant thread) with the
-fields below. Two differences from the list as first written, both for the reasons the PR list
-gives: a `Type:` line, so the three blocks read alike and are built by one thing rather than three;
-and a `Last Updated:` line, because the board read already carries it and the block was throwing it
-away.
+fields below, and must say in that thread when any of them changes.
 
-The rest of the PR list stays off a ticket, and that is the same rule rather than a different one.
-A draft card on a board has no author, no assignees and no labels, and the board read asks GitHub
-for Title and Status only - so `Author:`, `Assignees:`, `Tags:` and `Priority:` would each read
-`None` for ever, which is noise rather than information. `State:` is off for the same reason once
-removed: a ticket's state is open and nothing can close it, because a board column is not a closed
-state. `Description:` is not withheld but impossible - a board item carries no body text at all.
+The list grew twice. It was three lines as first written; a `Type:` and a `Last Updated:` joined it
+so the three blocks read alike and because the board read already carried the timestamp. The rest
+arrived with the board read itself: it asked GitHub for Title and Status alone, and a card could
+carry nothing else. It asks for the board's own fields now.
+
+A row with nothing in it is still left out rather than rendered `None`, because an always-empty
+field reads as data missing rather than data absent. The field NAMES belong to whoever owns the
+board, so a board that calls one of these something else simply has no value for that row - and
+`Story Point` is singular because that is how the board spells it. `State:` stays off for a
+different reason: a ticket's state is open and nothing can close it, because a board column is not
+a closed state, so the row could only ever say `Open`.
 
 ```text
 Ticket Name:
 Type: Ticket
 GitHub Link:
+Creator:
+Assignees:
 Status:
+Priority:
+Story Point:
+Iteration:
+Area:
+Tags:
+Created:
 Last Updated:
+Description:
 ```
+
+A change to any of these except `Creator` is announced in the thread, in ONE message listing
+everything that moved since the last poll - a board read sees a card's fields together, so somebody
+dragging a card and setting its points did one thing and hears about it once. `Creator` is excluded
+because a card's creator does not change. `Created` and `Updated` are excluded for a sharper reason:
+a created-at cannot change, and an updated-at changes whenever anything else does, so including it
+would put the same redundant pair of timestamps in every message. The block shows both; the
+announcement is for what a reader did not already know.
+
+A card seen for the first time announces nothing. Its fields are recorded and the block itself is
+the announcement, which is what stops every card on a board reporting every field at once the first
+time this runs.
 
 All of these blocks, and every other message this bot posts into a thread, show the formatting the
 text was written with: a heading, a list, a code span or a link in a GitHub body arrives as what it

@@ -47,15 +47,93 @@ TICKET = TicketSnapshot(
 )
 
 
-def rows(status: Status = Status.IN_REVIEW, snapshot: TicketSnapshot = TICKET) -> dict[str, str]:
+def rows(
+    status: Status = Status.IN_REVIEW,
+    snapshot: TicketSnapshot = TICKET,
+    mentions: dict[str, int] | None = None,
+) -> dict[str, str]:
     """The one FIELDS block, read back as a mapping, and an error rather than a guess if the
     block is not the shape this assumes."""
     block = next(
         block
-        for block in format_ticket(snapshot, status=status).blocks
+        for block in format_ticket(snapshot, status=status, mentions=mentions).blocks
         if block.kind is BlockKind.FIELDS
     )
     return dict(line.removeprefix("**").split(":** ", 1) for line in block.text.splitlines())
+
+
+# A card with every board field set, which is what issue #182 made possible. The values are the
+# shapes a real board answered with: a single-select priority of `HIGH`, a story point of `05`
+# zero-padded rather than numbered, an iteration named `Iteration 1`, and an area of `DB`.
+CARRYING = replace(
+    TICKET,
+    author=Actor("octocat", github_user_id=1, avatar_url="https://avatars.example/u/1"),
+    assignees=(Actor("hubot"), Actor("monalisa")),
+    labels=(Label("high priority"),),
+    created_at=datetime(2026, 6, 15, 0, 16, 26, tzinfo=UTC),
+    priority_name="HIGH",
+    story_point="05",
+    iteration="Iteration 1",
+    area="DB",
+)
+
+
+class TestWhatACardCarries:
+    """Issue #182. The board read asks for the board's own fields now, so a card has metadata.
+
+    Before this, the read asked GitHub for Title and Status alone and every one of these rows was
+    absent because there was nothing to put in it. The class below still covers that case, which is
+    a card with the fields unset rather than a board without them - both still leave the row out.
+    """
+
+    def test_every_row_the_board_can_fill_is_there(self) -> None:
+        """In the order a reader scans them: what it is, where it is, who it belongs to, where it
+        stands, and when it moved."""
+        assert list(rows(snapshot=CARRYING)) == [
+            "Ticket Name",
+            "Type",
+            "GitHub Link",
+            "Creator",
+            "Assignees",
+            "Status",
+            "Priority",
+            "Story Point",
+            "Iteration",
+            "Area",
+            "Tags",
+            "Created",
+            "Last Updated",
+        ]
+
+    def test_the_values_are_the_board_own(self) -> None:
+        said = rows(snapshot=CARRYING)
+
+        assert said["Creator"] == "octocat"
+        assert said["Assignees"] == "hubot, monalisa"
+        assert said["Priority"] == "HIGH"
+        assert said["Iteration"] == "Iteration 1"
+        assert said["Area"] == "DB"
+
+    def test_a_story_point_keeps_the_padding_the_board_gave_it(self) -> None:
+        """`05`, not `5`. The board holds a single-select of zero-padded options rather than a
+        number, and the padding is somebody's choice about their own board - reformatting it would
+        be this bot second-guessing them, and would make the thread and the board disagree."""
+        assert rows(snapshot=CARRYING)["Story Point"] == "05"
+
+    def test_a_linked_person_is_a_mention(self) -> None:
+        """A card names people now, so the mention map has somebody to resolve. It used to have
+        nobody, which is why `format_ticket` ignored the map entirely."""
+        said = rows(snapshot=CARRYING, mentions={"octocat": 909})
+
+        assert said["Creator"] == "<@909>"
+        assert said["Assignees"] == "hubot, monalisa", "only the linked one resolves"
+
+    def test_the_creators_face_is_the_picture(self) -> None:
+        """The one block in the project that never carried a thumbnail, because it never had an
+        author to take one from."""
+        card = format_ticket(CARRYING, status=Status.IN_REVIEW)
+
+        assert card.thumbnail_url == "https://avatars.example/u/1"
 
 
 class TestWhatATicketShows:
@@ -87,11 +165,13 @@ class TestWhatATicketShows:
 
 
 class TestWhatATicketLeavesOut:
-    """Each of these would read `None` for ever, which is noise rather than information.
+    """A row with nothing to put in it, which is still left out. Issue #166's rule, still standing.
 
-    Not an oversight in the board read either, in most cases: `/priority` refuses a ticket
-    outright because a draft card has no labels to set, and the read asks GitHub for Title and
-    Status only - naming more would send a field per card per poll that nothing parses.
+    What changed with #182 is WHY these are absent. They used to be unreachable: the read asked
+    GitHub for Title and Status alone, so no card could carry any of them. Now the read asks, and
+    `TICKET` is a card with those fields UNSET - a board that has not got the field, or a card
+    nobody has filled in, reaches exactly the same place. A row is omitted rather than rendered
+    `None`, because an always-empty field reads as data missing rather than data absent.
     """
 
     def test_there_is_no_author_or_assignees_row(self) -> None:
@@ -110,11 +190,13 @@ class TestWhatATicketLeavesOut:
         row could only ever say `Open`."""
         assert "State" not in rows()
 
-    def test_a_card_carrying_people_and_labels_anyway_still_shows_none_of_them(self) -> None:
-        """The rows are left out by not being built, not filtered on being empty - so a card that
-        somehow arrived with an author would not start showing one. That is deliberate: if the
-        board read ever learns to fetch these, this test is what says the renderer has to be told
-        too rather than quietly following.
+    def test_a_card_carrying_people_and_labels_now_shows_them(self) -> None:
+        """This asserted the opposite until issue #182, and it was written to be the thing that
+        caught this change: *"if the board read ever learns to fetch these, this test is what says
+        the renderer has to be told too rather than quietly following."*
+
+        The read learnt. It is the only test in the suite that failed when the read was widened,
+        which is exactly the job it was given.
         """
         carrying = replace(
             TICKET,
@@ -123,7 +205,11 @@ class TestWhatATicketLeavesOut:
             labels=(Label("bug"),),
         )
 
-        assert list(rows(snapshot=carrying)) == list(rows())
+        said = rows(snapshot=carrying)
+
+        assert said["Creator"] == "octocat"
+        assert said["Assignees"] == "hubot"
+        assert said["Tags"] == "`bug`"
 
 
 class TestTheCardItIsDrawnOn:

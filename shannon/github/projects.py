@@ -25,6 +25,7 @@ from urllib.parse import quote
 from shannon.domain.board import columns_for, normalise, status_from_column
 from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.json import JsonObject, is_json_list, is_json_object
+from shannon.domain.models import Actor, Label
 from shannon.domain.priority import parse_priority
 from shannon.github import mapping
 from shannon.github.errors import GitHubAuthError, GitHubNotFoundError
@@ -39,6 +40,36 @@ TITLE_FIELD = "Title"
 # Optional, unlike the two above. GitHub's default template does not ship one, and a board
 # without it mirrors perfectly well - it simply cannot be told a priority.
 PRIORITY_FIELD = "Priority"
+
+# The rest of what a card's block shows, since issue #182. All optional, all matched by NAME, and
+# the names are the board owner's to change - so a board calling one of these something else has no
+# value for that row, which is a row left out rather than a read that fails.
+#
+# Spelled exactly as the board spells them. `Story Point` is SINGULAR on the board this was built
+# against and holds zero-padded options rather than numbers, so the plural anybody would write by
+# reflex matches nothing - silently, on every card, for ever. That is worth a line of comment.
+ASSIGNEES_FIELD = "Assignees"
+STORY_POINT_FIELD = "Story Point"
+ITERATION_FIELD = "Iteration"
+AREA_FIELD = "Area"
+LABELS_FIELD = "Labels"
+
+# What `fields=` on the item read is built from: every field anything here parses.
+#
+# It was Title and Status alone until #182, and the comment on `BoardFields.wanted` explained why -
+# "nothing reads a card's priority back, so naming Priority here would send a field per card per
+# poll that nothing parses". Something reads them all back now. The cost is bytes rather than
+# requests: the same one call per page per poll, carrying more of each card.
+READ_FIELDS = (
+    TITLE_FIELD,
+    STATUS_FIELD,
+    PRIORITY_FIELD,
+    ASSIGNEES_FIELD,
+    STORY_POINT_FIELD,
+    ITERATION_FIELD,
+    AREA_FIELD,
+    LABELS_FIELD,
+)
 
 # GitHub's maximum.
 PAGE_SIZE = 100
@@ -156,9 +187,9 @@ class BoardFields:
     thing that survives review and fails on a real board.
     """
 
-    # What `list_board_items` sends as `fields=`. Title and Status only: it governs the
-    # READ, and nothing reads a card's priority back, so naming Priority here would send a
-    # field per card per poll that nothing parses.
+    # What `list_board_items` sends as `fields=`: the id of every field in `READ_FIELDS` the
+    # board actually has. Nothing indexes it, which is the point - `status` and `priority` below
+    # are kept as their own members precisely so no caller has to know this tuple's order.
     wanted: tuple[int, ...]
     status: BoardSelect
     priority: BoardSelect | None = None
@@ -166,7 +197,16 @@ class BoardFields:
 
 @dataclass(frozen=True, slots=True)
 class BoardItem:
-    """One card on a board, as this service needs it."""
+    """One card on a board, as this service needs it.
+
+    Everything below `content_id` arrived with issue #182, and all of it is optional in the same
+    way `column` already was: a board without the field, or a card with nothing set in it, answers
+    None or an empty tuple, and the block leaves that row out.
+
+    The selects are carried as the board's own option TEXT rather than as one of this project's
+    enums, which is what `column` already does and for the same reason: the mapping from a column
+    to a status is a domain decision and lives with the policies, not in a parser.
+    """
 
     item_id: int
     title: str
@@ -177,6 +217,22 @@ class BoardItem:
     # GitHub's id for the issue or pull request the card wraps, which is the id that item was
     # already stored under when its own webhook arrived. None for a draft, which wraps nothing.
     content_id: int | None = None
+    # Off the ITEM rather than out of its fields: these describe the card's place on the board,
+    # not a column somebody configured, so they are there whatever fields the board has.
+    creator: Actor | None = None
+    created_at: datetime | None = None
+    # A DRAFT card's own text, which is the one thing here that is not a project field and not on
+    # the item either: it sits under `content`, beside the draft's title. An issue or a pull request
+    # has its body mirrored from its own webhook long before a board is read, so this is only ever
+    # read for a draft - and for a draft it is the only place the text exists at all.
+    body: str = ""
+    # Out of the fields list, each one only where the board has that field.
+    assignees: tuple[Actor, ...] = ()
+    labels: tuple[Label, ...] = ()
+    priority_name: str | None = None
+    story_point: str | None = None
+    iteration: str | None = None
+    area: str | None = None
 
     @property
     def is_draft(self) -> bool:
@@ -509,7 +565,7 @@ class HttpProjectBoards:
             row.get("name"): row
             for row in rows
             if is_json_object(row)
-            and row.get("name") in (TITLE_FIELD, STATUS_FIELD, PRIORITY_FIELD)
+            and row.get("name") in READ_FIELDS
             and isinstance(row.get("id"), int)
         }
         status = named.get(STATUS_FIELD)
@@ -526,7 +582,7 @@ class HttpProjectBoards:
         found = BoardFields(
             wanted=tuple(
                 field_id
-                for name in (TITLE_FIELD, STATUS_FIELD)
+                for name in READ_FIELDS
                 if (row := named.get(name)) is not None
                 and isinstance(field_id := row.get("id"), int)
             ),
@@ -686,6 +742,18 @@ def parse_item(payload: object, project_number: int) -> BoardItem | None:
         html_url=_text(content.get("html_url")) or _board_url(payload, project_number),
         updated_at=mapping.parse_timestamp(payload.get("updated_at")),
         content_id=content_id if isinstance(content_id, int) else None,
+        # Issue #182. Every one of these goes through a `mapping` parser that already tolerates
+        # the field being absent, the value being null and the shape being wrong - so a board
+        # missing a field needs no guard here, it simply answers None or an empty tuple.
+        creator=mapping.actor(payload.get("creator")),
+        created_at=mapping.parse_timestamp(payload.get("created_at")),
+        body=_text(content.get("body")) or "",
+        assignees=mapping.actors(_field_value(fields, ASSIGNEES_FIELD)),
+        labels=mapping.labels(_field_value(fields, LABELS_FIELD)),
+        priority_name=_text(_option_name(_field_value(fields, PRIORITY_FIELD))),
+        story_point=_text(_option_name(_field_value(fields, STORY_POINT_FIELD))),
+        iteration=_iteration_title(_field_value(fields, ITERATION_FIELD)),
+        area=_text(_option_name(_field_value(fields, AREA_FIELD))),
     )
 
 
@@ -726,6 +794,18 @@ def _option_name(value: object) -> object:
     if is_json_object(value):
         return value.get("name")
     return value if isinstance(value, str) else None
+
+
+def _iteration_title(value: object) -> str | None:
+    """An iteration field's name, which is the one field shape that is nobody else's.
+
+    GitHub sends the start date, the duration and whether it has finished alongside the name, under
+    a `title` that is a `{raw, html}` pair like every other name in this API. None of the rest is
+    what a one-line row in a thread wants, so only the name comes out.
+    """
+    if is_json_object(value):
+        return _text(value.get("title"))
+    return None
 
 
 def _text(value: object) -> str | None:
