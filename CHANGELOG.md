@@ -7400,3 +7400,49 @@ feature end to end rather than assuming a predecessor the file never recorded.
   a creator change now assert what the message says and what it does not; the refusal test proves
   its record landed by the absence of the PRIORITY it had already written, rather than by an empty
   thread. The new ones cover a renamed card and a rewritten description.
+
+## A board poll that costs nothing, so it can happen thirty times as often
+
+- **A ticket reached Discord in thirty to forty-five seconds; it now takes about three.** The
+  pipeline was never the problem, which is worth saying plainly because the issue asked whether it
+  should be rebuilt. A webhook and a board poll run the *same* `ItemSyncService.sync()`. The whole
+  of the difference was the clock: a webhook is queued and collected by a worker polling every two
+  seconds, and a board was read every sixty. A change lands uniformly inside that window, so the
+  average wait was half of it - thirty seconds, which is exactly what was being reported. Nothing
+  was restructured, because nothing needed to be.
+- **The board read is conditional now, and that is what paid for the interval.** GitHub honours
+  `If-None-Match` on the project items endpoint, and a 304 to it carries no body **and spends no
+  rate-limit budget** - measured against the live board, not assumed: ten conditional polls two
+  seconds apart left the remaining-requests counter untouched. So thirty times the passes cost no
+  more per hour than sixty-second polling did, and an idle board now costs one request and nothing
+  else where it used to cost a megabyte.
+- **An unchanged board answers out of memory, and that is sound rather than hopeful.** A 304 proves
+  the body was byte-identical and parsing is a pure function of the body, so re-parsing could only
+  produce what is already held.
+- **Nothing downstream behaves differently.** The saving is in the transport, deliberately. Every
+  comparison the poll makes, every retry it owes, and every card still waiting for a thread is
+  reached exactly as often as before - so the one question a change like this has to answer, which
+  is "what might a cheap poll now skip?", has the answer "nothing".
+- **A validator is kept only for a board that provably arrived whole.** GitHub's ETag hashes one
+  response body, so a board over a page cannot be checked without downloading it, and - the part
+  that would have been a real bug - a FULL page cannot prove there is nothing behind it. A board of
+  exactly a hundred cards that gains one leaves page one byte-identical, and a 304 carries no Link
+  header to ask with, so trusting that validator would have hidden the new card for ever. The rule
+  is one unfull page or no caching, and the test that pins it is the most important one added.
+- **A board too big to check cheaply is polled on the old clock instead.** Reading a megabyte every
+  two seconds is the one way this change could have cost more than it saved. Such a board gets
+  slower rather than dearer, which is the direction a surprise should fail in, and it says so in
+  the log once. The board this runs against has eighty cards against a page of a hundred, so that
+  day will come and should not be a mystery when it does.
+- **Two warnings that fire once per poll are now loud once and then quiet.** Neither answer is
+  cached, by an earlier decision worth keeping, so both repeat on every pass - which the new
+  interval would have turned from sixty lines an hour into eighteen hundred. A warning repeating
+  that often is one whoever reads the log learns to scroll past.
+- **What stays unfixable is documented rather than worked around.** GitHub delivers no webhook for
+  a user-owned board: `projects_v2_item` is organisation scope and in public preview. So polling is
+  structural and there is a floor, and `requirements.md` now states what the floor is, why the
+  interval can be as short as it is, and the one thing that would remove it - an org-owned board
+  and a `projects_v2_item` subscription. The rejected alternatives are written down beside it, so
+  GraphQL and per-card concurrency do not have to be re-argued: GraphQL would trade a megabyte for
+  spending budget on every poll where a 304 spends none, and discord.py serialises thread creation
+  per channel anyway.
