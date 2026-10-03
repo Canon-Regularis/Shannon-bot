@@ -7372,3 +7372,31 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **The fixtures are observed, not invented.** Every payload shape in the new parse tests was copied
   off the wire from a real draft on a real board, which matters more than usual here: two of these
   shapes were guessed wrong in planning before the probe settled them.
+
+## A card reports every field it was asked to
+
+- **`Created` and `Updated` are announced now, which completes issue #182's list.** They were shown
+  in the block and left out of the change message, on the argument that a created-at cannot change
+  and an updated-at changes whenever anything else does. The issue said *"updates to all aside from
+  creator"*, and that is what it now does.
+- **Which made two more fields necessary rather than optional.** The poll only looks at a card whose
+  timestamp moved, so `Updated` differs on every message there is - and on its own it would report
+  that a card changed without saying what. `Ticket Name` and `Description` are the two edits that
+  move a timestamp without moving anything else watched, so they are watched too. A message carrying
+  nothing but a timestamp is the rare case now, and it means what it says: GitHub re-stamped the
+  card and nothing a reader can see moved with it.
+- **A title or description edit used to be completely silent.** The block was rewritten in place and
+  Discord says nothing about an edit, so renaming a card changed the thread's first message and told
+  nobody. That was a gap, not a decision.
+- **Every value in a change message is cut to eighty characters**, which stopped being optional the
+  moment a description became one of them. A description runs to seven hundred characters on its
+  own; eleven fields carrying two values each would have put the message past what Discord accepts
+  and cost the whole thing rather than the extra words. The block above carries every value in full,
+  which is what makes a short form the right one.
+- **The timestamp renderer is public now rather than copied.** A change message shows a date the
+  same way the block does, and the alternative was a second copy of Discord's timestamp syntax in
+  the poller - which is the duplication #166 was about.
+- **Four tests inverted and two arrived.** The ones asserting silence for a re-stamped card and for
+  a creator change now assert what the message says and what it does not; the refusal test proves
+  its record landed by the absence of the PRIORITY it had already written, rather than by an empty
+  thread. The new ones cover a renamed card and a rewritten description.
