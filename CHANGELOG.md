@@ -7446,3 +7446,98 @@ feature end to end rather than assuming a predecessor the file never recorded.
   GraphQL and per-card concurrency do not have to be re-argued: GraphQL would trade a megabyte for
   spending budget on every poll where a 304 spends none, and discord.py serialises thread creation
   per channel anyway.
+
+## A board is authorised by a person, not by one shared token
+
+- **Every project board in every server was read and written through one classic personal access
+  token belonging to one human account.** Scope `project`: read and write across every project that
+  account could see. Nothing scoped it per server - the credential supplier took the board's owner
+  as an argument and threw it away - so a card moved from Discord appeared on GitHub as the token's
+  owner whoever had asked for it, and one leaked token was write access to every board that account
+  could reach. Issue #170.
+- **Each person authorises for themselves now.** `/authorise_board` hands out a one-time link, the
+  same shape `/link` already used, and what somebody grants is used for exactly two things: a board
+  they link is read under their authorisation, and a card they move is moved as them.
+- **It had to be a separate OAuth App, and that is forced rather than chosen.** GitHub publishes no
+  App permission for a user-owned Projects v2 board - its Projects permission is organisation-level
+  only - and granting an installed App an organisation permission suspends its event delivery until
+  an admin accepts, which would stop every webhook in every registered repository. OAuth scopes
+  have neither problem, and `project` covers user and organisation projects alike. The registration
+  is additive: it touches nothing about the existing App and needs no reinstall.
+- **The first credential this project stores, and the only encrypted column in the schema.**
+  Everything else it keeps about somebody is a fact *about* them; this is a thing that *acts as*
+  them. Encrypted with a key held in the environment and never in the database, so a stolen copy of
+  the table is worth nothing on its own. `cryptography` was already a dependency, for the App's own
+  JWT signing, so nothing was added to get it.
+- **A key is a comma-separated list, newest first.** The cipher writes with the first and reads with
+  any, so rotating is "put the new key in front, deploy, drop the old one next deploy" rather than
+  every person who linked a board doing it again. A row that will not decrypt counts as absent and
+  says so once, naming the setting and never the key or the ciphertext.
+- **An unusable key means boards are off, not a process that will not start.** A lock added over a
+  working system must not become the reason the system stops: taking webhooks, deliveries and every
+  other server down over a board setting would be a far worse failure than the one it guards
+  against.
+- **`/set_board` refuses without an authorisation, and records whose it was.** A board linked on
+  somebody else's credential would put a server straight back where it started. Clearing the board
+  forgets the credential with it, and the reply says the honest half - forgetting this copy is not
+  revoking the grant, and only the person who granted it can do that.
+- **One round trip learned a second application rather than growing a second copy.** The
+  verification service was already parameterised by OAuth client; what was new was making the client
+  and the scope follow the purpose, which the state machine could already answer because it consumes
+  the state before it spends the code. One callback route, one single-use rule, one place that knows
+  expired and spent and never-issued must all say the same thing.
+- **Identity links are byte-identical.** `/link`, `/register` and `/unregister` still ask for no
+  scope at all, which is a security property rather than a tidiness one: a GitHub App's user token
+  with the default empty scope can call `GET /user`, and that is the whole of what they need. A test
+  holds both arms.
+- **Thirty-one tests, and the ones worth naming are about what is not there.** The stored secret is
+  asserted against the raw column rather than through the thing that decrypts it; the token appears
+  in no log line at DEBUG across the whole round trip; a row written under another key reads as
+  absent; the same token encrypts differently each time, so two rows cannot reveal that two people
+  authorised the same account; and the command takes no argument that could name anybody but its
+  runner, because the authorisation URL is a bearer credential.
+- **`SHANNON_GITHUB_PROJECT_TOKEN` is marked deprecated rather than deleted**, because it is still
+  what reads a board until the switch-over lands. Its note says to delete the line *and revoke the
+  token*: removing a credential from a file leaves it live.
+
+## The shared project token is gone
+
+- **`SHANNON_GITHUB_PROJECT_TOKEN` is removed, and so is the only thing that could hand this bot a
+  credential seeing everything.** `_OneToken` existed to make a personal access token look like a
+  token supplier; its own docstring called a second such thing "a second way to end up back where
+  this project started". There is no first way now either. Issue #170.
+- **A board is read under the authorisation of whoever linked it, resolved per BOARD and never per
+  owner.** That distinction is the one thing in this change that would have been worse than what it
+  replaced: `linked_to_board` refuses two repositories on the same board, but two servers may link
+  two *different* boards owned by the same account — so an owner-keyed lookup would have read one
+  server's board under the other server's member's grant. A user credential crossing a tenancy
+  boundary is precisely what the authorisation was for.
+- **A card is moved as whoever moved it.** `tell_the_board: bool` became `acting: int | None`, one
+  parameter doing the work of two, because "do not write to the board" and "nobody is writing"
+  turned out to be the same fact said twice. The poller passes None, which is both the mechanism
+  and the truth: it runs *because* a card moved, and no member asked.
+- **The board's write client carries no credential at all.** Every write passes an explicit
+  authorisation, and an explicit credential wins over whatever a client would attach — so a write
+  with nobody behind it goes out anonymous and GitHub answers 401. The rule is a fact of the wiring
+  rather than a check somebody could forget, and it is strictly narrower than the client it
+  replaced.
+- **`/status` refuses up front where the mover has authorised nothing**, rather than logging and
+  swallowing after the labels, the row and the thread have landed. That inverts the clause the
+  module already had in writing — *"a warning attached to a fix the caller cannot make is noise"* —
+  and the inversion is the justification: this caller **can** make the fix, in one command. It stays
+  silent where there is no card, and where the deployment has board writes off, because asking
+  somebody to authorise a write that will not happen is worse than saying nothing.
+- **The boot check is keyed to something a container can see.** The old one was keyed to
+  `SHANNON_GITHUB_PROJECT_NUMBER`, which `/set_board` had already made obsolete, so a deployment
+  that linked boards with the command got no check at all. The new one names a half-configuration
+  in either direction. It cannot ask whether a board is linked — `build_container` has no event loop
+  and no connection — and that limit is stated rather than papered over: an unauthorised board finds
+  out on the poll path, per board, once.
+- **Four copies of `project_owner or <the repository's own owner>` became one.** The fallback is not
+  arbitrary in any of them — an empty owner used to send a board write out with no credential, and
+  the poller read the resulting 401 as permanent and wrote the card off for good — so it is written
+  down once, in `domain.board`, with the reason beside it.
+- **The three unreadable-board handlers now share one name for what they catch.** Their control flow
+  genuinely differs and stays separate; what was duplicated was the exception tuple and a diagnosis
+  that named a setting which no longer exists. Both are in one place, and the advice names the two
+  commands somebody can actually run.

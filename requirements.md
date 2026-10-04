@@ -297,6 +297,64 @@ clock instead - slower rather than more expensive, which is the direction a surp
 in. It is logged once when it happens. The current board has eighty cards against a page of a
 hundred, so this will arrive eventually and should not be a mystery when it does.
 
+### Who a board is read as
+
+Issue #170. Each person authorises this bot for themselves, and what they grant is used for exactly
+two things: a board they link is read under their authorisation, and a card **they** move from
+Discord is moved as them. Nothing is shared between servers, and nothing acts for somebody who did
+not ask.
+
+What that replaced is worth recording, because the shape of it is the reason for the rest. Every
+board in every server was read and written through **one classic personal access token belonging to
+one human account**, with the `project` scope - read and write across every project that account
+could see. Nothing scoped it per server: the credential supplier took the board's owner as an
+argument and discarded it. So a card moved from Discord appeared on GitHub as the token's owner
+whoever had asked for it, and one leaked token was write access to every board that account could
+reach.
+
+The authorisation goes through a **classic OAuth App**, registered separately from the GitHub App,
+and that is forced rather than chosen. GitHub publishes no App permission for a **user-owned**
+Projects v2 board - its Projects permission exists at organisation level only, for Apps and
+fine-grained tokens alike - and granting an installed App an organisation permission suspends its
+event delivery until an admin accepts, which would stop every webhook in every registered
+repository. OAuth scopes have neither problem, and `project` covers user and organisation projects
+alike.
+
+A board authorisation is the **first credential this bot stores**, and the only encrypted column in
+the schema. Everything else it keeps about a person is a fact *about* them - a login, an account id,
+a preference. This is a thing that *acts as* them, so it is encrypted at rest with a key held in the
+environment and never in the database, which is what makes a stolen copy of the table worth nothing
+on its own. The key is a comma-separated list, newest first, so rotating it is one deploy rather
+than everybody authorising again; a row that will not decrypt counts as absent, and the person
+authorises again to replace it.
+
+There is no shared credential left at all. `SHANNON_GITHUB_PROJECT_TOKEN` is gone, and with it the
+object that existed to hand the client a fixed token — so there is no longer any way to give this
+bot one credential that sees everything. The board's write client carries no credential of its own,
+which makes "a card is moved as somebody" a fact of the wiring rather than a check somebody could
+forget: a write with nobody behind it goes out anonymous and GitHub answers 401.
+
+Linking a board therefore requires having authorised, and `/set_board` refuses otherwise. A board
+linked on somebody else's authorisation would put a server straight back on one person's credential.
+Clearing the board forgets the credential with it, and the reply says the honest thing: forgetting
+this copy is not revoking the grant, and only the person who granted it can do that, under
+Applications in their GitHub settings.
+
+### What "anonymity" can and cannot mean here
+
+The issue asked for *"full security and anonymity wherever possible"*, and the achievable property
+is **least authority plus correct attribution** rather than anonymity. GitHub sees the grant and
+sees the write; there is no arrangement under which it does not. What changed is that it now sees
+the right person, with the narrowest grant the feature needs, revocable by them - where before it
+saw one account standing in for everybody.
+
+Worth stating plainly so it is not re-litigated: **nothing else in this database is encrypted.**
+`user_links`, `verified_identities`, `item_assignments`, `logged_messages.content`, `muted_members`
+and `webhook_events.payload` are all plaintext, and most of them are queried on, so an encrypted
+column could not be an index key. Encrypting them is a database-wide project with a key-management
+story and a backfill, and folding it into a board-linking change would have made both worse. It is
+a known posture, not an oversight.
+
 **What would remove the floor entirely:** move the board to an organisation and subscribe to
 `projects_v2_item`. The board then joins the same delivery queue as everything else and inherits
 the worker's latency, with no poller involved. Two caveats: those events are in public preview, and
