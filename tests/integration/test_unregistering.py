@@ -28,12 +28,14 @@ from shannon.db.models import Repository, TrackedItem, VerifiedIdentity
 from shannon.db.stores.identities import IdentityVerificationStore, SpentLink
 from shannon.domain.enums import ObjectType, VerificationPurpose
 from shannon.domain.errors import NotProvenError, NotRegisteredError, RepositoryMismatchError
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.unregistration import RepositoryUnregistrationService
 from shannon.services.verification import (
     PROOF_LIFETIME,
     GitHubIdentityVerification,
     VerificationError,
 )
+from tests.support.credentials import BOARD_KEY
 
 pytestmark = pytest.mark.integration
 
@@ -116,6 +118,7 @@ async def verifying(
         yield GitHubIdentityVerification(
             sessionmaker,
             links or RecordingLinks(),
+            BoardCredentials(sessionmaker, keys=BOARD_KEY),
             client_id="Iv23liAbC",
             client_secret=client_secret,
             oauth_url="https://github.com",

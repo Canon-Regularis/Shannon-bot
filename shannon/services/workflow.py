@@ -23,7 +23,7 @@ from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
-from shannon.domain.board import must_pass_through
+from shannon.domain.board import board_owner, must_pass_through
 from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.errors import ItemNotReadyError, PermanentError, ShannonError
 from shannon.domain.models import Fetcher, Label, TrackedSnapshot
@@ -118,6 +118,18 @@ class WorkflowOutcome:
 _ENOUGH_TO_SHOW = 15
 
 
+class WhoIsMovingTheCard(Protocol):
+    """The authorisation a particular member granted, for a card to be moved as them.
+
+    One member, declared here because this is where it is consumed. Issue #170: before it, every
+    card move went out under one shared token and GitHub recorded that account as having moved it,
+    whoever had actually dragged anything. An empty string means they have granted none, which is a
+    refusal rather than a fallback - moving a card as somebody else is the thing this replaced.
+    """
+
+    async def moving(self, *, guild_id: int, discord_user_id: int) -> str: ...
+
+
 class MovesCards(Protocol):
     """Dragging an item's board card into the column standing for a status.
 
@@ -127,6 +139,21 @@ class MovesCards(Protocol):
     worth mentioning, which is why the answer is not a bool.
     """
 
+    @property
+    def may_write(self) -> bool:
+        """Whether this deployment writes to a board at all.
+
+        Asked because the object itself is the only thing that knows. The flag is applied to the
+        WRITER inside the board reader rather than by withholding the reader - issue #179, where
+        withholding it also withheld the column-order rule - so a caller cannot tell from the
+        wiring.
+
+        One caller: the refusal that asks somebody to authorise. With writes off there is no write
+        to authorise for, and asking anyway would refuse a command for a reason the person could do
+        nothing about.
+        """
+        ...
+
     async def move_card(
         self,
         *,
@@ -134,6 +161,7 @@ class MovesCards(Protocol):
         project_number: int,
         card_id: int,
         state: Status | Priority,
+        as_: str,
         column: str = "",
     ) -> CardMoved: ...
 
@@ -185,6 +213,7 @@ class ItemWorkflow:
         threads: ShutsAndKnowsServers,
         kinds: Mapping[ObjectType, ItemKind],
         repository_labels: RepositoryLabels,
+        authorisations: WhoIsMovingTheCard,
         cards: MovesCards | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -193,6 +222,8 @@ class ItemWorkflow:
         self._threads = threads
         self._kinds = kinds
         self._labels = repository_labels
+        # Turns the member who asked into the credential a card is moved with. Issue #170.
+        self._authorisations = authorisations
         # None where this deployment has not turned board writes on, or has no project
         # token to make them with. Wiring rather than a flag read here, so a deployment
         # that has not opted in cannot reach the write at all.
@@ -204,14 +235,20 @@ class ItemWorkflow:
         thread_id: int,
         status: Status,
         column: str = "",
-        tell_the_board: bool = True,
+        acting: int | None = None,
     ) -> WorkflowOutcome:
         """Move an item to a status, and lock its thread once it is done.
 
-        `tell_the_board` is False for exactly one caller: the board poller, which calls
-        this BECAUSE a card moved and would otherwise write the column it has just read
-        straight back. It terminates either way - the next poll sees nothing further
-        changed - so what it costs is a wasted call per moved card rather than a loop.
+        `acting` is the Discord member who asked, and None means nobody did - which is exactly
+        one caller, the board poller. It calls this BECAUSE a card moved and would otherwise
+        write the column it has just read straight back. It terminates either way - the next poll
+        sees nothing further changed - so what it costs is a wasted call per moved card rather
+        than a loop.
+
+        It replaced a `tell_the_board` flag, and the type is the point. Since issue #170 a card is
+        moved AS somebody, so "write to the board" and "whose authorisation to write with" are one
+        question rather than two that can disagree. A board write with nobody to attribute it to is
+        now unrepresentable rather than merely discouraged.
 
         `column` is the board column somebody picked, where they picked one. The status is still
         what drives the label, the lock and the block in Discord; the column decides only which
@@ -223,8 +260,9 @@ class ItemWorkflow:
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
         self._refuse_conflicting_status(found, snapshot, status)
-        if tell_the_board:
+        if acting is not None:
             await self._refuse_a_move_the_board_forbids(found, status, column)
+            await self._refuse_a_card_nobody_authorised(found, acting)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -302,7 +340,9 @@ class ItemWorkflow:
             # a status FROM a column, and a card left behind because GitHub was having a
             # moment is noticed by nothing. Running the command again is what a person
             # does, and it answered 'already Done' and asked the board nothing.
-            repeated = tell_the_board and await self._move_the_card(found, status, column)
+            repeated = acting is not None and await self._move_the_card(
+                found, status, acting=acting, column=column
+            )
             return WorkflowOutcome(
                 found.full_name,
                 found.number,
@@ -353,7 +393,9 @@ class ItemWorkflow:
             if touched:
                 await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
-        no_column = tell_the_board and await self._move_the_card(found, status, column)
+        no_column = acting is not None and await self._move_the_card(
+            found, status, acting=acting, column=column
+        )
 
         logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
         return WorkflowOutcome(
@@ -367,7 +409,9 @@ class ItemWorkflow:
             board_has_no_column=no_column,
         )
 
-    async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
+    async def set_priority(
+        self, *, thread_id: int, priority: Priority, acting: int | None = None
+    ) -> WorkflowOutcome:
         """Move an item to a priority. Nothing is locked and no status moves with it.
 
         The stored priority has to agree as well as the label, which is the same rule the status
@@ -387,7 +431,9 @@ class ItemWorkflow:
             # The board is asked on a repeat too, the same as the status half. Both
             # commands answer the same question and a repeat means the same thing in both:
             # try the half that has nothing else to retry it.
-            repeated = await self._move_the_card(found, priority)
+            repeated = acting is not None and await self._move_the_card(
+                found, priority, acting=acting
+            )
             return WorkflowOutcome(
                 found.full_name, found.number, changed=False, board_has_no_column=repeated
             )
@@ -395,11 +441,17 @@ class ItemWorkflow:
         await self._apply(found, change)
         await self._rerender(found, snapshot, change)
 
-        # No `tell_the_board` here, unlike the status half. That exists for one caller,
+        # `acting` means the same thing here as on the status half: whoever asked, and None for
+        # nobody. It is optional for the same reason too, which is worth being plain about -
+        # the alternative was a required argument on a path most callers reach without caring
+        # about the board at all, and a default of None costs nothing because it is the safe
+        # answer: no member, no board write. The two production callers both pass one.
+        #
+        # There is no poller on this path, unlike the status half:
         # the poller, which calls `set_status` BECAUSE a card moved - and nothing polls a
         # priority: the poll reads a card's column and no other field. A parameter no
         # caller ever passes False would be an arm only a test could take.
-        no_column = await self._move_the_card(found, priority)
+        no_column = acting is not None and await self._move_the_card(found, priority, acting=acting)
 
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
         return WorkflowOutcome(
@@ -522,7 +574,7 @@ class ItemWorkflow:
         )
 
     async def _move_the_card(
-        self, found: FoundItem, state: Status | Priority, column: str = ""
+        self, found: FoundItem, state: Status | Priority, *, acting: int, column: str = ""
     ) -> bool:
         """Drag this item's board card to match, where there is one and it may be.
 
@@ -545,6 +597,11 @@ class ItemWorkflow:
                 project_number=found.card.project_number,
                 card_id=found.card.card_id,
                 state=state,
+                # Whoever asked. `_refuse_a_card_nobody_authorised` has already established that
+                # they granted one, so this is a lookup rather than a question.
+                as_=await self._authorisations.moving(
+                    guild_id=found.guild_id, discord_user_id=acting
+                ),
                 column=column,
             )
         except ShannonError as refused:
@@ -581,6 +638,38 @@ class ItemWorkflow:
         down.
         """
         return found.object_type in self._kinds
+
+    async def _refuse_a_card_nobody_authorised(self, found: FoundItem, acting: int) -> None:
+        """Refuse before anything is written, where this member has authorised no board access.
+
+        Issue #170. A card is moved AS the person who asked, so somebody who has granted nothing
+        cannot move one - and this is the one board refusal they can fix themselves, in one
+        command, which is what makes refusing better than carrying on quietly.
+
+        Deliberately NOT the shape the other board failures take. Those are logged and swallowed
+        after the labels, the row and the thread have landed, on the argument that a warning
+        attached to a fix the caller cannot make is noise. That argument inverts here: the caller
+        CAN make the fix, so the reply is worth having - and it comes first, before anything has
+        happened, so there is no half-done change to explain.
+
+        Only where there is a write to make. Two ways there is not, and both would otherwise
+        refuse a command for a reason the person could do nothing about:
+
+        - the item has no card, because nobody added it to the board;
+        - this deployment has board writes turned off, so no credential of anybody's would be
+          used. Asking somebody to authorise access for a write that is not going to happen is
+          worse than saying nothing. That is `may_write` rather than a None check, because the
+          flag is applied to the WRITER inside the board reader and not by withholding it.
+        """
+        if self._cards is None or not self._cards.may_write or found.card is None:
+            return
+        if not await self._authorisations.moving(guild_id=found.guild_id, discord_user_id=acting):
+            raise WorkflowRefusedError(
+                "This server mirrors a project board and you have not authorised this bot to "
+                "move cards as you, so nothing was changed. Run /authorise_board and sign in to "
+                "GitHub: a card is moved as YOU, so the board's history names whoever moved it "
+                "rather than one shared account."
+            )
 
     def _refuse_a_kind_it_cannot_move(self, found: FoundItem, *, instead: str) -> None:
         """Refuse a thread whose item this service has no way to write to.
@@ -643,7 +732,7 @@ class ItemWorkflow:
         old constant could only ever be right for a board that happened to use that word, and
         GitHub's own default template does not.
 
-        Only when `tell_the_board` is true, which is exactly not the poller. The poller calls
+        Only when somebody is acting, which is exactly not the poller. The poller calls
         BECAUSE a card has already moved: somebody dragging one is the fact being mirrored
         rather than a request to be judged, and a poll has nowhere to put a refusal anyway.
         Refusing there would leave the board and the row disagreeing for ever, with the card
@@ -1034,10 +1123,12 @@ class FoundItem:
             column=item.project_column,
             card=(
                 BoardCard(
-                    # Never empty. An empty owner sends the write out with no
-                    # credential at all, GitHub answers 401, and the poller reads that
-                    # as permanent and writes the card off for good.
-                    owner=repository.project_owner or repository.repo_name.partition("/")[0],
+                    # Never empty, and the resolver says why: an empty owner sends the write
+                    # out with no credential at all.
+                    owner=board_owner(
+                        project_owner=repository.project_owner,
+                        repo_name=repository.repo_name,
+                    ),
                     project_number=number,
                     card_id=card_id,
                 )
@@ -1055,6 +1146,7 @@ def build_item_workflow(
     *,
     pr_sync: SyncsItems,
     issue_sync: SyncsItems,
+    authorisations: WhoIsMovingTheCard,
     cards: MovesCards | None = None,
 ) -> ItemWorkflow:
     """Assemble the workflow service with a fetcher and a renderer per object type."""
@@ -1073,5 +1165,6 @@ def build_item_workflow(
             ),
         },
         RepositoryLabels(github),
+        authorisations,
         cards,
     )

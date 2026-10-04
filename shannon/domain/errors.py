@@ -42,6 +42,24 @@ class NotProvenError(ShannonError):
     """
 
 
+class BoardNotAuthorisedError(ShannonError):
+    """Nobody has given this bot a GitHub authorisation it could use to reach the board.
+
+    Issue #170. Three refusals about a board read almost alike and send somebody to three
+    different places, so they are three types:
+
+    - `NotProvenError` above: GitHub has not said this account is yours.
+    - `BoardUnreadableError`: there is an authorisation, and GitHub will not open that board with
+      it - a wrong number, a wrong owner, or a grant that does not cover it.
+    - this one: there is no authorisation at all, which is the only one of the three the person
+      reading the message can fix in one command, by themselves.
+
+    Here rather than beside the other board errors in `services.boards`, because the commands and
+    the workflow both raise it and a service importing another service for an exception is the
+    coupling issue #170 set out to reduce.
+    """
+
+
 class RepositoryMismatchError(ShannonError):
     """The link points at a repository other than the one registered here."""
 

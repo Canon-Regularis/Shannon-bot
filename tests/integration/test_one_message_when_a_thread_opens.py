@@ -19,6 +19,7 @@ from shannon.db.models import Repository
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import Status
 from shannon.services.workflow import build_item_workflow
+from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -93,6 +94,7 @@ async def test_a_status_line_is_still_said_after_the_command_that_set_it(
         threads,
         pr_sync=container.pr_sync,
         issue_sync=container.issue_sync,
+        authorisations=FakeBoardCredentials(),
     )
 
     async with client:

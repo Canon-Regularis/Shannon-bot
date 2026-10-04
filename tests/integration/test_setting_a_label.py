@@ -20,6 +20,7 @@ from shannon.services.workflow import (
     WorkflowRefusedError,
     build_item_workflow,
 )
+from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -47,7 +48,12 @@ def workflow(
     issue_service: ItemSyncService,
 ) -> ItemWorkflow:
     return build_item_workflow(
-        db_sessionmaker, github, threads, pr_sync=sync_service, issue_sync=issue_service
+        db_sessionmaker,
+        github,
+        threads,
+        pr_sync=sync_service,
+        issue_sync=issue_service,
+        authorisations=FakeBoardCredentials(),
     )
 
 

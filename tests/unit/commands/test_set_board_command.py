@@ -14,6 +14,7 @@ And "stop mirroring a board" and "that is not a board number" are different answ
 
 from __future__ import annotations
 
+import inspect
 from typing import cast
 
 import discord
@@ -61,11 +62,15 @@ class StubBoards:
         self.listed = listed
         self.listing_error = listing_error
         self.calls: list[tuple[int, int | None, str]] = []
+        # Who the command said was acting. Its own list rather than a fourth element on `calls`,
+        # so the existing assertions about `calls` keep reading as they did.
+        self.acted: list[int] = []
 
     async def assign(
-        self, *, guild_id: int, project_number: int | None, typed_owner: str
+        self, *, guild_id: int, project_number: int | None, typed_owner: str, acting: int
     ) -> BoardLink:
         self.calls.append((guild_id, project_number, typed_owner))
+        self.acted.append(acting)
         if self.error is not None:
             raise self.error
         return self.result
@@ -434,3 +439,24 @@ def test_the_picker_writes_the_label_the_parser_reads() -> None:
         ProjectListing(number=1, title="#1 with a hash in the title"),
     ):
         assert _wanted(_label_for(one)) == ChosenBoard(one.number), _label_for(one)
+
+
+class TestWhoTheBoardIsLinkedAs:
+    """Issue #170. The board is read under the runner's own GitHub authorisation, so the command
+    tells the service who ran it and takes no argument that could name anybody else."""
+
+    async def test_it_names_whoever_ran_it(self) -> None:
+        command, interaction, service = run_it()
+
+        await fire(command, interaction, "3")
+
+        assert service.acted == [interaction.user.id]
+
+    async def test_it_takes_no_argument_that_could_name_somebody_else(self) -> None:
+        """The invariant `/link` keeps, for the same reason: a board linked on somebody else's
+        behalf would put a server back on one person's credential, which is what the authorisation
+        replaced. There is no parameter here to misuse."""
+        command = build_set_board_command(StubBoards(), default_gate())
+
+        taken = set(inspect.signature(command.callback).parameters)
+        assert taken == {"interaction", "board", "owner"}

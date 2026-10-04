@@ -93,10 +93,12 @@ class MovesItems(Protocol):
         thread_id: int,
         status: Status,
         column: str = "",
-        tell_the_board: bool = True,
+        acting: int | None = None,
     ) -> WorkflowOutcome: ...
 
-    async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome: ...
+    async def set_priority(
+        self, *, thread_id: int, priority: Priority, acting: int | None = None
+    ) -> WorkflowOutcome: ...
 
 
 class OffersColumns(Protocol):
@@ -144,7 +146,11 @@ def _status_command(
             gate,
             access,
             lambda thread_id: service.set_status(
-                thread_id=thread_id, status=wanted, column=to.strip()
+                thread_id=thread_id,
+                status=wanted,
+                column=to.strip(),
+                # Whoever ran it, so the card is moved as them. Issue #170.
+                acting=interaction.user.id,
             ),
             said=to.strip(),
         )
@@ -170,7 +176,9 @@ def _priority_command(
             "priority",
             gate,
             access,
-            lambda thread_id: service.set_priority(thread_id=thread_id, priority=wanted),
+            lambda thread_id: service.set_priority(
+                thread_id=thread_id, priority=wanted, acting=interaction.user.id
+            ),
             said=f"{spoken(wanted)} priority",
         )
 

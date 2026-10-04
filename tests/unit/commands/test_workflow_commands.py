@@ -47,18 +47,25 @@ class StubWorkflow:
         # What the command passed down as the board column, which is the text somebody picked
         # rather than the status it read back as.
         self.columns: list[str] = []
+        # Who the command said was acting, which since issue #170 is whose GitHub authorisation
+        # the card move goes out under. Its own list so the `calls` assertions read as they did.
+        self.acted: list[int | None] = []
 
     async def set_status(
-        self, *, thread_id: int, status: Status, column: str = ""
+        self, *, thread_id: int, status: Status, column: str = "", acting: int | None = None
     ) -> WorkflowOutcome:
         self.calls.append(("status", thread_id, status))
         self.columns.append(column)
+        self.acted.append(acting)
         if self.error is not None:
             raise self.error
         return self.outcome
 
-    async def set_priority(self, *, thread_id: int, priority: Priority) -> WorkflowOutcome:
+    async def set_priority(
+        self, *, thread_id: int, priority: Priority, acting: int
+    ) -> WorkflowOutcome:
         self.calls.append(("priority", thread_id, priority))
+        self.acted.append(acting)
         if self.error is not None:
             raise self.error
         return self.outcome

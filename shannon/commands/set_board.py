@@ -69,7 +69,7 @@ class LinksBoards(Protocol):
     """Pointing this server's repository at a board, and listing the ones to choose from."""
 
     async def assign(
-        self, *, guild_id: int, project_number: int | None, typed_owner: str
+        self, *, guild_id: int, project_number: int | None, typed_owner: str, acting: int
     ) -> BoardLink: ...
 
     async def choices_for(self, guild_id: int, typed_owner: str) -> Sequence[ProjectListing]: ...
@@ -110,6 +110,11 @@ def build_set_board_command(service: LinksBoards, gate: PermissionGate) -> Slash
                 # the one they typed, and silently preferring the URL would be this command
                 # overruling them about the half of the address people get wrong.
                 typed_owner=owner or chosen.owner,
+                # Whoever ran it, and not a parameter anybody can name. Since issue #170 their
+                # GitHub authorisation is what this board is read under from here on, so linking
+                # one on somebody else's behalf would put a server back on one person's
+                # credential - which is the thing the authorisation replaced.
+                acting=interaction.user.id,
             )
         except NotRegisteredError as error:
             await reply(interaction, refused(words_for(error, noun="repository")))

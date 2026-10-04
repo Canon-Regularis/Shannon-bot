@@ -11,6 +11,7 @@ from shannon.container import build_container
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.credentials import BOARD_KEY
 
 
 class _Closeable:
@@ -84,19 +85,15 @@ class TestClosingTheContainer:
 
         assert opened.closed is True
 
-    async def test_the_app_client_is_held_so_it_can_be(self) -> None:
+    async def test_both_clients_it_owns_are_held_so_they_can_be(self) -> None:
+        """Two, in every deployment. The App's own JWT client, and the board's writer.
+
+        The writer is unconditional now, where it used to appear only when a project token was
+        set: it carries no credential at all, because every board write passes the authorisation of
+        whoever asked for it. So there is nothing for a deployment to turn on, and nothing to
+        branch on here either.
+        """
         container = container_with(DisposableEngine(), FakeGitHubClient())
-
-        assert len(container.also_opened) == 1
-
-    async def test_the_board_keeping_its_own_token_is_held_as_well(self) -> None:
-        """A third client, and only when the board has a credential of its own."""
-        settings = Settings(
-            github_webhook_secret=SecretStr("x"),
-            github_project_token=SecretStr("ghp_board"),
-        )
-
-        container = container_with(DisposableEngine(), FakeGitHubClient(), settings)
 
         assert len(container.also_opened) == 2
 
@@ -108,6 +105,7 @@ class TestWhatItWiresUp:
 
         assert sorted(command.name for command in container.commands) == [
             "assign",
+            "authorise_board",
             "issue",
             "label",
             "link",
@@ -183,31 +181,28 @@ class TestTheOneCredentialTheAppCannotReplace:
     one feature keeps a token of its own, and everything else goes through an installation.
     """
 
-    async def test_the_board_reads_with_its_own_token_when_one_is_set(self) -> None:
-        from shannon.container import _OneToken
-
-        supplier = _OneToken("ghp_board")
-
-        assert await supplier.token_for("acme") == "ghp_board"
-        assert await supplier.token_for("anybody-else") == "ghp_board"
-
-    async def test_a_deployment_with_no_board_token_builds_without_one(self) -> None:
-        """Which is every deployment leaving the project number at zero, so the narrow credential
-        stays unset rather than being one more thing everybody has to create."""
+    async def test_a_deployment_that_authorises_no_board_still_builds(self) -> None:
+        """Which is every deployment that does not use one, so none of the three board settings is
+        one more thing everybody has to create."""
         container = container_with(
             DisposableEngine(), FakeGitHubClient(), Settings(github_webhook_secret="s")
         )
 
         assert container.poller is not None
 
-    async def test_setting_one_still_builds(self) -> None:
-        """The board then reads through a client of its own rather than the shared one. Asserted
-        as construction rather than by reaching inside the poller, because what matters is that
-        the branch exists and is taken; which object the reader holds is its own business."""
+    async def test_a_deployment_that_does_builds_too(self) -> None:
+        """Asserted as construction rather than by reaching inside the poller: what matters is
+        that the branch exists and is taken, and which object the reader holds is its own
+        business."""
         container = container_with(
             DisposableEngine(),
             FakeGitHubClient(),
-            Settings(github_webhook_secret="s", github_project_token="ghp_board"),
+            Settings(
+                github_webhook_secret="s",
+                github_board_client_id="Ov23liBoard",
+                github_board_client_secret=SecretStr("board-shh"),
+                board_credential_key=SecretStr(BOARD_KEY),
+            ),
         )
 
         assert container.poller is not None
@@ -261,15 +256,11 @@ class TestWhatTurningOffCardWritesTurnsOff:
     board that answers NO_WRITER rather than a board that is absent.
     """
 
-    def a_container(self, *, may_move: bool, token: str = "ghp_board") -> object:
+    def a_container(self, *, may_move: bool) -> object:
         return container_with(
             DisposableEngine(),
             FakeGitHubClient(),
-            Settings(
-                github_webhook_secret="s",
-                github_project_token=token,
-                board_may_move_cards=may_move,
-            ),
+            Settings(github_webhook_secret="s", board_may_move_cards=may_move),
         )
 
     def board_of(self, container: object) -> Any:
@@ -294,53 +285,77 @@ class TestWhatTurningOffCardWritesTurnsOff:
         assert self.board_of(self.a_container(may_move=False))._client is not None
         assert self.board_of(self.a_container(may_move=True))._client is not None
 
-    async def test_no_project_token_still_means_no_writer_whatever_the_flag_says(self) -> None:
-        """The older of the two gates, unchanged. The App client holds no Projects permission of
-        any kind, so a write through it could only ever 403 - and the flag being on must not
-        conjure a writer out of a client that cannot write."""
-        board = self.board_of(self.a_container(may_move=True, token=""))
+    async def test_the_writer_carries_no_credential_of_its_own(self) -> None:
+        """What replaced "no token means no writer". There is no shared token to be missing now, so
+        the flag is the only gate - but the writer it hands over holds no credential, so a write
+        with nobody behind it goes out anonymous and GitHub answers 401. The rule that a card is
+        moved AS somebody is a fact of the wiring rather than a check somebody could forget.
+        """
+        board = self.board_of(self.a_container(may_move=True))
 
-        assert board._writer is None
+        assert board._writer is not None
+        assert board._writer._tokens is None, (
+            "the board writer was given a credential of its own, which is what this replaced"
+        )
 
 
 class TestABoardWithNoTokenToReadItWith:
     """The failure this catches is silent and looks like something else.
 
-    With no project token the board reads through the App client, which holds no Projects
-    permission for either kind of board - so every call answers 403, and a 403 reads as a token
-    that is wrong rather than one that is missing. It is also exactly the shape of a .env edited
-    while the process was running: both are read once, here, at startup.
+    A board is reached through a separately registered OAuth App, and its authorisations are kept
+    encrypted. Either setting without the other is a deployment that cannot do it, and the failure
+    is silent and looks like something else: a board that will not open reads exactly like a wrong
+    number. So each direction is said once, loudly, at startup.
+
+    What this replaced was keyed to SHANNON_GITHUB_PROJECT_NUMBER, which `/set_board` had already
+    made obsolete - so a deployment that linked its boards with the command got no check at all.
+    This one is keyed to the settings themselves, which is the part a container can actually see:
+    it has no event loop and no connection, so it cannot ask the database whether a board is
+    linked. A board nobody authorised finds out on the poll path, per board, once.
     """
 
-    def test_a_number_with_no_token_is_said_at_boot(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_an_app_with_no_key_is_said_at_boot(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.ERROR, logger="shannon.container"):
             container_with(
                 DisposableEngine(),
                 FakeGitHubClient(),
-                Settings(github_webhook_secret="x", github_project_number=6),
+                Settings(github_webhook_secret="x", github_board_client_id="Ov23liBoard"),
             )
 
-        assert "SHANNON_GITHUB_PROJECT_TOKEN" in caplog.text
-        assert "403" in caplog.text
+        assert "SHANNON_BOARD_CREDENTIAL_KEY" in caplog.text
         assert "restart" in caplog.text
 
-    def test_a_number_with_a_token_says_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_a_key_with_no_app_is_said_at_boot(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(github_webhook_secret="x", board_credential_key=SecretStr(BOARD_KEY)),
+            )
+
+        assert "SHANNON_GITHUB_BOARD_CLIENT_ID" in caplog.text
+        assert "restart" in caplog.text
+
+    def test_both_together_say_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.ERROR, logger="shannon.container"):
             container_with(
                 DisposableEngine(),
                 FakeGitHubClient(),
                 Settings(
                     github_webhook_secret="x",
-                    github_project_number=6,
-                    github_project_token=SecretStr("ghp_" + "x" * 36),
+                    github_board_client_id="Ov23liBoard",
+                    github_board_client_secret=SecretStr("board-shh"),
+                    board_credential_key=SecretStr(BOARD_KEY),
                 ),
             )
 
-        assert "SHANNON_GITHUB_PROJECT_TOKEN" not in caplog.text
+        assert "SHANNON_BOARD_CREDENTIAL_KEY" not in caplog.text
+        assert "SHANNON_GITHUB_BOARD_CLIENT_ID" not in caplog.text
 
-    def test_no_board_says_nothing_either(self, caplog: pytest.LogCaptureFixture) -> None:
-        """Every deployment that leaves the number at zero, which is the default."""
+    def test_neither_says_nothing_either(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Every deployment that does not use a board, which is the default."""
         with caplog.at_level(logging.ERROR, logger="shannon.container"):
             container_with(DisposableEngine(), FakeGitHubClient())
 
-        assert "SHANNON_GITHUB_PROJECT_TOKEN" not in caplog.text
+        assert "SHANNON_BOARD_CREDENTIAL_KEY" not in caplog.text
+        assert "SHANNON_GITHUB_BOARD_CLIENT_ID" not in caplog.text

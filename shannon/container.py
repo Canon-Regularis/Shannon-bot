@@ -8,6 +8,7 @@ from typing import Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shannon.commands.authorise_board import build_authorise_board_command
 from shannon.commands.conversations import (
     build_log_conversation_command,
     build_stop_conversation_command,
@@ -71,6 +72,7 @@ from shannon.github.webhooks.review_comments import parse_review_comment_event
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.github.webhooks.router import EventRouter
 from shannon.services.access import GitHubAccess
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.boards import BoardColumns, BoardLinkingService, OwnerBoards
 from shannon.services.channels import ChannelMappingService
 from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
@@ -116,7 +118,11 @@ from shannon.services.transcripts.lines import not_a_transcript
 from shannon.services.transcripts.log import ConversationLog
 from shannon.services.transcripts.publish import TranscriptPublisher
 from shannon.services.unregistration import RepositoryUnregistrationService
-from shannon.services.verification import GitHubIdentityVerification
+from shannon.services.verification import (
+    BOARD_SCOPE,
+    GitHubIdentityVerification,
+    OAuthClient,
+)
 from shannon.services.workflow import ItemKind, ItemWorkflow, build_item_workflow
 
 logger = logging.getLogger(__name__)
@@ -278,27 +284,6 @@ class _EveryAnnouncer:
     async def say(self, arrival: Arrival) -> None:
         for announcer in self.announcers:
             await announcer.say(arrival)
-
-
-@dataclass(frozen=True, slots=True)
-class _OneToken:
-    """The same token for every account, which is what a plain personal access token is.
-
-    Exists for one caller. A user-owned Projects v2 board cannot be read through an installation
-    at all - GitHub publishes no App permission for one - and an organisation's is read the same
-    way rather than through a permission whose granting would suspend event delivery until
-    somebody accepted it. So that reader keeps a token of its own, and this is the shape the
-    client expects a credential to arrive in.
-
-    Deliberately not offered to anything else. Every repository call goes through an installation,
-    and a second way to hand the client a fixed token is a second way to end up back where this
-    project started, with one credential that can see everything.
-    """
-
-    token: str
-
-    async def token_for(self, owner: str) -> str:
-        return self.token
 
 
 def _every(*announcers: AnnouncesInThread) -> AnnouncesInThread:
@@ -711,6 +696,7 @@ def _commands(
     conversations: ConversationLog,
     boards: BoardLinkingService,
     board_columns: BoardColumns,
+    board_credentials: BoardCredentials,
     access: GitHubAccess,
     *,
     capturing: bool,
@@ -733,6 +719,7 @@ def _commands(
             ChannelMappingService(sessionmaker, channel_fallbacks()), relocation, gate
         ),
         build_set_board_command(boards, gate),
+        build_authorise_board_command(verification, board_credentials),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
@@ -808,14 +795,29 @@ def build_container(
     # the verification service needs it too: following a one-time link is what writes a link
     # row now, so the thing that spends the link is the thing that has to be able to write one.
     links = UserLinkingService(sessionmaker)
+    # The board authorisations, and the cipher over them. Built beside the verification service
+    # because following a BOARD link is what stores one, in the same way that following a LINK link
+    # is what writes a `user_links` row. Issue #170.
+    board_credentials = BoardCredentials(
+        sessionmaker, keys=settings.board_credential_key.get_secret_value()
+    )
     verification = GitHubIdentityVerification(
         sessionmaker,
         links,
+        board_credentials,
         client_id=settings.github_app_client_id,
         client_secret=settings.github_app_client_secret.get_secret_value(),
         oauth_url=settings.github_oauth_url,
         public_base_url=settings.public_base_url,
         http=app_http,
+        # The second application, and the only one that asks for a scope. A deployment that has
+        # registered no OAuth App gets `NO_APPLICATION` here, which makes `can_authorise_a_board`
+        # false and the command refuse - rather than a link to an application that does not exist.
+        board=OAuthClient(
+            client_id=settings.github_board_client_id,
+            client_secret=settings.github_board_client_secret.get_secret_value(),
+            scope=BOARD_SCOPE,
+        ),
     )
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
@@ -826,43 +828,33 @@ def build_container(
     # its set before the gateway connects.
     conversations = ConversationLog(sessionmaker, threads)
 
-    # The board's own client with its own token. GitHub publishes no App permission for a
-    # user-owned Projects v2 board, so that half of the feature cannot go through the
-    # installation at all and keeps a narrow credential instead.
+    # A board needs no client of its own any more. Issue #170: every board call now carries the
+    # authorisation of a particular person - the linker's for a read, the mover's for a write - and
+    # an explicit credential wins over whatever the client would have attached. So the ordinary App
+    # client is just the transport, and the credential that used to live in a second client built
+    # around one shared token is gone with the token.
     #
-    # An organisation's board could go through it, and deliberately does not: granting a new
-    # permission to an installed App suspends its event delivery until somebody accepts the
-    # change, so asking for one would take every webhook in every registered repository down
-    # until an admin noticed. One token reads both kinds. Left unset, the board reads through
-    # the ordinary client, which is what every deployment with the project number at zero does.
-    project_token = settings.github_project_token.get_secret_value()
-    if settings.github_project_number and not project_token:
-        # Said once and loudly, on the reasoning the App warning above gives: the failure this
-        # causes is silent and looks like something else. With no token the board reads through
-        # the App client, which holds no Projects permission for either kind of board, so every
-        # call answers 403 - and 403 reads as a wrong token rather than as a missing one.
-        #
-        # It is also the shape of a settings file edited while this was running. Both are read
-        # once, here, at startup.
+    # What was here before, and why it is worth not reinventing: one classic personal access token
+    # belonging to one human account, with the `project` scope across every project that account
+    # could see, used by every server. A card moved from Discord appeared on GitHub as that account
+    # whoever had asked, and one leak was write access to all of it.
+    #
+    # Half-configured deployments are told at startup, because the failure is otherwise silent and
+    # looks like something else: a board that will not open reads exactly like a wrong number.
+    if settings.github_board_client_id and not settings.board_credential_key.get_secret_value():
         logger.error(
-            "SHANNON_GITHUB_PROJECT_NUMBER is set and SHANNON_GITHUB_PROJECT_TOKEN is not, so "
-            "the board falls back to the App, which has no Projects permission and will answer "
-            "403 to everything. Set the token and restart."
+            "SHANNON_GITHUB_BOARD_CLIENT_ID is set and SHANNON_BOARD_CREDENTIAL_KEY is not, so a "
+            "board authorisation cannot be kept and every board will read as unauthorised. "
+            "Generate a key and restart."
         )
-    board_client = (
-        HttpGitHubClient(
-            tokens=_OneToken(project_token),
-            base_url=settings.github_api_url,
-            timeout=settings.github_timeout_seconds,
+    if settings.board_credential_key.get_secret_value() and not settings.github_board_client_id:
+        logger.error(
+            "SHANNON_BOARD_CREDENTIAL_KEY is set and SHANNON_GITHUB_BOARD_CLIENT_ID is not, so "
+            "nobody can authorise a board at all. Register an OAuth App and restart."
         )
-        if project_token
-        else None
-    )
 
     # One reader for both callers. Two would each pay the owner-kind lookup and each keep
     # their own field cache, and the command would be warming a cache the poller never sees.
-    # The writer is `board_client` alone, never the App fallback: the App holds no
-    # Projects permission of any kind, so a write through it could only ever 403.
     #
     # SHANNON_BOARD_MAY_MOVE_CARDS is applied HERE, to the writer, and not by withholding the
     # whole object from the workflow. Both gates then mean one thing - no writer, no write -
@@ -870,9 +862,27 @@ def build_container(
     # `order_for`, so a deployment that merely did not want the bot writing to its board
     # silently lost the rule that refuses a move the board's column order forbids. That is
     # issue #179: one flag, two failures, and only one of them was the flag's business.
+    # The write half, and it carries NO credential of its own. Every board write now passes an
+    # explicit authorisation - the member who asked for it - and an explicit credential wins over
+    # whatever a client would otherwise attach. With no tokens here, a write with nobody behind it
+    # goes out anonymous and GitHub answers 401: the new rule is a fact of the wiring rather than a
+    # check somebody could forget.
+    #
+    # Its own object rather than the App client because `GitHubClient` deliberately does not carry
+    # `patch_json` - see `WritesJson` - and putting it there would hand every service in this
+    # project the ability to write to any path with an installation token.
+    board_writer = HttpGitHubClient(
+        base_url=settings.github_api_url,
+        timeout=settings.github_timeout_seconds,
+    )
+
     boards = HttpProjectBoards(
-        board_client or github,
-        writer=board_client if settings.board_may_move_cards else None,
+        github,
+        # Whose authorisation each board's own reads are made under. Issue #170: resolved per
+        # board rather than per owner, because two servers may link two different boards owned by
+        # the same account and an owner-keyed lookup would cross between them.
+        board_credentials,
+        writer=board_writer if settings.board_may_move_cards else None,
     )
 
     # After the board reader, because the workflow is handed it: a status set in Discord drags
@@ -887,6 +897,9 @@ def build_container(
         threads,
         pr_sync=pr_sync,
         issue_sync=issue_sync,
+        # Turns the member who ran /status or /priority into the credential their card move goes
+        # out under, so GitHub's board history names them rather than one shared account.
+        authorisations=board_credentials,
         cards=boards,
     )
 
@@ -943,10 +956,11 @@ def build_container(
                 require_proved=settings.require_proved_links,
             ),
             conversations,
-            BoardLinkingService(sessionmaker, boards, OwnerBoards(boards)),
+            BoardLinkingService(sessionmaker, boards, OwnerBoards(boards), board_credentials),
             BoardColumns(sessionmaker, boards),
+            board_credentials,
             GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),
             capturing=settings.capture_discord_messages,
         ),
-        also_opened=(app_http,) if board_client is None else (app_http, board_client),
+        also_opened=(app_http, board_writer),
     )

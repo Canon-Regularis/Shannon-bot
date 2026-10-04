@@ -23,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.errors import NotRegisteredError, ShannonError
+from shannon.domain.board import board_owner
+from shannon.domain.errors import (
+    BoardNotAuthorisedError,
+    NotRegisteredError,
+    ShannonError,
+)
 from shannon.github.projects import ProjectListing
 
 # Long enough that choosing a board is one call rather than one per keystroke, short enough that
@@ -110,6 +115,19 @@ class OwnerBoards:
         return found
 
 
+class HoldsBoardAuthorisations(Protocol):
+    """The authorisations a board is reached with, as much of them as linking a board needs.
+
+    Two members and no cipher: this service decides whether somebody HAS authorised and tells the
+    store to let one go, and never handles a token. Declared here because this is where it is
+    consumed, which is the pattern the rest of the project already uses for a narrow handle.
+    """
+
+    async def granted_to(self, *, guild_id: int, discord_user_id: int) -> object | None: ...
+
+    async def forget(self, *, guild_id: int, discord_user_id: int) -> bool: ...
+
+
 class BoardLinkingService:
     """Backs `/set_board`: which board a server's repository mirrors."""
 
@@ -118,10 +136,12 @@ class BoardLinkingService:
         sessionmaker: async_sessionmaker[AsyncSession],
         projects: ReadsProjects,
         boards: OwnerBoards,
+        authorisations: HoldsBoardAuthorisations,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._projects = projects
         self._boards = boards
+        self._authorisations = authorisations
 
     async def choices_for(self, guild_id: int, typed_owner: str) -> tuple[ProjectListing, ...]:
         """The boards to offer, under the owner asked for or the repository's own.
@@ -139,14 +159,19 @@ class BoardLinkingService:
         return await self._boards.listed(owner)
 
     async def assign(
-        self, *, guild_id: int, project_number: int | None, typed_owner: str
+        self, *, guild_id: int, project_number: int | None, typed_owner: str, acting: int
     ) -> BoardLink:
         """Point this server's repository at a board, or at none.
 
         The board is opened BEFORE it is stored. A picker's suggestions are only suggestions, so
-        the number that arrives here may be typed, may be a digit out, and may name a board this
-        token cannot see - and every one of those stored is a warning once a minute in a log
-        rather than a sentence read by the person who caused it.
+        the number that arrives here may be typed, may be a digit out, and may name a board
+        nobody authorised this bot to see - and every one of those stored is a warning once a
+        minute in a log rather than a sentence read by the person who caused it.
+
+        `acting` is whoever ran the command, and since issue #170 that is not bookkeeping: their
+        authorisation is what the board will be read under from here on, so it is recorded on the
+        row and the command refuses without one. Linking a board somebody else authorised would
+        put this straight back where it started, with one person's credential serving a server.
         """
         async with self._sessionmaker() as session, session.begin():
             repositories = RepositoryStore(session)
@@ -161,6 +186,14 @@ class BoardLinkingService:
             await TrackedItemStore(session).forget_the_board(repository.id)
             own_owner = repository.repo_name.partition("/")[0]
             if project_number is None:
+                # Whoever authorised it is told to let it go, not merely unpointed. A credential
+                # kept for a board this server no longer mirrors is a credential nothing will
+                # ever use and nobody remembers granting - which is the worst kind to still hold.
+                # GitHub's own grant stands until the person withdraws it, and the reply says so.
+                if repository.project_linked_by is not None:
+                    await self._authorisations.forget(
+                        guild_id=guild_id, discord_user_id=repository.project_linked_by
+                    )
                 await repositories.set_board(repository, project_number=None, project_owner=None)
                 return BoardLink(
                     repo_name=repository.repo_name,
@@ -170,19 +203,31 @@ class BoardLinkingService:
                     replaced=replaced,
                 )
 
+            if (
+                await self._authorisations.granted_to(guild_id=guild_id, discord_user_id=acting)
+                is None
+            ):
+                # Before the board is opened, because opening it is what needs the credential.
+                # Raised inside the transaction like the two below, so a refused /set_board
+                # writes nothing at all - including the `forget_the_board` above.
+                raise BoardNotAuthorisedError(
+                    "This bot has no GitHub authorisation from you, so it cannot check that board "
+                    "exists or read it afterwards. Run /authorise_board and sign in to GitHub, "
+                    "then run this again. A board is read as whoever links it, which is why it "
+                    "has to be you."
+                )
+
             stored_owner = typed_owner.strip() or None
             owner = stored_owner or own_owner
             listing = await self._projects.get_board(owner, project_number)
             if listing is None:
                 raise BoardUnreadableError(
-                    f"{owner} has no project board numbered {project_number} that this bot can "
-                    "open. Check the number in the board's URL, and check which kind of token "
-                    "SHANNON_GITHUB_PROJECT_TOKEN holds: an organisation's board wants a "
-                    "fine-grained one with Projects under organisation permissions, and a "
-                    "personal board wants a classic one with read:project, because GitHub "
-                    "publishes no Projects permission for a personal account at all. That "
-                    "token is read once when this bot starts, so one added to .env since then "
-                    "is not one it has yet."
+                    f"{owner} has no project board numbered {project_number} that your GitHub "
+                    "authorisation can open. Check the number against the board's URL, and the "
+                    f"owner against who owns it - a board number is a sequence GitHub keeps per "
+                    "account, so the pair means something neither half does alone. If the board "
+                    f"belongs to somebody else, {owner} has to be named here and your "
+                    "authorisation has to cover it."
                 )
 
             taken = await repositories.linked_to_board(
@@ -198,7 +243,10 @@ class BoardLinkingService:
                 )
 
             await repositories.set_board(
-                repository, project_number=project_number, project_owner=stored_owner
+                repository,
+                project_number=project_number,
+                project_owner=stored_owner,
+                linked_by=acting,
             )
             return BoardLink(
                 repo_name=repository.repo_name,
@@ -263,7 +311,7 @@ class BoardColumns:
             self._held[guild_id] = _RememberedColumns(columns=(), until=now + self._lifetime)
             return ()
 
-        owner = stored.project_owner or stored.repo_name.partition("/")[0]
+        owner = board_owner(project_owner=stored.project_owner, repo_name=stored.repo_name)
         found = await self._columns.status_columns(owner, number)
         self._held[guild_id] = _RememberedColumns(columns=found, until=now + self._lifetime)
         return found

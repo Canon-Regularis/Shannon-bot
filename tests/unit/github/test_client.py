@@ -854,6 +854,68 @@ class TestWhichCredentialACallCarries:
 
         assert seen == ["Bearer ghs_acme"]
 
+    async def test_an_explicit_credential_is_the_one_that_goes_out(self) -> None:
+        """Issue #170, and the one line that puts a person's authorisation on a real request.
+
+        A project board is read and written under the authorisation of a particular PERSON, and the
+        owner cannot identify one: two servers may link two different boards owned by the same
+        account, so a credential chosen by owner alone would be one server's board read under the
+        other server's member's grant. The board reader resolves whose it is and passes it here.
+        """
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.get_json("/items", owner="acme", token="gho_a_person")
+
+        assert seen == ["Bearer gho_a_person"]
+
+    async def test_an_explicit_credential_beats_the_supplier(self) -> None:
+        """Which is what makes it usable at all: the client it goes through may hold an
+        installation token for that same account, and a board cannot be read with one."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler, tokens=FakeTokens(acme="ghs_installation")) as client:
+            await client.get_json("/items", owner="acme", token="gho_a_person")
+
+        assert seen == ["Bearer gho_a_person"], "the installation token won, so a board would 403"
+
+    async def test_no_explicit_credential_still_asks_the_supplier(self) -> None:
+        """The other arm, and every call in the project that is not about a board."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler, tokens=FakeTokens(acme="ghs_installation")) as client:
+            await client.get_json("/items", owner="acme")
+
+        assert seen == ["Bearer ghs_installation"]
+
+    async def test_a_write_carries_an_explicit_credential_too(self) -> None:
+        """The half that matters most: GitHub records whoever this names as having moved
+        the card."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.patch_json(
+                "/items/1", owner="acme", token="gho_the_mover", json={"fields": []}
+            )
+
+        assert seen == ["Bearer gho_the_mover"]
+
     async def test_two_accounts_are_authorised_differently(self) -> None:
         """One token for both would be the shared credential this replaced."""
         seen: list[str | None] = []
