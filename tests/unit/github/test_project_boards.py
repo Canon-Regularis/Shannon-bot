@@ -143,12 +143,16 @@ class TestReadingOneCard:
     def test_the_column_is_read_out_of_the_nested_name(self) -> None:
         """A single-select value's `name` is an object here, unlike every other name in this
         API. Read as a string it comes back None and every card looks statusless."""
-        assert parse_item(draft(), PROJECT).column == "In Progress"
+        item = parse_item(draft(), PROJECT)
+
+        assert item is not None
+        assert item.column == "In Progress"
 
     def test_a_card_links_to_the_board_it_lives_on(self) -> None:
         """A draft has no page of its own, so the board is the nearest true link."""
         item = parse_item(draft(), PROJECT)
 
+        assert item is not None
         assert item.html_url == f"https://github.com/users/monalisa/projects/{PROJECT}"
 
     def test_a_card_with_no_status_set_has_no_column(self) -> None:
@@ -281,6 +285,7 @@ class TestTheMetadataACardCarries:
         and nothing else."""
         item = parse_item(draft(), PROJECT)
 
+        assert item is not None
         assert item.creator is None
         assert item.created_at is None
         assert (item.assignees, item.labels) == ((), ())
@@ -298,6 +303,7 @@ class TestTheMetadataACardCarries:
         unset = [{"id": 353672878, "name": "Iteration", "value": None}]
         item = parse_item(draft(fields=[*draft()["fields"], *unset]), PROJECT)
 
+        assert item is not None
         assert item.iteration is None
 
 
@@ -323,17 +329,20 @@ class TestCardsThatWrapSomethingElse:
         """The same id its own webhook arrived with, which is how the tracked row is found."""
         item = parse_item(draft(content_type="Issue", content=WRAPPED), PROJECT)
 
+        assert item is not None
         assert item.content_id == 2807646438
 
     def test_it_links_to_the_item_rather_than_to_the_board(self) -> None:
         """Unlike a draft, an issue has a page of its own worth pointing at."""
         item = parse_item(draft(content_type="Issue", content=WRAPPED), PROJECT)
 
+        assert item is not None
         assert item.html_url == "https://github.com/monalisa/hello-world/issues/1093"
 
     def test_a_draft_wraps_nothing(self) -> None:
         item = parse_item(draft(), PROJECT)
 
+        assert item is not None
         assert item.kind is ObjectType.TICKET
         assert item.is_draft is True
         assert item.content_id is None
@@ -865,12 +874,14 @@ class TestFieldsInShapesNobodyPromised:
     def test_any_other_shape_reads_as_no_value(self, value: Any) -> None:
         item = parse_item(draft(fields=[{"name": "Status", "value": value}]), PROJECT)
 
+        assert item is not None
         assert item.column is None
 
     def test_a_bare_string_value_is_taken_as_it_is(self) -> None:
         """The nesting is documented by example only, so the flat form has to work too."""
         item = parse_item(draft(fields=[{"name": "Status", "value": "Done"}]), PROJECT)
 
+        assert item is not None
         assert item.column == "Done"
 
     def test_a_card_with_no_project_url_still_gets_a_link(self) -> None:
@@ -1648,6 +1659,14 @@ class TestOpeningABoardThatRefuses:
     """
 
     class Refusing:
+        """A client that refuses the board itself and answers everything else.
+
+        All three `ReadsJson` members, including the one nothing here calls. A stand-in that
+        claims a protocol and is missing a member passes at runtime for as long as no caller
+        happens to reach it - `get_board` reaches `get_json` alone - and then stops the day one
+        does. The checkers say so now that this file is held to them.
+        """
+
         def __init__(self, error: Exception) -> None:
             self.error = error
 
@@ -1658,6 +1677,18 @@ class TestOpeningABoardThatRefuses:
 
         async def get_pages(self, path: str, **params: Any) -> AsyncIterator[Any]:
             yield []
+
+        async def get_pages_since(
+            self, path: str, *, etag: str | None = None, owner: str = "", **params: Any
+        ) -> PagedRead:
+            """Answers rather than raises, deliberately.
+
+            These tests are about `get_board`, which never comes here. A member that raised where
+            the protocol says it answers would be the same untruth as the missing one, pointing the
+            other way: the next caller to reach it would get an exception the protocol does not
+            promise instead of a card it does.
+            """
+            return PagedRead(etag=None, pages=([],))
 
     @pytest.mark.parametrize(
         "error",
