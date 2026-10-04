@@ -56,6 +56,7 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
     tables = asyncio.run(_table_names(migration_url))
     assert tables == {
         "alembic_version",
+        "board_authorizations",
         "channel_mappings",
         "github_installations",
         "identity_verifications",
