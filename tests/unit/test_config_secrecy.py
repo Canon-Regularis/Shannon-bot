@@ -20,7 +20,11 @@ DATABASE_URL = "postgresql+asyncpg://shannon:not-a-real-password@localhost:5433/
 APP_KEY = "placeholder-github-app-private-key"
 APP_SECRET = "placeholder-github-app-client-secret"
 APP_WEBHOOK_SECRET = "placeholder-github-app-webhook-secret"
-PROJECT_TOKEN = "placeholder-github-project-token"
+# The board's own application, and the key its authorisations are encrypted with. They replaced
+# one shared project token: a credential of a person's rather than of the deployment, so the key
+# is the one thing standing between a database copy and acting as them. Issue #170.
+BOARD_SECRET = "placeholder-github-board-client-secret"
+BOARD_KEY = "placeholder-board-credential-key"
 
 LEAKS = (
     BOT_TOKEN,
@@ -28,7 +32,8 @@ LEAKS = (
     APP_KEY,
     APP_SECRET,
     APP_WEBHOOK_SECRET,
-    PROJECT_TOKEN,
+    BOARD_SECRET,
+    BOARD_KEY,
     "not-a-real-password",
 )
 
@@ -41,7 +46,8 @@ def settings() -> Settings:
         github_app_private_key=APP_KEY,
         github_app_client_secret=APP_SECRET,
         github_app_webhook_secret=APP_WEBHOOK_SECRET,
-        github_project_token=PROJECT_TOKEN,
+        github_board_client_secret=BOARD_SECRET,
+        board_credential_key=BOARD_KEY,
         database_url=DATABASE_URL,
     )
 
@@ -91,7 +97,8 @@ def test_the_values_are_still_readable_when_asked_for(settings: Settings) -> Non
     assert settings.github_app_private_key.get_secret_value() == APP_KEY
     assert settings.github_app_client_secret.get_secret_value() == APP_SECRET
     assert settings.github_app_webhook_secret.get_secret_value() == APP_WEBHOOK_SECRET
-    assert settings.github_project_token.get_secret_value() == PROJECT_TOKEN
+    assert settings.github_board_client_secret.get_secret_value() == BOARD_SECRET
+    assert settings.board_credential_key.get_secret_value() == BOARD_KEY
     assert settings.database_url.get_secret_value() == DATABASE_URL
 
 
@@ -104,7 +111,8 @@ def test_an_unset_secret_reads_as_empty() -> None:
     assert bare.github_app_private_key.get_secret_value() == ""
     assert bare.github_app_client_secret.get_secret_value() == ""
     assert bare.github_app_webhook_secret.get_secret_value() == ""
-    assert bare.github_project_token.get_secret_value() == ""
+    assert bare.github_board_client_secret.get_secret_value() == ""
+    assert bare.board_credential_key.get_secret_value() == ""
     # SecretStr defines __len__, so an empty one is falsy. Worth pinning down, because the
     # startup path and the webhook route both branch on a credential being absent.
     assert not bare.discord_token

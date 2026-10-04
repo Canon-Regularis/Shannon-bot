@@ -30,17 +30,37 @@ class Settings(BaseSettings):
     github_app_client_secret: SecretStr = SecretStr("")
     github_app_webhook_secret: SecretStr = SecretStr("")
 
-    # GitHub publishes no App permission for a USER-owned Projects v2 board - the Projects
-    # permission exists at organisation level only - so the board reader keeps a token of its own.
+    # The second registered application, and the only one that asks GitHub for a scope. Issue #170.
     #
-    # An organisation's board is not read through the App either, although it could be. Granting
-    # a new permission to an installed App suspends its event delivery until an admin accepts, so
-    # taking that route would stop every webhook in every registered repository until somebody
-    # clicked a button, in order to turn on a feature that ships off. One token covers both kinds
-    # of board and costs nothing to anybody not using one.
+    # A project board cannot be reached through the App at all: GitHub publishes no App permission
+    # for a USER-owned Projects v2 board, and granting an installed App an organisation permission
+    # suspends its event delivery until an admin accepts, which would stop every webhook in every
+    # registered repository. OAuth scopes have neither problem, and `project` covers user and
+    # organisation projects alike - so boards go through a classic OAuth App, registered separately,
+    # which touches nothing about the App and needs no reinstall.
     #
-    # Left unset, the board reads through the ordinary client rather than not at all.
-    github_project_token: SecretStr = SecretStr("")
+    # One per person rather than one per deployment. Whoever links a board authorises this
+    # themselves, that authorisation is what the board is read under, and a card moved from Discord
+    # is moved as whoever moved it. What this replaced was a single token belonging to one human
+    # account, shared by every server, under which every write appeared to be theirs.
+    github_board_client_id: str = ""
+    github_board_client_secret: SecretStr = SecretStr("")
+
+    # The key the authorisations above are encrypted with, and the only encryption in this schema.
+    #
+    # Everything else this bot stores about somebody is a fact ABOUT them. A board authorisation is
+    # a thing that ACTS as them, so it is encrypted at rest with a key that lives here and never in
+    # the database - which is what makes a stolen copy of the table worth nothing on its own.
+    #
+    # A comma-separated list, newest first. The cipher encrypts with the first key and decrypts with
+    # any of them, so rotating is "put the new key in front, deploy, drop the old one next deploy"
+    # rather than every person who linked a board doing it again.
+    #
+    # Unset or unreadable means boards are off and said so, loudly, once. Deliberately not a
+    # validator that refuses to start: a lock added over a working system must not become the reason
+    # the system stops, and taking webhooks and deliveries down over a board setting would be a
+    # worse failure than the one this guards against.
+    board_credential_key: SecretStr = SecretStr("")
 
     role_admin: str = "Admin"
     role_project_manager: str = "Project Manager"
