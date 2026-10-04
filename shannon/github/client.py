@@ -242,14 +242,22 @@ class GitHubClient(
     # Untyped bodies, for the project endpoints, which answer with arrays and are parsed by a
     # module that checks every field it touches. Declared here because the wiring hands this same
     # object to the board reader, and a stand-in without them would fail on the first poll.
-    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
+    async def get_json(
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
+    ) -> object: ...
 
     def get_pages(
         self, path: str, *, owner: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
 
     async def get_pages_since(
-        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+        self,
+        path: str,
+        *,
+        etag: str | None = None,
+        owner: str = "",
+        token: str = "",
+        **params: str | int,
     ) -> PagedRead: ...
 
 
@@ -527,7 +535,7 @@ class HttpGitHubClient:
         permission = payload.get("permission")
         return permission if isinstance(permission, str) else "none"
 
-    async def patch_json(self, path: str, *, owner: str, json: JsonObject) -> None:
+    async def patch_json(self, path: str, *, owner: str, token: str = "", json: JsonObject) -> None:
         """Send JSON at a path with PATCH, for the one caller that writes to a board.
 
         Over `_send` like every other write here, which is what gets the three things a
@@ -539,7 +547,7 @@ class HttpGitHubClient:
 
         Deliberately absent from the `GitHubClient` Protocol. See `WritesJson`.
         """
-        await self._send("PATCH", path, owner, json=json)
+        await self._send("PATCH", path, owner, token=token, json=json)
 
     async def is_organisation(self, owner: str) -> bool:
         """Whether this account is an organisation rather than a person.
@@ -714,7 +722,9 @@ class HttpGitHubClient:
             return None
         return found
 
-    async def _send(self, method: str, path: str, owner: str = "", **kwargs: Any) -> None:
+    async def _send(
+        self, method: str, path: str, owner: str = "", token: str = "", **kwargs: Any
+    ) -> None:
         """A write, whose answer is only ever whether it worked.
 
         Redirects are followed here rather than by the transport. GitHub answers 301 after a
@@ -724,7 +734,7 @@ class HttpGitHubClient:
         corrects `repositories.repo_name` until an item webhook arrives.
         """
         try:
-            headers = await self._authorization(owner)
+            headers = await self._authorization(owner, token)
             response = await self._client.request(
                 method, path, follow_redirects=False, headers=headers, **kwargs
             )
@@ -786,7 +796,13 @@ class HttpGitHubClient:
             logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
 
     async def get_pages_since(
-        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+        self,
+        path: str,
+        *,
+        etag: str | None = None,
+        owner: str = "",
+        token: str = "",
+        **params: str | int,
     ) -> PagedRead:
         """Every page of a list endpoint, unless GitHub says none of it changed.
 
@@ -804,7 +820,7 @@ class HttpGitHubClient:
         page and a generator cannot say it. Nothing is held that was not held before: the one
         caller accumulated every item into a list anyway.
         """
-        headers = await self._authorization(owner)
+        headers = await self._authorization(owner, token)
         if etag:
             headers = {**headers, "If-None-Match": etag}
 
@@ -828,7 +844,9 @@ class HttpGitHubClient:
         for _ in range(MAX_PAGES - 1):
             if url is None:
                 break
-            response = await self._fetch(url, params=None, headers=await self._authorization(owner))
+            response = await self._fetch(
+                url, params=None, headers=await self._authorization(owner, token)
+            )
             _raise_for_status(response, path)
             pages.append(self._body(response, path))
             url = response.links.get("next", {}).get("url")
@@ -858,7 +876,9 @@ class HttpGitHubClient:
         except ValueError as exc:
             raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
-    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
+    async def get_json(
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
+    ) -> object:
         """Whatever GitHub answers at a path, list or object alike.
 
         The project endpoints are parsed by a module that checks every field it touches, so
@@ -866,7 +886,7 @@ class HttpGitHubClient:
         """
         try:
             response = await self._client.get(
-                path, params=params or None, headers=await self._authorization(owner)
+                path, params=params or None, headers=await self._authorization(owner, token)
             )
         except httpx.HTTPError as exc:
             raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
@@ -878,17 +898,26 @@ class HttpGitHubClient:
         except ValueError as exc:
             raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
 
-    async def _authorization(self, owner: str) -> dict[str, str]:
+    async def _authorization(self, owner: str, token: str = "") -> dict[str, str]:
         """The credential for calls about one account, or nothing at all.
 
         Nothing rather than an empty bearer: `Bearer ` is malformed and GitHub answers 401,
         where no header at all is anonymous and public endpoints answer. An empty owner means
         a call that is not about a repository, and those endpoints are public.
+
+        An explicit `token` wins, and exists for one caller. Issue #170: a project board is read
+        and written under the authorisation of a particular PERSON, which the owner cannot
+        identify - two servers may link two different boards owned by the same account, so a
+        credential chosen by owner alone would be one server's board read under another server's
+        member's grant. The board reader resolves whose it is and says so here; everything else
+        still asks `token_for`, which answers with an installation and knows nothing about people.
         """
+        if token:
+            return {"Authorization": f"Bearer {token}"}
         if self._tokens is None or not owner:
             return {}
-        token = await self._tokens.token_for(owner)
-        return {"Authorization": f"Bearer {token}"} if token else {}
+        resolved = await self._tokens.token_for(owner)
+        return {"Authorization": f"Bearer {resolved}"} if resolved else {}
 
     async def _get(self, path: str, owner: str = "") -> JsonObject:
         try:

@@ -75,6 +75,13 @@ READ_FIELDS = (
 # GitHub's maximum.
 PAGE_SIZE = 100
 
+# The ways a board refuses to open, which three callers catch together and none can tell
+# apart. A board GitHub does not have answers 404; an authorisation that may not see it
+# answers 403; and no authorisation at all goes out anonymous and answers either, depending
+# on whether the project is private. An operator cannot act on the difference and the log
+# carries which it was, so the three sites that read a board fold them into one answer each.
+UNREADABLE = (GitHubNotFoundError, GitHubAuthError)
+
 # What GitHub calls the thing a card wraps, mapped to what this bot calls it. Issues and pull
 # requests are already mirrored from their own webhooks, so a card is looked up, not created.
 CONTENT_TYPES: dict[str, ObjectType] = {
@@ -250,28 +257,64 @@ class WritesJson(Protocol):
     it and is exactly what the module docstring says a handle must not be.
     """
 
-    async def patch_json(self, path: str, *, owner: str, json: JsonObject) -> None: ...
+    async def patch_json(
+        self, path: str, *, owner: str, token: str = "", json: JsonObject
+    ) -> None: ...
 
 
 class ReadsJson(Protocol):
     """Fetching JSON, one body or a page at a time."""
 
-    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object: ...
+    async def get_json(
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
+    ) -> object: ...
 
     def get_pages(
         self, path: str, *, owner: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
 
     async def get_pages_since(
-        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+        self,
+        path: str,
+        *,
+        etag: str | None = None,
+        owner: str = "",
+        token: str = "",
+        **params: str | int,
     ) -> PagedRead: ...
+
+
+class WhoTheBoardIsReadAs(Protocol):
+    """The authorisation a linked board's own reads are made under, or nothing where it has none.
+
+    One member, declared here because this is where it is consumed. Issue #170.
+
+    **Why not `SuppliesTokens`.** That one answers `token_for(owner)`, and an owner cannot identify
+    a person: `linked_to_board` refuses two repositories on the SAME board, but two servers may
+    link two DIFFERENT boards both owned by the same account. Keyed on the owner, one server's
+    board would be read under the other server's member's grant - a credential crossing a tenancy
+    boundary, which is the exact thing the authorisation replaced.
+
+    So a board's reads are keyed on the board. Its own reads only: the items, the Status field, the
+    column order. A WRITE is the opposite and takes an explicit credential from the caller, because
+    a card moved as whoever happened to link the board is what this change exists to stop.
+    """
+
+    async def reading(self, owner: str, project_number: int) -> str: ...
 
 
 class HttpProjectBoards:
     """`ReadsBoards` on top of GitHub's REST API for project boards."""
 
-    def __init__(self, client: ReadsJson, *, writer: WritesJson | None = None) -> None:
+    def __init__(
+        self,
+        client: ReadsJson,
+        credentials: WhoTheBoardIsReadAs,
+        *,
+        writer: WritesJson | None = None,
+    ) -> None:
         self._client = client
+        self._credentials = credentials
         # None where this deployment has no project token. The reader falls back to the App
         # client, which holds no Projects permission at all, so there is nothing to fall back
         # to for a write - and leaving it None makes "no token means no board writes" a fact of
@@ -305,13 +348,13 @@ class HttpProjectBoards:
         # warning - so the log fell silent, which reads as fixed, and the card still never moved.
         self._warned: set[tuple[str, int, str]] = set()
 
-    async def list_boards(self, owner: str) -> Sequence[ProjectListing]:
+    async def list_boards(self, owner: str, *, token: str = "") -> Sequence[ProjectListing]:
         """Every board this owner has, for somebody choosing one.
 
         Over the same prefix the reads use, so the organisation-or-person decision is made once
         and a picker cannot offer a board the poller then cannot open.
         """
-        kind = await self._owner_kind(owner)
+        kind = await self._owner_kind(owner, token)
         listings: list[ProjectListing] = []
         async for body in self._client.get_pages(
             f"/{kind}/{quote(owner, safe='')}/projectsV2", owner=owner, per_page=PAGE_SIZE
@@ -320,7 +363,9 @@ class HttpProjectBoards:
             listings.extend(listing for row in rows if (listing := parse_listing(row)) is not None)
         return listings
 
-    async def get_board(self, owner: str, project_number: int) -> ProjectListing | None:
+    async def get_board(
+        self, owner: str, project_number: int, *, token: str = ""
+    ) -> ProjectListing | None:
         """One board, or None where this token cannot open it.
 
         Exists so that "the token cannot see this board" becomes a refusal the person who typed
@@ -328,10 +373,10 @@ class HttpProjectBoards:
         suggestions are only suggestions - discord.py says so - so the number that arrives here
         may never have been offered.
         """
-        board = await self._board_path(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
         try:
-            body = await self._client.get_json(board, owner=owner)
-        except (GitHubNotFoundError, GitHubAuthError) as unopenable:
+            body = await self._client.get_json(board, owner=owner, token=token)
+        except UNREADABLE as unopenable:
             # Logged before it is folded, because folding is what costs the evidence. The reply
             # lists what to check and cannot say WHICH, so without this line the one hard fact -
             # 403 means a credential and 404 means a board - is thrown away at the moment
@@ -352,6 +397,7 @@ class HttpProjectBoards:
         project_number: int,
         card_id: int,
         state: Status | Priority,
+        as_: str,
         column: str = "",
     ) -> CardMoved:
         """Set the card's Status or Priority to match, saying what became of it.
@@ -381,8 +427,8 @@ class HttpProjectBoards:
         if self._writer is None:
             return CardMoved(CardMove.NO_WRITER)
 
-        board = await self._board_path(owner, project_number)
-        fields = await self._board_fields(board, owner, project_number)
+        board = await self._board_path(owner, project_number, as_)
+        fields = await self._board_fields(board, owner, project_number, as_)
         if fields is None:
             return CardMoved(CardMove.UNREADABLE)
 
@@ -404,9 +450,13 @@ class HttpProjectBoards:
             self._complain(owner, project_number, state, card_id)
             return CardMoved(CardMove.NO_COLUMN)
 
+        # As the person who asked, which is the whole of issue #170 in one argument. Before it,
+        # every card move went out under one shared token and GitHub recorded that account as
+        # having moved it, whoever had actually dragged anything.
         await self._writer.patch_json(
             f"{board}/items/{card_id}",
             owner=owner,
+            token=as_,
             json={"fields": [{"id": select.field_id, "value": option.option_id}]},
         )
         return CardMoved(CardMove.MOVED, column=option.name)
@@ -450,15 +500,16 @@ class HttpProjectBoards:
         Archiving is how a card is taken off the board without deleting it, so mirroring one
         would put back a thread for work already put away.
         """
-        board = await self._board_path(owner, project_number)
-        fields = await self._board_fields(board, owner, project_number)
+        token = await self._credentials.reading(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
+        fields = await self._board_fields(board, owner, project_number, token)
         params: dict[str, str | int] = {"per_page": PAGE_SIZE}
         if fields is not None:
             params["fields"] = ",".join(str(field) for field in fields.wanted)
 
         key = (owner, project_number)
         read = await self._client.get_pages_since(
-            f"{board}/items", etag=self._validator(key), owner=owner, **params
+            f"{board}/items", etag=self._validator(key), owner=owner, token=token, **params
         )
         if read.pages is None:
             # GitHub said nothing changed, so the cards parsed last time ARE this read's answer.
@@ -492,6 +543,16 @@ class HttpProjectBoards:
             self._listed.pop(key, None)
         return items
 
+    @property
+    def may_write(self) -> bool:
+        """Whether a card can be written at all, which is whether a writer was handed over.
+
+        `SHANNON_BOARD_MAY_MOVE_CARDS` is applied here, to the writer, rather than by withholding
+        this whole object - see the container, and issue #179, where withholding it silently took
+        the column-order rule with it. So this is the only place that can answer the question.
+        """
+        return self._writer is not None
+
     def _validator(self, key: tuple[str, int]) -> str | None:
         """The ETag to ask with, when one has been kept for this board."""
         remembered = self._listed.get(key)
@@ -511,17 +572,17 @@ class HttpProjectBoards:
         """
         return (owner, project_number) in self._listed
 
-    async def _board_path(self, owner: str, project_number: int) -> str:
+    async def _board_path(self, owner: str, project_number: int, token: str = "") -> str:
         """Where this board lives, which the kind of account owning it decides.
 
         Worked out once per read and handed down, rather than rebuilt by each caller that wants
         it: a second call would hit the cache below and cover its branch incidentally, leaving
         the test that the kind is asked for only once proving nothing.
         """
-        kind = await self._owner_kind(owner)
+        kind = await self._owner_kind(owner, token)
         return f"/{kind}/{quote(owner, safe='')}/projectsV2/{project_number}"
 
-    async def _owner_kind(self, owner: str) -> str:
+    async def _owner_kind(self, owner: str, token: str = "") -> str:
         """`orgs` or `users`, asked of GitHub once per account and then kept.
 
         Asked rather than configured because an operator can get it wrong and GitHub cannot,
@@ -535,7 +596,9 @@ class HttpProjectBoards:
         if owner in self._kinds:
             return self._kinds[owner]
 
-        body = await self._client.get_json(f"/users/{quote(owner, safe='')}", owner=owner)
+        body = await self._client.get_json(
+            f"/users/{quote(owner, safe='')}", owner=owner, token=token
+        )
         account: JsonObject = body if is_json_object(body) else {}
         kind = account.get("type")
         if not isinstance(kind, str):
@@ -572,9 +635,10 @@ class HttpProjectBoards:
         nowhere to put a refusal, so having nothing to offer and having nothing to say are the
         same outcome to it.
         """
-        board = await self._board_path(owner, project_number)
+        token = await self._credentials.reading(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
         self._fields.pop((owner, project_number), None)
-        fields = await self._board_fields(board, owner, project_number)
+        fields = await self._board_fields(board, owner, project_number, token)
         if fields is None:
             return ()
         return tuple(one.name for one in fields.status.options)
@@ -597,9 +661,10 @@ class HttpProjectBoards:
 
         None where the board cannot be read at all, which the caller reads as no rule to apply.
         """
-        board = await self._board_path(owner, project_number)
+        token = await self._credentials.reading(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
         self._fields.pop((owner, project_number), None)
-        fields = await self._board_fields(board, owner, project_number)
+        fields = await self._board_fields(board, owner, project_number, token)
         if fields is None:
             return None
 
@@ -616,7 +681,7 @@ class HttpProjectBoards:
         )
 
     async def _board_fields(
-        self, board: str, owner: str, project_number: int
+        self, board: str, owner: str, project_number: int, token: str = ""
     ) -> BoardFields | None:
         """The Title and Status fields, and the Status field's choices, once per board.
 
@@ -637,7 +702,7 @@ class HttpProjectBoards:
         if key in self._fields:
             return self._fields[key]
 
-        body = await self._client.get_json(f"{board}/fields", owner=owner)
+        body = await self._client.get_json(f"{board}/fields", owner=owner, token=token)
         rows = body if is_json_list(body) else []
         named = {
             row.get("name"): row
