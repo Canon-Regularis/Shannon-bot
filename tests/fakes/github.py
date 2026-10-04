@@ -429,7 +429,9 @@ class FakeGitHubClient:
             raise self.error
         return self.permissions.get(login.lower(), "admin")
 
-    async def get_json(self, path: str, *, owner: str = "", **params: str | int) -> object:
+    async def get_json(
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
+    ) -> object:
         """Whatever this fake was told to answer with at a path, or an empty list.
 
         Here because the protocol declares it, which is the point of the conformance table: the
@@ -452,7 +454,13 @@ class FakeGitHubClient:
         yield self.bodies.get(path, [])
 
     async def get_pages_since(
-        self, path: str, *, etag: str | None = None, owner: str = "", **params: str | int
+        self,
+        path: str,
+        *,
+        etag: str | None = None,
+        owner: str = "",
+        token: str = "",
+        **params: str | int,
     ) -> PagedRead:
         """One page, and never a 304.
 

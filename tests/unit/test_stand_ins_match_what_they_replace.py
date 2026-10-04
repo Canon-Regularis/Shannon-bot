@@ -28,7 +28,7 @@ from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
 from shannon.commands.workflow import MovesItems
-from shannon.container import Container, _OneToken
+from shannon.container import Container
 from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -155,7 +155,6 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ReadsJson, FakeGitHubClient),
     (ReadsJson, HttpGitHubClient),
     (SuppliesTokens, InstallationTokens),
-    (SuppliesTokens, _OneToken),
     (ResolvesInstallations, InstallationDirectory),
     (ReadsPermissions, FakeGitHubClient),
     (ReadsPermissions, HttpGitHubClient),

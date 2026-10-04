@@ -39,6 +39,7 @@ from shannon.services.workflow import (
     WorkflowRefusedError,
     build_item_workflow,
 )
+from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.boards import PROJECT, FakeBoard, card, filled, wraps
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -84,6 +85,7 @@ def workflow(
         threads,
         pr_sync=build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
         issue_sync=build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+        authorisations=FakeBoardCredentials(),
     )
 
 
@@ -474,7 +476,9 @@ class TestTheLoop:
             assert await poller_for(board, board_owner="acme").run_once() == 0
 
         assert "/set_board" in caplog.text
-        assert "SHANNON_GITHUB_PROJECT_TOKEN" in caplog.text
+        assert "/authorise_board" in caplog.text, (
+            "it did not name the one cause a reader can act on: nobody has authorised it"
+        )
         assert "acme" in caplog.text
         assert REPO_FULL.split("/")[1] in caplog.text.lower(), "it did not name the repository"
         assert "Traceback" not in caplog.text
@@ -1498,7 +1502,9 @@ class TestOneCardTakingTheWholeBoardWithIt:
 
         await poller.run_once()
 
-        assert moves.told_the_board == [False]
+        assert moves.acted_as == [None], (
+            "the poller named somebody as having moved the card, and nobody did"
+        )
 
 
 class TestProgressRecordedForAStepThatFailed:
@@ -1864,12 +1870,14 @@ class RememberingWorkflow:
     """Records how it was asked, for the one thing the poller says differently from a person."""
 
     def __init__(self) -> None:
-        self.told_the_board: list[bool] = []
+        # Who the poller said was acting. None is the answer that matters: a board write is made
+        # AS somebody since issue #170, and no member asked for a poll.
+        self.acted_as: list[int | None] = []
 
     async def set_status(
-        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+        self, *, thread_id: int, status: Status, acting: int | None = None
     ) -> WorkflowOutcome:
-        self.told_the_board.append(tell_the_board)
+        self.acted_as.append(acting)
         return WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True)
 
 
@@ -1880,7 +1888,7 @@ class ExplodingWorkflow:
         self.calls = 0
 
     async def set_status(
-        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+        self, *, thread_id: int, status: Status, acting: int | None = None
     ) -> object:
         self.calls += 1
         raise RuntimeError("something nobody wrote a branch for")

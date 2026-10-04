@@ -40,6 +40,12 @@ FINISHED: Final[dict[VerificationPurpose, str]] = {
     VerificationPurpose.UNREGISTER: (
         "Signed in as {login}.\n\nGo back to Discord and run /unregister again to finish."
     ),
+    VerificationPurpose.BOARD: (
+        "Signed in as {login}.\n\nThat server can read your project board now, and the board will "
+        "show you as whoever moves a card from Discord rather than somebody else.\n\nThere is "
+        "nothing else to run. You can take this back at any time, either with /set_board in "
+        "Discord or from Applications in your GitHub settings."
+    ),
 }
 
 

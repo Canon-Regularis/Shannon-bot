@@ -51,6 +51,7 @@ TABLES = (
     "webhook_events",
     "identity_verifications",
     "verified_identities",
+    "board_authorizations",
     "github_installations",
     "repositories",
 )

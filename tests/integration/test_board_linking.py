@@ -22,8 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.enums import ObjectType
-from shannon.domain.errors import NotRegisteredError
+from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
 from shannon.github.projects import ProjectListing
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.boards import (
     LIFETIME,
     BoardColumns,
@@ -32,11 +33,17 @@ from shannon.services.boards import (
     BoardUnreadableError,
     OwnerBoards,
 )
+from tests.support.credentials import BOARD_KEY
 from tests.support.db import register_repository
 
 pytestmark = pytest.mark.integration
 
 PROJECT = 3
+# Whoever runs /set_board. Their authorisation is what the board is read under
+# from then on, so it is named rather than left as a bare literal. Issue #170.
+LINKER = 555
+# Somebody who has not. Only the refusal test uses them.
+STRANGER = 999
 
 
 class FakeProjects:
@@ -65,10 +72,39 @@ def projects() -> FakeProjects:
 
 
 @pytest.fixture
+def authorisations(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> BoardCredentials:
+    return BoardCredentials(db_sessionmaker, keys=BOARD_KEY)
+
+
+@pytest.fixture(autouse=True)
+async def authorised(
+    authorisations: BoardCredentials,
+) -> None:
+    """The linker has authorised, which every test in this file assumes but one.
+
+    Autouse, rather than a parameter on thirteen tests. Since issue #170 `/set_board` refuses
+    outright without an authorisation, so "whoever links has authorised" stopped being a thing a
+    test sets up and became a precondition of linking a board at all. The one test that is about
+    the refusal names somebody else instead, which reads better than every other test naming this.
+    """
+    await authorisations.remember(
+        guild_id=1,
+        discord_user_id=LINKER,
+        github_login="octocat",
+        github_user_id=583231,
+        token="gho_linker",
+    )
+
+
+@pytest.fixture
 def service(
-    db_sessionmaker: async_sessionmaker[AsyncSession], projects: FakeProjects
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    projects: FakeProjects,
+    authorisations: BoardCredentials,
 ) -> BoardLinkingService:
-    return BoardLinkingService(db_sessionmaker, projects, OwnerBoards(projects))
+    return BoardLinkingService(db_sessionmaker, projects, OwnerBoards(projects), authorisations)
 
 
 async def stored(session: AsyncSession, repository_id: int) -> Repository:
@@ -84,7 +120,7 @@ class TestPointingAtABoard:
     ) -> None:
         repository_id = registered.id
 
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
         row = await stored(db_session, repository_id)
         assert row.project_number == PROJECT
@@ -96,7 +132,7 @@ class TestPointingAtABoard:
         Writing it out would freeze today's answer into the row and survive a rename."""
         repository_id = registered.id
 
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
         row = await stored(db_session, repository_id)
         assert row.project_number == PROJECT, (
@@ -113,7 +149,7 @@ class TestPointingAtABoard:
     ) -> None:
         repository_id = registered.id
 
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="acme")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="acme", acting=LINKER)
 
         assert (await stored(db_session, repository_id)).project_owner == "acme"
         assert projects.opened == [("acme", PROJECT)]
@@ -121,9 +157,9 @@ class TestPointingAtABoard:
     async def test_the_reply_carries_the_board_it_replaced(
         self, service: BoardLinkingService, registered: Repository
     ) -> None:
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
-        link = await service.assign(guild_id=1, project_number=77, typed_owner="")
+        link = await service.assign(guild_id=1, project_number=77, typed_owner="", acting=LINKER)
 
         assert (link.number, link.replaced) == (77, PROJECT)
 
@@ -135,7 +171,7 @@ class TestTheBoardIsOpenedBeforeItIsStored:
         projects.opens = False
 
         with pytest.raises(BoardUnreadableError, match="numbered 3"):
-            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
     async def test_nothing_is_written_when_it_does_not_open(
         self,
@@ -148,43 +184,64 @@ class TestTheBoardIsOpenedBeforeItIsStored:
         projects.opens = False
 
         with pytest.raises(BoardUnreadableError):
-            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
         assert (await stored(db_session, repository_id)).project_number is None
 
-    async def test_the_refusal_names_the_token(
+    async def test_the_refusal_names_what_the_person_can_check(
         self, service: BoardLinkingService, projects: FakeProjects, registered: Repository
     ) -> None:
-        """A board that does not open is as likely to be a token without Projects: Read-only for
-        that owner as it is to be a wrong number, and the number is the one people check first."""
+        """It used to name SHANNON_GITHUB_PROJECT_TOKEN, and since issue #170 there is no such
+        thing to name: the credential is the runner's own authorisation, which they have already
+        granted by the time they get here. So the refusal names the two halves of the address
+        instead - the number and the owner - because a board number is a sequence GitHub keeps per
+        account and a wrong owner answers exactly like a wrong number.
+        """
         projects.opens = False
 
-        with pytest.raises(BoardUnreadableError, match="SHANNON_GITHUB_PROJECT_TOKEN"):
-            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        with pytest.raises(BoardUnreadableError, match="number against the board's URL"):
+            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
 
 class TestOneBoardPerRepository:
     async def test_a_board_another_repository_has_is_refused(
-        self, service: BoardLinkingService, registered: Repository, db_session: AsyncSession
+        self,
+        service: BoardLinkingService,
+        registered: Repository,
+        db_session: AsyncSession,
+        authorisations: BoardCredentials,
     ) -> None:
         """Two repositories on one board each mirror every draft card into their own server,
         because a tracked item is keyed by repository and nothing compares across them."""
         await register_repository(
             db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
         )
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        # Authorised in the second server too, and the fact that this line is needed is the
+        # scoping rule working: an authorisation granted in one server is not one in another,
+        # however much the same person holds both. Without it this test would stop at the
+        # authorisation refusal and never reach the rule it is about.
+        await authorisations.remember(
+            guild_id=2,
+            discord_user_id=LINKER,
+            github_login="octocat",
+            github_user_id=583231,
+            token="gho_linker",
+        )
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
         with pytest.raises(BoardTakenError, match="already mirroring"):
-            await service.assign(guild_id=2, project_number=PROJECT, typed_owner="")
+            await service.assign(guild_id=2, project_number=PROJECT, typed_owner="", acting=LINKER)
 
     async def test_the_same_repository_setting_the_same_board_again_is_fine(
         self, service: BoardLinkingService, registered: Repository
     ) -> None:
         """It is its own board. Refusing here would make the command fail the second time
         somebody ran it with the same answer."""
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
-        link = await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        link = await service.assign(
+            guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+        )
 
         assert link.number == PROJECT
 
@@ -196,9 +253,9 @@ class TestClearingIt:
         """An owner with no number addresses nothing and would sit in the row looking like
         configuration."""
         repository_id = registered.id
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="acme")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="acme", acting=LINKER)
 
-        await service.assign(guild_id=1, project_number=None, typed_owner="")
+        await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
 
         row = await stored(db_session, repository_id)
         assert (row.project_number, row.project_owner) == (None, None)
@@ -206,16 +263,16 @@ class TestClearingIt:
     async def test_it_says_what_was_dropped(
         self, service: BoardLinkingService, registered: Repository
     ) -> None:
-        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
-        link = await service.assign(guild_id=1, project_number=None, typed_owner="")
+        link = await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
 
         assert (link.number, link.replaced) == (0, PROJECT)
 
     async def test_clearing_asks_github_nothing(
         self, service: BoardLinkingService, projects: FakeProjects, registered: Repository
     ) -> None:
-        await service.assign(guild_id=1, project_number=None, typed_owner="")
+        await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
 
         assert projects.opened == []
 
@@ -223,7 +280,9 @@ class TestClearingIt:
 class TestAServerWithNoRepository:
     async def test_assigning_is_refused(self, service: BoardLinkingService) -> None:
         with pytest.raises(NotRegisteredError, match="/register"):
-            await service.assign(guild_id=404, project_number=PROJECT, typed_owner="")
+            await service.assign(
+                guild_id=404, project_number=PROJECT, typed_owner="", acting=LINKER
+            )
 
     async def test_the_picker_says_nothing_rather_than_raising(
         self, service: BoardLinkingService
@@ -327,7 +386,7 @@ class TestRelinkingForgetsTheOldBoardsCards:
     ) -> None:
         item_id = await self.carded(db_session, registered)
 
-        await service.assign(guild_id=1, project_number=77, typed_owner="")
+        await service.assign(guild_id=1, project_number=77, typed_owner="", acting=LINKER)
 
         assert (await self.stored(db_session, item_id)).project_item_id is None
 
@@ -336,7 +395,7 @@ class TestRelinkingForgetsTheOldBoardsCards:
     ) -> None:
         item_id = await self.carded(db_session, registered)
 
-        await service.assign(guild_id=1, project_number=None, typed_owner="")
+        await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
 
         assert (await self.stored(db_session, item_id)).project_item_id is None
 
@@ -353,7 +412,7 @@ class TestRelinkingForgetsTheOldBoardsCards:
         projects.opens = False
 
         with pytest.raises(BoardUnreadableError):
-            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="")
+            await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
 
         assert (await self.stored(db_session, item_id)).project_item_id == 999999
 
@@ -515,3 +574,88 @@ class TestTheColumnsThePickerOffers:
 
         clock = clock + LIFETIME + timedelta(seconds=1)
         assert await columns.offered(registered.discord_guild_id) == ("Backlog",)
+
+
+class TestABoardIsLinkedBySomebodyWhoAuthorisedIt:
+    """Issue #170. A board is read under the authorisation of whoever linked it, so linking one
+    requires having authorised - and the row records who, because a poll has to find it again."""
+
+    async def test_somebody_who_has_not_authorised_is_refused(
+        self, service: BoardLinkingService, registered: Repository
+    ) -> None:
+        """The one test in this file whose runner has not authorised. The message names the
+        command that fixes it, because this is the one board refusal the person reading it can
+        fix themselves in one step."""
+        with pytest.raises(BoardNotAuthorisedError, match="/authorise_board"):
+            await service.assign(
+                guild_id=1, project_number=PROJECT, typed_owner="", acting=STRANGER
+            )
+
+    async def test_a_refused_link_writes_nothing_at_all(
+        self,
+        service: BoardLinkingService,
+        registered: Repository,
+        db_session: AsyncSession,
+        projects: FakeProjects,
+    ) -> None:
+        """Raised inside the same transaction as the two refusals below it, so the
+        `forget_the_board` that runs before the branch is rolled back with it. A command that
+        refused must not have forgotten which cards the old board held."""
+        with pytest.raises(BoardNotAuthorisedError):
+            await service.assign(
+                guild_id=1, project_number=PROJECT, typed_owner="", acting=STRANGER
+            )
+
+        assert (await stored(db_session, registered.id)).project_number is None
+        assert projects.opened == [], "it asked GitHub about a board it had no credential for"
+
+    async def test_the_member_who_linked_it_is_recorded(
+        self, service: BoardLinkingService, registered: Repository, db_session: AsyncSession
+    ) -> None:
+        """What a poll reads back to find the credential. Without it the board would be read under
+        whichever authorisation happened to be found first, which is where this started."""
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
+
+        assert (await stored(db_session, registered.id)).project_linked_by == LINKER
+
+    async def test_clearing_the_board_forgets_the_authorisation(
+        self,
+        service: BoardLinkingService,
+        registered: Repository,
+        db_session: AsyncSession,
+        authorisations: BoardCredentials,
+    ) -> None:
+        """A credential kept for a board nobody mirrors is one nothing will ever use and nobody
+        remembers granting, which is the worst kind to still hold."""
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
+
+        await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
+
+        assert await authorisations.granted_to(guild_id=1, discord_user_id=LINKER) is None
+        assert (await stored(db_session, registered.id)).project_linked_by is None
+
+    async def test_clearing_a_board_nobody_linked_forgets_nothing(
+        self,
+        service: BoardLinkingService,
+        registered: Repository,
+        authorisations: BoardCredentials,
+    ) -> None:
+        """The other arm. A server with no board has nobody recorded against it, and reaching for
+        a credential under a null member would be asking the store about user zero."""
+        await service.assign(guild_id=1, project_number=None, typed_owner="", acting=LINKER)
+
+        assert await authorisations.granted_to(guild_id=1, discord_user_id=LINKER) is not None
+
+    async def test_relinking_keeps_the_linkers_authorisation(
+        self,
+        service: BoardLinkingService,
+        registered: Repository,
+        authorisations: BoardCredentials,
+    ) -> None:
+        """Pointing at a different board is not withdrawing anything: the same person is still
+        the one it is read as. Only clearing lets the credential go."""
+        await service.assign(guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER)
+
+        await service.assign(guild_id=1, project_number=77, typed_owner="", acting=LINKER)
+
+        assert await authorisations.granted_to(guild_id=1, discord_user_id=LINKER) is not None

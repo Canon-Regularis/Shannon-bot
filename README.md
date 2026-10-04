@@ -325,19 +325,18 @@ What is shared, and what that costs:
   and `/register` is open to anybody holding the Admin role in any server this bot was invited to.
 - **One GitHub App, and therefore one private key.** It is the credential to protect, because it
   mints tokens for every installation. Losing it is worse than losing the token it replaced.
-- **One `SHANNON_GITHUB_PROJECT_TOKEN`, if the board is used at all.** GitHub's Projects
-  permission exists at organisation level only, so that one feature keeps a credential of its
-  own. It is unset in every deployment that leaves `SHANNON_GITHUB_PROJECT_NUMBER` at zero, and
-  an organisation's board reads through it rather than through an App permission that does exist,
-  because asking for a new one suspends event delivery to the installation until somebody accepts
-  it — see the note above.
-- **How narrow that token is depends on the board, and a personal one is not narrow.** For an
-  organisation's board it is a fine-grained token scoped to Projects on that organisation: a leak
-  exposes a board rather than source. A **personal** board cannot be read by a fine-grained token
-  at all, so it takes a **classic** token with `read:project` — and classic tokens are not scoped
-  to a resource, so that one grants read across every project its owner can see. That is a real
-  step down and worth weighing against moving the board to an organisation. Either way the board
-  history shows the token's owner rather than this bot.
+- **One OAuth App for project boards, and no shared token.** GitHub's Projects permission exists
+  at organisation level only, so a board cannot be reached through the App at all — and asking the
+  App for an organisation permission suspends event delivery to the installation until somebody
+  accepts, which would stop every webhook in every registered repository. So boards go through a
+  separately registered classic **OAuth App**, and each person authorises it for themselves with
+  `/authorise_board`.
+- **A board is read as whoever linked it, and a card is moved as whoever moved it.** That replaced
+  one classic token belonging to one human account, shared by every server, with the `project`
+  scope across every project that account could see — so one leak was write access to all of them,
+  and the board's history named the token's owner whoever had actually asked. Authorisations are
+  stored encrypted with `SHANNON_BOARD_CREDENTIAL_KEY`, which is the only encrypted column in the
+  schema, and anybody can withdraw theirs at any time.
 - **One webhook secret per source.** The App has its own, and the endpoint also accepts
   `SHANNON_GITHUB_WEBHOOK_SECRET` so a repository configured the old way keeps working while a
   deployment moves across. Delete the per-repository webhook once the App is installed: until you
@@ -387,9 +386,11 @@ at the door.
 | `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/link`, `/register` and `/unregister`. Empty makes all three refuse rather than hand out a broken link, which since issue #135 means a deployment without it cannot bind a repository at all |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
 | `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
+| `SHANNON_GITHUB_BOARD_CLIENT_ID` | empty | The **second** registered application, a classic **OAuth App** rather than a GitHub App, used only to authorise a project board. GitHub publishes no App permission for a user-owned board and granting an installed App an organisation permission suspends its event delivery until an admin accepts, so boards cannot go through the App above. Register it with the redirect URI `<SHANNON_PUBLIC_BASE_URL>/oauth/github/callback`, wildcard matching **off**, device flow **off**, and *Expire user access tokens* **off** |
+| `SHANNON_GITHUB_BOARD_CLIENT_SECRET` | empty | Exchanges the OAuth code for a board authorisation. Empty makes `/set_board` refuse rather than send somebody to GitHub to grant something that cannot be used |
+| `SHANNON_BOARD_CREDENTIAL_KEY` | empty | The Fernet key those authorisations are encrypted with — the only encryption in this schema, because a board authorisation is the one thing stored here that *acts as* somebody rather than describing them. A comma-separated list, newest first: the cipher writes with the first key and reads with any, so a rotation does not make everybody authorise again. Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Unset or unreadable means boards are off and said so once, rather than a process that will not start |
 | `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
-| `SHANNON_GITHUB_PROJECT_TOKEN` | empty | The **one** credential the App cannot replace, and the kind of token depends on who owns the board. GitHub's Projects permission exists at **organisation** level only, for Apps and fine-grained tokens alike. An **organisation's** board takes a fine-grained token with Projects: Read-only under organisation permissions. A **personal** board — a `github.com/users/<login>/projects/N` URL — takes a **classic** token with `read:project`, issued by the account that owns it, because GitHub lists "access Projects owned by a user account" among the things a fine-grained token cannot do. Only `HttpProjectBoards` reads it, and only when `SHANNON_GITHUB_PROJECT_NUMBER` is set |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
 | `SHANNON_ROLE_REVIEWER` | `Reviewer` | Grants no command today. Deciding a change is good and recording that the project has accepted it are different jobs, and only the second is written down here |
@@ -621,6 +622,7 @@ rather than abandoning the rest.
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and is asked when this has nothing, so a missing row costs a read of the App's own installations and then writes itself down |
 | `identity_verifications` | Outstanding one-time links. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once, and `purpose` is the only record of which command sent them |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
+| `board_authorizations` | The GitHub authorisation one person granted so one server could reach their project board, with the token **encrypted**. The only encrypted column in the schema, and the first credential this project stores: everything else it keeps about somebody describes them, where this one acts as them. One row per person per server, which is how both readers reach it — a card move by whoever ran the command, a poll by the member named in `repositories.project_linked_by` |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
 | `logged_messages` | What has been said in a logged thread and not yet reached GitHub. Deleted as soon as the comment carrying it lands, because these rows hold what people said |
 
@@ -629,7 +631,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0030`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0031`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

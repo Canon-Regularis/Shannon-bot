@@ -33,6 +33,7 @@ from shannon.services.workflow import (
     WorkflowRefusedError,
     build_item_workflow,
 )
+from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.discord_objects import (
     FakeGuildPermissions,
     FakeInteraction,
@@ -48,6 +49,13 @@ pytestmark = pytest.mark.integration
 
 BOARD = 6
 CARD = 74106766
+# Whoever ran the command. Every test in this file is about the board WRITE, and since issue
+# #170 a card is moved AS somebody - so the actor is named here rather than repeated as a
+# literal, and `TestWhenNobodyAuthorisedIt` is the one case that leaves it out.
+MOVER = 4242
+# The guild `register_repository` defaults to, named so an assertion about WHOSE
+# authorisation was asked for reads as a pair rather than as two bare numbers.
+GUILD = 1
 REPO_KEY = (f"{payloads.OWNER}/{payloads.REPO}".lower(), 7)
 
 
@@ -77,6 +85,10 @@ class FakeCards:
         self.order = order
         self.order_error = order_error
         self.moved: list[tuple[str, int, int, Status | Priority]] = []
+        self.moved_as: list[str] = []
+        # Whether this stand-in writes at all. True by default, because every test here
+        # is about the write; the one that turns it off goes through the real container.
+        self.may_write = True
         # The board column a command named, where it named one.
         self.named: list[str] = []
         self.asked: list[tuple[Status, Status]] = []
@@ -88,8 +100,13 @@ class FakeCards:
         project_number: int,
         card_id: int,
         state: Status | Priority,
+        as_: str,
         column: str = "",
     ) -> CardMoved:
+        # Whose credential the write went out under. Recorded rather than ignored: since issue
+        # #170 that is the difference between a card moved by somebody and a card moved by the bot
+        # on one shared account's behalf, and it is the thing worth asserting.
+        self.moved_as.append(as_)
         self.moved.append((owner, project_number, card_id, state))
         self.named.append(column)
         if self.error is not None:
@@ -118,13 +135,19 @@ def workflow_with(
     sync_service: ItemSyncService,
     issue_service: ItemSyncService,
 ):
-    def build(cards: FakeCards | None) -> ItemWorkflow:
+    def build(
+        cards: FakeCards | None, *, authorisations: FakeBoardCredentials | None = None
+    ) -> ItemWorkflow:
         return build_item_workflow(
             db_sessionmaker,
             github,
             threads,
             pr_sync=sync_service,
             issue_sync=issue_service,
+            # Somebody has authorised unless a test says otherwise, which is what every test here
+            # but `TestWhenNobodyAuthorisedTheMove` wants: since issue #170 a card is moved AS a
+            # person, so "the mover has authorised" is a precondition of moving one at all.
+            authorisations=authorisations or FakeBoardCredentials(),
             cards=cards,
         )
 
@@ -145,7 +168,9 @@ class TestWhenBothGatesAreOpen:
     async def test_the_card_is_dragged_to_match(
         self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
     ) -> None:
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert cards.moved == [("Canon-Regularis", BOARD, CARD, Status.IN_REVIEW)]
 
@@ -154,7 +179,9 @@ class TestWhenBothGatesAreOpen:
     ) -> None:
         """Never empty. An empty owner sends the write out with no credential at all, GitHub
         answers 401, and the poller reads that as permanent and writes the card off for good."""
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert cards.moved[0][0] == "Canon-Regularis"
 
@@ -170,7 +197,9 @@ class TestWhenBothGatesAreOpen:
         registered.project_owner = "acme"
         await db_session.commit()
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert cards.moved[0][0] == "acme"
 
@@ -178,7 +207,9 @@ class TestWhenBothGatesAreOpen:
         self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int, db_session
     ) -> None:
         outcome = await workflow_with(cards).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         assert outcome.changed is True
@@ -199,7 +230,9 @@ class TestWhenThereIsNothingToWriteTo:
         leaves the reader, and what "off" looks like from here is `CardMove.NO_WRITER` - pinned
         in `TestTheOrderTheBoardIsIn` below.
         """
-        outcome = await workflow_with(None).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        outcome = await workflow_with(None).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert outcome.changed is True
         assert cards.moved == []
@@ -207,7 +240,9 @@ class TestWhenThereIsNothingToWriteTo:
     async def test_a_repository_with_no_board_writes_nothing(
         self, workflow_with, cards: FakeCards, thread_id: int, registered: Repository
     ) -> None:
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert cards.moved == []
 
@@ -225,7 +260,9 @@ class TestWhenThereIsNothingToWriteTo:
         registered.project_number = BOARD
         await db_session.commit()
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+        await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
 
         assert cards.moved == []
 
@@ -240,7 +277,9 @@ class TestWhenTheBoardRefuses:
         refusing = FakeCards(error=GitHubRefusedError("Could not resolve to a node"))
 
         outcome = await workflow_with(refusing).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         assert outcome.changed is True
@@ -254,7 +293,9 @@ class TestWhenTheBoardRefuses:
         refusing = FakeCards(error=GitHubRefusedError("Could not resolve to a node"))
 
         with caplog.at_level("WARNING", logger="shannon.services.workflow"):
-            await workflow_with(refusing).set_status(thread_id=thread_id, status=Status.IN_REVIEW)
+            await workflow_with(refusing).set_status(
+                thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+            )
 
         assert "Could not resolve to a node" in caplog.text
         assert f"board {BOARD}" in caplog.text
@@ -267,7 +308,9 @@ class TestThePriorityHalf:
     async def test_setting_a_priority_moves_the_card(
         self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
     ) -> None:
-        await workflow_with(cards).set_priority(thread_id=thread_id, priority=Priority.HIGH)
+        await workflow_with(cards).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
 
         assert cards.moved == [("Canon-Regularis", BOARD, CARD, Priority.HIGH)]
 
@@ -275,7 +318,9 @@ class TestThePriorityHalf:
         self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
     ) -> None:
         outcome = await workflow_with(cards).set_priority(
-            thread_id=thread_id, priority=Priority.HIGH
+            thread_id=thread_id,
+            priority=Priority.HIGH,
+            acting=MOVER,
         )
 
         assert outcome.changed is True
@@ -288,9 +333,11 @@ class TestThePriorityHalf:
         was having a moment is noticed by nothing. Running the command again is what a person
         does, and it used to report "already High priority" and ask the board nothing."""
         service = workflow_with(cards)
-        await service.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+        await service.set_priority(thread_id=thread_id, priority=Priority.HIGH, acting=MOVER)
 
-        outcome = await service.set_priority(thread_id=thread_id, priority=Priority.HIGH)
+        outcome = await service.set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
 
         assert outcome.changed is False
         assert len(cards.moved) == 2, "the repeat asked the board nothing"
@@ -306,7 +353,9 @@ class TestWhenTheBoardHasNoColumnForIt:
         nowhere = FakeCards(answer=CardMove.NO_COLUMN)
 
         outcome = await workflow_with(nowhere).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         assert outcome.changed is True
@@ -322,7 +371,9 @@ class TestWhenTheBoardHasNoColumnForIt:
         command until an operator changes something. A warning attached to a fix the caller
         cannot make is noise."""
         outcome = await workflow_with(FakeCards(answer=answer)).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         assert outcome.board_has_no_column is False
@@ -335,7 +386,9 @@ class TestWhenTheBoardHasNoColumnForIt:
         refusing = FakeCards(error=GitHubRefusedError("Could not resolve to a node"))
 
         outcome = await workflow_with(refusing).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         assert outcome.board_has_no_column is False
@@ -357,7 +410,9 @@ class TestRememberingWhereItPutIt:
         anything this bot reads as it - `In progress`, `Doing` - and storing the wrong one
         disagrees with the board for ever rather than for one poll."""
         await workflow_with(FakeCards(column="In progress")).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         db_session.expire_all()
@@ -372,7 +427,9 @@ class TestRememberingWhereItPutIt:
         entirely, so writing its option name there would tell the poller the card had moved to a
         column called `HIGH`."""
         await workflow_with(FakeCards(column="HIGH")).set_priority(
-            thread_id=thread_id, priority=Priority.HIGH
+            thread_id=thread_id,
+            priority=Priority.HIGH,
+            acting=MOVER,
         )
 
         db_session.expire_all()
@@ -397,7 +454,9 @@ class TestRememberingWhereItPutIt:
         before = started_as.project_column
 
         await workflow_with(FakeCards(answer=answer)).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            acting=MOVER,
         )
 
         db_session.expire_all()
@@ -431,7 +490,9 @@ class TestTheOrderTheBoardIsIn:
         cards = FakeCards(order=self.order(leaving="Ready", arriving="Done"))
 
         with pytest.raises(WorkflowRefusedError, match="In review"):
-            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+            await workflow_with(cards).set_status(
+                thread_id=thread_id, status=Status.DONE, acting=MOVER
+            )
 
         assert cards.moved == [], "it wrote to the board it had just refused"
         assert github.label_calls == [], "a refused command still wrote to GitHub"
@@ -444,7 +505,9 @@ class TestTheOrderTheBoardIsIn:
         cards = FakeCards(order=self.order(leaving="Backlog", arriving="Done"))
 
         with pytest.raises(WorkflowRefusedError) as refused:
-            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+            await workflow_with(cards).set_status(
+                thread_id=thread_id, status=Status.DONE, acting=MOVER
+            )
 
         said = refused.value.message
         assert "would skip Ready, In progress, In review" in said
@@ -471,7 +534,9 @@ class TestTheOrderTheBoardIsIn:
         )
 
         with pytest.raises(WorkflowRefusedError, match="In review"):
-            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+            await workflow_with(cards).set_status(
+                thread_id=thread_id, status=Status.DONE, acting=MOVER
+            )
 
         assert cards.moved == [], "it tried to write to a board it may not write to"
         assert github.label_calls == [], "a refused command still wrote to GitHub"
@@ -485,7 +550,9 @@ class TestTheOrderTheBoardIsIn:
             answer=CardMove.NO_WRITER, order=self.order(leaving="In review", arriving="Done")
         )
 
-        outcome = await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+        outcome = await workflow_with(cards).set_status(
+            thread_id=thread_id, status=Status.DONE, acting=MOVER
+        )
 
         assert outcome.changed is True
         assert github.label_calls, "the label did not land, so this proves nothing"
@@ -495,7 +562,7 @@ class TestTheOrderTheBoardIsIn:
     ) -> None:
         cards = FakeCards(order=self.order(leaving="In review", arriving="Done"))
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE, acting=MOVER)
 
         assert cards.moved != []
 
@@ -508,7 +575,10 @@ class TestTheOrderTheBoardIsIn:
         cards = FakeCards(order=self.order(leaving="Ready", arriving="In progress"))
 
         await workflow_with(cards).set_status(
-            thread_id=thread_id, status=Status.IN_REVIEW, column="In progress"
+            thread_id=thread_id,
+            status=Status.IN_REVIEW,
+            column="In progress",
+            acting=MOVER,
         )
 
         assert cards.named == ["In progress"]
@@ -520,20 +590,26 @@ class TestTheOrderTheBoardIsIn:
         take `/status` down for everybody."""
         cards = FakeCards(order=None)
 
-        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+        await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE, acting=MOVER)
 
         assert cards.moved != []
 
     async def test_the_poller_is_never_refused(
         self, on_a_board: None, workflow_with, thread_id: int
     ) -> None:
-        """`tell_the_board=False` is exactly the poller, and it calls BECAUSE a card has already
-        moved. Somebody dragging one is the fact being mirrored rather than a request to be
-        judged, and refusing it would leave the board and the row disagreeing for ever."""
+        """`acting=None` is exactly the poller, and it calls BECAUSE a card has already moved.
+        Somebody dragging one is the fact being mirrored rather than a request to be judged, and
+        refusing it would leave the board and the row disagreeing for ever.
+
+        It used to say `tell_the_board=False`. Since issue #170 the two are one parameter, because
+        a board write is made AS somebody and "do not write" and "nobody is writing" turned out to
+        be the same fact said twice."""
         cards = FakeCards(order=self.order(leaving="Backlog", arriving="Done"))
 
         await workflow_with(cards).set_status(
-            thread_id=thread_id, status=Status.DONE, tell_the_board=False
+            thread_id=thread_id,
+            status=Status.DONE,
+            acting=None,
         )
 
         assert cards.asked == [], "it asked the board about a move the board had already made"
@@ -550,7 +626,9 @@ class TestTheOrderTheBoardIsIn:
         cards = FakeCards(order_error=GitHubRefusedError("API rate limit exceeded"))
 
         with caplog.at_level("WARNING", logger="shannon.services.workflow"):
-            await workflow_with(cards).set_status(thread_id=thread_id, status=Status.DONE)
+            await workflow_with(cards).set_status(
+                thread_id=thread_id, status=Status.DONE, acting=MOVER
+            )
 
         assert cards.moved != [], "a board it could not read stopped the move"
         assert "API rate limit exceeded" in caplog.text
@@ -684,3 +762,107 @@ class TestTheWireFromTheContainer:
 
         assert "skip" not in interaction.reply, f"a legal move was refused: {interaction.reply!r}"
         assert github.label_calls, "the label did not land, so this proves nothing"
+
+
+class TestWhenNobodyAuthorisedTheMove:
+    """Issue #170. A card is moved AS the person who asked, so somebody who has granted nothing
+    cannot move one - and this is the one board refusal they can fix themselves, in one command,
+    which is what makes refusing better than carrying on quietly.
+    """
+
+    async def test_it_refuses_and_names_the_command(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        nobody = FakeBoardCredentials(writes="")
+
+        with pytest.raises(WorkflowRefusedError, match="/authorise_board"):
+            await workflow_with(cards, authorisations=nobody).set_status(
+                thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+            )
+
+    async def test_it_refuses_before_anything_is_written(
+        self,
+        on_a_board: None,
+        workflow_with,
+        cards: FakeCards,
+        thread_id: int,
+        github: FakeGitHubClient,
+    ) -> None:
+        """What distinguishes this from every other board failure on this path. Those are logged
+        and swallowed AFTER the labels, the row and the thread have landed, on the argument that a
+        warning attached to a fix the caller cannot make is noise. That argument inverts here, so
+        the refusal comes first and there is no half-done change to explain.
+        """
+        nobody = FakeBoardCredentials(writes="")
+
+        with pytest.raises(WorkflowRefusedError):
+            await workflow_with(cards, authorisations=nobody).set_status(
+                thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+            )
+
+        assert github.label_calls == [], "a refused command still wrote the label to GitHub"
+        assert cards.moved == [], "a refused command still moved the card"
+
+    async def test_an_item_with_no_card_needs_no_authorisation(
+        self, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """No `on_a_board` fixture, so the item is on no board. Nobody added it, so there is
+        nothing to move and refusing would make this feature's absence somebody else's problem."""
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
+
+        assert outcome.changed is True
+
+    async def test_the_poller_is_never_asked_for_one(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """`acting=None` is the poller, and it has no authorisation because no member asked. It
+        runs BECAUSE a card moved, so refusing it would leave the board and the row disagreeing
+        for ever."""
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_status(
+            thread_id=thread_id, status=Status.DONE, acting=None
+        )
+
+        assert outcome.changed is True
+
+    async def test_a_deployment_with_board_writes_off_asks_nobody_to_authorise(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """With writes off there is no write to authorise FOR, so asking would refuse a command for
+        a reason the person could do nothing about. `may_write` is the question, because the flag
+        is applied to the WRITER inside the board reader rather than by withholding it."""
+        off = FakeCards()
+        off.may_write = False
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(off, authorisations=nobody).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
+
+        assert outcome.changed is True
+        assert github.label_calls != [], "the label did not land, so this proves nothing"
+
+    async def test_an_authorised_move_is_made_as_that_person(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """The headline of the whole change. Before it, every card move went out under one shared
+        token and GitHub recorded that account as having moved it, whoever had actually asked."""
+        theirs = FakeBoardCredentials(writes="gho_the_mover")
+
+        await workflow_with(cards, authorisations=theirs).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
+
+        assert cards.moved_as == ["gho_the_mover"]
+        # Asked twice, and for the same person both times: once by the refusal that establishes
+        # they granted one, once by the write that uses it. Two indexed lookups on a path a human
+        # drives, against a command that already opens several sessions - not worth threading the
+        # answer through two call sites to save. What matters is WHOSE, which is what this pins.
+        assert theirs.wrote_for == [(GUILD, MOVER), (GUILD, MOVER)], (
+            "it asked for somebody else's authorisation"
+        )

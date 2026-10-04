@@ -28,4 +28,7 @@ WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 # half takes the tier that speaks for the server. A command gated on one of its arguments cannot
 # be described by a list of names, so this stays a list of commands anybody may run whatever they
 # type, and `/link`'s own tests hold the tier.
-UNGATED = frozenset({"mentions"})
+# `/authorise_board` joins it for the same reason, and with the same caveat written into its
+# own docstring: granting a credential of your own is yours to decide, a gate could only stop
+# somebody volunteering one, and withdrawing it is possible on GitHub whatever this bot allows.
+UNGATED = frozenset({"mentions", "authorise_board"})

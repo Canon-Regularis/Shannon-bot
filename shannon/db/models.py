@@ -68,6 +68,15 @@ class Repository(TimestampMixin, Base):
     # number is a sequence GitHub keeps per account, so the pair addresses a board and neither
     # half does alone - which is why this is stored beside the number rather than derived.
     project_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The Discord member whose GitHub authorisation this board's own reads are made under. Issue
+    # #170. Null means nobody has authorised one, and that reads as a board that cannot be read -
+    # which is also how the shared token was retired without a special case anywhere: every row
+    # that existed before this column arrived is null, so every board waits for somebody to
+    # authorise it rather than quietly carrying on under one account's credential.
+    #
+    # The member rather than the credential, so that revoking an authorisation is one delete and
+    # cannot leave a board pointing at a row that is gone.
+    project_linked_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
     # need every child row loaded into the session first.
@@ -357,6 +366,56 @@ class MutedMember(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class BoardAuthorization(TimestampMixin, Base):
+    """A GitHub authorisation somebody granted so this server could reach their project board.
+
+    Issue #170, and the first credential this project stores. Everything else it holds about a
+    person is a fact ABOUT them - a login, an id, a preference - which is bad enough to lose; this
+    is a thing that ACTS as them, so it is the one column in the schema that is encrypted. The key
+    lives in the environment and never in here, which is what makes a stolen dump of this table
+    worth nothing on its own.
+
+    Its own table, on the reasoning `MutedMember` above sets out: `repositories` is rewritten by
+    several commands and a credential kept there would be forgotten by one of them one day. It also
+    keeps the lifetimes apart - unlinking a board destroys the authorisation, where a repository
+    outlives both.
+
+    Keyed on the DISCORD member, one row per person per server, because that is how both readers
+    reach it. A card move asks "may this member write as themselves". A poll asks "whose
+    authorisation does this board read under", and answers it through the member recorded on the
+    board's own row - see `Repository.project_linked_by` - rather than through the board's owner.
+
+    Keying on the owner instead was the first design and it was wrong in a way worth recording.
+    A token granted by account X does read any board X owns, so it looks sound; but
+    `linked_to_board` only refuses two repositories sharing the SAME board, so two servers may
+    link two DIFFERENT boards both owned by X. Keyed on X, one server's board would then be read
+    under the other server's member's credential - a credential used across a tenancy boundary,
+    which is the exact thing this table exists to prevent.
+    """
+
+    __tablename__ = "board_authorizations"
+    __table_args__ = (
+        UniqueConstraint(
+            "discord_guild_id", "discord_user_id", name="uq_board_authorizations_guild_discord"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Who granted it. Both lookups arrive here: a card move by the member running the command, a
+    # poll by the member named on the board's row.
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The account GitHub said it was, never one anybody typed. The login is here for a log line
+    # and a reply to read; the id is what anything decides on, because GitHub frees a name the
+    # moment it is renamed and lets somebody else take it.
+    github_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The OAuth token, encrypted. Text rather than bytes because a Fernet token is already
+    # URL-safe base64, and a column somebody might read by hand should not also need decoding by
+    # hand to be recognised as ciphertext.
+    secret: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class TeamLink(TimestampMixin, Base):

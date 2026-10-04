@@ -80,15 +80,24 @@ class RepositoryStore:
         return found
 
     async def set_board(
-        self, repository: Repository, *, project_number: int | None, project_owner: str | None
+        self,
+        repository: Repository,
+        *,
+        project_number: int | None,
+        project_owner: str | None,
+        linked_by: int | None = None,
     ) -> None:
         """Point a repository at a board, or at none.
 
-        `project_number=None` clears both, because an owner without a number addresses nothing
-        and would sit in the row looking like configuration.
+        `project_number=None` clears all three, because an owner without a number addresses
+        nothing and would sit in the row looking like configuration - and a member recorded as
+        having authorised a board this server no longer mirrors is worse than nothing, because it
+        is the thing a poll would go looking for a credential under.
         """
         repository.project_number = project_number
         repository.project_owner = project_owner if project_number is not None else None
+        # Whose authorisation the board's own reads are made under. Issue #170.
+        repository.project_linked_by = linked_by if project_number is not None else None
         await self._session.flush()
 
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:

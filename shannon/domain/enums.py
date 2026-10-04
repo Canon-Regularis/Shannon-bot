@@ -130,3 +130,8 @@ class VerificationPurpose(StrEnum):
     LINK = "LINK"
     REGISTER = "REGISTER"
     UNREGISTER = "UNREGISTER"
+    # Issue #170. The one purpose whose token is KEPT rather than spent and forgotten: a board is
+    # read every couple of seconds for as long as it is linked, so the authorisation has to outlive
+    # the browser visit that granted it. It is also the only purpose that asks GitHub for a scope,
+    # because reading somebody's project board is a permission and saying who they are is not.
+    BOARD = "BOARD"
