@@ -22,6 +22,7 @@ from shannon.github.errors import (
 )
 from shannon.github.paging import PagedRead
 from shannon.github.projects import PAGE_SIZE, CardMove, HttpProjectBoards, parse_item
+from tests.fakes.board_credentials import FakeBoardCredentials
 
 PROJECT = 3
 
@@ -367,7 +368,9 @@ class TestReadingABoard:
             items=[draft()],
         )
 
-        items = await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+        items = await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
 
         assert len(items) == 1
         assert f"/users/monalisa/projectsV2/{PROJECT}/fields" in [path for path, _ in client.calls]
@@ -379,7 +382,7 @@ class TestReadingABoard:
     async def test_the_field_ids_are_looked_up_once_and_kept(self) -> None:
         """They change only when somebody edits the board's columns, and this runs every minute."""
         client = FakeJson(fields=[{"id": 39518, "name": "Status"}], items=[draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -391,7 +394,9 @@ class TestReadingABoard:
         and a board whose Status was renamed should not stop the whole mirror."""
         client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[draft(fields=[])])
 
-        items = await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+        items = await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
 
         assert [item.column for item in items] == [None]
 
@@ -404,7 +409,7 @@ class TestReadingABoard:
         undo, and the poll after it should see the board again.
         """
         client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[draft(fields=[])])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -418,7 +423,12 @@ class TestReadingABoard:
         # cards from a read are now KEPT and handed out again on a 304, so a mutable answer would
         # let one caller's `.append` or `.clear` rewrite what every later poll believes the board
         # holds. Immutable is what makes sharing them safe.
-        assert await HttpProjectBoards(client).list_board_items("monalisa", PROJECT) == ()
+        assert (
+            await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+                "monalisa", PROJECT
+            )
+            == ()
+        )
 
 
 class TestReadingABoardOnlyWhenItChanged:
@@ -443,7 +453,7 @@ class TestReadingABoardOnlyWhenItChanged:
     async def test_the_first_read_asks_with_no_validator(self) -> None:
         """Nothing has been seen yet, so there is nothing to ask with."""
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
 
@@ -452,7 +462,7 @@ class TestReadingABoardOnlyWhenItChanged:
     async def test_the_next_read_asks_with_the_validator_it_was_given(self) -> None:
         """The saving does not happen unless the question gets asked."""
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -464,7 +474,7 @@ class TestReadingABoardOnlyWhenItChanged:
         `parse_item` is a pure function of the body, so re-parsing could only produce these.
         """
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         first = await boards.list_board_items("monalisa", PROJECT)
         again = await boards.list_board_items("monalisa", PROJECT)
@@ -481,7 +491,7 @@ class TestReadingABoardOnlyWhenItChanged:
         would not have noticed either way.
         """
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         first = await boards.list_board_items("monalisa", PROJECT)
         # A different board behind a different validator, which is what an edit looks like.
@@ -514,7 +524,7 @@ class TestReadingABoardOnlyWhenItChanged:
         An unfull page cannot be hiding anything, and that is the only case worth trusting.
         """
         client = self._board([draft(id=index) for index in range(1, PAGE_SIZE + 1)])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         read = await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -525,7 +535,7 @@ class TestReadingABoardOnlyWhenItChanged:
     async def test_a_page_one_short_of_full_keeps_its_validator(self) -> None:
         """The boundary from the other side, so the rule is pinned rather than merely satisfied."""
         client = self._board([draft(id=index) for index in range(1, PAGE_SIZE)])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -540,7 +550,7 @@ class TestReadingABoardOnlyWhenItChanged:
             fields=[{"id": 1, "name": "Title"}, {"id": 2, "name": "Status"}],
             etag='"v1"',
         )
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         read = await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -553,7 +563,7 @@ class TestReadingABoardOnlyWhenItChanged:
         board is cached while it fits in a page and must stop being cached the moment it does not.
         """
         client = self._board([draft(id=1)])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         client.pages = [[draft(id=1)], [draft(id=2)]]
@@ -573,7 +583,7 @@ class TestReadingABoardOnlyWhenItChanged:
         would read a megabyte every two seconds for ever.
         """
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         assert not boards.can_recheck_cheaply("monalisa", PROJECT), "nothing has been read yet"
 
@@ -590,7 +600,7 @@ class TestReadingABoardOnlyWhenItChanged:
     async def test_a_board_that_offers_no_validator_is_read_whole_every_time(self) -> None:
         """GitHub sending no ETag at all. Nothing to ask with, so nothing is kept."""
         client = self._board([draft()], etag=None)
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("monalisa", PROJECT)
@@ -602,7 +612,7 @@ class TestReadingABoardOnlyWhenItChanged:
         reader. Keyed on the pair, because a project number is a sequence GitHub keeps per account.
         """
         client = self._board([draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         await boards.list_board_items("octocat", PROJECT)
@@ -622,14 +632,14 @@ class TestListingTheBoardsAnOwnerHas:
             ]
         )
 
-        listed = await HttpProjectBoards(client).list_boards("monalisa")
+        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa")
 
         assert [(one.number, one.title) for one in listed] == [(3, "Roadmap"), (7, "Bugs")]
 
     async def test_an_organisation_is_listed_under_orgs(self) -> None:
         client = FakeJson(account={"type": "Organization"}, boards=[{"number": 3, "title": "R"}])
 
-        await HttpProjectBoards(client).list_boards("acme")
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("acme")
 
         assert any(path == "/orgs/acme/projectsV2" for path, _ in client.calls)
 
@@ -651,14 +661,14 @@ class TestListingTheBoardsAnOwnerHas:
         can make."""
         client = FakeJson(boards=[row, {"number": 9, "title": "Real"}])
 
-        listed = await HttpProjectBoards(client).list_boards("monalisa")
+        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa")
 
         assert [one.number for one in listed] == [9]
 
     async def test_an_answer_that_is_not_a_list_is_no_boards(self) -> None:
         client = FakeJson(boards={"message": "Not Found"})
 
-        assert await HttpProjectBoards(client).list_boards("monalisa") == []
+        assert await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa") == []
 
 
 class TestOpeningOneBoard:
@@ -668,7 +678,9 @@ class TestOpeningOneBoard:
     async def test_it_answers_the_board(self) -> None:
         client = FakeJson(one_board={"number": 3, "title": "Roadmap"})
 
-        found = await HttpProjectBoards(client).get_board("monalisa", PROJECT)
+        found = await HttpProjectBoards(client, FakeBoardCredentials()).get_board(
+            "monalisa", PROJECT
+        )
 
         assert found is not None
         assert (found.number, found.title) == (3, "Roadmap")
@@ -676,14 +688,17 @@ class TestOpeningOneBoard:
     async def test_it_asks_under_the_owners_own_kind(self) -> None:
         client = FakeJson(account={"type": "Organization"}, one_board={"number": 3, "title": "R"})
 
-        await HttpProjectBoards(client).get_board("acme", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).get_board("acme", PROJECT)
 
         assert any(path == f"/orgs/acme/projectsV2/{PROJECT}" for path, _ in client.calls)
 
     async def test_a_body_it_cannot_read_is_no_board(self) -> None:
         client = FakeJson(one_board={"message": "Not Found"})
 
-        assert await HttpProjectBoards(client).get_board("monalisa", PROJECT) is None
+        assert (
+            await HttpProjectBoards(client, FakeBoardCredentials()).get_board("monalisa", PROJECT)
+            is None
+        )
 
 
 class TestWhichKindOfAccountOwnsTheBoard:
@@ -696,7 +711,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
     async def test_an_organisations_board_is_read_under_orgs(self) -> None:
         client = FakeJson(account={"type": "Organization"}, items=[draft()])
 
-        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items("acme", PROJECT)
 
         boards = [path for path, _ in client.calls if "/projectsV2/" in path]
         assert boards
@@ -705,7 +720,9 @@ class TestWhichKindOfAccountOwnsTheBoard:
     async def test_a_persons_board_is_still_read_under_users(self) -> None:
         client = FakeJson(account={"type": "User"}, items=[draft()])
 
-        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
 
         assert any(
             path.startswith(f"/users/monalisa/projectsV2/{PROJECT}") for path, _ in client.calls
@@ -715,7 +732,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
         """It changes when an account is converted, which is not a thing that happens between
         two polls a minute apart, and this would otherwise be a second request every time."""
         client = FakeJson(account={"type": "Organization"}, items=[draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("acme", PROJECT)
         await boards.list_board_items("acme", PROJECT)
@@ -727,7 +744,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
         anonymously this is both a possible 404 and a share of an IP-wide hourly allowance."""
         client = FakeJson(account={"type": "Organization"}, items=[draft()])
 
-        await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items("acme", PROJECT)
 
         asked = next(params for path, params in client.calls if path == "/users/acme")
         assert asked["owner"] == "acme"
@@ -737,7 +754,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
         client is quoted."""
         client = FakeJson(account={"type": "Organization"}, items=[])
 
-        await HttpProjectBoards(client).list_board_items("a b/c", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items("a b/c", PROJECT)
 
         assert all("a b/c" not in path for path, _ in client.calls if "projectsV2" in path)
         assert any("a%20b%2Fc" in path for path, _ in client.calls)
@@ -751,7 +768,9 @@ class TestWhichKindOfAccountOwnsTheBoard:
         client = FakeJson(account=account, items=[draft()])
 
         with caplog.at_level("WARNING"):
-            await HttpProjectBoards(client).list_board_items("acme", PROJECT)
+            await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+                "acme", PROJECT
+            )
 
         assert any(path.startswith(f"/users/acme/projectsV2/{PROJECT}") for path, _ in client.calls)
         assert "kind of account" in caplog.text
@@ -763,7 +782,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
         not decide the prefix for the life of the process - but the line about it does not.
         """
         client = FakeJson(account={}, items=[draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         with caplog.at_level("WARNING"):
             await boards.list_board_items("acme", PROJECT)
@@ -780,7 +799,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
     ) -> None:
         """The other arm: an answer arriving clears the record, so a later blip is heard."""
         client = FakeJson(account={}, items=[draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("acme", PROJECT)
         client.bodies["account"] = {"type": "User"}
@@ -805,7 +824,7 @@ class TestWhichKindOfAccountOwnsTheBoard:
         for the life of the process, and an organisation's board would stay dead until a
         restart nobody knew to do."""
         client = FakeJson(account={}, items=[draft()])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("acme", PROJECT)
         await boards.list_board_items("acme", PROJECT)
@@ -924,7 +943,7 @@ class TestTheStatusFieldsChoices:
             ),
             items=[draft()],
         )
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         found = boards._fields[("monalisa", PROJECT)]
@@ -951,7 +970,7 @@ class TestTheStatusFieldsChoices:
             ),
             items=[],
         )
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
 
@@ -982,7 +1001,7 @@ class TestTheStatusFieldsChoices:
             ),
             items=[],
         )
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
 
@@ -998,7 +1017,7 @@ class TestTheStatusFieldsChoices:
         if listed is not None:
             status["options"] = listed
         client = FakeJson(fields=self.fields(status), items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
 
@@ -1009,7 +1028,7 @@ class TestTheStatusFieldsChoices:
         `(status_id,)` here and `(title_id, status_id)` on an ordinary board - a writer reaching
         for `wanted[1]` is wrong on the first and right on the second."""
         client = FakeJson(fields=[{"id": 39518, "name": "Status"}], items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         found = boards._fields[("monalisa", PROJECT)]
@@ -1019,7 +1038,7 @@ class TestTheStatusFieldsChoices:
 
     async def test_the_status_id_is_right_on_an_ordinary_board(self) -> None:
         client = FakeJson(fields=self.fields({"id": 39518, "name": "Status"}), items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         found = boards._fields[("monalisa", PROJECT)]
@@ -1036,7 +1055,7 @@ class TestTheStatusFieldsChoices:
         repeats eighteen hundred times an hour is one whoever reads the log learns to scroll past.
         """
         client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         with caplog.at_level("WARNING"):
             await boards.list_board_items("monalisa", PROJECT)
@@ -1058,7 +1077,7 @@ class TestTheStatusFieldsChoices:
         so the first read's warning is still in it when the third one is counted.
         """
         client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
         client.bodies["fields"] = [{"id": 1, "name": "Title"}, {"id": 2, "name": "Status"}]
@@ -1079,7 +1098,7 @@ class TestTheStatusFieldsChoices:
         one and missed for the other: two caches can disagree about whether a board has a Status
         field, and one cannot."""
         client = FakeJson(fields=[{"id": 1, "name": "Title"}], items=[])
-        boards = HttpProjectBoards(client)
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
 
         await boards.list_board_items("monalisa", PROJECT)
 
@@ -1092,9 +1111,14 @@ class FakeWriter:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.sent: list[tuple[str, str, Any]] = []
+        # Whose authorisation the write went out under. Its own list so the `sent` assertions read
+        # as they did, and recorded at all because since issue #170 this is the difference between
+        # a card moved by somebody and a card moved by one shared account on their behalf.
+        self.sent_as: list[str] = []
 
-    async def patch_json(self, path: str, *, owner: str, json: Any) -> None:
+    async def patch_json(self, path: str, *, owner: str, token: str = "", json: Any) -> None:
         self.sent.append((path, owner, json))
+        self.sent_as.append(token)
         if self.error is not None:
             raise self.error
 
@@ -1120,13 +1144,17 @@ class TestMovingACard:
 
     def boards(self, writer: FakeWriter | None, **bodies: Any) -> HttpProjectBoards:
         client = FakeJson(fields=[{"id": 39516, "name": "Title"}, a_board()], **bodies)
-        return HttpProjectBoards(client, writer=writer)
+        return HttpProjectBoards(client, FakeBoardCredentials(), writer=writer)
 
     async def test_it_patches_the_card_with_the_option_id(self) -> None:
         writer = FakeWriter()
 
         moved = await self.boards(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="gho_mover",
         )
 
         assert moved.outcome is CardMove.MOVED
@@ -1144,7 +1172,9 @@ class TestMovingACard:
         writer = FakeWriter()
         boards = self.boards(writer, account={"type": "Organization"})
 
-        await boards.move_card(owner="acme", project_number=PROJECT, card_id=99, state=Status.DONE)
+        await boards.move_card(
+            owner="acme", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
+        )
 
         assert writer.sent[0][0] == f"/orgs/acme/projectsV2/{PROJECT}/items/99"
 
@@ -1154,7 +1184,7 @@ class TestMovingACard:
         writer = FakeWriter()
 
         await self.boards(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         assert writer.sent[0][1] == "monalisa"
@@ -1175,7 +1205,7 @@ class TestMovingACard:
         writer = FakeWriter()
 
         await self.boards(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=status
+            owner="monalisa", project_number=PROJECT, card_id=99, state=status, as_="gho_mover"
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] == expected
@@ -1197,8 +1227,12 @@ class TestMovingACard:
             ]
         )
 
-        await HttpProjectBoards(client, writer=writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+        await HttpProjectBoards(client, FakeBoardCredentials(), writer=writer).move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="gho_mover",
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] == "second"
@@ -1208,7 +1242,7 @@ class TestMovingACard:
         client, and the App holds no Projects permission of any kind, so there is nothing to
         fall back to for a write."""
         moved = await self.boards(None).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         assert moved.outcome is CardMove.NO_WRITER
@@ -1217,8 +1251,8 @@ class TestMovingACard:
         writer = FakeWriter()
         client = FakeJson(fields=[{"id": 39516, "name": "Title"}])
 
-        moved = await HttpProjectBoards(client, writer=writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+        moved = await HttpProjectBoards(client, FakeBoardCredentials(), writer=writer).move_card(
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         assert moved.outcome is CardMove.UNREADABLE
@@ -1233,8 +1267,14 @@ class TestMovingACard:
         client = FakeJson(fields=[a_board(options=[{"id": "opt-todo", "name": "Todo"}])])
 
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
-            moved = await HttpProjectBoards(client, writer=writer).move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            moved = await HttpProjectBoards(
+                client, FakeBoardCredentials(), writer=writer
+            ).move_card(
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.DONE,
+                as_="gho_mover",
             )
 
         assert moved.outcome is CardMove.NO_COLUMN
@@ -1248,7 +1288,11 @@ class TestMovingACard:
 
         with pytest.raises(GitHubRefusedError):
             await self.boards(writer).move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.DONE,
+                as_="gho_mover",
             )
 
 
@@ -1283,7 +1327,9 @@ class TestABoardFromGitHubsOwnTemplate:
 
     def moving(self, writer: FakeWriter) -> HttpProjectBoards:
         return HttpProjectBoards(
-            FakeJson(fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE]), writer=writer
+            FakeJson(fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE]),
+            FakeBoardCredentials(),
+            writer=writer,
         )
 
     @pytest.mark.parametrize(
@@ -1301,7 +1347,7 @@ class TestABoardFromGitHubsOwnTemplate:
         writer = FakeWriter()
 
         await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=status
+            owner="monalisa", project_number=PROJECT, card_id=99, state=status, as_="gho_mover"
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] == expected
@@ -1312,7 +1358,11 @@ class TestABoardFromGitHubsOwnTemplate:
         writer = FakeWriter()
 
         await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.IN_REVIEW
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="gho_mover",
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] != "47fc9ee4", "it picked In progress"
@@ -1329,7 +1379,7 @@ class TestABoardFromGitHubsOwnTemplate:
         writer = FakeWriter()
 
         moved = await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=state
+            owner="monalisa", project_number=PROJECT, card_id=99, state=state, as_="gho_mover"
         )
 
         assert moved.outcome is CardMove.MOVED, f"nowhere to put {state}"
@@ -1339,7 +1389,7 @@ class TestABoardFromGitHubsOwnTemplate:
         writer = FakeWriter()
 
         await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         assert writer.sent[0][2]["fields"][0]["id"] == 353672864
@@ -1367,7 +1417,7 @@ class TestSettingAPriority:
         rows: list[Any] = [{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE]
         if with_priority:
             rows.append(PRIORITY_FIELD_ROW)
-        return HttpProjectBoards(FakeJson(fields=rows), writer=writer)
+        return HttpProjectBoards(FakeJson(fields=rows), FakeBoardCredentials(), writer=writer)
 
     @pytest.mark.parametrize(
         ("priority", "expected"),
@@ -1384,7 +1434,7 @@ class TestSettingAPriority:
         writer = FakeWriter()
 
         await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=priority
+            owner="monalisa", project_number=PROJECT, card_id=99, state=priority, as_="gho_mover"
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] == expected
@@ -1395,7 +1445,11 @@ class TestSettingAPriority:
         writer = FakeWriter()
 
         await self.moving(writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Priority.HIGH,
+            as_="gho_mover",
         )
 
         assert writer.sent[0][2]["fields"][0]["id"] == 353672876
@@ -1415,8 +1469,12 @@ class TestSettingAPriority:
             ]
         )
 
-        await HttpProjectBoards(client, writer=writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        await HttpProjectBoards(client, FakeBoardCredentials(), writer=writer).move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Priority.HIGH,
+            as_="gho_mover",
         )
 
         assert writer.sent[0][2]["fields"][0]["value"] == "urgent-id"
@@ -1426,7 +1484,11 @@ class TestSettingAPriority:
         writer = FakeWriter()
 
         moved = await self.moving(writer, with_priority=False).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Priority.HIGH,
+            as_="gho_mover",
         )
 
         assert moved.outcome is CardMove.NO_FIELD
@@ -1440,8 +1502,12 @@ class TestSettingAPriority:
             fields=[DEFAULT_TEMPLATE, {"id": 353672876, "name": "Priority", "options": []}]
         )
 
-        moved = await HttpProjectBoards(client, writer=writer).move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+        moved = await HttpProjectBoards(client, FakeBoardCredentials(), writer=writer).move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Priority.HIGH,
+            as_="gho_mover",
         )
 
         assert moved.outcome is CardMove.NO_FIELD
@@ -1452,10 +1518,14 @@ class TestSettingAPriority:
         boards = self.moving(writer)
 
         await boards.move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Priority.HIGH
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Priority.HIGH,
+            as_="gho_mover",
         )
         await boards.move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         assert [sent[2]["fields"][0]["id"] for sent in writer.sent] == [353672876, 353672864]
@@ -1475,7 +1545,9 @@ class TestSettingAPriority:
             items=[],
         )
 
-        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
 
         asked = next(params for path, params in client.calls if path.endswith("/items"))
         assert asked["fields"] == "353672862,353672864,353672876"
@@ -1488,7 +1560,9 @@ class TestSettingAPriority:
         """
         client = FakeJson(fields=[{"id": 353672862, "name": "Title"}, DEFAULT_TEMPLATE], items=[])
 
-        await HttpProjectBoards(client).list_board_items("monalisa", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
 
         asked = next(params for path, params in client.calls if path.endswith("/items"))
         assert asked["fields"] == "353672862,353672864"
@@ -1511,17 +1585,27 @@ class TestSayingItOnce:
     }
 
     def moving(self, writer: FakeWriter) -> HttpProjectBoards:
-        return HttpProjectBoards(FakeJson(fields=[self.TWO_COLUMNS]), writer=writer)
+        return HttpProjectBoards(
+            FakeJson(fields=[self.TWO_COLUMNS]), FakeBoardCredentials(), writer=writer
+        )
 
     async def test_the_same_complaint_is_said_once(self, caplog: pytest.LogCaptureFixture) -> None:
         boards = self.moving(FakeWriter())
 
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.BACKLOG,
+                as_="gho_mover",
             )
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.BACKLOG,
+                as_="gho_mover",
             )
 
         assert caplog.text.count("has no column this bot reads as") == 1
@@ -1534,14 +1618,22 @@ class TestSayingItOnce:
         about something else."""
         writer = FakeWriter()
         client = FakeJson(fields=[{"id": 39518, "name": "Status", "options": []}])
-        boards = HttpProjectBoards(client, writer=writer)
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=writer)
 
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.BACKLOG,
+                as_="gho_mover",
             )
             await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.DONE,
+                as_="gho_mover",
             )
 
         assert caplog.text.count("has no column this bot reads as") == 2
@@ -1576,7 +1668,9 @@ class TestOpeningABoardThatRefuses:
         ids=["refused", "not found"],
     )
     async def test_it_answers_no_board_rather_than_raising(self, error: Exception) -> None:
-        found = await HttpProjectBoards(self.Refusing(error)).get_board("monalisa", PROJECT)
+        found = await HttpProjectBoards(self.Refusing(error), FakeBoardCredentials()).get_board(
+            "monalisa", PROJECT
+        )
 
         assert found is None
 
@@ -1595,7 +1689,9 @@ class TestOpeningABoardThatRefuses:
         which, so without this the one hard fact - 403 means a credential and 404 means a board -
         is thrown away at the moment somebody most needs it."""
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
-            await HttpProjectBoards(self.Refusing(error)).get_board("monalisa", PROJECT)
+            await HttpProjectBoards(self.Refusing(error), FakeBoardCredentials()).get_board(
+                "monalisa", PROJECT
+            )
 
         assert "could not open board" in caplog.text
         assert shows in caplog.text
@@ -1604,7 +1700,9 @@ class TestOpeningABoardThatRefuses:
     async def test_anything_else_still_raises(self) -> None:
         """Only the two that mean "you cannot open this" are folded. A rate limit is the whole
         process being asked to wait and must not read as a board that is not there."""
-        boards = HttpProjectBoards(self.Refusing(GitHubRateLimitError("slow down")))
+        boards = HttpProjectBoards(
+            self.Refusing(GitHubRateLimitError("slow down")), FakeBoardCredentials()
+        )
 
         with pytest.raises(GitHubRateLimitError):
             await boards.get_board("monalisa", PROJECT)
@@ -1620,7 +1718,7 @@ class TestTheOrderTheBoardIsIn:
 
     def reading(self, *fields: object) -> tuple[HttpProjectBoards, FakeJson]:
         client = FakeJson(fields=list(fields))
-        return HttpProjectBoards(client, writer=FakeWriter()), client
+        return HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter()), client
 
     async def asked(self, boards: HttpProjectBoards, *, frm: Status, to: Status):
         return await boards.order_for(owner="monalisa", project_number=PROJECT, frm=frm, to=to)
@@ -1719,7 +1817,7 @@ class TestTheOrderTheBoardIsIn:
 
         await self.asked(boards, frm=Status.BACKLOG, to=Status.DONE)
         await boards.move_card(
-            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+            owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
 
         reads = [path for path, _ in client.calls if path.endswith("/fields")]
@@ -1745,11 +1843,15 @@ class TestABoardThatWasFixedAfterTheComplaint:
 
     async def test_a_second_attempt_reads_the_board_again(self) -> None:
         client = FakeJson(fields=[self.NARROW])
-        boards = HttpProjectBoards(client, writer=FakeWriter())
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter())
 
         for _ in range(2):
             moved = await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.BACKLOG
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.BACKLOG,
+                as_="gho_mover",
             )
             assert moved.outcome is CardMove.NO_COLUMN
 
@@ -1759,11 +1861,15 @@ class TestABoardThatWasFixedAfterTheComplaint:
     async def test_a_write_that_lands_keeps_its_cache(self) -> None:
         """Only a failure is a reason to doubt it. A board that answered is read once."""
         client = FakeJson(fields=[self.NARROW])
-        boards = HttpProjectBoards(client, writer=FakeWriter())
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter())
 
         for _ in range(2):
             moved = await boards.move_card(
-                owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.DONE,
+                as_="gho_mover",
             )
             assert moved.outcome is CardMove.MOVED
 
@@ -1783,7 +1889,7 @@ class TestTheColumnsAPickerIsOffered:
         """Order, not a set. It is the order the rule measures a skipped column against, and it is
         the order somebody reads down the picker."""
         client = FakeJson(fields=[DEFAULT_TEMPLATE])
-        boards = HttpProjectBoards(client, writer=FakeWriter())
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter())
 
         found = await boards.status_columns("monalisa", PROJECT)
 
@@ -1793,7 +1899,9 @@ class TestTheColumnsAPickerIsOffered:
         """Empty rather than None. A picker has three seconds and nowhere to put a refusal, so
         having nothing to offer and having nothing to say are one outcome to it."""
         boards = HttpProjectBoards(
-            FakeJson(fields=[{"id": 1, "name": "Title"}]), writer=FakeWriter()
+            FakeJson(fields=[{"id": 1, "name": "Title"}]),
+            FakeBoardCredentials(),
+            writer=FakeWriter(),
         )
 
         assert await boards.status_columns("monalisa", PROJECT) == ()
@@ -1803,10 +1911,72 @@ class TestTheColumnsAPickerIsOffered:
         longer has and hides one it does. The caller in front of it keeps the answer for a couple of
         minutes, which is what stops a keystroke being a GitHub call."""
         client = FakeJson(fields=[DEFAULT_TEMPLATE])
-        boards = HttpProjectBoards(client, writer=FakeWriter())
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter())
 
         await boards.status_columns("monalisa", PROJECT)
         await boards.status_columns("monalisa", PROJECT)
 
         reads = [path for path, _ in client.calls if path.endswith("/fields")]
         assert len(reads) == 2, "a picker was offered a snapshot from the last command"
+
+
+class TestWhoseAuthorisationTheWriteCarries:
+    """Issue #170. The card move is the one place GitHub records a person, so the credential has to
+    reach the WIRE - not merely be accepted by the method.
+
+    This class exists because it nearly did not happen. The argument was threaded the whole way
+    down and then dropped at the last call, so every write still went out with no credential at all
+    while every other test here still passed: they assert what the workflow handed over, not what
+    the writer sent. A mutation check found it by failing to find the line it meant to break.
+    """
+
+    def boards(self, writer: FakeWriter, *, board_token: str) -> HttpProjectBoards:
+        client = FakeJson(fields=[{"id": 39516, "name": "Title"}, a_board()])
+        return HttpProjectBoards(client, FakeBoardCredentials(reads=board_token), writer=writer)
+
+    async def test_the_movers_authorisation_is_what_goes_out(self) -> None:
+        writer = FakeWriter()
+
+        await self.boards(writer, board_token="gho_the_board").move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="gho_the_mover",
+        )
+
+        assert writer.sent_as == ["gho_the_mover"]
+
+    async def test_it_is_not_the_boards_own_authorisation(self) -> None:
+        """The board's credential belongs to whoever LINKED it. Using that for a write would be the
+        shared token again under another name: the history would name the linker whoever moved the
+        card, which is the thing this change exists to stop.
+        """
+        writer = FakeWriter()
+
+        await self.boards(writer, board_token="gho_the_board").move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="gho_the_mover",
+        )
+
+        assert writer.sent_as != ["gho_the_board"], (
+            "the write went out as whoever linked the board rather than as whoever moved the card"
+        )
+
+    async def test_a_write_with_nobody_behind_it_carries_nothing(self) -> None:
+        """Which GitHub answers 401 to, and that is the point: the board's write client holds no
+        credential of its own, so a card cannot be moved by nobody."""
+        writer = FakeWriter()
+
+        await self.boards(writer, board_token="gho_the_board").move_card(
+            owner="monalisa",
+            project_number=PROJECT,
+            card_id=99,
+            state=Status.IN_REVIEW,
+            as_="",
+        )
+
+        assert writer.sent_as == [""]

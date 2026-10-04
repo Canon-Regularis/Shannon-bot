@@ -25,11 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
+from shannon.domain.board import board_owner
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError, ShannonError
 from shannon.domain.models import RepositorySnapshot, TrackedSnapshot
 from shannon.github.client import ListsOpenItems
-from shannon.github.errors import GitHubAuthError, GitHubNotFoundError, GitHubRateLimitError
+from shannon.github.errors import GitHubRateLimitError
+from shannon.github.projects import UNREADABLE
 from shannon.services.boards import BoardNotLinkedError, BoardUnreadableError
 from shannon.services.sync.draft_cards import (
     ReadsBoards,
@@ -95,7 +97,8 @@ _REFUSALS: dict[MissedTickets, tuple[type[ShannonError], str]] = {
     MissedTickets.UNREADABLE: (
         BoardUnreadableError,
         "The board this server mirrors could not be read, so no tickets were covered. "
-        "Check the project token; the log says what GitHub answered.",
+        "Nobody may have authorised this bot to read it, or the board moved; the log says "
+        "what GitHub answered.",
     ),
 }
 
@@ -240,9 +243,11 @@ class RepositoryRefresh:
                     name=name,
                     html_url=stored.repo_url,
                 ),
-                # A board can belong to a different owner than the repository, so the fallback is
-                # the repository owner, which is what the poller resolves to as well.
-                board_owner=stored.project_owner or owner,
+                # A board can belong to a different owner than the repository. The fallback is
+                # shared with every other caller - see `domain.board.board_owner`.
+                board_owner=board_owner(
+                    project_owner=stored.project_owner, repo_name=stored.repo_name
+                ),
                 board_number=stored.project_number,
                 ticket_channel=mapped is not None,
             )
@@ -271,11 +276,11 @@ class RepositoryRefresh:
             listed = await self._boards.list_board_items(
                 registered.board_owner, registered.board_number
             )
-        except (GitHubNotFoundError, GitHubAuthError, GitHubRateLimitError) as unreadable:
-            # All three folded into one answer. An operator cannot act on the difference from a
-            # Discord reply - the commonest cause of all of them is the wrong KIND of project
-            # token - and the log carries which it was. The poller makes the same judgement about
-            # the same read.
+        except (*UNREADABLE, GitHubRateLimitError) as unreadable:
+            # Folded into one answer. An operator cannot act on the difference from a Discord
+            # reply - the commonest cause is that nobody has authorised this bot to read that
+            # board, or that the authorisation was withdrawn - and the log carries which it was.
+            # The poller makes the same judgement about the same read, through the same tuple.
             logger.warning(
                 "could not read board %s belonging to %r for a refresh, so no tickets were "
                 "covered (%s)",

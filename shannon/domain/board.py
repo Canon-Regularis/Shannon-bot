@@ -119,3 +119,22 @@ def must_pass_through(columns: Sequence[str], *, frm: str | None, to: str) -> tu
         return ()
 
     return tuple(columns[at] for at in range(here + 1, there))
+
+
+def board_owner(*, project_owner: str | None, repo_name: str) -> str:
+    """Which GitHub account a repository's board belongs to.
+
+    The one place `project_owner or <the repository's own owner>` is written. It was written in four
+    and the fallback is not arbitrary in any of them: a board number is a sequence GitHub keeps per
+    ACCOUNT, so the pair addresses a board and neither half does alone, and an EMPTY owner used to
+    send a board write out with no credential at all - GitHub answered 401, and the poller read that
+    as permanent and wrote the card off for good.
+
+    Null means the board belongs to the repository's own owner, which is what every row written
+    before the column existed says and needs no backfill.
+
+    Plain values rather than a `Repository`, so `domain` stays free of the ORM - the argument
+    `shannon/services/sync/draft_cards.py` already makes for `snapshot_of`. Nothing here imports
+    upward.
+    """
+    return project_owner or repo_name.partition("/")[0]

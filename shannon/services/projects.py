@@ -95,8 +95,8 @@ from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
-from shannon.github.errors import GitHubAuthError, GitHubNotFoundError, GitHubRateLimitError
-from shannon.github.projects import BoardItem
+from shannon.github.errors import GitHubAuthError, GitHubRateLimitError
+from shannon.github.projects import UNREADABLE, BoardItem
 from shannon.services.sync.draft_cards import (
     ReadsBoards,
     forget_the_mirror,
@@ -153,7 +153,7 @@ class MovesStatus(Protocol):
     """
 
     async def set_status(
-        self, *, thread_id: int, status: Status, tell_the_board: bool = True
+        self, *, thread_id: int, status: Status, acting: int | None = None
     ) -> WorkflowOutcome: ...
 
 
@@ -254,7 +254,7 @@ class ProjectPoller:
         """One board: read it, and sync the cards that have moved since the last read."""
         try:
             listed = await self._projects.list_board_items(board.board_owner, board.project_number)
-        except (GitHubNotFoundError, GitHubAuthError) as unreadable:
+        except UNREADABLE as unreadable:
             # Named rather than left to the loop's `logger.exception`, which answers a
             # misconfiguration with a traceback once a minute. Both answers are caught together
             # because an operator cannot act on the difference: a fine-grained token that is not
@@ -266,12 +266,11 @@ class ProjectPoller:
             # sequence kept per account, so the pair means something neither half does alone -
             # or a token that cannot see the board, which is the one most likely here.
             #
-            # The token line is specific because the wrong KIND of token is the commonest way
-            # to get here and the hardest to guess at. Projects is an organisation permission
-            # only, so a fine-grained token cannot read a PERSONAL board at all: GitHub lists
-            # that among the things it cannot do. A personal board wants a classic token. An
-            # unset token falls through to the App, which holds no Projects permission either
-            # way and therefore cannot read either kind.
+            # The third cause is the commonest and was the hardest to name while there was a
+            # token to blame: since issue #170 a board is read under the authorisation of whoever
+            # linked it, so "nobody authorised this" and "their authorisation no longer opens it"
+            # both arrive here as a board that will not open. Both are fixed the same way, by
+            # somebody running the two commands again, which is what the line says.
             #
             # The repository is named because there can now be several boards, and a line saying
             # only that "board 3" failed is one an operator cannot act on when two servers each
@@ -280,10 +279,10 @@ class ProjectPoller:
                 "could not read board %s belonging to %r for %s, so there is nothing to mirror "
                 "(%s). Run /set_board in that server to check the number against the board's "
                 "URL and the owner against who owns it - the number is a sequence GitHub keeps "
-                "per account, so the pair means something neither half does alone - and check "
-                "SHANNON_GITHUB_PROJECT_TOKEN: an organisation's board wants a fine-grained "
-                "token with Projects under ORGANISATION permissions, a personal board wants a "
-                "CLASSIC token with read:project",
+                "per account, so the pair means something neither half does alone. If those are "
+                "right, nobody has authorised this bot to read that board, or the authorisation "
+                "it had has been withdrawn on GitHub: whoever links it runs /authorise_board and "
+                "then /set_board again",
                 board.project_number,
                 board.board_owner,
                 board.snapshot.full_name,
@@ -521,11 +520,12 @@ class ProjectPoller:
             return 0
 
         try:
-            # Not told back to the board. This runs BECAUSE the card moved, so the
-            # column it would write is the one it has just read - a wasted call per
-            # moved card, and one the poller would then read again next pass.
+            # Nobody is acting, which is both the mechanism and the truth. This runs BECAUSE
+            # the card moved, so writing to the board would put back the column it has just
+            # read - and since issue #170 a board write is made AS somebody, and no member asked
+            # for this one. `acting=None` says both at once.
             moved = await self._workflow.set_status(
-                thread_id=tracked.thread_id, status=wanted, tell_the_board=False
+                thread_id=tracked.thread_id, status=wanted, acting=None
             )
         except WorkflowRefusedError as refusal:
             # A status the item cannot hold, such as anything but DONE on a closed issue.

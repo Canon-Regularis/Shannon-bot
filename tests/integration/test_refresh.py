@@ -45,6 +45,7 @@ from shannon.services.sync.refresh import (
     RepositoryRefresh,
 )
 from shannon.services.workflow import build_item_workflow
+from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.boards import PROJECT, FakeBoard, card, wraps
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -703,6 +704,7 @@ class TestACardWhoseMirrorFailed:
                 threads,
                 pr_sync=build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
                 issue_sync=build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+                authorisations=FakeBoardCredentials(),
             ),
             threads,
             project_number=PROJECT,
