@@ -21,7 +21,13 @@ from shannon.github.errors import (
     GitHubRefusedError,
 )
 from shannon.github.paging import PagedRead
-from shannon.github.projects import PAGE_SIZE, CardMove, HttpProjectBoards, parse_item
+from shannon.github.projects import (
+    PAGE_SIZE,
+    UNREADABLE,
+    CardMove,
+    HttpProjectBoards,
+    parse_item,
+)
 from tests.fakes.board_credentials import FakeBoardCredentials
 
 PROJECT = 3
@@ -630,7 +636,7 @@ class TestReadingABoardOnlyWhenItChanged:
 
 
 class TestListingTheBoardsAnOwnerHas:
-    """What `/set_board` offers. Over the same prefix the reads use, deliberately: a picker on a
+    """What `/board link` offers. Over the same prefix the reads use, deliberately: a picker on a
     path of its own could offer a board the poller then cannot open."""
 
     async def test_it_lists_them(self) -> None:
@@ -679,6 +685,21 @@ class TestListingTheBoardsAnOwnerHas:
 
         assert await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa") == []
 
+    async def test_both_requests_carry_the_choosers_own_credential(self) -> None:
+        """Issue #201: the account lookup AND the listing. The listing went out with none, which
+        the client answers with the App installation's token, so a private board was never offered
+        to the person who could open it."""
+        client = FakeJson(boards=[{"number": 3, "title": "Roadmap"}])
+
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_boards(
+            "monalisa", token="gho_chooser"
+        )
+
+        assert [params.get("token") for _, params in client.calls] == [
+            "gho_chooser",
+            "gho_chooser",
+        ]
+
 
 class TestOpeningOneBoard:
     """So that "this token cannot see that board" is a sentence the person who typed it reads,
@@ -708,6 +729,18 @@ class TestOpeningOneBoard:
             await HttpProjectBoards(client, FakeBoardCredentials()).get_board("monalisa", PROJECT)
             is None
         )
+
+    async def test_both_requests_carry_the_openers_own_credential(self) -> None:
+        """Issue #201: linking a board opens it to prove it exists, and that check went out with
+        no credential - which the client answers with the App installation's token. A private
+        board was refused with a sentence blaming an authorisation that was never sent."""
+        client = FakeJson(one_board={"number": 3, "title": "Roadmap"})
+
+        await HttpProjectBoards(client, FakeBoardCredentials()).get_board(
+            "monalisa", PROJECT, token="gho_linker"
+        )
+
+        assert [params.get("token") for _, params in client.calls] == ["gho_linker", "gho_linker"]
 
 
 class TestWhichKindOfAccountOwnsTheBoard:
@@ -1249,9 +1282,9 @@ class TestMovingACard:
         assert writer.sent[0][2]["fields"][0]["value"] == "second"
 
     async def test_with_no_writer_it_writes_nothing(self) -> None:
-        """Which is every deployment with no project token. The reader falls back to the App
-        client, and the App holds no Projects permission of any kind, so there is nothing to
-        fall back to for a write."""
+        """Which is every deployment with SHANNON_BOARD_MAY_MOVE_CARDS off. The board is still
+        read, with its linker's authorisation, so the column-order rule survives - but there is
+        no writer to move a card with."""
         moved = await self.boards(None).move_card(
             owner="monalisa", project_number=PROJECT, card_id=99, state=Status.DONE, as_="gho_mover"
         )
@@ -1490,6 +1523,43 @@ class TestSettingAPriority:
 
         assert writer.sent[0][2]["fields"][0]["value"] == "urgent-id"
 
+    @pytest.mark.parametrize(("with_priority", "expected"), [(True, True), (False, False)])
+    async def test_it_says_whether_the_board_takes_a_priority(
+        self, with_priority: bool, expected: bool
+    ) -> None:
+        """What an unauthorised `/priority` asks before refusing anybody: on a board with no
+        Priority field there is no write to authorise. Issue #201."""
+        boards = self.moving(FakeWriter(), with_priority=with_priority)
+
+        taken = await boards.takes(owner="monalisa", project_number=PROJECT, state=Priority.HIGH)
+
+        assert taken is expected
+
+    async def test_a_board_it_can_read_takes_a_status(self) -> None:
+        boards = self.moving(FakeWriter(), with_priority=False)
+
+        assert await boards.takes(owner="monalisa", project_number=PROJECT, state=Status.DONE)
+
+    async def test_a_board_with_no_status_field_takes_nothing(self) -> None:
+        client = FakeJson(fields=[{"id": 353672862, "name": "Title"}, PRIORITY_FIELD_ROW])
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
+
+        taken = await boards.takes(owner="monalisa", project_number=PROJECT, state=Priority.HIGH)
+
+        assert taken is False
+
+    async def test_it_asks_as_the_board_is_read_and_not_at_all_without_anybody(self) -> None:
+        """The member asking has no authorisation, which is why they are being asked about.
+        So it is the BOARD's credential that goes out, and nothing where nobody's stands behind
+        the board."""
+        client = FakeJson(fields=[DEFAULT_TEMPLATE, PRIORITY_FIELD_ROW])
+        boards = HttpProjectBoards(client, FakeBoardCredentials(reads=""))
+
+        with pytest.raises(GitHubAuthError):
+            await boards.takes(owner="monalisa", project_number=PROJECT, state=Priority.HIGH)
+
+        assert client.calls == []
+
     async def test_a_board_with_no_priority_field_writes_nothing(self) -> None:
         """Not a misconfiguration. GitHub's default template ships no Priority field at all."""
         writer = FakeWriter()
@@ -1667,11 +1737,14 @@ class TestOpeningABoardThatRefuses:
         does. The checkers say so now that this file is held to them.
         """
 
-        def __init__(self, error: Exception) -> None:
+        def __init__(self, error: Exception, *, at: str = f"/projectsV2/{PROJECT}") -> None:
             self.error = error
+            # Which request refuses. The board itself by default; the account lookup in front of
+            # it is the other place a person's credential is first spent.
+            self.at = at
 
         async def get_json(self, path: str, **params: Any) -> Any:
-            if path.endswith(f"/projectsV2/{PROJECT}"):
+            if path.endswith(self.at):
                 raise self.error
             return {"type": "User"}
 
@@ -1737,6 +1810,29 @@ class TestOpeningABoardThatRefuses:
 
         with pytest.raises(GitHubRateLimitError):
             await boards.get_board("monalisa", PROJECT)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubAuthError("GitHub refused the request for /users/monalisa (401)"),
+            GitHubNotFoundError("GitHub has nothing at /users/monalisa"),
+        ],
+        ids=["a revoked grant", "a mistyped owner"],
+    )
+    async def test_an_account_lookup_that_refuses_is_no_board_either(
+        self, error: Exception
+    ) -> None:
+        """Issue #201. The account lookup is the first request a person's credential is spent on,
+        so a grant they revoked on GitHub answers 401 THERE, and a mistyped owner 404 - and both
+        used to reach them as GitHub's raw sentence about a `/users/` path, which names neither the
+        board nor the credential."""
+        refusing = self.Refusing(error, at="/users/monalisa")
+
+        found = await HttpProjectBoards(refusing, FakeBoardCredentials()).get_board(
+            "monalisa", PROJECT, token="gho_revoked"
+        )
+
+        assert found is None
 
 
 class TestTheOrderTheBoardIsIn:
@@ -2011,3 +2107,48 @@ class TestWhoseAuthorisationTheWriteCarries:
         )
 
         assert writer.sent_as == [""]
+
+
+class TestABoardNobodysAuthorisationStandsBehind:
+    """Issue #201. `reading` answers an empty string for a board with nobody's authorisation behind
+    it - nobody linked it, the linker withdrew, two servers claim it - and an empty credential is
+    not "anonymous" on its way through the client: it is filled in with the App installation's token
+    for the owner. That only ever failed because the App holds no Projects permission, which is a
+    thing an installation can be granted. So none of the three reads sends anything at all."""
+
+    async def test_the_poll_is_refused_before_a_request(self) -> None:
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, FakeBoardCredentials(reads=""))
+
+        with pytest.raises(GitHubAuthError, match="nobody's authorisation"):
+            await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.calls == [], "a request went out with no member's credential behind it"
+
+    async def test_the_column_picker_is_refused_before_a_request(self) -> None:
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, FakeBoardCredentials(reads=""))
+
+        with pytest.raises(GitHubAuthError):
+            await boards.status_columns("monalisa", PROJECT)
+
+        assert client.calls == []
+
+    async def test_the_order_check_is_refused_before_a_request(self) -> None:
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, FakeBoardCredentials(reads=""))
+
+        with pytest.raises(GitHubAuthError):
+            await boards.order_for(
+                owner="monalisa", project_number=PROJECT, frm=Status.BACKLOG, to=Status.IN_REVIEW
+            )
+
+        assert client.calls == []
+
+    async def test_the_refusal_is_one_an_unreadable_board_is_already_caught_as(self) -> None:
+        """No caller needed a new branch: the poller, `/refresh` and the order check all catch
+        this pair already, as a board that will not open - which is what it is."""
+        boards = HttpProjectBoards(FakeJson(), FakeBoardCredentials(reads=""))
+
+        with pytest.raises(UNREADABLE):
+            await boards.list_board_items("monalisa", PROJECT)

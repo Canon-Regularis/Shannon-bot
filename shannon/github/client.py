@@ -247,7 +247,7 @@ class GitHubClient(
     ) -> object: ...
 
     def get_pages(
-        self, path: str, *, owner: str = "", **params: str | int
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
 
     async def get_pages_since(
@@ -753,13 +753,17 @@ class HttpGitHubClient:
         _raise_for_status(response, path)
 
     async def get_pages(
-        self, path: str, *, owner: str = "", **params: str | int
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> AsyncIterator[object]:
         """Every page of a list endpoint, following GitHub's own Link header.
 
         The project endpoints paginate by cursor: there is no `page` parameter, and asking for
         page two by number silently returns the first page again, so a caller that counted pages
         would mirror every card twice. The cursor is opaque, so the header is followed as given.
+
+        `token` is the same explicit credential `get_json` takes, and goes on every page rather
+        than the first. Issue #201: listing somebody's boards is a board read like any other, and
+        without it the list went out as the App installation, which cannot see a private board.
         """
         url: str | None = path
         for _ in range(MAX_PAGES):
@@ -767,7 +771,7 @@ class HttpGitHubClient:
                 return
             try:
                 response = await self._client.get(
-                    url, params=params or None, headers=await self._authorization(owner)
+                    url, params=params or None, headers=await self._authorization(owner, token)
                 )
             except httpx.HTTPError as exc:
                 raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc

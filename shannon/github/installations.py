@@ -168,8 +168,9 @@ class InstallationTokens:
         # One lock for all discovery rather than one per owner. Discovery happens on a miss, so
         # a cold map means a burst of callers all missing together - and the argument the mint
         # lock below makes applies here a step earlier. One rather than a map keyed on the owner
-        # because the owner is not always a login this bot vouched for (the `/set_board` owner
-        # option is free text), so a per-owner map is a dictionary anybody can grow. Two
+        # because the owner is not always a login this bot vouched for (a `/pr` or `/issue` link
+        # naming another repository is looked up under that link's owner), so a per-owner map is
+        # a dictionary anybody can grow. Two
         # different uncached owners queue behind each other, which costs one HTTP call of
         # waiting on a path that only runs when the map has nothing.
         self._discovery = asyncio.Lock()
