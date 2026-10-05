@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository
@@ -60,24 +60,39 @@ class RepositoryStore:
             )
         ).all()
 
-    async def linked_to_board(
-        self, *, project_number: int, project_owner: str | None
-    ) -> Repository | None:
-        """A repository already mirroring this exact board, if one is.
+    async def mirroring(self, *, project_number: int, owner: str) -> Sequence[Repository]:
+        """Every repository mirroring one board, however its owner was written down.
 
         Two repositories sharing a board would each mirror every draft card into their own
         server, because a tracked item is keyed by repository, and nothing else would notice.
-        The owner is compared as stored, which means a null owner and an explicit one naming the
-        same account read as different boards - accepted, because resolving that here would mean
-        a GitHub call inside a uniqueness check.
+
+        A board is a NUMBER under an ACCOUNT - GitHub keeps the sequence per account, so every
+        account's first board is #1 - and the row stores the account two ways: null where it is
+        the repository's own owner, and named where it is somebody else's. Compared as stored,
+        that was wrong in both directions. Two servers each linking their OWN account's #1 were
+        one board, so the second was refused and told the first one's repository name; and one
+        server naming another's board by its owner was a different board, so it was allowed -
+        after which the poll that looks a board's credential up by the board read it under the
+        wrong server's member. Issue #201.
+
+        So the owner is resolved in the query, to the one the board is actually read under: the
+        stored one, or the repository's own where none is stored. That is the rule
+        `domain.board.board_owner` applies in Python, and it needs no GitHub call, which is what
+        the comparison-as-stored was avoiding. Lowercased on both sides, because GitHub's logins
+        are case-insensitive and the person typing one is not careful about it.
+
+        Every match rather than the first. A pair linked before this check existed can still be
+        sitting in the table, and handing back whichever row the database returned first would
+        make that decision for the caller - which, for a credential, is the decision that matters.
         """
-        found: Repository | None = await self._session.scalar(
-            select(Repository).where(
-                Repository.project_number == project_number,
-                Repository.project_owner == project_owner,
-            )
+        own_owner = func.split_part(Repository.repo_name, "/", 1)
+        effective = func.lower(func.coalesce(Repository.project_owner, own_owner))
+        found = await self._session.scalars(
+            select(Repository)
+            .where(Repository.project_number == project_number, effective == owner.lower())
+            .order_by(Repository.id)
         )
-        return found
+        return found.all()
 
     async def set_board(
         self,
