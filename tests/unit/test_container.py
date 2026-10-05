@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from shannon.config import Settings
 from shannon.container import build_container
+from shannon.services.verification import OAuthClient
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -237,6 +238,97 @@ class TestSayingWhenNoAppIsConfigured:
             )
 
         assert "no GitHub App is configured" not in caplog.text
+
+
+class TestSayingWhenDiscordSignInIsMissing:
+    """Found reviewing #201. Every one-time link now goes through Discord before GitHub, so a
+    deployment that set up a GitHub sign-in and not the Discord half refuses every link - which is
+    the decision, failing closed. Said once at boot, with the redirect it needs, rather than found
+    out one refused command at a time."""
+
+    SECRET = "placeholder-discord-client-secret"
+
+    def booted(self, caplog: pytest.LogCaptureFixture, **settings: Any) -> Any:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            return container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(github_webhook_secret="x", **settings),
+            )
+
+    def test_an_app_sign_in_without_discord_is_said_at_boot(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self.booted(
+            caplog,
+            github_app_client_secret=SecretStr("shh"),
+            public_base_url="https://shannon.example.com/",
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_ID" in caplog.text
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+        assert "https://shannon.example.com/oauth/discord/callback" in caplog.text
+
+    def test_a_board_sign_in_without_discord_is_said_at_boot(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """With the placeholder for a base URL nobody set, so the line still says where."""
+        self.booted(caplog, github_board_client_id="Ov23liBoard")
+
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+        assert "<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback" in caplog.text
+
+    def test_half_of_discord_is_still_said(self, caplog: pytest.LogCaptureFixture) -> None:
+        self.booted(
+            caplog,
+            github_app_client_secret=SecretStr("shh"),
+            discord_client_id="1180000000000000",
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+
+    def test_all_of_it_says_nothing_and_signs_in_with_discord(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        container = self.booted(
+            caplog,
+            github_app_client_id="Iv23liAbC",
+            github_app_client_secret=SecretStr("shh"),
+            public_base_url="https://shannon.example.com",
+            discord_client_id="1180000000000000",
+            discord_client_secret=SecretStr(self.SECRET),
+        )
+
+        assert "SHANNON_DISCORD" not in caplog.text
+        assert container.verification is not None
+        assert container.verification.can_sign_in_with_discord is True
+        assert container.verification.can_prove_identity is True
+        # The wiring itself, in literals. A refactor that dropped the scope or crossed a secret
+        # would leave every check above passing and every link dead at Discord.
+        assert container.verification._discord == OAuthClient(
+            client_id="1180000000000000", client_secret=self.SECRET, scope="identify"
+        )
+
+    def test_a_deployment_with_no_sign_in_at_all_says_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nothing hands out a link there, so a missing Discord half refuses nothing new."""
+        container = self.booted(caplog)
+
+        assert "SHANNON_DISCORD" not in caplog.text
+        assert container.verification is not None
+        assert container.verification.can_sign_in_with_discord is False
+
+    def test_the_secret_is_never_said(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Even where the line fires because the other half is missing."""
+        self.booted(
+            caplog,
+            github_board_client_id="Ov23liBoard",
+            discord_client_secret=SecretStr(self.SECRET),
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_ID" in caplog.text
+        assert self.SECRET not in caplog.text
 
 
 class TestWhatTurningOffCardWritesTurnsOff:

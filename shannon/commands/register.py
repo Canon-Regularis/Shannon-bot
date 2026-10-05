@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 NOT_CONFIGURED = (
     "This bot cannot check who you are on GitHub, so it will not bind a repository to this "
-    "server. An admin needs to set the GitHub App's client secret and this deployment's public "
-    "URL."
+    "server. An admin needs to set the GitHub App's client secret, this deployment's public URL, "
+    "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
 )
 
 
@@ -41,10 +41,13 @@ class VerifiesIdentity(Protocol):
     `proved_just_now` rather than ever: binding a repository discloses everything in it to a
     Discord channel, so what matters is that the person is at the keyboard having just come back
     from the browser, not that they once were.
+
+    `can_prove_identity` rather than `configured`: since #201's review a link needs Discord as
+    well as GitHub, and `/link` says why.
     """
 
     @property
-    def configured(self) -> bool: ...
+    def can_prove_identity(self) -> bool: ...
 
     async def proved_just_now(
         self, *, guild_id: int, discord_user_id: int
@@ -89,7 +92,7 @@ def build_register_command(
             return
         # Above the browser trip rather than after it: sending somebody to GitHub and then
         # refusing them on something already known is a round trip spent for nothing.
-        if not verification.configured:
+        if not verification.can_prove_identity:
             await reply(interaction, refused(NOT_CONFIGURED))
             return
 
@@ -108,7 +111,8 @@ def build_register_command(
                     interaction,
                     owed(
                         "First, prove to GitHub that you administer this repository. Open this "
-                        "link, then run /register again with the same repository "
+                        "link in your browser and sign in - Discord checks that it is you first "
+                        "- then run /register again with the same repository "
                         f"link:\n{link}"
                     ),
                 )

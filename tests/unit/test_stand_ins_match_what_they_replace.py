@@ -17,6 +17,7 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.commands.board import AuthorisesBoards
 from shannon.commands.conversations import LogsConversations
 from shannon.commands.link import ProvesIdentity
 from shannon.commands.link_team import LinksTeams
@@ -24,6 +25,7 @@ from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.people import PutsSomebodyOnAnItem
 from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
+from shannon.commands.register import VerifiesIdentity as ProvesBeforeRegistering
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
@@ -200,6 +202,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # GitHub, and an implementation without it would fail only once somebody tried.
     (KeepsBoardAuthorisations, BoardCredentials),
     (ProvesIdentity, GitHubIdentityVerification),
+    # Missing until #201's review renamed what each of them reads. Three protocols over one
+    # service, each declared where it is consumed, so each is a separate place to drift.
+    (ProvesBeforeRegistering, GitHubIdentityVerification),
+    (AuthorisesBoards, GitHubIdentityVerification),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
     (ResolvesMentions, TeamLinkStore),

@@ -11,10 +11,11 @@ cannot be bound by mistake. Following the link is the whole of it — the row is
 click, in `redeem`, where GitHub's answer is.
 
 The member argument exists so that **no** link is issued for somebody else, which is the inverse
-of what it used to do. The authorisation URL is a bearer credential: whoever opens it is recorded
-as the person it was issued for, so handing one to anybody but that person hands them that
-person's identity. Naming a member posts a note in the channel asking them to run this themselves
-and issues nothing.
+of what it used to do. Naming a member posts a note in the channel asking them to run this
+themselves and issues nothing. A link used to be a bearer credential, recorded as whoever it was
+issued for by whoever opened it. Since #201's review Discord has to name that member before GitHub
+is asked anything, so one in anybody else's hands is refused - and issuing nothing is still the
+rule, because the person a link is for is the person who asked for it.
 
 Gated on one of its two halves, which is unusual here and is the point. Connecting your own
 account needs no role, because GitHub decides it and a gate would only stop somebody proving who
@@ -41,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 NOT_CONFIGURED = (
     "This bot cannot check who you are on GitHub, so there is nothing to connect to. An admin "
-    "needs to set the GitHub App's client secret and this deployment's public URL."
+    "needs to set the GitHub App's client secret, this deployment's public URL, "
+    "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
 )
 
 CANNOT_POST = (
@@ -55,10 +57,14 @@ class ProvesIdentity(Protocol):
 
     Two members, not three. There is no "have they proved it yet" question any more, because
     there is no second run to ask it on: the link finishes the job when it is followed.
+
+    `can_prove_identity` rather than `configured`. Since #201's review a link needs Discord as
+    well as GitHub, and a deployment with only GitHub must refuse rather than hand out a link that
+    nobody can follow.
     """
 
     @property
-    def configured(self) -> bool: ...
+    def can_prove_identity(self) -> bool: ...
 
     async def link_for(
         self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
@@ -92,7 +98,7 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
 
         # Above the branch, because neither half works without it: a deployment that cannot run
         # the round trip cannot link anybody, so asking somebody to go and try is no kinder.
-        if not verification.configured:
+        if not verification.can_prove_identity:
             await reply(interaction, refused(NOT_CONFIGURED))
             return
 
@@ -110,7 +116,10 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
         )
         await reply(
             interaction,
-            owed(f"Open this link and sign in to GitHub.\n{url}"),
+            owed(
+                "Open this link in your browser and sign in to GitHub. Discord checks that it is "
+                f"you first.\n{url}"
+            ),
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather
@@ -124,8 +133,8 @@ async def _ask_them(
     """Ask somebody else to connect their account, and issue nothing.
 
     The note is public because it is addressed to them, and they are not the one watching for a
-    reply. It carries no link, which is the security property this command is built around: a
-    link issued for somebody else is that person's identity in whoever's hands hold the URL.
+    reply. It carries no link: a link is only ever issued for whoever ran the command, so they
+    run /link and get their own.
     """
     if not gate.allows(interaction.user, REGISTER_ROLES):
         await reply(interaction, refused(gate.denial("link", REGISTER_ROLES)))

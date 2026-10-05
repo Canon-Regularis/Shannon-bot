@@ -5,7 +5,7 @@ second command, to GitHub, and back to run the first one again. Now the link it 
 which board was chosen, and following it is the whole of it - the shape `/link` already had.
 
 Driven against a real database, the real verification service, the real board-linking service and
-the real callback route, because what makes this safe is not any one of them. It is that the board
+the real OAuth routes, because what makes this safe is not any one of them. It is that the board
 rides on the server-side row rather than in the URL, that it is linked as the member the row names
 and with the authorisation GitHub has just granted, and that a link which cannot be finished still
 keeps that authorisation and says why.
@@ -20,7 +20,6 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.api.routes import oauth
@@ -40,6 +39,15 @@ from shannon.services.verification import (
 )
 from tests.support.credentials import BOARD_KEY
 from tests.support.db import register_repository
+from tests.support.round_trip import (
+    DISCORD_APP,
+    browser_on,
+    discord_says,
+    followed_in,
+    round_trip,
+    state_of,
+    to_github_in,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -102,7 +110,8 @@ async def verifying(
     linking = BoardLinkingService(
         sessionmaker, projects, OwnerBoards(projects, credentials), credentials
     )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler or github_says())) as http:
+    transport = httpx.MockTransport(discord_says(handler or github_says()))
+    async with httpx.AsyncClient(transport=transport) as http:
         yield GitHubIdentityVerification(
             sessionmaker,
             UserLinkingService(sessionmaker),
@@ -116,20 +125,9 @@ async def verifying(
             board=OAuthClient(
                 client_id="Ov23liBoard", client_secret="board-shh", scope=BOARD_SCOPE
             ),
+            discord=DISCORD_APP,
             now=lambda: NOW,
         )
-
-
-@asynccontextmanager
-async def browser(verification: GitHubIdentityVerification) -> AsyncIterator[httpx.AsyncClient]:
-    """The callback route on a bare app, which is all it needs."""
-    app = FastAPI()
-    app.state.verification = verification
-    app.include_router(oauth.router)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        yield client
 
 
 async def follow(
@@ -145,11 +143,8 @@ async def follow(
         purpose=VerificationPurpose.BOARD,
         board=board,
     )
-    async with browser(verification) as client:
-        return await client.get(
-            "/oauth/github/callback",
-            params={"code": "abc", "state": url.partition("state=")[2]},
-        )
+    async with browser_on(verification) as client:
+        return await followed_in(client, url, member=ALICE)
 
 
 async def kept(sessionmaker: async_sessionmaker[AsyncSession]) -> bool:
@@ -378,7 +373,7 @@ class TestWhatALinkWithoutABoardDoes:
             url = await verification.link_for(
                 guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.LINK
             )
-            verified = await verification.redeem(state=url.partition("state=")[2], code="abc")
+            verified = await round_trip(verification, url, member=ALICE)
 
         assert verified.board is None
         assert projects.tokens == []
@@ -398,14 +393,11 @@ class TestFollowingALinkMoreThanOnce:
                 purpose=VerificationPurpose.BOARD,
                 board=ChosenBoard(number=PROJECT),
             )
-            state = url.partition("state=")[2]
-            async with browser(verification) as client:
-                first = await client.get(
-                    "/oauth/github/callback", params={"code": "abc", "state": state}
-                )
-                second = await client.get(
-                    "/oauth/github/callback", params={"code": "abc", "state": state}
-                )
+            async with browser_on(verification) as client:
+                github = await to_github_in(client, url, member=ALICE)
+                callback = {"code": "abc", "state": state_of(github)}
+                first = await client.get("/oauth/github/callback", params=callback)
+                second = await client.get("/oauth/github/callback", params=callback)
 
         assert (first.status_code, second.status_code) == (200, 400)
         assert projects.tokens == ["gho_granted"], "the board was linked twice"
@@ -435,12 +427,11 @@ class TestFollowingALinkMoreThanOnce:
                 purpose=VerificationPurpose.BOARD,
                 board=ChosenBoard(number=77),
             )
-            async with browser(verification) as client:
+            # In one browser, so one cookie carries both: the second link reuses the cookie the
+            # first one left rather than knocking it over.
+            async with browser_on(verification) as client:
                 pages = [
-                    await client.get(
-                        "/oauth/github/callback",
-                        params={"code": "abc", "state": url.partition("state=")[2]},
-                    )
+                    await followed_in(client, url, member=ALICE)
                     for url in (to_seventy_seven, to_three)
                 ]
 
@@ -464,7 +455,7 @@ class TestTheOutcomeTheRouteIsHanded:
                 purpose=VerificationPurpose.BOARD,
                 board=ChosenBoard(number=PROJECT),
             )
-            verified = await verification.redeem(state=url.partition("state=")[2], code="abc")
+            verified = await round_trip(verification, url, member=ALICE)
 
         assert isinstance(verified.board, BoardLinked)
         assert verified.board.link.number == PROJECT
@@ -479,7 +470,7 @@ class TestTheOutcomeTheRouteIsHanded:
                 purpose=VerificationPurpose.BOARD,
                 board=ChosenBoard(number=PROJECT),
             )
-            verified = await verification.redeem(state=url.partition("state=")[2], code="abc")
+            verified = await round_trip(verification, url, member=ALICE)
 
         assert isinstance(verified.board, BoardNotLinked)
         assert "numbered 3" in verified.board.reason

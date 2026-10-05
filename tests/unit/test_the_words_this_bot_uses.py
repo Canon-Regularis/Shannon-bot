@@ -131,7 +131,7 @@ def _installed_commands() -> set[str]:
 
 
 def _the_pages_after_signing_in() -> list[tuple[str, str]]:
-    """What the OAuth callback answers a browser with, which names commands too.
+    """What the three OAuth routes answer a browser with, which names commands too.
 
     Not in `SPOKEN_TO`, because the rest of `api/` is route paths - `/oauth`, `/health` - that
     look like commands and are not. So the page module's own constants are read instead: every

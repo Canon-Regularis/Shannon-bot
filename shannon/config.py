@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     # worse failure than the one this guards against.
     board_credential_key: SecretStr = SecretStr("")
 
+    # The bot's own Discord application, as an OAuth client: every one-time link now goes through
+    # it before GitHub, so that Discord can say which member is holding the browser. Found reviewing
+    # #201 - a link that went straight to GitHub was finished by whoever clicked it, so a forwarded
+    # one signed its issuer in as somebody else. Asked for `identify` and nothing more.
+    #
+    # The same application the bot token belongs to, so nothing new is registered: its OAuth2 page
+    # in the Developer Portal has the client id, a secret to reset, and the redirect to add -
+    # `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback`.
+    #
+    # Unset means every link refuses, `/link`, `/register`, `/unregister` and `/board` alike, rather
+    # than handing out one that skips the check. That is failing closed, and it was chosen.
+    discord_client_id: str = ""
+    discord_client_secret: SecretStr = SecretStr("")
+
     role_admin: str = "Admin"
     role_project_manager: str = "Project Manager"
     role_reviewer: str = "Reviewer"
@@ -79,15 +93,17 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     # `authorize` and `access_token` live on `github.com`, not the API host.
     github_oauth_url: str = "https://github.com"
-    # The origin the OAuth `redirect_uri` is built from. Empty makes `/unregister` refuse rather
-    # than hand out a link that goes nowhere.
+    # The origin every OAuth `redirect_uri` is built from, Discord's and GitHub's. Empty makes every
+    # command that hands out a link refuse rather than hand out one that goes nowhere.
     public_base_url: str = ""
     # Whether a link nobody proved may be used to write to GitHub. `/link` records a login an
     # admin typed and nobody checked, so a wrong one acts on a real repository under somebody
     # else's name. Off by default, because turning it on before people have run `/link` refuses
     # every assignment in the server; until then an unproved link still works and the reply says
-    # so. Ignored where the round trip is not configured at all, since refusing a command nobody
-    # could satisfy is only a way to break it.
+    # so. Ignored where the App's client id or secret, or the public URL, is unset, since no link
+    # could be proved there at all. Deliberately NOT ignored where only the Discord sign-in is
+    # missing: `/link` refuses there naming the settings it lacks, and leaving Discord unset must
+    # not be a way to switch enforcement off. See `services/access.py`.
     require_proved_links: bool = False
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 

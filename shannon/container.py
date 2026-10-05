@@ -119,6 +119,7 @@ from shannon.services.transcripts.publish import TranscriptPublisher
 from shannon.services.unregistration import RepositoryUnregistrationService
 from shannon.services.verification import (
     BOARD_SCOPE,
+    DISCORD_SCOPE,
     GitHubIdentityVerification,
     OAuthClient,
 )
@@ -162,8 +163,8 @@ class Container:
     # which is built whether or not card writes are on and carries no credential of its own.
     # Kept apart from `github` because that one may be a fake with nothing to close.
     also_opened: tuple[Closes, ...]
-    # Held so the OAuth callback route can reach it. The route is the one place in this project
-    # that is entered from outside rather than called, so it reads its collaborator off app state
+    # Held so the three OAuth routes can reach it. They are the one place in this project that is
+    # entered from outside rather than called, so they read their collaborator off app state
     # rather than being handed one.
     verification: GitHubIdentityVerification | None = None
 
@@ -836,6 +837,23 @@ def build_container(
             "SHANNON_BOARD_CREDENTIAL_KEY is set and SHANNON_GITHUB_BOARD_CLIENT_ID is not, so "
             "nobody can authorise a board at all. Register an OAuth App and restart."
         )
+    # Found reviewing #201: every one-time link now goes through Discord before GitHub, so a
+    # deployment that set up a GitHub sign-in and not the Discord half refuses every link. That is
+    # the decision - failing closed - and it is said once here rather than discovered command by
+    # command. With the redirect it needs, which is the step most likely to be missed.
+    wants_a_sign_in = bool(
+        settings.github_app_client_secret.get_secret_value() or settings.github_board_client_id
+    )
+    if wants_a_sign_in and not (
+        settings.discord_client_id and settings.discord_client_secret.get_secret_value()
+    ):
+        logger.error(
+            "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET are not both set, so "
+            "every one-time link is refused: /link, /register, /unregister, /board link and "
+            "/board authorise. On the bot's Discord application, add the OAuth2 redirect "
+            "%s/oauth/discord/callback, set both and restart.",
+            settings.public_base_url.rstrip("/") or "<SHANNON_PUBLIC_BASE_URL>",
+        )
 
     # One reader for both callers. Two would each pay the owner-kind lookup and each keep
     # their own field cache, and the command would be warming a cache the poller never sees.
@@ -893,6 +911,14 @@ def build_container(
             client_id=settings.github_board_client_id,
             client_secret=settings.github_board_client_secret.get_secret_value(),
             scope=BOARD_SCOPE,
+        ),
+        # The bot's own Discord application, which every link now goes through before GitHub so
+        # that only the member it was issued for can follow it. Found reviewing #201. Unset leaves
+        # this unconfigured, and every command that hands out a link refuses.
+        discord=OAuthClient(
+            client_id=settings.discord_client_id,
+            client_secret=settings.discord_client_secret.get_secret_value(),
+            scope=DISCORD_SCOPE,
         ),
     )
 

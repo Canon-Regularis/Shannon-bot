@@ -40,6 +40,20 @@ class SpentLink:
     board: ChosenBoard | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PendingLink:
+    """A link that can still be followed, and the member it was handed out for.
+
+    Read on the way through Discord, before anything is spent: what is asked of Discord is whether
+    the browser holding the link is held by `discord_user_id`, and nothing else on the row matters
+    to that question. The guild rides along so a refusal can say where the link came from.
+    """
+
+    guild_id: int
+    discord_user_id: int
+    purpose: VerificationPurpose
+
+
 class IdentityVerificationStore:
     """The one-time links the commands that need one hand out, and the single use of each."""
 
@@ -82,18 +96,72 @@ class IdentityVerificationStore:
             )
         )
 
-    async def consume(self, state: str) -> SpentLink | None:
+    async def pending(self, state: str) -> PendingLink | None:
+        """The link a state names, while it can still be followed, or None.
+
+        Read-only, and on purpose: this is asked on the way INTO the round trip, which a link
+        preview or a crawler can start as easily as a person can. Nothing is decided by it except
+        whether there is anything to send somebody to Discord about.
+        """
+        found = (
+            await self._session.execute(
+                select(
+                    IdentityVerification.discord_guild_id,
+                    IdentityVerification.discord_user_id,
+                    IdentityVerification.purpose,
+                ).where(
+                    IdentityVerification.state == state,
+                    IdentityVerification.consumed_at.is_(None),
+                    IdentityVerification.expires_at > func.now(),
+                )
+            )
+        ).first()
+        if found is None:
+            return None
+        return PendingLink(guild_id=found[0], discord_user_id=found[1], purpose=found[2])
+
+    async def bind(self, state: str, *, discord_user_id: int, binding: str) -> bool:
+        """Write down the browser Discord has just said is held by the member this link is for.
+
+        Found reviewing #201. Guarded on the member as well as the state, so nothing but proof of
+        being THIS member can bind it, and on the link still being followable. Binding again
+        replaces the browser: the last browser that proved itself is the one that may finish,
+        and only the issuer can prove anything, so that is the issuer changing their mind.
+
+        Answers whether a row was bound. Nothing is, where the link expired or was spent in the
+        moments between being read and being bound.
+        """
+        bound = await rows_changed(
+            self._session,
+            update(IdentityVerification)
+            .where(
+                IdentityVerification.state == state,
+                IdentityVerification.discord_user_id == discord_user_id,
+                IdentityVerification.consumed_at.is_(None),
+                IdentityVerification.expires_at > func.now(),
+            )
+            .values(bound_browser=binding),
+        )
+        return bound == 1
+
+    async def consume(self, state: str, *, binding: str) -> SpentLink | None:
         """Spend a link, answering whose it was and what it finishes, or None if it cannot be spent.
 
         Filter, stamp and answer in one statement, so two clicks on the same link race in
         Postgres and exactly one of them wins. One answer for expired, already used and never
         existed: telling them apart would confirm to somebody guessing states that a particular
         one was real.
+
+        And only by the browser that proved itself through Discord. Found reviewing #201: the state
+        alone used to spend a link, so whoever was forwarded one finished it as its issuer. A row
+        nothing has bound holds null, which equals nothing, so a link handed out before this - or
+        one whose holder never went through Discord - cannot be spent at all.
         """
         spent = await self._session.execute(
             update(IdentityVerification)
             .where(
                 IdentityVerification.state == state,
+                IdentityVerification.bound_browser == binding,
                 IdentityVerification.consumed_at.is_(None),
                 IdentityVerification.expires_at > func.now(),
             )

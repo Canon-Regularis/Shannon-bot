@@ -49,7 +49,7 @@ from tests.unit.commands.conftest import administrator, default_gate, developer,
 pytestmark = pytest.mark.unit
 
 GUILD = 1
-URL = "https://github.com/login/oauth/authorize?client_id=x&scope=project&state=abc"
+URL = "https://shannon.example.com/oauth/start?state=abc"
 
 
 def link(*, number: int = 3, replaced: int | None = None) -> BoardLink:
@@ -245,9 +245,9 @@ class TestTheCommandsShape:
     def test_no_half_takes_an_argument_that_could_name_somebody_else(
         self, name: str, taken: set[str]
     ) -> None:
-        """The invariant `/link` keeps. Every link is issued for whoever ran the command, because
-        the URL is a bearer credential and whoever opens it is recorded as the person it was
-        issued for - a parameter naming somebody else would be a way to collect their credential."""
+        """The invariant `/link` keeps. Every link is issued for whoever ran the command: a
+        credential is granted by the person it belongs to, from their own command. Since #201's
+        review Discord refuses anybody else who follows a link, and the rule stands regardless."""
         command = Built().sub(name)
 
         assert set(inspect.signature(command.callback).parameters) == taken
@@ -492,6 +492,8 @@ class TestLinkingWithNoAuthorisationYet:
         for setting in (
             "SHANNON_GITHUB_BOARD_CLIENT_ID",
             "SHANNON_BOARD_CREDENTIAL_KEY",
+            "SHANNON_DISCORD_CLIENT_ID",
+            "SHANNON_DISCORD_CLIENT_SECRET",
             "SHANNON_PUBLIC_BASE_URL",
         ):
             assert setting in NOT_CONFIGURED

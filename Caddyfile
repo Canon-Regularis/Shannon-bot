@@ -31,9 +31,11 @@
 	# The commit is the one thing here that gives something away, and it is worth writing down
 	# rather than leaving to be discovered. This repository is public, so the hash names a tree
 	# anybody can read: it says which fixes this deployment has and, more to the point, which
-	# ones it has not. That is accepted rather than overlooked. There is one route behind this
-	# that does anything, it refuses every request without a valid HMAC, and knowing the commit
-	# does not help anybody forge one. Take this field out if the calculation changes.
+	# ones it has not. That is accepted rather than overlooked. Behind this, the webhook refuses
+	# every request without a valid HMAC, and the `/oauth/*` routes are held to one browser by a
+	# cookie and to one member by Discord; knowing the commit forges neither. What it does tell
+	# somebody is whether a deployment predates a published fix, so a fix that closes a hole is
+	# deployed when it is pushed. Take this field out if the calculation changes.
 	handle /health {
 		reverse_proxy app:8000
 	}
@@ -42,14 +44,18 @@
 		reverse_proxy app:8000
 	}
 
-	# Where GitHub sends somebody back after they have proved who they are, for `/unregister` and
-	# `/verify`. Public and unsigned because it has to be: a browser arrives carrying a code, with
-	# no credential of its own and nothing to sign with.
+	# Where a one-time link opens, where Discord sends the browser back, and where GitHub sends it
+	# back after that. Public and unsigned because they have to be: a browser arrives carrying a
+	# state or a code, with no credential of its own and nothing to sign with.
 	#
-	# What stands in for one is the `state` in the query string. It is 256 bits from
-	# `secrets.token_urlsafe`, it is spent by a single UPDATE so two clicks on one link race in
-	# Postgres rather than in Python, it expires in ten minutes, and the page echoes neither it nor
-	# the code back. Guessing one is the whole attack and there is nothing here to guess it from.
+	# What stands in for one is a cookie and Discord. The link opens on the app, which leaves a
+	# `__Host-` cookie and asks Discord who is holding the browser; only the member the link was
+	# issued for is sent on to GitHub, and only that browser may finish. The `state` in the query
+	# string names the row and completes nothing on its own. Found reviewing #201, when it was
+	# still the whole of the proof and a forwarded link signed its issuer in as whoever clicked.
+	#
+	# The cookie is on Path=/, which a `__Host-` cookie has to be. That is safe only because this
+	# file forwards nothing to the app beyond `/health`, `/webhooks/*` and `/oauth/*`.
 	#
 	# Left out when this file was written, which is not a small thing: the route existed, the
 	# command handed out links to it, and every one of them landed on the catch-all below. So

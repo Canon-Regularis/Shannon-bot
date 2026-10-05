@@ -122,9 +122,9 @@ class TestNobodyElseSeesAReply:
     """`EPHEMERAL = True`, held against all four paths a reply can take.
 
     Thread traffic is the signal and an acknowledgement is not, which is the whole argument for
-    the constant. Several replies also quote back what somebody typed, and one of them hands out
-    a one-time authorisation link, so a public reply is not merely noise: it is a credential in
-    the channel.
+    the constant. Several replies also quote back what somebody typed, and five commands hand
+    out one-time links. Since #201's review nobody but whoever ran the command could finish one,
+    but a sign-in in progress is still nobody else's business.
     """
 
     async def test_an_immediate_reply_is_private(self) -> None:

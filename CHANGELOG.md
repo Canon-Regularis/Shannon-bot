@@ -7637,3 +7637,38 @@ feature end to end rather than assuming a predecessor the file never recorded.
   reads the OAuth page, where a stale `/set_board` had sat unseen since #170.
 - **Discord permission overrides set on the two old commands do not carry over**, and one set on
   `/board` hides `withdraw` too, because Discord applies overrides per top-level command.
+
+## A link signs in only the member it was issued for
+
+- **A forwarded link signed its issuer in as whoever clicked it.** A link pointed straight at
+  GitHub's authorize page and its callback trusted nothing but the state, and GitHub skips its
+  consent page for an application somebody has already authorised. So a link forwarded to such a
+  person was finished by them, without them seeing anything, and recorded as the issuer: a name
+  under `/link`, the evidence `/register` and `/unregister` act on, and for a board a `project`
+  token that acts as whoever clicked. Every purpose shared it. It dates from #144 and #170, and
+  #201 made it worth more by making private boards linkable. Found reviewing #201.
+- **A link opens on this bot now, and goes through Discord first.** `/oauth/start` leaves a cookie
+  and sends the browser to Discord, asking for `identify` and nothing else. `/oauth/discord/callback`
+  hears which account is holding the browser, and only if that is the member the link was issued
+  for is the browser written down and sent on to GitHub. Anybody else is refused with nothing
+  recorded and nothing asked of GitHub, and the log names the issuer, never whoever followed it.
+- **Every state that leaves this bot is sealed to the cookie.** `S.mac`, an HMAC keyed by the
+  cookie, one per leg, so nobody can push a round trip of their own into somebody else's browser:
+  they cannot compute the seal for a cookie they do not hold. The row keeps a hash keyed by the
+  cookie (migration `0033`) and never the cookie, and a link is spent by that browser alone - the
+  state on its own completes nothing.
+- **The cookie is `__Host-`, Secure, HttpOnly and Lax**, for as long as a link lives. Opening a link
+  writes nothing, so a link preview costs nothing, and two links in one browser share the cookie
+  rather than knocking each other over.
+- **Two new settings, and no link without them.** `SHANNON_DISCORD_CLIENT_ID` and
+  `SHANNON_DISCORD_CLIENT_SECRET`, from the bot's own application, with
+  `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` added there as a redirect. Unset, every command
+  that hands out a link refuses - failing closed - and the container says so at startup, naming the
+  redirect. `configured` still means the App alone: two services read it to decide whether
+  `SHANNON_REQUIRE_PROVED_LINKS` is enforced, and folding Discord into it would have switched that
+  off on exactly the deployments that had not set Discord up.
+- **A link handed out before this cannot be finished.** It pointed straight at GitHub and nothing
+  ever bound it, so it reads as expired, which costs ten minutes at most.
+- **What a forwarded link already recorded is not undone by this.** Rows written before it in
+  `verified_identities`, `user_links` and `board_authorizations` are worth a look for a login that
+  does not belong to the member it sits under.

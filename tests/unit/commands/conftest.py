@@ -26,8 +26,8 @@ class FakeVerification:
     reads as though the proof were not there.
     """
 
-    def __init__(self, *, configured: bool = True, proved: str | None = "octocat") -> None:
-        self.configured = configured
+    def __init__(self, *, can_prove_identity: bool = True, proved: str | None = "octocat") -> None:
+        self.can_prove_identity = can_prove_identity
         # Still a login, because that is what every test here is about saying. The account it
         # stands for is built below, so no test has to name an id it does not care about.
         self.proved = proved
@@ -46,7 +46,7 @@ class FakeVerification:
     ) -> str:
         self.links_handed_out += 1
         self.purposes.append(purpose)
-        return "https://github.com/login/oauth/authorize?state=abc"
+        return "https://shannon.example.com/oauth/start?state=abc"
 
 
 def default_gate() -> PermissionGate:

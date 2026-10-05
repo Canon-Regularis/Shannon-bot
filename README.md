@@ -215,6 +215,15 @@ On the very first start the commands are registered globally, and Discord serves
 that can take up to an hour to catch up. The log says so. Until it does, typing `/` shows nothing
 and there is nothing wrong: wait, or restart the Discord client, which usually shortens it.
 
+**Discord sign-in.** Every one-time link goes through Discord before GitHub, so that only the
+member who ran the command can finish it: a link that went straight to GitHub was finished by
+whoever clicked it, and GitHub skips its consent page for an application somebody has authorised
+before. It uses the bot's own application as an OAuth client. Under OAuth2 in the Developer Portal,
+add `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` as a redirect, copy the Client ID into
+`SHANNON_DISCORD_CLIENT_ID`, and reset the Client Secret into `SHANNON_DISCORD_CLIENT_SECRET` - the
+bot token is a separate credential and is not touched. Leave Public Client off. Until both are set,
+every command that hands out a link refuses, and the bot says so at startup.
+
 **Then, in the server, in this order.**
 
 ```text
@@ -389,11 +398,13 @@ at the door.
 `. Signs the JWT that is traded for an installation token |
 | `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/link`, `/register` and `/unregister`. Empty makes all three refuse rather than hand out a broken link, which since issue #135 means a deployment without it cannot bind a repository at all |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
-| `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
+| `SHANNON_PUBLIC_BASE_URL` | empty | The origin every OAuth `redirect_uri` is built from, Discord's and GitHub's. Must match the redirects set on the App, the board OAuth App and the Discord application. The same origin GitHub already reaches for webhooks |
+| `SHANNON_DISCORD_CLIENT_ID` | empty | The bot's own Discord application, as an OAuth client. Every one-time link opens on this bot and asks Discord who is holding the browser before GitHub is asked anything, so a link only works for the member who ran the command. Copy it from OAuth2 in the Developer Portal, where `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` is added as a redirect |
+| `SHANNON_DISCORD_CLIENT_SECRET` | empty | Exchanges Discord's code for who signed in, and nothing else is asked of Discord: the scope is `identify`. Reset it under OAuth2; the bot token is a separate credential. Empty, or an empty id, makes `/link`, `/register`, `/unregister`, `/board link` and `/board authorise` refuse rather than hand out a link anybody it was forwarded to could finish, and the bot says so at startup |
 | `SHANNON_GITHUB_BOARD_CLIENT_ID` | empty | The **second** registered application, a classic **OAuth App** rather than a GitHub App, used only to authorise a project board. GitHub publishes no App permission for a user-owned board and granting an installed App an organisation permission suspends its event delivery until an admin accepts, so boards cannot go through the App above. Register it with the redirect URI `<SHANNON_PUBLIC_BASE_URL>/oauth/github/callback`, wildcard matching **off**, device flow **off**, and *Expire user access tokens* **off** |
 | `SHANNON_GITHUB_BOARD_CLIENT_SECRET` | empty | Exchanges the OAuth code for a board authorisation. Empty makes `/board link` and `/board authorise` refuse rather than send somebody to GitHub to grant something that cannot be used, and so does an empty `SHANNON_BOARD_CREDENTIAL_KEY` |
 | `SHANNON_BOARD_CREDENTIAL_KEY` | empty | The Fernet key those authorisations are encrypted with — the only encryption in this schema, because a board authorisation is the one thing stored here that *acts as* somebody rather than describing them. A comma-separated list, newest first: the cipher writes with the first key and reads with any, so a rotation does not make everybody authorise again. Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Unset or unreadable means boards are off and said so once, rather than a process that will not start |
-| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
+| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where `SHANNON_GITHUB_APP_CLIENT_ID`, `SHANNON_GITHUB_APP_CLIENT_SECRET` or `SHANNON_PUBLIC_BASE_URL` is unset. Not where only Discord sign-in is missing: there it is still enforced, and a member who never proved a link is refused and cannot prove one until `SHANNON_DISCORD_CLIENT_ID` and `SHANNON_DISCORD_CLIENT_SECRET` are set, which `/link` says. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
@@ -547,8 +558,9 @@ would only stop somebody proving who they are.
 
 Asking somebody else to connect theirs is a project manager's job, because that half pings a
 member in public and a bot that will ping anybody on anybody's say-so is a spam tool. It hands out
-no link: the authorisation URL records whoever it was issued for, so one shown to anybody but that
-person is that person's identity in whoever's hands hold it.
+no link: a link is only ever issued for whoever ran the command, so the member is asked to run
+`/link` and get their own. Discord refuses anybody else who follows a link, before GitHub is asked
+anything.
 
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single
@@ -632,7 +644,7 @@ rather than abandoning the rest.
 | `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and is asked when this has nothing, so a missing row costs a read of the App's own installations and then writes itself down |
-| `identity_verifications` | Outstanding one-time links. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once, and `purpose` is the only record of which command sent them. A board link also carries the board somebody chose, so following it both authorises and links; it is kept here and never in the URL, so nothing can change it on the way to GitHub and back |
+| `identity_verifications` | Outstanding one-time links. The `state` names the row a browser is following and completes nothing on its own: `bound_browser` is the browser Discord said is held by the member the link was issued for, as a hash keyed by a cookie only that browser holds, and a link is spent by that browser alone. `purpose` is the only record of which command sent them. A board link also carries the board somebody chose, so following it both authorises and links; it is kept here and never in the URL, so nothing can change it on the way to GitHub and back |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
 | `board_authorizations` | The GitHub authorisation one person granted so one server could reach their project board, with the token **encrypted**. The only encrypted column in the schema, and the first credential this project stores: everything else it keeps about somebody describes them, where this one acts as them. One row per person per server, which is how both readers reach it — a card move by whoever ran the command, a poll by the member named in `repositories.project_linked_by` |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
@@ -643,7 +655,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0032`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0033`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
@@ -657,6 +669,9 @@ for as long as the App is installed on it.
 | --- | --- |
 | `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing header or unusable body, 401 for a bad signature, 413 past the 25MB cap, 500 if the secret is unset |
 | `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, `version` as the commit answering, 503 if any of the first three is false |
+| `GET /oauth/start` | Where a one-time link opens. 303 to Discord, leaving the `__Host-shannon_round_trip` cookie that holds the round trip to this browser, and writing nothing. 400 for a link that has expired, been used or never existed |
+| `GET /oauth/discord/callback` | 303 on to GitHub once Discord names the member the link was issued for, in the browser that opened it. 400 for anybody else, another browser, or a cancelled sign-in |
+| `GET /oauth/github/callback` | A plain-text page saying who signed in and what happens next, for that browser alone. 400 otherwise. All three answer 500 where Discord sign-in is not configured |
 
 `version` is the commit the image was built from. It is there because a change that was merged
 and never deployed and a change that does not work look identical from outside, and telling them
@@ -681,7 +696,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Six things the bot is known to get wrong. All are narrow, and all are written down here rather
+Seven things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -726,6 +741,14 @@ call per commit asking whether the default branch already has it, which triples 
 in order to hide something that is true. A rebase is a separate case and is handled: every commit
 on a rewritten branch has a new hash, so the thread says the branch was force-pushed rather than
 announcing them all again.
+
+**A link opened on a phone.** A one-time link goes through Discord before GitHub, and a phone
+with the Discord app installed can open Discord's page in the app rather than in the browser the
+link began in. The round trip is held to that browser by a cookie, so the return is refused, with a
+page saying to finish where it began, and nothing is recorded. Opening the link in a desktop
+browser, or pasting it into the phone's browser while signed in to discord.com, works. Somebody
+who has never authorised the bot's Discord application sees its consent page once; after that
+Discord skips it, in any browser.
 
 **A message this bot has sent cannot go back to being plain text.** Discord's components flag is
 one way: once it has seen a message carrying one, that flag can never be taken off it. Every block

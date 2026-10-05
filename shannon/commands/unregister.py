@@ -32,10 +32,13 @@ class VerifiesIdentity(Protocol):
     `proved_just_now` rather than whether they have ever proved anything: this permits an
     irreversible command, so what matters is that the person is at the keyboard now, having just
     come back from the browser.
+
+    `can_prove_identity` rather than `configured`: since #201's review a link needs Discord as
+    well as GitHub, and `/link` says why.
     """
 
     @property
-    def configured(self) -> bool: ...
+    def can_prove_identity(self) -> bool: ...
 
     async def proved_just_now(
         self, *, guild_id: int, discord_user_id: int
@@ -68,7 +71,7 @@ def build_unregister_command(
         guild_id = await in_a_server(interaction, "unregister", gate, REGISTER_ROLES)
         if guild_id is None:
             return
-        if not verification.configured:
+        if not verification.can_prove_identity:
             # The role check is above this, so somebody who could not run the command anyway is
             # not told how the deployment is configured.
             await reply(
@@ -76,7 +79,8 @@ def build_unregister_command(
                 refused(
                     "This bot cannot verify who you are on GitHub, so it will not "
                     "unregister anything. An admin needs to set the GitHub App's client "
-                    "secret and this deployment's public URL."
+                    "secret, this deployment's public URL, SHANNON_DISCORD_CLIENT_ID and "
+                    "SHANNON_DISCORD_CLIENT_SECRET."
                 ),
             )
             return
@@ -96,7 +100,8 @@ def build_unregister_command(
                     interaction,
                     owed(
                         "First, prove to GitHub that you can administer this repository. "
-                        f"Open this link, then run /unregister again:\n{link}"
+                        "Open this link in your browser and sign in - Discord checks that it is "
+                        f"you first - then run /unregister again:\n{link}"
                     ),
                 )
                 return

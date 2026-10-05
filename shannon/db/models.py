@@ -470,10 +470,11 @@ class IdentityVerification(TimestampMixin, Base):
     and everything mirrored under it, so it waits to be run again where there is somebody to
     report the answer to. A board link can also carry the board somebody chose, for the same
     reason the purpose is here: the callback has nothing else to read it from. Rows here outlive
-    the unbinding they authorised: this table is keyed by guild, not by repository. The callback
-    GitHub redirects to is unauthenticated, so `state` is CSRF token and session identifier at
-    once. Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the
-    database.
+    the unbinding they authorised: this table is keyed by guild, not by repository. The callbacks
+    are unauthenticated, and since #201's review `state` only names the row: what makes them safe is
+    `bound_browser`, the browser Discord said is held by the member the link was issued for, which
+    `consume` matches. Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race
+    in the database.
     """
 
     __tablename__ = "identity_verifications"
@@ -503,6 +504,12 @@ class IdentityVerification(TimestampMixin, Base):
     # is null where nobody named one, as `Repository.project_owner` is.
     board_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     board_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The browser that proved, through Discord, that it is held by the member this link was issued
+    # for - as a keyed hash of a cookie only that browser holds, never the cookie itself. Null until
+    # then, and `consume` matches nothing that is null, so a link nobody has proved cannot be spent
+    # by anybody: holding the state alone completes nothing. Found reviewing #201: a forwarded link
+    # signed its issuer in as whoever clicked it.
+    bound_browser: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -6,9 +6,9 @@ in the middle: `/set_board` refused, `/authorise_board` handed out a link, the b
 and `/set_board` was run again. Undoing it was split the same way, and the two places that said how
 disagreed with each other.
 
-Now it is one command, and linking a board is one click. `/board link` hands out a GitHub link that
-REMEMBERS the board that was chosen, and following it both authorises and links - the shape `/link`
-already has, where clicking the link is the whole of it.
+Now it is one command, and linking a board is one click. `/board link` hands out one link - to this
+bot, then Discord, then GitHub - that REMEMBERS the board that was chosen, and following it both
+authorises and links: the shape `/link` already has, where clicking the link is the whole of it.
 
 **Who may run which half.** Linking and unlinking decide something for the server, so they take the
 tier that speaks for it, `REGISTER_ROLES`. Authorising and asking take `BOARD_ROLES`, the tiers
@@ -19,9 +19,11 @@ since have lost. A factory gated on some of its halves cannot be described by
 hold the tiers.
 
 **No member argument anywhere.** Every link this hands out is issued for whoever ran it and never
-for somebody named: the authorisation URL is a bearer credential, and whoever opens it is recorded
-as the person it was issued for. A parameter naming somebody else would be a way to collect their
-credential.
+for somebody named. A link used to be a bearer credential, recorded as whoever it was issued for by
+whoever opened it, so a parameter naming somebody else would have been a way to collect their
+credential. Since #201's review Discord has to name that member before GitHub is asked anything,
+and the rule stands regardless: a credential is granted by the person it belongs to, from their
+own command.
 """
 
 from __future__ import annotations
@@ -96,7 +98,8 @@ _BOARD_LABEL = re.compile(r"^#(?P<number>[0-9]+)\b", re.ASCII)
 NOT_CONFIGURED = (
     "This bot is not set up to authorise project boards yet, so there is nothing to sign in to. "
     "An admin needs to register the board OAuth App and set SHANNON_GITHUB_BOARD_CLIENT_ID, its "
-    "client secret, SHANNON_BOARD_CREDENTIAL_KEY and SHANNON_PUBLIC_BASE_URL."
+    "client secret, SHANNON_BOARD_CREDENTIAL_KEY, SHANNON_DISCORD_CLIENT_ID, "
+    "SHANNON_DISCORD_CLIENT_SECRET and SHANNON_PUBLIC_BASE_URL."
 )
 
 # Said after the link rather than instead of it, because the thing worth knowing is what the grant
@@ -125,20 +128,26 @@ AUTHORISING_IS_FOR = (
     "from Discord then moves as you rather than as somebody else. " + ORGANISATIONS
 )
 
+# In a browser, because the link goes to Discord before GitHub: Discord says which member is
+# holding the browser, and only the one who ran the command gets any further. Found reviewing #201.
 SIGN_IN_TO_LINK = (
-    "Sign in to GitHub, and {board} is linked when you do. There is nothing else to run.\n{url}"
-    "\n\n" + LINKING_IS_FOR
+    "Open this link in your browser and sign in to GitHub, and {board} is linked when you do. "
+    "Discord checks that it is you first. There is nothing else to run.\n{url}\n\n" + LINKING_IS_FOR
 )
 
-SIGN_IN = "Open this link and sign in to GitHub.\n{url}\n\n" + AUTHORISING_IS_FOR
+SIGN_IN = (
+    "Open this link in your browser and sign in to GitHub. Discord checks that it is you first."
+    "\n{url}\n\n" + AUTHORISING_IS_FOR
+)
 
 # Where the board would not open with the authorisation they already have. The reason comes first,
 # because a wrong number is the likelier cause and signing in again will not fix that one. Nor
 # will it fix an organisation that has not approved this app: GitHub completes a second sign-in
 # without showing anything, so that one is said separately, with where approval is asked for.
 WILL_NOT_OPEN = (
-    "{reason}\n\nIf the number and owner are right and you revoked this app on GitHub, sign in "
-    "again and it is linked when you do.\n{url}\n\n-# If the board belongs to an organisation, "
+    "{reason}\n\nIf the number and owner are right and you revoked this app on GitHub, open this "
+    "link in your browser and sign in again - Discord checks that it is you first - and it is "
+    "linked when you do.\n{url}\n\n-# If the board belongs to an organisation, "
     "the organisation has to approve this app first - an owner can, under its Settings, "
     "Third-party access - and then /board link works as it is."
 )
@@ -324,8 +333,7 @@ def build_board_command(
             return
 
         await defer(interaction)
-        # Issued for whoever ran it, never for an argument. The URL is a bearer credential; see
-        # the module docstring.
+        # Issued for whoever ran it, never for an argument; see the module docstring.
         url = await verification.link_for(
             guild_id=guild_id,
             discord_user_id=interaction.user.id,

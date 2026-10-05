@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +23,7 @@ from shannon.db.stores.identities import ProvedAccount
 from shannon.github import people
 from shannon.github.errors import GitHubUnavailableError
 from shannon.services.access import GitHubAccess
+from tests.support.round_trip import without_discord
 
 pytestmark = pytest.mark.integration
 
@@ -32,9 +34,10 @@ WHO = 424242
 class FakeProof:
     def __init__(self, login: str | None = LOGIN, *, configured: bool = True) -> None:
         self.login = login
-        # Whether the OAuth round trip exists at all. Separate from whether anybody has used
-        # it, because `require_proved` has to tell a deployment that cannot produce a proof
-        # apart from a person who has not produced one.
+        # Whether the App's half of the round trip is set up - its client id and secret and a
+        # public URL.
+        # Separate from whether anybody has used it, because `require_proved` has to tell a
+        # deployment that cannot produce a proof apart from a person who has not produced one.
         self._configured = configured
 
     @property
@@ -273,14 +276,15 @@ class TestWhenTheServerInsistsOnAProvedAccount:
 
         assert await refusal(service) is None
 
-    async def test_a_deployment_that_cannot_run_the_round_trip_still_lets_them_through(
+    async def test_a_deployment_with_no_app_sign_in_still_lets_them_through(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
     ) -> None:
         """The half of the condition that is not optional. With no public URL there is no way to
         produce a proof, so refusing for the lack of one would take these eight commands away from
         everybody for ever, with the only remedy a setting nobody would connect to the symptom.
 
-        `/assign` pairs the same two for the same reason.
+        `/assign` pairs the same two for the same reason. A deployment missing only Discord is not
+        this case: see the test below.
         """
         service = access(
             db_sessionmaker,
@@ -289,6 +293,24 @@ class TestWhenTheServerInsistsOnAProvedAccount:
         )
 
         assert await refusal(service) is None
+
+    async def test_a_deployment_missing_only_discord_still_refuses(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """Found reviewing #201's fix. Without Discord nobody can prove anything either, and
+        this still enforces, on purpose: `/link` refuses there naming the two settings it lacks,
+        so the remedy is one command from the symptom, and leaving Discord unset must not be a way
+        to switch the setting off. Against the real service, because what is pinned is which of
+        its properties the gate reads."""
+        async with httpx.AsyncClient() as http:
+            verification = without_discord(db_sessionmaker, http)
+            service = GitHubAccess(db_sessionmaker, FakePermissions(), verification, True)
+
+            said = await refusal(service)
+
+        assert verification.can_prove_identity is False
+        assert said is not None
+        assert "/link" in said
 
     async def test_off_by_default_an_unproved_caller_passes(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
