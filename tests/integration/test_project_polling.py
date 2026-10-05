@@ -243,8 +243,11 @@ class TestABoardAndMoreThanOneServer:
     async def test_one_server_is_still_polled_from_the_settings(
         self, board_channel: None, poller_for
     ) -> None:
-        """The default the settings name still applies where nothing else does, so a deployment
-        that upgrades without running the command keeps working exactly as it did."""
+        """The arm that reads the board the settings name still runs where nothing else applies.
+        Against GitHub it can no longer read anything - since issue #170 a board is read under its
+        linker's authorisation, and a board named only in the environment has no linker; the
+        container says so at boot - but `FakeBoard` asks for no credential, which is all this
+        pins."""
         poller = poller_for(FakeBoard(card()))
 
         assert await poller.run_once() == 1
@@ -294,7 +297,7 @@ class TestABoardAndMoreThanOneServer:
         with caplog.at_level(logging.ERROR):
             await poller_for(FakeBoard(card())).run_once()
 
-        assert "/set_board" in caplog.text
+        assert "/board link" in caplog.text
 
     async def test_it_says_so_once_rather_than_once_a_minute(
         self, board_channel: None, poller_for, db_session: AsyncSession, caplog
@@ -311,7 +314,7 @@ class TestABoardAndMoreThanOneServer:
             await poller.run_once()
             await poller.run_once()
 
-        assert caplog.text.count("/set_board") == 1
+        assert caplog.text.count("/board link") == 1
 
     async def test_two_servers_each_with_their_own_board_are_both_read(
         self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
@@ -448,6 +451,40 @@ class TestWhenThereIsNothingToDo:
 
 
 class TestTheLoop:
+    async def test_an_unreadable_board_is_said_once_rather_than_every_pass(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A pass runs every couple of seconds since issue #189, and a board nobody's
+        authorisation stands behind - every board linked before issue #170, until somebody links
+        it again - used to put this line in the log on every one of them."""
+        board = FakeBoard(card())
+        board.error = GitHubAuthError("nobody's authorisation stands behind board 3")
+        poller = poller_for(board)
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            for _ in range(3):
+                await poller.run_once()
+
+        assert caplog.text.count("could not read board") == 1
+
+    async def test_a_board_that_reads_again_is_news_when_it_breaks_again(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Once is per breakage rather than per process: a board that came back and then went
+        again is something an operator has not been told about yet."""
+        board = FakeBoard(card())
+        poller = poller_for(board)
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            board.error = GitHubAuthError("revoked")
+            await poller.run_once()
+            board.error = None
+            await poller.run_once()
+            board.error = GitHubAuthError("revoked again")
+            await poller.run_once()
+
+        assert caplog.text.count("could not read board") == 2
+
     @pytest.mark.parametrize(
         "refusal",
         [
@@ -475,8 +512,8 @@ class TestTheLoop:
         with caplog.at_level("WARNING", logger="shannon.services.projects"):
             assert await poller_for(board, board_owner="acme").run_once() == 0
 
-        assert "/set_board" in caplog.text
-        assert "/authorise_board" in caplog.text, (
+        assert "/board show" in caplog.text, "it did not say where to see whose it is"
+        assert "/board link again" in caplog.text, (
             "it did not name the one cause a reader can act on: nobody has authorised it"
         )
         assert "acme" in caplog.text
@@ -2706,7 +2743,7 @@ class TestACommandLandingWhileTheBoardIsBeingRead:
 
 
 class TestRelinkingABoard:
-    """`/set_board` lets go of the card ids, and has to let go of the columns with them.
+    """`/board link` lets go of the card ids, and has to let go of the columns with them.
 
     A column name belongs to its board exactly as a card id does. Kept across a relink it is wrong
     twice over: the poller compares the new board's listing against a column from the old one and

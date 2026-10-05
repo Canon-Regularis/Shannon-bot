@@ -179,14 +179,20 @@ class ProjectPoller:
         self._sync = sync
         self._workflow = workflow
         self._threads = threads
-        # A default for a deployment that has not run `/set_board` yet, rather than the one
-        # board there is. Zero means none, which is what it always meant.
+        # The board named in the environment, which cannot be read since issue #170 - nobody is
+        # recorded against it - and which the container says so about at boot. Zero means none.
         self._project_number = project_number
         self._board_owner = board_owner
         self._polling = polling
         self._interval = interval
         self._may_set_status = may_set_status
         self._said = False
+        # Boards already said to be unreadable, so the line is loud once and then DEBUG. This
+        # runs every couple of seconds since issue #189, and a board nobody's authorisation
+        # stands behind - every board linked before issue #170, until somebody links it again -
+        # used to put a warning in the log on every pass. Let go of once the board reads, so a
+        # board that breaks again later is news again.
+        self._unreadable: set[tuple[str, int]] = set()
         self._stopping = False
         self._stopped = asyncio.Event()
         # Whether every board the last pass read can be re-read for a conditional request. Set
@@ -232,7 +238,7 @@ class ProjectPoller:
         """Read every linked board and sync what moved, answering with how many cards that was.
 
         Boards are re-read from the database at the top of every pass rather than resolved once
-        at boot, which is the whole of how `/set_board` takes effect without a restart. A board
+        at boot, which is the whole of how `/board link` takes effect without a restart. A board
         linked at 12:00:05 is polled at 12:00:07, and the command's reply says so. Pushing a
         wake-up from the command instead would couple the command table to the poller instance
         to save two seconds, once - an argument that was thin when the interval was a minute and
@@ -252,14 +258,15 @@ class ProjectPoller:
 
     async def _poll(self, board: _Board) -> int:
         """One board: read it, and sync the cards that have moved since the last read."""
+        key = (board.board_owner.casefold(), board.project_number)
         try:
             listed = await self._projects.list_board_items(board.board_owner, board.project_number)
         except UNREADABLE as unreadable:
             # Named rather than left to the loop's `logger.exception`, which answers a
             # misconfiguration with a traceback once a minute. Both answers are caught together
-            # because an operator cannot act on the difference: a fine-grained token that is not
-            # authorised for an organisation answers 404 as readily as 403, so telling the two
-            # apart in the message would be a confident guess rather than a diagnosis.
+            # because an operator cannot act on the difference: GitHub hides a private board
+            # from an authorisation that cannot see it behind 404 as readily as 403, so telling
+            # the two apart in the message would be a confident guess rather than a diagnosis.
             #
             # Three things can be wrong and the log cannot tell which, so it names all three.
             # A board GitHub does not have, an owner it was asked under - the number is a
@@ -270,25 +277,33 @@ class ProjectPoller:
             # token to blame: since issue #170 a board is read under the authorisation of whoever
             # linked it, so "nobody authorised this" and "their authorisation no longer opens it"
             # both arrive here as a board that will not open. Both are fixed the same way, by
-            # somebody running the two commands again, which is what the line says.
+            # somebody linking it again - one command and one click since issue #201 - which is
+            # what the line says.
             #
             # The repository is named because there can now be several boards, and a line saying
             # only that "board 3" failed is one an operator cannot act on when two servers each
             # have one.
-            logger.warning(
+            #
+            # Loud once per board, then DEBUG, for the reason the fields warning gives: a line
+            # that repeats every pass is one whoever reads the log learns to scroll past.
+            level = logging.WARNING if key not in self._unreadable else logging.DEBUG
+            self._unreadable.add(key)
+            logger.log(
+                level,
                 "could not read board %s belonging to %r for %s, so there is nothing to mirror "
-                "(%s). Run /set_board in that server to check the number against the board's "
-                "URL and the owner against who owns it - the number is a sequence GitHub keeps "
-                "per account, so the pair means something neither half does alone. If those are "
-                "right, nobody has authorised this bot to read that board, or the authorisation "
-                "it had has been withdrawn on GitHub: whoever links it runs /authorise_board and "
-                "then /set_board again",
+                "(%s). Run /board show in that server to see whose authorisation it is read "
+                "with, and check the number against the board's URL and the owner against who "
+                "owns it - the number is a sequence GitHub keeps per account, so the pair means "
+                "something neither half does alone. If those are right, nobody has authorised "
+                "this bot to read that board, or the authorisation it had has been withdrawn on "
+                "GitHub: running /board link again and signing in puts it right",
                 board.project_number,
                 board.board_owner,
                 board.snapshot.full_name,
                 unreadable,
             )
             return 0
+        self._unreadable.discard(key)
 
         # Asked after the read rather than before it, because the read is what decides the answer:
         # a board is only known cheap once one of its pages has come back unfull and validated.
@@ -905,10 +920,10 @@ class ProjectPoller:
         """Every board to read this pass, newest state of the database each time.
 
         A linked board wins over the configured one, per repository and per pass. The settings
-        are a default for a deployment that has not run `/set_board` yet, not a fallback for one
-        whose command failed: once any repository carries a board of its own, they stop applying
-        anywhere, because half-honouring them would poll one server from the database and
-        another from the environment with nothing saying which.
+        cannot be read since issue #170 - a board is read under its linker's authorisation, and
+        one named in the environment has no linker - so the arm that returns one is a board that
+        will not open, said once; the container says why at boot. Once any repository carries a
+        board of its own they stop applying anywhere, as before.
 
         The refusal this replaces stopped the poller outright with more than one server
         registered, and said to set the number to zero or give that server a deployment of its
@@ -942,7 +957,7 @@ class ProjectPoller:
             if found:
                 self._say_once(
                     "%s servers are registered and the board settings name one board between "
-                    "them, so nothing says whose it is and no board is read. Run /set_board in "
+                    "them, so nothing says whose it is and no board is read. Run /board link in "
                     "the server it belongs to; the settings are a default for a deployment that "
                     "has not done that yet",
                     len(found),
