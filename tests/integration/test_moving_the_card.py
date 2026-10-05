@@ -4,9 +4,10 @@ The board has been read and never written since the poller was built. A status s
 the labels on GitHub, the stored row and the thread, and left the card sitting in whatever column
 it was in - so the one place a reader of the board looks went on saying the old thing.
 
-Two gates stand in front of the WRITE and both are wiring rather than a check: a deployment with
-no project token has no writer at all, and `SHANNON_BOARD_MAY_MOVE_CARDS` off empties the writer
-too. Neither withholds the board itself, which is issue #179: the flag used to hand the workflow
+Two gates stand in front of the WRITE. One is wiring: with `SHANNON_BOARD_MAY_MOVE_CARDS` off the
+board has no writer at all. The other is the mover's own authorisation (issue #170): somebody who
+has authorised nothing is refused before anything is written, wherever there is a write to make.
+Neither withholds the board itself, which is issue #179: the flag used to hand the workflow
 no board at all, so turning off card writes also turned off the rule that refuses a move the
 board's own column order forbids - a read, costing nothing but a read.
 
@@ -27,6 +28,7 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import Priority, Status
 from shannon.github.errors import GitHubRefusedError
 from shannon.github.projects import BoardOrder, CardMove, CardMoved
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.sync.items import ItemSyncService
 from shannon.services.workflow import (
     ItemWorkflow,
@@ -42,6 +44,7 @@ from tests.fakes.discord_objects import (
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.credentials import BOARD_KEY
 from tests.support.signing import SECRET
 from tests.support.stack import build_stack
 
@@ -56,6 +59,9 @@ MOVER = 4242
 # The guild `register_repository` defaults to, named so an assertion about WHOSE
 # authorisation was asked for reads as a pair rather than as two bare numbers.
 GUILD = 1
+# Whoever linked the board in the tests that read it through the real container, whose
+# authorisation that read is made with. Issue #201.
+LINKER = 555
 REPO_KEY = (f"{payloads.OWNER}/{payloads.REPO}".lower(), 7)
 
 
@@ -92,6 +98,11 @@ class FakeCards:
         # The board column a command named, where it named one.
         self.named: list[str] = []
         self.asked: list[tuple[Status, Status]] = []
+        # Whether the board has the field a state is written to. True by default, because
+        # almost every board here takes both; the tests about one that does not say so.
+        self.takes_it = True
+        self.takes_error: Exception | None = None
+        self.asked_takes: list[Status | Priority] = []
 
     async def move_card(
         self,
@@ -120,6 +131,14 @@ class FakeCards:
         if self.order_error is not None:
             raise self.order_error
         return self.order
+
+    async def takes(self, *, owner: str, project_number: int, state: Status | Priority) -> bool:
+        # Asked only of a member with no authorisation, and recorded so a test can show an
+        # authorised one never pays for the question.
+        self.asked_takes.append(state)
+        if self.takes_error is not None:
+            raise self.takes_error
+        return self.takes_it
 
 
 @pytest.fixture
@@ -701,9 +720,29 @@ class TestTheWireFromTheContainer:
         await command.callback(interaction, to)
         return interaction
 
-    async def test_a_skipped_column_is_refused_with_card_writes_off(
+    @pytest.fixture
+    async def authorised(
         self,
         on_a_board: None,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The board linked by somebody whose authorisation is held, which is what it is read
+        with. Real, with a real key, because the container builds the real credential store."""
+        registered.project_linked_by = LINKER
+        await db_session.commit()
+        await BoardCredentials(db_sessionmaker, keys=BOARD_KEY).remember(
+            guild_id=GUILD,
+            discord_user_id=LINKER,
+            github_login="octocat",
+            github_user_id=583231,
+            token="gho_linker",
+        )
+
+    async def test_a_skipped_column_is_refused_with_card_writes_off(
+        self,
+        authorised: None,
         db_engine: AsyncEngine,
         threads: FakeThreadGateway,
         thread_id: int,
@@ -720,12 +759,16 @@ class TestTheWireFromTheContainer:
             db_engine,
             threads=threads,
             github=github,
-            # No project token on purpose, so the board reads through the FAKE rather than a
-            # real HTTP client: with one set the container gives the board a client of its own
-            # and every read here would 401. It costs nothing that matters to this test - with
-            # writes off there is no writer either way, and what is under test is whether the
-            # board is READ at all.
-            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
+            # The board reads through the FAKE, as somebody who authorised it: since issue #201
+            # a board nobody's authorisation stands behind is refused before any request goes
+            # out, so the key and the linker's grant are what make it readable at all - which
+            # is what production needs too. With writes off there is no writer either way, and
+            # what is under test is whether the board is READ.
+            settings=Settings(
+                github_webhook_secret=SecretStr(SECRET),
+                board_may_move_cards=False,
+                board_credential_key=SecretStr(BOARD_KEY),
+            ),
         )
 
         interaction = await self.run_status(container, "Done", thread_id)
@@ -737,7 +780,7 @@ class TestTheWireFromTheContainer:
 
     async def test_a_legal_move_still_goes_through_with_card_writes_off(
         self,
-        on_a_board: None,
+        authorised: None,
         db_engine: AsyncEngine,
         threads: FakeThreadGateway,
         thread_id: int,
@@ -750,12 +793,16 @@ class TestTheWireFromTheContainer:
             db_engine,
             threads=threads,
             github=github,
-            # No project token on purpose, so the board reads through the FAKE rather than a
-            # real HTTP client: with one set the container gives the board a client of its own
-            # and every read here would 401. It costs nothing that matters to this test - with
-            # writes off there is no writer either way, and what is under test is whether the
-            # board is READ at all.
-            settings=Settings(github_webhook_secret=SecretStr(SECRET), board_may_move_cards=False),
+            # The board reads through the FAKE, as somebody who authorised it: since issue #201
+            # a board nobody's authorisation stands behind is refused before any request goes
+            # out, so the key and the linker's grant are what make it readable at all - which
+            # is what production needs too. With writes off there is no writer either way, and
+            # what is under test is whether the board is READ.
+            settings=Settings(
+                github_webhook_secret=SecretStr(SECRET),
+                board_may_move_cards=False,
+                board_credential_key=SecretStr(BOARD_KEY),
+            ),
         )
 
         interaction = await self.run_status(container, "Ready", thread_id)
@@ -775,7 +822,7 @@ class TestWhenNobodyAuthorisedTheMove:
     ) -> None:
         nobody = FakeBoardCredentials(writes="")
 
-        with pytest.raises(WorkflowRefusedError, match="/authorise_board"):
+        with pytest.raises(WorkflowRefusedError, match="/board authorise"):
             await workflow_with(cards, authorisations=nobody).set_status(
                 thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
             )
@@ -866,3 +913,188 @@ class TestWhenNobodyAuthorisedTheMove:
         assert theirs.wrote_for == [(GUILD, MOVER), (GUILD, MOVER)], (
             "it asked for somebody else's authorisation"
         )
+
+    async def test_an_authorised_priority_is_set_as_that_person(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """WHOSE authorisation the refusal asks about, which nothing else here pins: a refusal
+        that asked about anybody else - any other number in reach - would pass every test that
+        only checks it fired."""
+        theirs = FakeBoardCredentials(writes="gho_the_mover")
+
+        await workflow_with(cards, authorisations=theirs).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+
+        assert cards.moved_as == ["gho_the_mover"]
+        assert theirs.wrote_for == [(GUILD, MOVER), (GUILD, MOVER)], (
+            "it asked for somebody else's authorisation"
+        )
+
+    async def test_a_priority_on_a_board_with_no_priority_field_needs_no_authorisation(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        """GitHub's default template ships no Priority field, and on such a board no card is ever
+        written - so asking somebody to authorise a write that cannot happen was refusing them for
+        nothing. A regression issue #201 made, and put right."""
+        cards = FakeCards()
+        cards.takes_it = False
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+
+        assert outcome.changed is True
+        assert github.label_calls != [], "the label did not land, so this proves nothing"
+        assert cards.moved == [], "a card write went out with nobody's credential behind it"
+
+    async def test_a_status_the_board_has_no_field_for_needs_no_authorisation_either(
+        self, on_a_board: None, workflow_with, thread_id: int
+    ) -> None:
+        cards = FakeCards()
+        cards.takes_it = False
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_status(
+            thread_id=thread_id, status=Status.IN_REVIEW, acting=MOVER
+        )
+
+        assert outcome.changed is True
+        assert cards.moved == []
+        assert cards.asked_takes == [Status.IN_REVIEW]
+
+    async def test_a_board_that_will_not_say_what_it_takes_still_refuses(
+        self,
+        on_a_board: None,
+        workflow_with,
+        thread_id: int,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unsure counts as yes. This member could still write to the board once they authorise -
+        their grant is not the linker's - and answering no would put back the swallowed write the
+        refusal replaced."""
+        cards = FakeCards()
+        cards.takes_error = GitHubRefusedError("nobody's authorisation stands behind board 6")
+        nobody = FakeBoardCredentials(writes="")
+
+        with (
+            caplog.at_level("WARNING", logger="shannon.services.workflow"),
+            pytest.raises(WorkflowRefusedError),
+        ):
+            await workflow_with(cards, authorisations=nobody).set_priority(
+                thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+            )
+
+        assert "to see whether it takes a priority" in caplog.text
+
+    async def test_an_authorised_mover_never_has_the_board_asked(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """Asked last, once the member turned out to have no authorisation, so somebody who has
+        one pays nothing for the question."""
+        theirs = FakeBoardCredentials(writes="gho_the_mover")
+
+        await workflow_with(cards, authorisations=theirs).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+
+        assert cards.asked_takes == []
+
+    async def test_a_priority_is_refused_before_anything_is_written(
+        self,
+        on_a_board: None,
+        workflow_with,
+        cards: FakeCards,
+        thread_id: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """Issue #201. `/priority` moves the same card `/status` does and never asked, so somebody
+        who had authorised nothing had the label written on GitHub, then the card write failed for
+        want of their credential and was logged and swallowed - and the reply said it had worked.
+        """
+        started_as = await db_session.scalar(select(TrackedItem))
+        assert started_as is not None
+        before = started_as.priority
+        nobody = FakeBoardCredentials(writes="")
+
+        with pytest.raises(WorkflowRefusedError):
+            await workflow_with(cards, authorisations=nobody).set_priority(
+                thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+            )
+
+        assert github.label_calls == [], "a refused command still wrote the label to GitHub"
+        assert cards.moved == [], "a refused command still moved the card"
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem))
+        assert item is not None and item.priority is before, (
+            "a refused command still wrote the priority down"
+        )
+
+    async def test_a_repeated_priority_is_refused_too(
+        self,
+        on_a_board: None,
+        workflow_with,
+        cards: FakeCards,
+        thread_id: int,
+        db_session: AsyncSession,
+    ) -> None:
+        """A repeat writes no label but still moves the card: it is how somebody retries a board
+        write that was swallowed. So the refusal comes before the question of whether there is
+        anything to write, or the one path that touches nothing but the board would skip it."""
+        await workflow_with(cards).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+        db_session.expire_all()
+        item = await db_session.scalar(select(TrackedItem))
+        assert item is not None and item.priority is Priority.HIGH, "there is nothing to repeat"
+        moved = len(cards.moved)
+        nobody = FakeBoardCredentials(writes="")
+
+        with pytest.raises(WorkflowRefusedError):
+            await workflow_with(cards, authorisations=nobody).set_priority(
+                thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+            )
+
+        assert cards.moved[moved:] == [], "a refused repeat still moved the card"
+
+    async def test_a_priority_on_an_item_with_no_card_needs_no_authorisation(
+        self, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+
+        assert outcome.changed is True
+
+    async def test_a_priority_with_board_writes_off_asks_nobody_to_authorise(
+        self, on_a_board: None, workflow_with, thread_id: int, github: FakeGitHubClient
+    ) -> None:
+        off = FakeCards()
+        off.may_write = False
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(off, authorisations=nobody).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=MOVER
+        )
+
+        assert outcome.changed is True
+        assert github.label_calls != [], "the label did not land, so this proves nothing"
+
+    async def test_a_priority_set_with_nobody_acting_is_not_refused(
+        self, on_a_board: None, workflow_with, cards: FakeCards, thread_id: int
+    ) -> None:
+        """`acting=None` is a caller that does not care about the board. There is no poller on this
+        half to be one - nothing polls a priority - so no command passes it, and with no member
+        there is nobody to refuse and nobody to move the card as."""
+        nobody = FakeBoardCredentials(writes="")
+
+        outcome = await workflow_with(cards, authorisations=nobody).set_priority(
+            thread_id=thread_id, priority=Priority.HIGH, acting=None
+        )
+
+        assert outcome.changed is True
+        assert cards.moved == [], "it moved a card with nobody to move it as"
