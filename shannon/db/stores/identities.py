@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.base import interval, rows_changed
 from shannon.db.models import IdentityVerification, VerifiedIdentity
+from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 
 
@@ -33,10 +34,14 @@ class SpentLink:
     guild_id: int
     discord_user_id: int
     purpose: VerificationPurpose
+    # The board a board link was handed out to link, or None to authorise only - which is every
+    # other purpose, and every link that named no board. Issue #201. A default, so a link that
+    # carries none reads exactly as it did before there was anything to carry.
+    board: ChosenBoard | None = None
 
 
 class IdentityVerificationStore:
-    """The one-time links the two commands that need one hand out, and the single use of each."""
+    """The one-time links the commands that need one hand out, and the single use of each."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -49,6 +54,7 @@ class IdentityVerificationStore:
         discord_user_id: int,
         purpose: VerificationPurpose,
         lifetime: timedelta,
+        board: ChosenBoard | None = None,
     ) -> None:
         """Hand out a link that expires a fixed time from now.
 
@@ -58,6 +64,9 @@ class IdentityVerificationStore:
         The purpose is written now because it cannot be worked out later: the callback is a
         browser arriving with nothing but the state, and what it should say next depends on which
         command sent the person away.
+
+        The board is written now for the same reason, where a board link was handed out to link
+        one. Issue #201. Here rather than in the URL, so nobody can change it on the way.
         """
         await self._session.execute(
             pg_insert(IdentityVerification).values(
@@ -66,6 +75,10 @@ class IdentityVerificationStore:
                 discord_user_id=discord_user_id,
                 purpose=purpose,
                 expires_at=func.now() + interval(lifetime),
+                board_number=board.number if board else None,
+                # A blank owner is "nobody named one", which the column spells as null, the way
+                # `repositories.project_owner` spells the same absence.
+                board_owner=(board.owner or None) if board else None,
             )
         )
 
@@ -89,12 +102,20 @@ class IdentityVerificationStore:
                 IdentityVerification.discord_guild_id,
                 IdentityVerification.discord_user_id,
                 IdentityVerification.purpose,
+                IdentityVerification.board_number,
+                IdentityVerification.board_owner,
             )
         )
         found = spent.first()
         if found is None:
             return None
-        return SpentLink(guild_id=found[0], discord_user_id=found[1], purpose=found[2])
+        return SpentLink(
+            guild_id=found[0],
+            discord_user_id=found[1],
+            purpose=found[2],
+            # A null owner back to the blank `ChosenBoard` uses for "nobody named one".
+            board=None if found[3] is None else ChosenBoard(number=found[3], owner=found[4] or ""),
+        )
 
     async def prune(self, *, keep_for: timedelta) -> int:
         """Drop links that are long past being usable."""

@@ -69,6 +69,7 @@ from shannon.runtime.lifespan import (
     RunsDeliveries,
 )
 from shannon.runtime.liveness import ProcessLiveness
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -115,7 +116,11 @@ from shannon.services.unregistration import (
     ReadsPermissions,
     RepositoryUnregistrationService,
 )
-from shannon.services.verification import BindsProvedAccounts, GitHubIdentityVerification
+from shannon.services.verification import (
+    BindsProvedAccounts,
+    GitHubIdentityVerification,
+    KeepsBoardAuthorisations,
+)
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.boards import FakeBoard
 from tests.fakes.github import FakeGitHubClient
@@ -191,6 +196,9 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (SaysThings, FakeGitHubClient),
     (SaysThings, HttpGitHubClient),
     (BindsProvedAccounts, UserLinkingService),
+    # Missing until issue #201 gave it a second member. `usable` is read before anybody is sent to
+    # GitHub, and an implementation without it would fail only once somebody tried.
+    (KeepsBoardAuthorisations, BoardCredentials),
     (ProvesIdentity, GitHubIdentityVerification),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),

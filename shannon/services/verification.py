@@ -34,11 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.identities import (
     IdentityVerificationStore,
     ProvedAccount,
+    SpentLink,
     VerifiedIdentityStore,
 )
+from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
 from shannon.github.responses import json_object
+from shannon.services.boards import BoardLink
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,11 @@ NO_APPLICATION = OAuthClient(client_id="", client_secret="")
 # Deliberately NOT a setting. Lowered, the board goes read-only and the failure appears somewhere
 # else entirely, as a card that will not move; raised, it is a footgun with nothing asking for it.
 # Least privilege here means least privilege for what the feature does, which is one fixed answer.
+#
+# Asked for is not granted. GitHub lets a person grant less than was asked and issues the token
+# anyway, so `_exchange` holds what came back against this and keeps nothing short of it. Issue
+# #201: until then a short grant was kept, and found out later as a board that would not open or
+# a card that would not move.
 BOARD_SCOPE = "project"
 
 
@@ -123,7 +131,14 @@ class KeepsBoardAuthorisations(Protocol):
     Answers whether it was kept. A deployment with no encryption key cannot keep one, and the
     caller has just sent somebody through a browser - so it has to be able to say the trip was
     wasted rather than report a success that stored nothing.
+
+    And says beforehand whether it could, which is the better place to find out. `usable` is read
+    before anybody is offered the trip at all; the answer from `remember` is for a key that went
+    away between the link being handed out and being followed.
     """
+
+    @property
+    def usable(self) -> bool: ...
 
     async def remember(
         self,
@@ -134,6 +149,37 @@ class KeepsBoardAuthorisations(Protocol):
         github_user_id: int,
         token: str,
     ) -> bool: ...
+
+
+class LinksTheBoardChosen(Protocol):
+    """Linking the board a one-click link was issued for, as the member who followed it.
+
+    Declared here because this is where it is consumed, the pattern `BindsProvedAccounts` above
+    sets: following a LINK link is what binds somebody, and since issue #201 following a BOARD link
+    that carries a board is what links it.
+    """
+
+    async def assign(
+        self, *, guild_id: int, project_number: int, typed_owner: str, acting: int
+    ) -> BoardLink: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BoardLinked:
+    """The board a one-click link carried, mirrored now."""
+
+    link: BoardLink
+
+
+@dataclass(frozen=True, slots=True)
+class BoardNotLinked:
+    """The board a one-click link carried, and why it is not mirrored.
+
+    The authorisation was kept all the same. The reason is a sentence for a person in a browser,
+    or empty where it is nothing they could act on - the log has that one.
+    """
+
+    reason: str
 
 
 class VerificationError(ShannonError):
@@ -153,6 +199,9 @@ class Verified:
     login: str
     github_user_id: int
     purpose: VerificationPurpose
+    # What became of the board a BOARD link carried, and None for any link that carried none -
+    # which is every identity link and every `/board authorise`. Issue #201.
+    board: BoardLinked | BoardNotLinked | None = None
 
 
 class GitHubIdentityVerification:
@@ -164,6 +213,7 @@ class GitHubIdentityVerification:
         links: BindsProvedAccounts,
         boards: KeepsBoardAuthorisations,
         *,
+        board_links: LinksTheBoardChosen,
         client_id: str,
         client_secret: str,
         oauth_url: str,
@@ -175,6 +225,7 @@ class GitHubIdentityVerification:
         self._sessionmaker = sessionmaker
         self._links = links
         self._boards = boards
+        self._board_links = board_links
         # The App, for the three purposes that only need to know who somebody is. Kept as loose
         # arguments rather than folded into an `OAuthClient` so that every existing caller and
         # every existing fake reads exactly as it did; what is new here is the second client.
@@ -197,12 +248,18 @@ class GitHubIdentityVerification:
 
     @property
     def can_authorise_a_board(self) -> bool:
-        """Whether this deployment can run the BOARD round trip.
+        """Whether this deployment can run the BOARD round trip, and keep what it grants.
 
         Its own property rather than an argument to `configured`, for the reason above: the two
         applications are registered separately and either can be missing on its own.
+
+        The key is part of the question, because a board's authorisation is the one that has to
+        be kept. Without `SHANNON_BOARD_CREDENTIAL_KEY` the round trip runs perfectly well and then
+        cannot store its answer, so somebody would be sent to GitHub to grant something that is
+        thrown away, and told so only once they were back. Issue #201. Asking first means the
+        command refuses before the trip rather than after it.
         """
-        return bool(self._board.configured and self._public_base_url)
+        return bool(self._board.configured and self._public_base_url and self._boards.usable)
 
     def _client_for(self, purpose: VerificationPurpose) -> OAuthClient:
         """Which application a purpose runs against.
@@ -244,7 +301,12 @@ class GitHubIdentityVerification:
             )
 
     async def link_for(
-        self, *, guild_id: int, discord_user_id: int, purpose: VerificationPurpose
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: int,
+        purpose: VerificationPurpose,
+        board: ChosenBoard | None = None,
     ) -> str:
         """A one-time authorize URL for this person in this server.
 
@@ -258,6 +320,12 @@ class GitHubIdentityVerification:
         keep: whoever opens it is recorded as `discord_user_id`, so every caller passes the id of
         the person in front of it and never one taken from an argument. Handing somebody a link
         issued for another member is handing them that member's identity.
+
+        `board` is the board a board link is handed out to link, where it is handed out for one.
+        Issue #201: one link both authorises and links, so the choice has to survive the trip to
+        GitHub and back. It is written on the row beside the purpose and never into the URL, which
+        is the same with or without one: the state stays the only thing in the link, and nobody
+        can change the board on the way.
         """
         client = self._client_for(purpose)
         state = secrets.token_urlsafe(STATE_BYTES)
@@ -268,6 +336,7 @@ class GitHubIdentityVerification:
                 discord_user_id=discord_user_id,
                 purpose=purpose,
                 lifetime=LINK_LIFETIME,
+                board=board,
             )
 
         # Appended rather than sent empty, and as a one-line conditional so the coverage floor has
@@ -338,24 +407,29 @@ class GitHubIdentityVerification:
                 github_user_id=github_user_id,
             )
 
-        if spent.purpose is VerificationPurpose.BOARD and not await self._boards.remember(
-            guild_id=spent.guild_id,
-            discord_user_id=spent.discord_user_id,
-            github_login=login,
-            github_user_id=github_user_id,
-            token=token,
-        ):
-            # The one purpose that can be granted and still fail, and it must say so. Everybody
-            # else's token is finished with by here; a board's IS the thing being granted, so a
-            # deployment that cannot keep it has sent somebody to GitHub for nothing - and worse,
-            # left a real authorisation standing on their account with nothing here using it.
-            # The message says that, because "it worked" would be a lie they could not check.
-            raise VerificationError(
-                "You authorised this, but this bot could not keep the authorisation, so the board "
-                "will not be read. Nothing is wrong on your side - an admin needs to set "
-                "SHANNON_BOARD_CREDENTIAL_KEY. You can withdraw the authorisation under "
-                "Applications in your GitHub settings in the meantime."
-            )
+        board: BoardLinked | BoardNotLinked | None = None
+        if spent.purpose is VerificationPurpose.BOARD:
+            if not await self._boards.remember(
+                guild_id=spent.guild_id,
+                discord_user_id=spent.discord_user_id,
+                github_login=login,
+                github_user_id=github_user_id,
+                token=token,
+            ):
+                # The one purpose that can be granted and still fail, and it must say so. Everybody
+                # else's token is finished with by here; a board's IS the thing being granted, so a
+                # deployment that cannot keep it has sent somebody to GitHub for nothing - and
+                # worse, left a real authorisation standing on their account with nothing here
+                # using it. The message says that, because "it worked" would be a lie they could
+                # not check.
+                raise VerificationError(
+                    "You authorised this, but this bot could not keep the authorisation, so the "
+                    "board will not be read. Nothing is wrong on your side - an admin needs to set "
+                    "SHANNON_BOARD_CREDENTIAL_KEY. You can withdraw the authorisation under "
+                    "Applications in your GitHub settings in the meantime."
+                )
+            # After the authorisation is kept and never before: linking opens the board WITH it.
+            board = await self._link_what_was_chosen(spent)
 
         logger.info("discord:%s proved they are github:%s", spent.discord_user_id, login)
         return Verified(
@@ -364,7 +438,46 @@ class GitHubIdentityVerification:
             login=login,
             github_user_id=github_user_id,
             purpose=spent.purpose,
+            board=board,
         )
+
+    async def _link_what_was_chosen(self, spent: SpentLink) -> BoardLinked | BoardNotLinked | None:
+        """Point the server at the board a one-click link was issued for, as the member it names.
+
+        Issue #201. `/board link` used to be refused without an authorisation and the person sent
+        off to a second command, to GitHub, and back to run the first one again. Now the link it
+        hands out remembers the board, and this is where following it finishes the job - the shape
+        `/link` already had, where clicking the link is the whole of it.
+
+        As `spent.discord_user_id` and nobody else: the member the row was issued for, which the
+        command only ever sets to whoever ran it. The board comes off the same row, which never
+        left the database, so nothing on the way to GitHub and back could have changed it.
+
+        A refusal is an answer rather than a failure. The person did authorise, and that stands -
+        it is what their cards are moved with and what the next `/board link` opens the board
+        with - so the page says what happened to the board and the grant is kept. Anything else is
+        logged and folded into the same answer: the state is spent and the grant is kept, so a
+        server error here would be shown to somebody whose sign-in worked.
+        """
+        if spent.board is None:
+            return None
+        try:
+            linked = await self._board_links.assign(
+                guild_id=spent.guild_id,
+                project_number=spent.board.number,
+                typed_owner=spent.board.owner,
+                acting=spent.discord_user_id,
+            )
+        except ShannonError as refusal:
+            return BoardNotLinked(reason=refusal.message)
+        except Exception:
+            logger.exception(
+                "discord:%s authorised a board in guild %s, and linking it then failed",
+                spent.discord_user_id,
+                spent.guild_id,
+            )
+            return BoardNotLinked(reason="")
+        return BoardLinked(link=linked)
 
     async def prune(self, *, keep_for: timedelta) -> int:
         """Drop links long past being followable, answering how many went.
@@ -377,10 +490,17 @@ class GitHubIdentityVerification:
             return await IdentityVerificationStore(session).prune(keep_for=keep_for)
 
     async def _exchange(self, code: str, client: OAuthClient) -> str:
-        """Trade the code for a user token.
+        """Trade the code for a user token, refusing one granted less than was asked for.
 
         GitHub answers 200 with an error in the body for a bad code rather than a 4xx, so
         checking the status alone reads a refusal as a success.
+
+        Nor is a token proof of the scope it was asked for. GitHub documents that a person can
+        grant less than was requested, and the answer then carries a token all the same, with what
+        was really granted in `scope`. Issue #201. Every scope the client asked for has to be in
+        it or nothing is kept, because a board token short of `project` would otherwise be stored
+        and fail later, a long way from the one person who could fix it. Identity asks for
+        nothing, so it can never be refused by this, and there is no purpose to look at.
 
         The token is still not kept HERE. Three of the four purposes are finished by knowing a
         name and the token is dropped on the way out of `redeem`; a board authorisation is the one
@@ -404,6 +524,27 @@ class GitHubIdentityVerification:
             logger.warning("the oauth exchange failed: %s", payload.get("error") or "no token")
             raise VerificationError(
                 "GitHub would not complete the sign-in. Try the command in Discord again."
+            )
+
+        # Comma-separated, and anything that is not a string reads as nothing granted rather than
+        # as something guessed at. One-line conditionals, so the coverage floor has only the
+        # refusal itself to ask about.
+        scope = payload.get("scope")
+        granted: set[str] = (
+            {one.strip() for one in scope.split(",")} if isinstance(scope, str) else set()
+        )
+        missing = {one.strip() for one in client.scope.split(",") if one.strip()} - granted
+        if missing:
+            # What is missing and nothing else. The token and the code are both credentials, and
+            # a log line is the one place either could come to rest.
+            logger.warning(
+                "the oauth exchange came back without %s, so nothing was kept",
+                ", ".join(sorted(missing)),
+            )
+            raise VerificationError(
+                "GitHub granted less access than this bot asked for, so nothing was kept. Reading "
+                "a board and moving its cards needs access to your projects. Run the command in "
+                "Discord again and allow what GitHub asks for."
             )
         return token
 

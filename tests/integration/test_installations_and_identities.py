@@ -26,6 +26,7 @@ from shannon.db.stores.identities import (
     VerifiedIdentityStore,
 )
 from shannon.db.stores.installations import InstallationStore
+from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from tests.support.db import blocked_on_a_row
 
@@ -560,3 +561,89 @@ class TestWhichCommandAskedForIt:
 
         assert first is not None and first.purpose is VerificationPurpose.UNREGISTER
         assert second is not None and second.purpose is VerificationPurpose.LINK
+
+
+class TestWhichBoardALinkWasFor:
+    """Issue #201. One link both authorises and links a board, so the board somebody chose has to
+    come back out of the row the browser lands on. The URL carries nothing but the state, so the
+    row is the only place it can come from - the same position the purpose above is in."""
+
+    async def test_the_board_chosen_survives_the_round_trip(self, db_session: AsyncSession) -> None:
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LIVE,
+            board=ChosenBoard(number=6, owner="acme"),
+        )
+
+        assert await store.consume("s1") == SpentLink(
+            GUILD, ALICE, VerificationPurpose.BOARD, ChosenBoard(number=6, owner="acme")
+        )
+
+    async def test_an_owner_nobody_named_is_null_on_the_row_and_blank_again_after(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Every entry the picker offers is a bare number. Null in the column, which is how
+        `repositories.project_owner` spells the same absence, and blank on the way out, which is
+        how `ChosenBoard` does - so an empty string is never a third spelling of it."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LIVE,
+            board=ChosenBoard(number=6),
+        )
+
+        row = await db_session.scalar(
+            select(IdentityVerification).where(IdentityVerification.state == "s1")
+        )
+        assert row is not None
+        assert (row.board_number, row.board_owner) == (6, None)
+        spent = await store.consume("s1")
+        assert spent is not None
+        assert spent.board == ChosenBoard(number=6, owner="")
+
+    async def test_a_link_that_names_no_board_only_authorises(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Null for both, which is what every link handed out before the columns existed says, and
+        what every identity link still says."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LIVE,
+        )
+
+        spent = await store.consume("s1")
+        assert spent is not None
+        assert spent.board is None
+
+    async def test_two_links_for_one_person_keep_their_own_boards(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The board belongs to the link rather than to the person. Somebody who asked for two
+        boards and then follows the older link links the board that link was handed out for."""
+        store = IdentityVerificationStore(db_session)
+        for state, number in (("first", 6), ("second", 7)):
+            await store.issue(
+                state=state,
+                guild_id=GUILD,
+                discord_user_id=ALICE,
+                purpose=VerificationPurpose.BOARD,
+                lifetime=LIVE,
+                board=ChosenBoard(number=number),
+            )
+
+        first = await store.consume("first")
+        second = await store.consume("second")
+
+        assert first is not None and first.board == ChosenBoard(number=6)
+        assert second is not None and second.board == ChosenBoard(number=7)

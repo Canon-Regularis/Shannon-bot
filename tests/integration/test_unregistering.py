@@ -35,6 +35,7 @@ from shannon.services.verification import (
     GitHubIdentityVerification,
     VerificationError,
 )
+from tests.fakes.board_links import NoBoardLinks
 from tests.support.credentials import BOARD_KEY
 
 pytestmark = pytest.mark.integration
@@ -119,6 +120,7 @@ async def verifying(
             sessionmaker,
             links or RecordingLinks(),
             BoardCredentials(sessionmaker, keys=BOARD_KEY),
+            board_links=NoBoardLinks(),
             client_id="Iv23liAbC",
             client_secret=client_secret,
             oauth_url="https://github.com",

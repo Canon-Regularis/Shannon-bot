@@ -389,7 +389,7 @@ class BoardAuthorization(TimestampMixin, Base):
 
     Keying on the owner instead was the first design and it was wrong in a way worth recording.
     A token granted by account X does read any board X owns, so it looks sound; but
-    `linked_to_board` only refuses two repositories sharing the SAME board, so two servers may
+    `mirroring` only refuses two repositories sharing the SAME board, so two servers may
     link two DIFFERENT boards both owned by X. Keyed on X, one server's board would then be read
     under the other server's member's credential - a credential used across a tenancy boundary,
     which is the exact thing this table exists to prevent.
@@ -465,13 +465,15 @@ class GitHubInstallation(TimestampMixin, Base):
 class IdentityVerification(TimestampMixin, Base):
     """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
 
-    Two commands hand these out and they are finished differently, which is what `purpose` is
+    Several commands hand these out and they are finished differently, which is what `purpose` is
     for: `/link` is done the moment the link is followed, and `/unregister` destroys a binding
     and everything mirrored under it, so it waits to be run again where there is somebody to
-    report the answer to. Rows here outlive the
-    unbinding they authorised: this table is keyed by guild, not by repository. The callback GitHub
-    redirects to is unauthenticated, so `state` is CSRF token and session identifier at once.
-    Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the database.
+    report the answer to. A board link can also carry the board somebody chose, for the same
+    reason the purpose is here: the callback has nothing else to read it from. Rows here outlive
+    the unbinding they authorised: this table is keyed by guild, not by repository. The callback
+    GitHub redirects to is unauthenticated, so `state` is CSRF token and session identifier at
+    once. Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the
+    database.
     """
 
     __tablename__ = "identity_verifications"
@@ -494,6 +496,13 @@ class IdentityVerification(TimestampMixin, Base):
         nullable=False,
         server_default=text("'LINK'"),
     )
+    # The board a board link was handed out to link, so that following it can link as well as
+    # authorise. Issue #201. On the row and never in the URL: the state stays the only thing in
+    # the link, and nobody can edit the board on its way to GitHub and back. Null means authorise
+    # only, which every other purpose is and every row written before the column was. The owner
+    # is null where nobody named one, as `Repository.project_owner` is.
+    board_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    board_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

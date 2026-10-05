@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from shannon.domain.enums import Status
 
@@ -138,3 +139,22 @@ def board_owner(*, project_owner: str | None, repo_name: str) -> str:
     upward.
     """
     return project_owner or repo_name.partition("/")[0]
+
+
+@dataclass(frozen=True, slots=True)
+class ChosenBoard:
+    """A board somebody named, and the owner where they named one.
+
+    The owner is empty for a bare number, which is every entry the picker offers: those are
+    already listed under an owner, so repeating it would be the command telling the service
+    something the service just told it. Empty rather than a guess, because `board_owner` above is
+    the one place an absent owner is resolved.
+
+    Here rather than beside the command that parses it, because since issue #201 the choice
+    outlives the command. A board link that has to send somebody to GitHub first writes the board
+    they chose onto the pending verification row, and the callback reads it back from there - so
+    `db` and `services` both hold one, and neither may import from `commands`.
+    """
+
+    number: int
+    owner: str = ""
