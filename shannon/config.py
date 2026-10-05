@@ -98,23 +98,17 @@ class Settings(BaseSettings):
     # Run the poller in ONE replica. Nothing elects a leader, so two pollers racing on one card
     # can each put its row back and undo the other's finished move, permanently. This is the
     # switch that says which replica - a job the number below used to do, badly and now not at
-    # all: a board is linked by /set_board, so a second replica would start polling the moment
+    # all: a board is linked by /board link, so a second replica would start polling the moment
     # somebody ran the command, with no environment change anywhere to notice.
     poll_boards: bool = True
 
-    # A DEFAULT board, for a deployment that has not run /set_board yet. Not "the" board any
-    # more: a board belongs to a repository and is recorded on its row, which is what lets two
-    # servers each mirror their own. Zero means none.
-    #
-    # These two stop applying anywhere the moment ANY repository carries a board of its own.
-    # Half-honouring them would poll one server out of the database and another out of the
-    # environment with nothing saying which was which.
+    # A board named in the environment rather than linked, which NOTHING READS ANY MORE. Since
+    # issue #170 a board is read under the authorisation of whoever linked it, and a board named
+    # here has nobody recorded against it, so it cannot be opened; the container says so at
+    # boot. Kept so an existing .env still starts, and slated for removal. Run /board link.
     github_project_number: int = Field(default=0, ge=0)
-    # Who owns that default board, where it is not the registered repository's own owner. Empty
-    # means it is. Worth a setting rather than an assumption because the number above is a
-    # sequence GitHub keeps per account: the wrong owner does not reliably answer 404, it can
-    # answer with a real board belonging to somebody else, and its cards would be mirrored in
-    # here as if they were this repository's work.
+    # Who owns that board, read no more than the number above is. `/board link`'s owner option
+    # is where an owner is named now.
     github_project_owner: str = ""
     # How often a linked board is read. Two seconds, matching the delivery worker, and that
     # parity is the point: a ticket and an issue now reach Discord on the same clock, where a
@@ -135,14 +129,16 @@ class Settings(BaseSettings):
     # commands ask. A draft card is unaffected either way - its status is its column.
     board_may_set_status: bool = False
     # Whether a status set HERE may drag the card on the board, which is the mirror of the
-    # line above. ON: a server that has run `/set_board` has asked for its board to be the
+    # line above. ON: a server that has run `/board link` has asked for its board to be the
     # truth, and a `/status` that writes the label and leaves the card where it was does half
     # the job silently (issue #179).
     #
-    # It needs a token that may WRITE - Projects: Read and write for an organisation's board,
-    # a classic `project` token for a personal one. A read-only token answers 403, which is
-    # logged and swallowed: the label, the row and the thread have all already landed by then,
-    # so reporting a failure would be reporting one that did not happen.
+    # The card is written as whoever moved it, with the `project` scope they granted through
+    # `/board authorise` or `/board link`, which the sign-in checks GitHub actually granted.
+    # Somebody who has granted nothing is refused by `/status` and `/priority` before anything
+    # is written. A write GitHub refuses anyway is logged and swallowed: the label, the row and
+    # the thread have all landed by then, so reporting a failure would report one that did not
+    # happen.
     #
     # Turning this OFF stops the card being written and nothing else. It used to withhold the
     # whole board reader, which also took away the rule that refuses a move the board's own

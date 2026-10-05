@@ -75,8 +75,9 @@ class TestClosingTheContainer:
 
     async def test_everything_else_opened_here_is_closed_too(self) -> None:
         """Not just `github`. The App's own client signs with a JWT rather than an installation
-        token, so it is a second client, and the board keeps a third when it has its own token.
-        Both were built in the wiring, reachable from nowhere else, and closed by nothing."""
+        token, so it is a second client, and the board's writer is a third, built in every
+        deployment whether or not card writes are on. Both were built in the wiring, reachable
+        from nowhere else, and closed by nothing."""
         container = container_with(DisposableEngine(), FakeGitHubClient())
         opened = _Closeable()
         container.also_opened = (*container.also_opened, opened)
@@ -105,7 +106,7 @@ class TestWhatItWiresUp:
 
         assert sorted(command.name for command in container.commands) == [
             "assign",
-            "authorise_board",
+            "board",
             "issue",
             "label",
             "link",
@@ -118,7 +119,6 @@ class TestWhatItWiresUp:
             "regenerate",
             "register",
             "request_review",
-            "set_board",
             "set_channel",
             "status",
             "stop_conversation",
@@ -268,8 +268,8 @@ class TestWhatTurningOffCardWritesTurnsOff:
         return container.poller._projects  # type: ignore[attr-defined]
 
     async def test_with_writes_off_the_board_has_no_writer(self) -> None:
-        """ "Off" as a fact of the wiring rather than a check somebody could forget, which is the
-        same way having no project token at all turns it off."""
+        """ "Off" as a fact of the wiring rather than a check somebody could forget: the flag is
+        the only thing that withholds the writer."""
         board = self.board_of(self.a_container(may_move=False))
 
         assert board._writer is None
@@ -307,8 +307,8 @@ class TestABoardWithNoTokenToReadItWith:
     is silent and looks like something else: a board that will not open reads exactly like a wrong
     number. So each direction is said once, loudly, at startup.
 
-    What this replaced was keyed to SHANNON_GITHUB_PROJECT_NUMBER, which `/set_board` had already
-    made obsolete - so a deployment that linked its boards with the command got no check at all.
+    What this replaced was keyed to SHANNON_GITHUB_PROJECT_NUMBER, which linking a board by
+    command had already made obsolete - so a deployment that did that got no check at all.
     This one is keyed to the settings themselves, which is the part a container can actually see:
     it has no event loop and no connection, so it cannot ask the database whether a board is
     linked. A board nobody authorised finds out on the poll path, per board, once.
@@ -358,4 +358,29 @@ class TestABoardWithNoTokenToReadItWith:
             container_with(DisposableEngine(), FakeGitHubClient())
 
         assert "SHANNON_BOARD_CREDENTIAL_KEY" not in caplog.text
+
+    def test_a_board_named_in_the_environment_is_said_to_be_unreadable(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue #201. Since #170 a board is read under the authorisation of whoever linked it,
+        and one named only in the environment has nobody recorded against it - so it can never
+        be opened, and the deployment that set it would otherwise find out as a board that
+        silently never mirrors."""
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(github_webhook_secret="x", github_project_number=6),
+            )
+
+        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
+        assert "/board link" in caplog.text
+
+    def test_no_board_in_the_environment_says_nothing_about_one(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            container_with(DisposableEngine(), FakeGitHubClient())
+
+        assert "SHANNON_GITHUB_PROJECT_NUMBER" not in caplog.text
         assert "SHANNON_GITHUB_BOARD_CLIENT_ID" not in caplog.text

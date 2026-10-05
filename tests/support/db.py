@@ -73,7 +73,7 @@ async def link_board(
     project_number: int = PROJECT,
     project_owner: str | None = None,
 ) -> None:
-    """The state /set_board leaves behind.
+    """The state /board link leaves behind.
 
     `project_owner` stays null by default, which is not laziness: null means "this repository's own
     owner", and writing today's answer into the row instead would survive a rename. Both the poller

@@ -101,11 +101,11 @@ class TestWhatItSays:
 
         assert f"Mirrored 3 open items from {FULL_NAME}" in interaction.said
         assert "No board is linked to this server, so tickets were not covered." in interaction.said
-        assert "/set_board" in interaction.said
+        assert "/board link" in interaction.said
 
     async def test_no_ticket_channel_says_which_command_maps_one(self) -> None:
         """A different command to run, which is why this is not one flag with one sentence: a board
-        is linked, so `/set_board` would be the wrong advice."""
+        is linked, so `/board link` would be the wrong advice."""
         service = StubRefresh(
             outcome=an_outcome(mirrored=1, tickets_missed=MissedTickets.NO_CHANNEL)
         )
@@ -113,17 +113,19 @@ class TestWhatItSays:
         interaction = await run(service)
 
         assert "/set_channel" in interaction.said
-        assert "/set_board" not in interaction.said
+        assert "/board" not in interaction.said
 
-    async def test_a_board_that_would_not_read_sends_somebody_to_the_log(self) -> None:
-        """No command to run, because the cause is a credential rather than a setting, and this
-        reply cannot tell a 404 from a 403 from a spent quota - the log can."""
+    async def test_a_board_that_would_not_read_says_where_to_find_out_why(self) -> None:
+        """`/board show` for whose authorisation it is read with, which is the commonest cause,
+        and the log for the rest: this reply cannot tell a 404 from a 403 from a spent quota.
+        No command to run, because nothing here can be run to fix it from the reply."""
         service = StubRefresh(outcome=an_outcome(tickets_missed=MissedTickets.UNREADABLE))
 
         interaction = await run(service)
 
         assert "The board could not be read, so tickets were not covered." in interaction.said
-        assert "/set_" not in interaction.said
+        assert "/board show" in interaction.said
+        assert "Run /" not in interaction.said
 
     async def test_the_note_is_said_even_when_there_was_nothing_to_mirror(self) -> None:
         """The case that made this a wrapper rather than one more clause.
@@ -138,7 +140,7 @@ class TestWhatItSays:
         interaction = await run(service)
 
         assert "has no open items right now" in interaction.said
-        assert "/set_board" in interaction.said
+        assert "/board link" in interaction.said
 
     async def test_nothing_is_added_when_tickets_were_covered(self) -> None:
         """The other arm. A run with nothing to report about tickets must say nothing about them,

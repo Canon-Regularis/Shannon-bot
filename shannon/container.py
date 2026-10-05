@@ -8,7 +8,7 @@ from typing import Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.commands.authorise_board import build_authorise_board_command
+from shannon.commands.board import build_board_command
 from shannon.commands.conversations import (
     build_log_conversation_command,
     build_stop_conversation_command,
@@ -26,7 +26,6 @@ from shannon.commands.people import (
 from shannon.commands.refresh import build_refresh_command
 from shannon.commands.regenerate import build_regenerate_command
 from shannon.commands.register import build_register_command
-from shannon.commands.set_board import build_set_board_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.unregister import build_unregister_command
@@ -56,7 +55,7 @@ from shannon.discord_bot.formatting import (
 )
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
-from shannon.discord_bot.slash import SlashCommand
+from shannon.discord_bot.slash import Installable
 from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import ItemNote
@@ -157,11 +156,11 @@ class Container:
     # and stop the task that publishes what it holds. Issue #103.
     conversations: ConversationLog
     flusher: TranscriptFlusher
-    commands: tuple[SlashCommand, ...]
+    commands: tuple[Installable, ...]
     # Opened in `build_container` and reachable from nowhere else, so this is the only
-    # thing that can close them: the App's own HTTP client, and the board's client when
-    # the board has a token of its own. Kept apart from `github` because that one may be
-    # a fake with nothing to close.
+    # thing that can close them: the App's own HTTP client, and the board's write client,
+    # which is built whether or not card writes are on and carries no credential of its own.
+    # Kept apart from `github` because that one may be a fake with nothing to close.
     also_opened: tuple[Closes, ...]
     # Held so the OAuth callback route can reach it. The route is the one place in this project
     # that is entered from outside rather than called, so it reads its collaborator off app state
@@ -700,7 +699,7 @@ def _commands(
     access: GitHubAccess,
     *,
     capturing: bool,
-) -> tuple[SlashCommand, ...]:
+) -> tuple[Installable, ...]:
     """Every slash command the bot installs.
 
     A command missing from here is one that silently stops existing in Discord, so the tuple is
@@ -718,8 +717,10 @@ def _commands(
         build_set_channel_command(
             ChannelMappingService(sessionmaker, channel_fallbacks()), relocation, gate
         ),
-        build_set_board_command(boards, gate),
-        build_authorise_board_command(verification, board_credentials),
+        # One command for a board, with five halves, since issue #201. It is gated on all but one
+        # of them - withdrawing your own authorisation takes no tier - so it keeps its `gate`, and
+        # `/mentions` below is again the only command with none.
+        build_board_command(boards, verification, board_credentials, gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
@@ -801,33 +802,6 @@ def build_container(
     board_credentials = BoardCredentials(
         sessionmaker, keys=settings.board_credential_key.get_secret_value()
     )
-    verification = GitHubIdentityVerification(
-        sessionmaker,
-        links,
-        board_credentials,
-        client_id=settings.github_app_client_id,
-        client_secret=settings.github_app_client_secret.get_secret_value(),
-        oauth_url=settings.github_oauth_url,
-        public_base_url=settings.public_base_url,
-        http=app_http,
-        # The second application, and the only one that asks for a scope. A deployment that has
-        # registered no OAuth App gets `NO_APPLICATION` here, which makes `can_authorise_a_board`
-        # false and the command refuse - rather than a link to an application that does not exist.
-        board=OAuthClient(
-            client_id=settings.github_board_client_id,
-            client_secret=settings.github_board_client_secret.get_secret_value(),
-            scope=BOARD_SCOPE,
-        ),
-    )
-
-    pr_sync, issue_sync = _sync_services(sessionmaker, threads)
-    queue = WebhookDeliveryQueue(sessionmaker)
-    event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
-    # Built here rather than inside `_commands`, because three things hold it: the two commands,
-    # the gateway listener that fills it with what people say, and the process that has to load
-    # its set before the gateway connects.
-    conversations = ConversationLog(sessionmaker, threads)
-
     # A board needs no client of its own any more. Issue #170: every board call now carries the
     # authorisation of a particular person - the linker's for a read, the mover's for a write - and
     # an explicit credential wins over whatever the client would have attached. So the ordinary App
@@ -846,6 +820,16 @@ def build_container(
             "SHANNON_GITHUB_BOARD_CLIENT_ID is set and SHANNON_BOARD_CREDENTIAL_KEY is not, so a "
             "board authorisation cannot be kept and every board will read as unauthorised. "
             "Generate a key and restart."
+        )
+    if settings.github_project_number:
+        # Since issue #170 a board is read under the authorisation of whoever linked it, and a
+        # board named only in the environment has nobody recorded against it - so it can never
+        # be opened. Said once here rather than discovered as a board that silently never
+        # mirrors. Issue #201.
+        logger.error(
+            "SHANNON_GITHUB_PROJECT_NUMBER is set, and a board named only in the environment "
+            "cannot be read: a board is read under the authorisation of whoever linked it. Run "
+            "/board link in the server it belongs to, then remove the setting."
         )
     if settings.board_credential_key.get_secret_value() and not settings.github_board_client_id:
         logger.error(
@@ -884,6 +868,41 @@ def build_container(
         board_credentials,
         writer=board_writer if settings.board_may_move_cards else None,
     )
+
+    # One linking service for the command and for the OAuth callback. Issue #201: following a board
+    # link is what links the board now, in the same way that following a LINK link is what writes a
+    # `user_links` row - so the service that spends the link needs it, and it is built first. One
+    # instance rather than two, so the picker's memory is the one the command sees.
+    board_linking = BoardLinkingService(
+        sessionmaker, boards, OwnerBoards(boards, board_credentials), board_credentials
+    )
+    verification = GitHubIdentityVerification(
+        sessionmaker,
+        links,
+        board_credentials,
+        board_links=board_linking,
+        client_id=settings.github_app_client_id,
+        client_secret=settings.github_app_client_secret.get_secret_value(),
+        oauth_url=settings.github_oauth_url,
+        public_base_url=settings.public_base_url,
+        http=app_http,
+        # The second application, and the only one that asks for a scope. A deployment that has
+        # registered no OAuth App gets `NO_APPLICATION` here, which makes `can_authorise_a_board`
+        # false and the command refuse - rather than a link to an application that does not exist.
+        board=OAuthClient(
+            client_id=settings.github_board_client_id,
+            client_secret=settings.github_board_client_secret.get_secret_value(),
+            scope=BOARD_SCOPE,
+        ),
+    )
+
+    pr_sync, issue_sync = _sync_services(sessionmaker, threads)
+    queue = WebhookDeliveryQueue(sessionmaker)
+    event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
+    # Built here rather than inside `_commands`, because three things hold it: the two commands,
+    # the gateway listener that fills it with what people say, and the process that has to load
+    # its set before the gateway connects.
+    conversations = ConversationLog(sessionmaker, threads)
 
     # After the board reader, because the workflow is handed it: a status set in Discord drags
     # the card to match, and the board's own column order decides whether the move is allowed
@@ -956,7 +975,7 @@ def build_container(
                 require_proved=settings.require_proved_links,
             ),
             conversations,
-            BoardLinkingService(sessionmaker, boards, OwnerBoards(boards), board_credentials),
+            board_linking,
             BoardColumns(sessionmaker, boards),
             board_credentials,
             GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),

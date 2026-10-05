@@ -145,7 +145,7 @@ async def board_linked(registered: Repository, db_session: AsyncSession) -> None
     """A server set up for tickets the way somebody who finished the job would have it.
 
     BOTH commands, because tickets need both and either one missing is its own reported reason:
-    `/set_board` links the board, `/set_channel project tickets` says where the cards go. A ticket
+    `/board link` links the board, `/set_channel project tickets` says where the cards go. A ticket
     has no fallback channel, unlike an issue, which borrows the pull request one until it is given
     its own.
     """
@@ -526,7 +526,7 @@ class TestWhenTicketsCannotBeCovered:
         db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
-        with pytest.raises(BoardNotLinkedError, match="/set_board"):
+        with pytest.raises(BoardNotLinkedError, match="/board link"):
             await refresh_with(db_sessionmaker, threads, github_with()).refresh(
                 guild_id=1, scope=RefreshScope.TICKETS
             )
@@ -580,12 +580,12 @@ class TestWhenTicketsCannotBeCovered:
         db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
-        """A wrong project token is deployment-wide and long-lived, so refusing would break `all`
-        for every server until an operator noticed. The poller makes the same judgement about the
-        same read."""
+        """A board's authorisation is its linker's, and once it lapses or is withdrawn it stays
+        that way until somebody authorises again - so refusing would break `all` for this server
+        until somebody noticed. The poller makes the same judgement about the same read."""
         github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
         board = FakeBoard(card())
-        board.error = GitHubAuthError("the project token cannot see this board")
+        board.error = GitHubAuthError("nobody's authorisation stands behind this board")
 
         outcome = await refresh_with(db_sessionmaker, threads, github, board=board).refresh(
             guild_id=1, scope=RefreshScope.EVERYTHING

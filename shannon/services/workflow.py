@@ -169,6 +169,16 @@ class MovesCards(Protocol):
         self, *, owner: str, project_number: int, frm: Status, to: Status, column: str = ""
     ) -> BoardOrder | None: ...
 
+    async def takes(self, *, owner: str, project_number: int, state: Status | Priority) -> bool:
+        """Whether this board has the field a state is written to.
+
+        Asked before somebody is refused for having authorised nothing, and only then. A
+        Priority field is optional - GitHub's default template ships none - and on a board
+        without one no card is ever written, so asking somebody to authorise a write that cannot
+        happen would be refusing them for nothing. Issue #201.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class BoardCard:
@@ -262,7 +272,7 @@ class ItemWorkflow:
         self._refuse_conflicting_status(found, snapshot, status)
         if acting is not None:
             await self._refuse_a_move_the_board_forbids(found, status, column)
-            await self._refuse_a_card_nobody_authorised(found, acting)
+            await self._refuse_a_card_nobody_authorised(found, acting, status)
 
         change = labels.status_change(snapshot.label_names, status)
         if change.nothing_to_do and found.status is status:
@@ -425,6 +435,13 @@ class ItemWorkflow:
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
+        # Refused before anything is written, exactly as `set_status` refuses: the two commands
+        # answer the same question about the same card. Issue #201: this half never asked, so a
+        # member who had authorised nothing had the label written on GitHub, then the card write
+        # failed for want of their credential and was logged and swallowed, under a reply saying
+        # it had worked. Ahead of the repeat as well, because the repeat moves the card too.
+        if acting is not None:
+            await self._refuse_a_card_nobody_authorised(found, acting, priority)
 
         change = labels.priority_change(snapshot.label_names, priority)
         if change.nothing_to_do and found.priority is priority:
@@ -445,12 +462,13 @@ class ItemWorkflow:
         # nobody. It is optional for the same reason too, which is worth being plain about -
         # the alternative was a required argument on a path most callers reach without caring
         # about the board at all, and a default of None costs nothing because it is the safe
-        # answer: no member, no board write. The two production callers both pass one.
+        # answer: no member, so nobody to refuse at the top and no board write here. The one
+        # production caller, `/priority`, always passes one.
         #
-        # There is no poller on this path, unlike the status half:
-        # the poller, which calls `set_status` BECAUSE a card moved - and nothing polls a
-        # priority: the poll reads a card's column and no other field. A parameter no
-        # caller ever passes False would be an arm only a test could take.
+        # There is no poller on this path, unlike the status half. The poller calls `set_status`
+        # BECAUSE a card moved, and nothing polls a priority: the poll reads a card's column and
+        # no other field. So None here is never a card being mirrored, only a caller that does
+        # not care about the board.
         no_column = acting is not None and await self._move_the_card(found, priority, acting=acting)
 
         logger.info("%s#%s set to %s priority", found.full_name, found.number, priority.value)
@@ -591,17 +609,21 @@ class ItemWorkflow:
         if self._cards is None or found.card is None:
             return False
 
+        # Whoever asked. Somebody with no authorisation only gets this far where there is
+        # nothing to write - board writes are off, or the board has no field for this state -
+        # and then nothing is sent at all. Never an empty credential: on its way through the
+        # client that is filled in with the App installation's token. Issue #201.
+        mover = await self._authorisations.moving(guild_id=found.guild_id, discord_user_id=acting)
+        if not mover:
+            return False
+
         try:
             moved = await self._cards.move_card(
                 owner=found.card.owner,
                 project_number=found.card.project_number,
                 card_id=found.card.card_id,
                 state=state,
-                # Whoever asked. `_refuse_a_card_nobody_authorised` has already established that
-                # they granted one, so this is a lookup rather than a question.
-                as_=await self._authorisations.moving(
-                    guild_id=found.guild_id, discord_user_id=acting
-                ),
+                as_=mover,
                 column=column,
             )
         except ShannonError as refused:
@@ -639,7 +661,9 @@ class ItemWorkflow:
         """
         return found.object_type in self._kinds
 
-    async def _refuse_a_card_nobody_authorised(self, found: FoundItem, acting: int) -> None:
+    async def _refuse_a_card_nobody_authorised(
+        self, found: FoundItem, acting: int, state: Status | Priority
+    ) -> None:
         """Refuse before anything is written, where this member has authorised no board access.
 
         Issue #170. A card is moved AS the person who asked, so somebody who has granted nothing
@@ -652,24 +676,53 @@ class ItemWorkflow:
         CAN make the fix, so the reply is worth having - and it comes first, before anything has
         happened, so there is no half-done change to explain.
 
-        Only where there is a write to make. Two ways there is not, and both would otherwise
+        Only where there is a write to make. Three ways there is not, and each would otherwise
         refuse a command for a reason the person could do nothing about:
 
         - the item has no card, because nobody added it to the board;
         - this deployment has board writes turned off, so no credential of anybody's would be
           used. Asking somebody to authorise access for a write that is not going to happen is
           worse than saying nothing. That is `may_write` rather than a None check, because the
-          flag is applied to the WRITER inside the board reader and not by withholding it.
+          flag is applied to the WRITER inside the board reader and not by withholding it;
+        - the board has no field for this state. A Priority is optional and GitHub's default
+          template ships none, and refusing `/priority` there was a regression of issue #201's
+          own making. Asked last, once the member turned out to have no authorisation, so
+          somebody who has one pays nothing for the question.
         """
         if self._cards is None or not self._cards.may_write or found.card is None:
             return
-        if not await self._authorisations.moving(guild_id=found.guild_id, discord_user_id=acting):
+        if await self._authorisations.moving(guild_id=found.guild_id, discord_user_id=acting):
+            return
+        if await self._has_somewhere_to_write(self._cards, found.card, state):
             raise WorkflowRefusedError(
                 "This server mirrors a project board and you have not authorised this bot to "
-                "move cards as you, so nothing was changed. Run /authorise_board and sign in to "
+                "move cards as you, so nothing was changed. Run /board authorise and sign in to "
                 "GitHub: a card is moved as YOU, so the board's history names whoever moved it "
                 "rather than one shared account."
             )
+
+    async def _has_somewhere_to_write(
+        self, cards: MovesCards, card: BoardCard, state: Status | Priority
+    ) -> bool:
+        """Whether the board has the field this state is written to, refusing where unsure.
+
+        Unsure counts as yes. A board that cannot be read at all is one this member could still
+        write to once they have authorised - their grant is not the linker's - so the refusal
+        that asks them to stands. Answering no instead would put back the swallowed write this
+        refusal replaced.
+        """
+        try:
+            return await cards.takes(
+                owner=card.owner, project_number=card.project_number, state=state
+            )
+        except ShannonError as unreadable:
+            logger.warning(
+                "could not read board %s to see whether it takes a %s: %s",
+                card.project_number,
+                type(state).__name__.lower(),
+                unreadable.message,
+            )
+            return True
 
     def _refuse_a_kind_it_cannot_move(self, found: FoundItem, *, instead: str) -> None:
         """Refuse a thread whose item this service has no way to write to.
