@@ -334,11 +334,50 @@ bot one credential that sees everything. The board's write client carries no cre
 which makes "a card is moved as somebody" a fact of the wiring rather than a check somebody could
 forget: a write with nobody behind it goes out anonymous and GitHub answers 401.
 
-Linking a board therefore requires having authorised, and `/set_board` refuses otherwise. A board
-linked on somebody else's authorisation would put a server straight back on one person's credential.
-Clearing the board forgets the credential with it, and the reply says the honest thing: forgetting
-this copy is not revoking the grant, and only the person who granted it can do that, under
-Applications in their GitHub settings.
+Linking a board therefore requires having authorised. A board linked on somebody else's
+authorisation would put a server straight back on one person's credential.
+
+### One command, and one click
+
+Issue #201. That rule made linking a board for the first time two commands with a trip to GitHub
+between them, and undoing it was split the same way. It is one command now, `/board`, with five
+halves:
+
+| Half | Who | What it does |
+|---|---|---|
+| `/board link` | Admin, Project Manager | Mirrors a board. With no authorisation yet, it hands out ONE link that remembers the board chosen: following it authorises and links, and there is nothing else to run |
+| `/board unlink` | Admin, Project Manager | Stops mirroring, forgets the linker's authorisation, and names them - forgetting this copy is not revoking the grant, and only they can do that, under Applications in their GitHub settings |
+| `/board authorise` | Admin, Project Manager | Grants your own, so a card you move with `/status` or `/priority` moves as you |
+| `/board withdraw` | anybody | Forgets your own. No tier, deliberately: deleting a credential that is yours must not depend on a role you may since have lost |
+| `/board show` | Admin, Project Manager | The board, who linked it, whether it still opens, and your own authorisation |
+
+The tier on `authorise` and `show` is the set of tiers whose authorisation is ever actually used -
+linkers and card movers - which today is the same two, so nobody who needs one lost it, and nobody
+whose credential nothing would use can hand one over.
+
+The board a link was issued for rides on the pending verification row, never in the URL: the state
+stays the only thing in the link, and nothing can edit the board on its way to GitHub and back.
+
+Three things the merge found, and fixed, on the way:
+
+- **The board was opened and listed as the App.** The check that a board exists, and the picker,
+  sent no credential, which the client fills in with the App installation's token - and the App
+  holds no Projects permission. A private board could not be linked, and the refusal blamed the
+  person's own authorisation. Both now go out as the person choosing.
+- **A board was told apart by how its owner was written down.** Null means the repository's own
+  owner, and the comparison did not resolve it: two servers each linking their own account's #1 were
+  one board (the second was refused and told the first's repository name), while a server naming
+  another's board by its owner was a different one - after which a poll read that board under the
+  wrong server's member. The owner is resolved in the query now, and a refusal names no other server.
+- **The scope GitHub granted was never checked.** GitHub lets a person grant less than was asked.
+  The sign-in now refuses, and keeps nothing, when `project` is missing.
+
+No scope was added. `project` covers user and organisation boards alike; `read:org` is asked for by
+no Projects v2 document; and `repo`, the only scope that might let a board show a card wrapping a
+private repository's issue, is full control of every private repository the person can reach -
+the opposite of the narrowest grant the feature needs. An organisation's board needs the
+organisation to approve the OAuth App, which is an access restriction rather than a scope, and the
+sign-in text says where to press.
 
 ### What "anonymity" can and cannot mean here
 
