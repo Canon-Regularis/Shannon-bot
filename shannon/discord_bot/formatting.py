@@ -707,10 +707,9 @@ def format_everyone_approved(
 
     The people named are the author and the assignees, for the reason the check-failure line
     names the same pair: they are who a pull request waits on once the reviewing is done. Whoever
-    approved last is not dropped the way the draft switch drops a non-author who pressed the
-    button — there that person knows what they just did, and here the news is about everybody
-    else's reviews rather than their own. The draft switch keeps its AUTHOR whatever happens
-    (issue #161), which is the same judgement this line makes about the pair it names.
+    approved last is not dropped the way the draft switch drops whoever pressed the button —
+    there the initiator knows what they just did, and here the news is about everybody else's
+    reviews rather than their own.
 
     `teams` and `roles` are accepted and go through `_role` like the ready line's, so this
     matches the shape the other two audience-taking renderers use. The caller hands an empty
