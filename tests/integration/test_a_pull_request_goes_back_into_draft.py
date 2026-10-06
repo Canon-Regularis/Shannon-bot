@@ -179,19 +179,15 @@ class TestItSaysSo:
         assert f"<@{MONALISA}>" in content
         assert notify is not None and MONALISA in notify
 
-    async def test_an_author_drafting_their_own_work_back_is_rung(
+    async def test_an_author_drafting_their_own_work_back_is_not_rung(
         self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
     ) -> None:
-        """Issue #161, on this half. The ordinary case, since an author usually drafts their
-        own work back - and used to be the one person it reached nobody about.
+        """Issue #230, on this half. The ordinary case, since an author usually drafts their own
+        work back - and he knows: he pressed it.
 
-        The rule was "they know: they pressed it", applied to everybody. It still is, for
-        everybody except the author: pressing the button is an act he was there for, but his
-        own work changing state is not only an act, and the thread is the record of it.
-
-        Both halves get the same treatment deliberately. They share one audience function, so
-        a rule that held on the way out of draft and not on the way back would be one nobody
-        could remember.
+        Both halves get the same treatment deliberately. They share one audience function, so a
+        rule that held on the way out of draft and not on the way back would be one nobody could
+        remember. Linked, so a mention that survived would show.
         """
         await link_account(db_session, "octocat", OCTOCAT)
 
@@ -205,10 +201,7 @@ class TestItSaysSo:
             )
 
         assert lines(threads) == [
-            (
-                f"{HEADING}\n<@{OCTOCAT}> **octocat** converted this pull request to draft.",
-                (OCTOCAT,),
-            )
+            (f"{HEADING}\n**octocat** converted this pull request to draft.", ())
         ]
 
     async def test_a_linked_team_is_named_but_its_role_is_not_rung(

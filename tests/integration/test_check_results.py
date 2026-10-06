@@ -282,13 +282,13 @@ class TestWhoIsRung:
         threads: FakeThreadGateway,
         db_session: AsyncSession,
     ) -> None:
-        """Where this bot's self-notification rules part company.
+        """A deliberate exception to this bot's one self-notification rule.
 
-        `draft_lines` drops whoever pressed the button - except the pull request's author, who is
-        never dropped (issue #161). Nothing is dropped here at all: a suite finishing is a
-        different kind of event from pressing a button. It is news, and it is most news to the
-        person who pushed, who cannot know the answer until the jobs come back. Anybody who would
-        rather not hear it has `/mentions off`, which is where that choice belongs.
+        `draft_lines` drops whoever pressed the button, author or not, because they know - they
+        pressed it (issue #230). A suite finishing is the opposite kind of event: it is news, and
+        it is most news to the person who pushed, who cannot know the answer until the jobs come
+        back. Anybody who would rather not hear it has `/mentions off`, which is where that
+        choice belongs.
 
         Green as well as red. "Your build is fixed" is as much news as "your build broke", and a
         test that only ever broke the build could not see a pass-path regression.
