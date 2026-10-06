@@ -204,28 +204,19 @@ def _who_to_tell(
     happened to assign them. Last in the order, so an author who IS assigned keeps the place the
     assignee list gave them.
 
-    All of them, minus whoever pressed the button - except its author, who is never dropped.
-    Issue #161.
+    All of them, minus whoever pressed the button, author or not. Issue #230.
 
-    The initiator is left out because they know: they pressed it. That held for everybody until
-    it was pointed out that an author marking their OWN pull request ready is the ordinary case,
-    not a corner - so the one rule that "leaves out a self-marking author without having to
-    mention authors at all" was leaving out the one person the pull request now belongs to, while
-    ringing everybody else on it. The author is the exception because for them the switch is not
-    only an act they performed, it is the state of their own work changing; for anybody else
-    pressing that button it is just the act, and they were there for it.
+    The initiator is left out because they know: they pressed it. Issue #161 made the author the
+    one exception, on the grounds that an author marking their own pull request ready is the
+    ordinary case rather than a corner - and that is exactly why the exception was wrong: the
+    ordinary case became the bot ringing somebody about a button they had pressed a second
+    earlier. What #161 was right about holds without it. An author is told whenever somebody ELSE
+    throws the switch, which is the one case in which the news is news to them.
 
-    So the pair reads: a maintainer marking somebody else's pull request ready is not rung and its
-    author is, which was always the interesting case and still works; and an author marking their
-    own is now rung too, which is the half that was wrong. Anybody who would rather not hear about
-    their own button has `/mentions off`, which is where that choice belongs - the same answer
-    `everyone_who_worked_on_it` gives for a CI run it deliberately tells the pusher about.
-
-    A self-marking author is therefore named twice in the one line: once as the mention that
-    rings them, and once in the sentence as the person who acted. That is accepted rather than
-    worked around. The sentence names them through `_account`, which is plain text and rings
-    nobody, so the repetition costs a word and the alternative - teaching the renderer to spot
-    the overlap - costs a rule in the one place that has no business knowing who pressed what.
+    The drop is by login rather than by role, so somebody who pressed it is left out of every list
+    that carries them - an author who is also assigned is not rung through the assignee list.
+    They are still named, in the sentence, as the person who acted: `_account` renders that in
+    plain text, which rings nobody.
 
     Teams are kept whatever happens. GitHub does not say who is in one, so no rule here can leave
     the initiator out of a team, and `/mentions` cannot either. Whether a team becomes a role
@@ -233,11 +224,10 @@ def _who_to_tell(
     """
     pressed = initiator.login.lower() if initiator is not None else None
     author = (snapshot.author,) if snapshot.author else ()
-    wrote_it = snapshot.author.login.lower() if snapshot.author else None
     people = {
         person.login.lower(): person
         for person in (*snapshot.reviewers, *snapshot.assignees, *author)
-        # Dropped for having pressed the button, unless they wrote it.
-        if person.login.lower() != pressed or person.login.lower() == wrote_it
+        # Dropped for having pressed the button, whichever list they are on.
+        if person.login.lower() != pressed
     }
     return tuple(people.values()), tuple(snapshot.reviewer_teams)

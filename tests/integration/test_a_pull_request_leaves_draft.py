@@ -50,7 +50,6 @@ LATER_STILL = "2026-08-10T12:15:00Z"
 # The Discord accounts behind the logins below, where a test has run /link for them.
 MONALISA = 555
 HUBOT = 606
-# Issue #161. The author is in the audience now, so these tests need a Discord id for him.
 OCTOCAT = 111
 ROLE = 777_000
 
@@ -226,11 +225,10 @@ class TestWhoIsTold:
 
         assert lines(threads) == [
             (
-                # `octocat` wrote it and so is named last, in plain text because this test
-                # links nobody but the two it is about. Issue #161 put him there; what it
-                # means for a LINKED author is held below.
-                f"{HEADING}\n<@{MONALISA}> <@{HUBOT}> octocat **octocat** marked this "
-                "pull request ready for review.",
+                # `octocat` wrote it and pressed it, so he is named only as the person who
+                # acted (issue #230). What he is owed when somebody else presses it is held below.
+                f"{HEADING}\n<@{MONALISA}> <@{HUBOT}> **octocat** marked this pull request "
+                "ready for review.",
                 # Sorted, not in the order the sentence names them: `may_be_pinged` answers who
                 # this bot may ring, and an allow-list has no reading order to preserve.
                 (MONALISA, HUBOT),
@@ -257,25 +255,44 @@ class TestWhoIsTold:
             )
 
         assert said(threads) == [
-            f"{HEADING}\n<@{MONALISA}> octocat **octocat** marked this pull request ready "
-            "for review."
+            f"{HEADING}\n<@{MONALISA}> **octocat** marked this pull request ready for review."
         ]
 
-    async def test_an_author_who_pressed_it_and_is_assigned_is_named_once(
+    async def test_an_author_marking_their_own_work_ready_is_not_rung(
         self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
     ) -> None:
-        """The dedupe, with the author kept by issue #161's exception rather than by the
-        assignee list.
+        """Issue #230, and the whole of it. The ordinary case: somebody finishes their own pull
+        request and presses the button themselves.
+
+        Issue #161 rang him for it, because the pull request is his - which made the commonest
+        press of this button a ping about something he did a second ago. He is named once, in
+        the sentence, as the person who acted, and that rings nobody. Linked, so a mention that
+        survived would show in the text and on the allow-list both.
+        """
+        await link_account(db_session, "octocat", OCTOCAT)
+
+        async with registered_stack(db_engine, db_session, threads) as http_client:
+            await opened_as_a_draft(http_client)
+            await deliver(
+                http_client,
+                "pull_request",
+                ready(requested_reviewers=[], assignees=[]),
+                delivery="p1",
+            )
+
+        assert lines(threads) == [
+            (f"{HEADING}\n**octocat** marked this pull request ready for review.", ())
+        ]
+
+    async def test_an_author_who_pressed_it_is_not_rung_through_the_assignee_list_either(
+        self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """The drop is by login, not by list. An author who is also assigned reaches the mapping
+        by two roads, and a rule that left him off only one of them would ring him through the
+        other, for a button he pressed himself.
 
         Distinct from the test further down, which assigns the author while somebody ELSE presses
-        the button: there the author is in the mapping once, by one road. Here he arrives by two
-        and is also the person the initiator rule would have dropped, so the exception and the
-        dedupe meet - and a login keyed twice would ring him twice for one event.
-
-        Issue #161 keeps the author whatever happens, so an author who is also assigned reaches
-        the mapping from two directions and would be named twice and rung twice for one event
-        if the lowered-login key were not doing its job. He keeps the assignee list's place,
-        which is why he leads here rather than trailing.
+        the button: there he arrives by the same two roads and is kept, once.
         """
         await link_account(db_session, "octocat", OCTOCAT)
 
@@ -292,39 +309,7 @@ class TestWhoIsTold:
             )
 
         assert lines(threads) == [
-            (
-                f"{HEADING}\n<@{OCTOCAT}> **octocat** marked this pull request ready for review.",
-                (OCTOCAT,),
-            )
-        ]
-
-    async def test_an_author_marking_their_own_work_ready_is_rung(
-        self, db_engine: AsyncEngine, db_session: AsyncSession, threads: FakeThreadGateway
-    ) -> None:
-        """Issue #161, and the whole of it. The ordinary case: somebody finishes their own pull
-        request and presses the button themselves.
-
-        He used to be the one person on it who heard nothing, because the rule dropped whoever
-        acted and he had. Named twice in the one line now - once as the mention that rings him,
-        once in the sentence as the person who did it - which is accepted: the sentence names
-        him through `_account`, which is plain text and rings nobody.
-        """
-        await link_account(db_session, "octocat", OCTOCAT)
-
-        async with registered_stack(db_engine, db_session, threads) as http_client:
-            await opened_as_a_draft(http_client)
-            await deliver(
-                http_client,
-                "pull_request",
-                ready(requested_reviewers=[], assignees=[]),
-                delivery="p1",
-            )
-
-        assert lines(threads) == [
-            (
-                f"{HEADING}\n<@{OCTOCAT}> **octocat** marked this pull request ready for review.",
-                (OCTOCAT,),
-            )
+            (f"{HEADING}\n**octocat** marked this pull request ready for review.", ())
         ]
 
     async def test_a_non_author_who_pressed_it_is_dropped_while_the_author_is_rung(
@@ -336,10 +321,10 @@ class TestWhoIsTold:
         no mention of her survives and nothing rings her. She is still NAMED, by the sentence, as
         the person who acted - that is what the bold text is for, and it rings nobody.
 
-        `octocat` wrote it and is mentioned and rung although he did nothing. He would be rung
-        even if he had pressed it himself, which is the whole of what issue #161 changed and what
-        separates the two people here. Both are linked, so the allow-list shows the difference
-        rather than hiding it behind an unlinked account.
+        `octocat` wrote it and is mentioned and rung, because he did nothing: the news is news to
+        him. Had he pressed it himself he would be left out exactly as she is (issue #230). Both
+        are linked, so the allow-list shows the difference rather than hiding it behind an
+        unlinked account.
         """
         await link_account(db_session, "monalisa", MONALISA)
         await link_account(db_session, "octocat", OCTOCAT)
@@ -374,10 +359,8 @@ class TestWhoIsTold:
         she is named and not rung; `octocat` wrote it, never touched it, and is told. Nobody had
         to assign him for that to happen, which is what issue #139 changed.
 
-        Unchanged by issue #161, which only stopped the drop applying to the AUTHOR - and he
-        did not press this one. **This is now the only test covering the drop at all**, because
-        every other case on this path has the author pressing the button and the author is
-        never dropped. Deleting it would leave that arm of the rule unexercised.
+        The reviewer's side of the drop. The author's side, which is the case issue #230
+        reported, is `test_an_author_marking_their_own_work_ready_is_not_rung`.
         """
         await link_account(db_session, "monalisa", MONALISA)
 
@@ -485,8 +468,7 @@ class TestWhoIsTold:
 
         assert lines(threads) == [
             (
-                f"{HEADING}\n<@{MONALISA}> octocat **octocat** marked this pull request "
-                "ready for review.",
+                f"{HEADING}\n<@{MONALISA}> **octocat** marked this pull request ready for review.",
                 (),
             )
         ]
@@ -507,6 +489,7 @@ class TestWhoIsTold:
                 http_client,
                 "pull_request",
                 ready(
+                    sender="bigboss",
                     requested_reviewers=[],
                     requested_teams=[{"slug": "backend"}],
                     assignees=[],
@@ -516,8 +499,9 @@ class TestWhoIsTold:
 
         assert lines(threads) == [
             (
-                # People before teams, so the author leads the role mention.
-                f"{HEADING}\noctocat <@&{ROLE}> **octocat** marked this pull request ready "
+                # People before teams, so the author leads the role mention. Somebody else
+                # pressed it, or there would be no author left to lead it.
+                f"{HEADING}\noctocat <@&{ROLE}> **bigboss** marked this pull request ready "
                 "for review.",
                 (),
             )
@@ -529,22 +513,22 @@ class TestWhoIsTold:
         """The thread is the record. A pull request going ready with no reviewers yet is exactly
         when somebody wants to notice it and put themselves on it.
 
-        It used to be called "with nobody on it", and since issue #161 there is no such pull
-        request: the author is always on it. So what this holds now is the line being said at
-        all with both lists empty - the author named in plain text, because this test links
-        nobody.
+        Somebody other than the author presses it, so the author is who it reaches: named in
+        plain text, because this test links nobody. Had the author pressed it there would be
+        nobody left to name, and the line is said all the same - that is
+        `test_an_author_marking_their_own_work_ready_is_not_rung`.
         """
         async with registered_stack(db_engine, db_session, threads) as http_client:
             await opened_as_a_draft(http_client)
             await deliver(
                 http_client,
                 "pull_request",
-                ready(requested_reviewers=[], assignees=[]),
+                ready(sender="bigboss", requested_reviewers=[], assignees=[]),
                 delivery="p1",
             )
 
         assert said(threads) == [
-            f"{HEADING}\noctocat **octocat** marked this pull request ready for review."
+            f"{HEADING}\noctocat **bigboss** marked this pull request ready for review."
         ]
 
     async def test_an_account_that_has_gone_still_gets_the_line_said(
