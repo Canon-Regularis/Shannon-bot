@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import Repository, TrackedItem
-from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.enums import CardState, ObjectType, Priority, Status
 from shannon.domain.json import JsonObject
 from shannon.domain.time import as_utc
 
@@ -24,6 +24,27 @@ class BoardRow:
     column: str | None
     # The board card this item is wrapped by, or None until a poll has paired them.
     card_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TicketThread:
+    """One draft card's row as the poller follows the card itself, out of its session.
+
+    Issue #198. Only rows that still have a thread, because what follows a card is its thread:
+    one let go of, by a conversion or a deletion, has nothing left to shut or reopen. The board's
+    page comes with it - owner and number both - so the poller can tell this board's cards from a
+    board the server used to mirror before it would ask GitHub about one.
+    """
+
+    tracked_item_id: int
+    card_id: int
+    thread_id: int
+    state: str
+    board_url: str
+
+    @property
+    def archived(self) -> bool:
+        return self.state == CardState.ARCHIVED
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +193,67 @@ class TrackedItemStore:
         return {
             (row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5], row[6]) for row in rows.all()
         }
+
+    async def ticket_threads(self, *, repository_id: int) -> list[TicketThread]:
+        """Every draft card of one repository that still has a thread, in one query.
+
+        Issue #198. Asked once per board per poll, because what the poller compares it against - the
+        board - is read whole every pass anyway, and a card the listing has stopped showing is found
+        here rather than by asking GitHub about every card.
+        """
+        rows = await self._session.execute(
+            select(
+                TrackedItem.id,
+                TrackedItem.github_object_id,
+                TrackedItem.discord_thread_id,
+                TrackedItem.github_state,
+                TrackedItem.github_url,
+            )
+            .where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == ObjectType.TICKET,
+                TrackedItem.discord_thread_id.is_not(None),
+            )
+            .order_by(TrackedItem.id)
+        )
+        return [
+            TicketThread(row[0], row[1], thread_id, row[3], row[4])
+            for row in rows.all()
+            # Narrowed per row rather than trusted from the WHERE clause, which filters in SQL and
+            # tells the type checker nothing.
+            if (thread_id := row[2]) is not None
+        ]
+
+    async def remember_card_state(
+        self, tracked_item_id: int, *, thread_id: int, state: CardState
+    ) -> None:
+        """Record where a draft card now stands on its board. Issue #198.
+
+        Only while the row still points at the thread this was decided about. A relocation can have
+        moved the card to a new thread in the meantime, and the state belongs to the card the
+        decision was made over, read beside that thread.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(TrackedItem.id == tracked_item_id, TrackedItem.discord_thread_id == thread_id)
+            .values(github_state=state.value)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def remember_board_page(self, tracked_item_id: int, *, page: str) -> None:
+        """Keep a draft card's board page as the listing now gives it. Issue #198.
+
+        The page is how the poller tells this board's cards from an old board's, and it names the
+        board's owner - so when that account is renamed, rows written before the rename name an
+        owner the board no longer has, and a card of theirs that later goes missing would never be
+        asked about. A listed card proves its page, so the row takes it.
+        """
+        await self._session.execute(
+            update(TrackedItem)
+            .where(TrackedItem.id == tracked_item_id)
+            .values(github_url=page)
+            .execution_options(synchronize_session=False)
+        )
 
     async def remember_cards(self, pairs: Mapping[int, int]) -> None:
         """Write down which board card wraps each of these items.

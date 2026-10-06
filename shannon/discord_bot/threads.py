@@ -192,7 +192,8 @@ class RevisesMessages(Protocol):
 
 
 class ShutsThread(Protocol):
-    """Shut means locked against replies and archived out of the channel, in one edit."""
+    """Shut means locked against replies and archived out of the channel, in one edit - or two
+    for a thread Discord has already archived by itself, which it will not edit otherwise."""
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None: ...
 
@@ -383,6 +384,14 @@ class DiscordThreadGateway:
             return
 
         with _translated("close the thread" if shut else "reopen the thread"):
+            if shut and thread.archived:
+                # Discord archived it by itself after a quiet week, and it refuses every edit to
+                # an archived thread that does not unarchive it - so the one-edit shut below was
+                # refused, every time it was asked. Locked on the way out of the archive and
+                # archived again after, so it is never open in between and nobody can reply into
+                # it. Issue #198: a draft card is usually archived on the board once it has gone
+                # quiet, which is exactly when its thread has.
+                await thread.edit(archived=False, locked=True)
             # Both halves in one PATCH, so no attempt can leave a thread archived and
             # unlocked: anybody may reopen an unlocked thread and the first reply would, while
             # the row went on saying shut. Manage Threads is needed for this and for the reopen.

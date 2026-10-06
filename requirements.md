@@ -180,8 +180,9 @@ A row with nothing in it is still left out rather than rendered `None`, because 
 field reads as data missing rather than data absent. The field NAMES belong to whoever owns the
 board, so a board that calls one of these something else simply has no value for that row - and
 `Story Point` is singular because that is how the board spells it. `State:` stays off for a
-different reason: a ticket's state is open and nothing can close it, because a board column is not
-a closed state, so the row could only ever say `Open`.
+different reason: a board column is not a closed state, so a card in Done is as open as one in
+Todo, and the one thing that does end a card - taking it off the board - also shuts the thread the
+row would be shown in. The row could only ever say `Open`.
 
 ```text
 Ticket Name:
@@ -199,6 +200,12 @@ Created:
 Last Updated:
 Description:
 ```
+
+A card taken off the board takes its thread with it (#198). Archived, its thread is shut - locked
+and archived, as a closed issue's is - and says so, with how to get it back. Restored, the thread
+opens again and says so, and then hears what changed while the card was away, compared with what
+it last showed: an archived card is never mirrored, so nothing it gained in the archive is lost.
+Deleted, its thread is ended the way a converted card's is: shut, told, and let go of for good.
 
 A change to any of these except `Creator` is announced in the thread, in ONE message listing
 everything that moved since the last poll - a board read sees a card's fields together, so somebody
@@ -296,6 +303,14 @@ such a board cannot be checked without downloading the whole of it, and it is po
 clock instead - slower rather than more expensive, which is the direction a surprise should fail
 in. It is logged once when it happens. The current board has eighty cards against a page of a
 hundred, so this will arrive eventually and should not be a mystery when it does.
+
+One thing costs budget on a quiet board, and only while a card is missing from the read: asking
+GitHub about that card on its own (#198). A missing card can be deleted, archived out of a read that
+leaves the archive out, or simply beyond what one read could prove it saw, and only a request per
+card tells them apart. So it is paced: one card every ten seconds per board at most, a card GitHub
+still has asked about again after ten minutes, an archived one hourly - 360 requests an hour at
+worst, and none while every tracked card is on the read. A card is believed deleted only on the
+second "no such card", two passes apart, because letting its thread go cannot be undone.
 
 ### Who a board is read as
 

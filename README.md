@@ -39,7 +39,10 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   statuses told apart from ordinary labels. A tag the opening block already listed says nothing:
   GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening
   posts a header saying what became of the thread, and a finished item's thread is shut: locked
-  and archived out of the channel, and opened again if the item is. Both exist because a Discord
+  and archived out of the channel, and opened again if the item is. A draft card's thread follows
+  its card off the board the same way: shut when the card is archived, opened again when it is
+  restored - followed by the usual line for anything that changed meanwhile - and shut for good
+  when the card is deleted. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
   that only moves the block looks from the channel like nothing happening.
 - **What CI made of a commit.** When every job on a commit has finished, its thread says how many
@@ -200,14 +203,16 @@ refused as a missing permission rather than retried.
 `Manage Threads` is refused by `/register` and `/set_channel` if it is missing, which is the only
 one of these checked at the door. It is what shuts a finished item's thread, meaning locked
 against replies and archived out of the channel, which is what Discord's client calls closing a
-thread. Both halves go in one edit, so a server without it gets neither and its threads simply
-stay open.
+thread - and a draft card's, when the card is archived or deleted off the board. Both halves go in
+one edit, so a server without it gets neither and its threads simply stay open.
 
 It is also what reopens a shut thread to write in it, so a comment on a closed issue needs it as
 much as the close did. Grant it before anything closes. Adding it later is enough on its own,
 because the row remembers that a thread is owed a shut; taking it away afterwards is not, because
 those threads then cannot be reopened to write in and those items stop mirroring until it is put
-back.
+back. A draft card's thread is the exception to the first half: the board is read every couple of
+seconds, so a refused shut or reopen there is written off rather than asked again, and a card
+archived, restored or deleted while the permission was missing keeps its thread as it was.
 
 A repository registered before that check existed never passed it, and the permission can be
 revoked at any time, so a close that is refused says so in the thread rather than only in the log.
@@ -454,6 +459,15 @@ the account owning the registered repository: without one the owner is taken fro
 repository's name, which is right for most deployments and quietly wrong rather than obviously
 broken for the rest.
 
+A card taken off the board is read off it too (#198). An archived card comes back from the read
+marked. A card missing from the read proves nothing - a board past its page cap, or a card dragged
+mid-read, leaves one out without saying so - so the poller asks GitHub about that one card on its
+own, under the same authorisation: at most one card every ten seconds per board, a card GitHub
+still has again after ten minutes, and an archived one hourly, so 360 requests an hour at worst and
+none while nothing is missing. A card counts as deleted only once GitHub has answered 404 for it
+twice, on two passes, and only the linked board's own cards are ever asked about, so relinking to
+another board never shuts the old one's threads.
+
 One rule spans fields: `worker_lease_seconds` must cover `worker_batch_size *
 worker_delivery_timeout_seconds`, or construction fails. A lease expiring mid-batch would let a
 second worker take deliveries this one is still on.
@@ -518,7 +532,7 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing |
+| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
@@ -538,6 +552,7 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 
 - **Mirroring a card into a thread** is behind the Developer tier, like the other three, because `/refresh tickets` is its on-demand equivalent. It had no flag and no equivalent until that scope existed; what it had instead was the webhook path's argument, which is ungated by design — on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. Two things still gate it beyond the tier: it cannot happen at all until somebody with Admin or Project Manager runs **both** `/board link` and `/set_channel project tickets` — tickets are the one kind with no fallback channel. Note what the tier split now means: a Developer can spend the linker's rate limit, which is what the poller reads the board with, while linking the board stays Admin or Project Manager. It pings nobody either way: a draft card names no assignees and its block carries no mentions.
 - **A card changing an item's status** is behind `SHANNON_BOARD_MAY_SET_STATUS`, off by default, because that one *does* have a Discord equivalent to bypass: `/status` is Project Manager only, and nothing GitHub sends with a board says who dragged the card.
+- **A card being archived, restored or deleted** shuts, reopens or ends its thread, and is not gated: it is the mirror keeping up with the board rather than an action anybody takes in Discord, there is no command that does it, and archiving or deleting a card needs write access to the board (#198).
 
 The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, which is **on**, because a board somebody linked is a board they want kept. The card is moved as whoever set the status, so they need to have authorised: `/status` and `/priority` refuse up front for somebody who has not, because that is the one board failure they can put right themselves. Turning it off stops the write and nothing else: the board's own column order is still read, and a move that skips a column is still refused.
 
@@ -639,7 +654,7 @@ rather than abandoning the rest.
 | --- | --- |
 | `repositories` | One per registered repository. Unique on guild and on GitHub id, so a webhook resolves to exactly one server |
 | `channel_mappings` | Which channel a kind of item threads into |
-| `tracked_items` | One per mirrored PR or issue: thread, message, state, and the high water mark that orders deliveries |
+| `tracked_items` | One per mirrored PR, issue or draft card: thread, message, state - a card's is where it stands on the board, open, archived or deleted - and the high water mark that orders deliveries |
 | `item_assignments` | Who is on an item and in what capacity. `notified_at` is the ping claim, `fulfilled_at` closes a review request |
 | `mirrored_notes` | Comments and reviews already posted, claimed before posting so a retry cannot repeat one |
 | `webhook_events` | The queue: payload, status, attempts, backoff, lease, last error |

@@ -94,6 +94,12 @@ class FakeThreadGateway:
         # A server that will never let it close one, which is a different thing: no amount of
         # waiting grants a permission, and a caller with nobody to tell has to stop asking.
         self.refuses_every_shut = False
+        # A bot that has lost Manage Threads, held to Discord's whole rule: it can neither shut nor
+        # reopen a thread, and nor can it unarchive a LOCKED one to write in it, which only Manage
+        # Threads may do. Its own switch rather than part of the one above because tests written
+        # before it lean on writing into a locked thread while shuts are refused; issue #198's
+        # review found one asserting a line production could never post, which this is for.
+        self.lacks_manage_threads = False
         # And for asking where a thread is. Its own switch because a refusal there means
         # something different from every other one: the answer is unknown rather than no, and
         # a caller that read it as no would let go of a live thread.
@@ -230,7 +236,7 @@ class FakeThreadGateway:
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
         self.shut_calls.append((thread_id, shut))
-        if self.refuses_every_shut:
+        if self.refuses_every_shut or self.lacks_manage_threads:
             raise DiscordPermissionError("Discord will not let the bot close the thread")
         if self.fail_next_shut:
             self.fail_next_shut = False
@@ -313,6 +319,10 @@ class FakeThreadGateway:
         if thread is None:
             raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
         if thread.archived:
+            if thread.locked and self.lacks_manage_threads:
+                # Discord's rule: a LOCKED thread can be unarchived only by somebody who may manage
+                # threads. See `lacks_manage_threads`.
+                raise DiscordPermissionError("only Manage Threads may unarchive a locked thread")
             thread.archived = False
             self.unarchived.append(thread_id)
         return thread

@@ -185,9 +185,9 @@ class TestWhatATicketLeavesOut:
         assert "Priority" not in rows()
 
     def test_there_is_no_state_row(self) -> None:
-        """The one left out for a different reason: a ticket's state is hard-coded open and
-        nothing in the project can close it, because a board column is not a closed state. The
-        row could only ever say `Open`."""
+        """The one left out for a different reason: a board column is not a closed state, and
+        the one thing that ends a card - taking it off the board, issue #198 - shuts the thread
+        it would be shown in. The row could only ever say `Open`."""
         assert "State" not in rows()
 
     def test_a_card_carrying_people_and_labels_now_shows_them(self) -> None:

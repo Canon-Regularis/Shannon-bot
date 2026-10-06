@@ -476,6 +476,23 @@ class TestWhatTicketsAreCovered:
         assert outcome.mirrored == 1, "the wrapped card was mirrored as a ticket"
         assert len(threads.created) == 1
 
+    async def test_an_archived_card_is_not_offered(
+        self,
+        board_linked: None,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Issue #198. An archived card comes back from the read marked rather than dropped, and
+        mirroring one would open a thread for work somebody put away."""
+        board = FakeBoard(card(), card(item_id=901, title="Put away", archived=True))
+
+        outcome = await refresh_with(db_sessionmaker, threads, github_with(), board=board).refresh(
+            guild_id=1, scope=RefreshScope.TICKETS
+        )
+
+        assert outcome.mirrored == 1, "the archived card was mirrored"
+        assert len(threads.created) == 1
+
     async def test_a_board_listing_a_card_twice_mirrors_it_once(
         self,
         board_linked: None,

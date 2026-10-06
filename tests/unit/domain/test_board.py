@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from shannon.domain.board import must_pass_through, status_from_column
+from shannon.domain.board import is_board_page, must_pass_through, status_from_column
 from shannon.domain.enums import Status
 
 
@@ -195,3 +195,53 @@ class TestWhatAMoveHasToPassThrough:
 
         assert must_pass_through(columns, frm="Backlog", to="In progress") == ()
         assert must_pass_through(columns, frm="In progress", to="Done") == ("in-progress",)
+
+
+class TestWhichBoardAPageIs:
+    """Issue #198. A ticket row's link is its board's page, and only the owner in it tells two
+    boards of the same number apart - so a card missing from one board's read is never asked about
+    on a board the server used to mirror, where it would answer 404 and be shut as deleted."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/users/Canon-Regularis/projects/12",
+            "https://github.com/orgs/Canon-Regularis/projects/12",
+        ],
+        ids=["users", "orgs"],
+    )
+    def test_the_boards_own_page_is_it(self, url: str) -> None:
+        assert is_board_page(url, owner="Canon-Regularis", number=12)
+
+    def test_the_owner_is_compared_as_github_compares_logins(self) -> None:
+        assert is_board_page(
+            "https://github.com/users/canon-regularis/projects/12",
+            owner="CANON-Regularis",
+            number=12,
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/users/acme/projects/12",
+            "https://github.com/users/Canon-Regularis/projects/13",
+            "https://github.com/users/Canon-Regularis/projects/120",
+            "https://github.com/users/Canon-Regularis/projects/1",
+            "https://github.com/users/unknown/projects/12",
+            "https://github.com/Canon-Regularis/Shannon-bot/issues/12",
+            "https://github.com/users/Canon-Regularis/projects/12/views/1",
+            "not a url at all",
+        ],
+        ids=[
+            "another-owner",
+            "another-number",
+            "a-longer-number",
+            "a-shorter-number",
+            "the-fallback-page",
+            "an-issue",
+            "a-view-of-it",
+            "garbage",
+        ],
+    )
+    def test_anything_else_is_not(self, url: str) -> None:
+        assert not is_board_page(url, owner="Canon-Regularis", number=12)

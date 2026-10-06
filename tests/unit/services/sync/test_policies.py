@@ -161,9 +161,14 @@ class TestWhatTheRowAloneSaysAboutTheLock:
         assert policy.shut_for_state(status=Status.NOT_REVIEWED, github_state="closed") is True
         assert policy.shut_for_state(status=Status.DONE, github_state="open") is False
 
-    def test_a_ticket_is_never_finished_with(self) -> None:
-        """A card in Done is a card somebody can drag back out, and nothing in this bot would
-        ever unlock its thread again."""
+    @pytest.mark.parametrize("state", ["open", "archived", "deleted"])
+    def test_a_ticket_is_never_finished_with(self, state: str) -> None:
+        """A card in Done is a card somebody can drag back out, so a sync never locks its thread.
+
+        Not even one whose row says its card was archived or deleted (issue #198). That lock is
+        the poller's, taken and lifted beside the card's own state; a sync settling a lock it owes
+        is the only thing that asks this, and no sync owes a ticket one.
+        """
         policy = TicketPolicy()
 
-        assert policy.shut_for_state(status=Status.DONE, github_state="open") is False
+        assert policy.shut_for_state(status=Status.DONE, github_state=state) is False

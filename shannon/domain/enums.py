@@ -70,6 +70,21 @@ class StateChange(StrEnum):
     REOPENED = "REOPENED"
 
 
+class CardState(StrEnum):
+    """Where a draft card stands on its board, as a ticket row's `github_state` records it.
+
+    Issue #198. A draft has no state on GitHub that anything here could read - it cannot be closed,
+    only archived, restored or deleted off the board - so a ticket's row said `open` for ever and
+    its thread stayed open over a card that had gone. Lowercase, because it shares the column with
+    the `open`, `closed` and `merged` GitHub gives issues and pull requests, and a ticket that is
+    open has to read exactly as everything else that is.
+    """
+
+    OPEN = "open"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
+
+
 class ActorRole(StrEnum):
     """How a GitHub user relates to a tracked item.
 

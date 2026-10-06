@@ -259,6 +259,10 @@ class RepositoryRefresh:
 
         Only drafts. A card wrapping an issue or a pull request already has a thread from that
         item's own webhooks, and the two kinds above cover it.
+
+        And only drafts still on the board. An archived card comes back from the read marked rather
+        than dropped since issue #198, and offering one here would open a thread for work somebody
+        put away.
         """
         if registered.board_number is None:
             return (), MissedTickets.NO_BOARD
@@ -298,7 +302,7 @@ class RepositoryRefresh:
                 action="refreshed",
             )
             for item in once_each(listed)
-            if item.is_draft
+            if item.is_draft and not item.archived
         ], None
 
     async def _open_items(

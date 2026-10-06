@@ -7,7 +7,10 @@ import pytest
 
 from shannon.discord_bot.formatting import (
     OPEN_ON_GITHUB,
+    format_card_archived,
     format_card_converted,
+    format_card_deleted,
+    format_card_restored,
     format_pull_request,
     format_thread_moved,
     format_thread_moving,
@@ -496,6 +499,109 @@ class TestSayingACardBecameAnIssue:
         """What the old line was not. Without an accent `layout` sends the panel as ordinary text
         with no coloured bar, which is how this read as a quiet aside rather than an end state."""
         assert format_card_converted(self.ISSUE, shut=True).is_plain is False
+
+
+class TestSayingACardWasArchived:
+    """The panel left in a draft card's thread when the card is archived. Issue #198.
+
+    Written after the shut was attempted, as a conversion's is, so `shut` is what happened rather
+    than what was hoped for - and the one thing archiving has that a conversion does not is a way
+    back, which a shut thread is told.
+    """
+
+    def test_a_shut_thread_is_told_how_to_get_it_back(self) -> None:
+        said = format_card_archived(shut=True).text
+
+        assert "This card was archived on the board." in said
+        assert (
+            "This thread is locked and archived. Restore the card on the board to reopen it here."
+            in said
+        )
+
+    def test_a_thread_that_would_not_shut_is_told_nothing_about_locks(self) -> None:
+        """Nothing promised that Discord refused, and no way back offered from a lock that is not
+        there."""
+        said = format_card_archived(shut=False).text
+
+        assert "This card was archived on the board." in said
+        assert "locked" not in said
+        assert "Restore" not in said
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_it_is_grey_either_way(self, shut: bool) -> None:
+        """The grey a draft already wears: put away, not finished, and not news about the work."""
+        assert format_card_archived(shut=shut).accent is Accent.NEUTRAL
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_it_is_one_heading_and_the_line_under_it(self, shut: bool) -> None:
+        panel = format_card_archived(shut=shut)
+
+        assert [block.kind for block in panel.blocks] == [BlockKind.HEADING, BlockKind.SUBHEADING]
+        assert panel.blocks[0].text == "### 📦 Archived"
+
+    def test_it_is_a_card_and_not_a_message(self) -> None:
+        assert format_card_archived(shut=True).is_plain is False
+
+
+class TestSayingACardIsBack:
+    """The panel left in a draft card's thread when the card comes back to the board. Issue #198."""
+
+    def test_a_reopened_thread_is_told_it_is_open_again(self) -> None:
+        said = format_card_restored(reopened=True).text
+
+        assert "This card is back on the board." in said
+        assert "This thread is open again." in said
+
+    def test_a_thread_discord_would_not_reopen_is_not_told_it_is_open(self) -> None:
+        """Still shut, so "open again" would be the one false sentence in it."""
+        said = format_card_restored(reopened=False).text
+
+        assert "This card is back on the board." in said
+        assert "open again" not in said
+
+    @pytest.mark.parametrize("reopened", [True, False])
+    def test_it_is_green_either_way(self, reopened: bool) -> None:
+        assert format_card_restored(reopened=reopened).accent is Accent.OPEN
+
+    @pytest.mark.parametrize("reopened", [True, False])
+    def test_it_is_one_heading_and_the_line_under_it(self, reopened: bool) -> None:
+        panel = format_card_restored(reopened=reopened)
+
+        assert [block.kind for block in panel.blocks] == [BlockKind.HEADING, BlockKind.SUBHEADING]
+        assert panel.blocks[0].text == "### 📤 Restored"
+
+
+class TestSayingACardWasDeleted:
+    """The panel left in a draft card's thread when the card is deleted. Issue #198.
+
+    An end with no way back, so it is said the way a merge is: the plain lock line, and nothing
+    about restoring a card that no longer exists.
+    """
+
+    def test_a_shut_thread_is_told_it_is_finished(self) -> None:
+        said = format_card_deleted(shut=True).text
+
+        assert "This card was deleted from the board." in said
+        assert "This thread is locked and archived." in said
+        assert "Restore" not in said, "a deleted card cannot be restored"
+
+    def test_a_thread_that_would_not_shut_is_told_nothing_about_locks(self) -> None:
+        said = format_card_deleted(shut=False).text
+
+        assert "This card was deleted from the board." in said
+        assert "locked" not in said
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_it_is_red_either_way(self, shut: bool) -> None:
+        """Red, as a closed issue's end is: the work is gone, not moved somewhere."""
+        assert format_card_deleted(shut=shut).accent is Accent.CLOSED
+
+    @pytest.mark.parametrize("shut", [True, False])
+    def test_it_is_one_heading_and_the_line_under_it(self, shut: bool) -> None:
+        panel = format_card_deleted(shut=shut)
+
+        assert [block.kind for block in panel.blocks] == [BlockKind.HEADING, BlockKind.SUBHEADING]
+        assert panel.blocks[0].text == "### 🗑️ Deleted"
 
 
 class TestTheCardTheBlockIsDrawnOn:

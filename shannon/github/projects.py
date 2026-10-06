@@ -28,7 +28,11 @@ from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import Actor, Label
 from shannon.domain.priority import parse_priority
 from shannon.github import mapping
-from shannon.github.errors import GitHubAuthError, GitHubNotFoundError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubNotFoundError,
+    GitHubUnavailableError,
+)
 from shannon.github.paging import PagedRead
 
 logger = logging.getLogger(__name__)
@@ -242,6 +246,11 @@ class BoardItem:
     story_point: str | None = None
     iteration: str | None = None
     area: str | None = None
+    # Whether the card is in the board's archive. Issue #198: an archived card used to be dropped
+    # where it was read, which made it look exactly like a deleted one - absent - so neither could
+    # be told to its thread. Kept and marked instead, and everything that mirrors a card leaves an
+    # archived one alone. Last, so every construction from before it still means what it did.
+    archived: bool = False
 
     @property
     def is_draft(self) -> bool:
@@ -511,10 +520,17 @@ class HttpProjectBoards:
         )
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
-        """Every card on the board, archived ones dropped.
+        """Every card on the board, the archived ones marked rather than dropped.
 
         Archiving is how a card is taken off the board without deleting it, so mirroring one
-        would put back a thread for work already put away.
+        would put back a thread for work already put away - and nothing here mirrors one. They
+        used to be dropped right here, which made an archived card and a deleted one the same
+        thing to the poller: absent. Issue #198 needs them apart, because an archived card's thread
+        comes back with the card and a deleted card's never does.
+
+        Whether GitHub lists archived cards at all is not something its documentation says. This
+        is right either way: a listed one arrives marked, and one left out is a card missing from
+        the read, which the poller asks about on its own.
         """
         token = await self._read_as(owner, project_number)
         board = await self._board_path(owner, project_number, token)
@@ -558,6 +574,38 @@ class HttpProjectBoards:
             # that cannot be trusted is not worth the reading.
             self._listed.pop(key, None)
         return items
+
+    async def read_card(self, owner: str, project_number: int, card_id: int) -> BoardItem | None:
+        """One card read on its own, or None where GitHub has no such card on this board.
+
+        Issue #198. A card the board's listing has stopped showing may have been deleted, archived
+        out of a listing that leaves archived cards out, or simply missed by a read that could not
+        prove it arrived whole - so the poller asks about that one card before it believes any of
+        them.
+
+        None means exactly one thing: GitHub answered THIS card's own path with 404. The poller
+        reads that as deleted, which lets a thread go for good, so nothing else may become None.
+        The credential and the board's path are found outside the `try` for that reason - a 404
+        looking up the account is a board that will not open, not a card that has gone - and a body
+        that is not a card raises rather than answering None, because "GitHub said something odd"
+        is not "GitHub has no such card".
+
+        Under the board's own reader, as every other read of the board is: its linker's
+        authorisation, and no request at all where nobody's stands behind it.
+        """
+        token = await self._read_as(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
+        try:
+            body = await self._client.get_json(f"{board}/items/{card_id}", owner=owner, token=token)
+        except GitHubNotFoundError:
+            return None
+        card = parse_item(body, project_number)
+        if card is None:
+            raise GitHubUnavailableError(
+                f"GitHub answered card {card_id} on board {project_number} belonging to {owner} "
+                "with something that is not a card"
+            )
+        return card
 
     async def _read_as(self, owner: str, project_number: int) -> str:
         """The credential a board's own reads go out under, refusing before any request without one.
@@ -913,10 +961,12 @@ def parse_item(payload: object, project_number: int) -> BoardItem | None:
 
     The poller uses a card's content id to find the thread its issue or pull request already
     has, rather than opening a second one.
+
+    An archived card is read like any other and marked, rather than dropped here. Issue #198:
+    dropped, it was indistinguishable from a deleted card, and the two ask different things of a
+    thread.
     """
     if not is_json_object(payload):
-        return None
-    if payload.get("archived_at") is not None:
         return None
 
     # Checked for being a string before it is looked up: a dict.get on an unhashable key raises
@@ -962,6 +1012,7 @@ def parse_item(payload: object, project_number: int) -> BoardItem | None:
         story_point=_text(_option_name(_field_value(fields, STORY_POINT_FIELD))),
         iteration=_iteration_title(_field_value(fields, ITERATION_FIELD)),
         area=_text(_option_name(_field_value(fields, AREA_FIELD))),
+        archived=payload.get("archived_at") is not None,
     )
 
 

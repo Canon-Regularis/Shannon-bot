@@ -32,6 +32,9 @@ class Accent(IntEnum):
 
     NEUTRAL = 0x8B949E
     DRAFT = 0x8B949E
+    # Issue #198. A card put away, not finished: the grey a draft already wears, rather than a
+    # colour saying anything happened to the work.
+    ARCHIVED = 0x8B949E
 
     MERGED = 0xA371F7
     CONVERTED = 0xA371F7
@@ -39,6 +42,8 @@ class Accent(IntEnum):
     CLOSED = 0xF85149
     FAILED = 0xF85149
     HIGH = 0xF85149
+    # Issue #198. A card gone for good, which is a thread ending the way a closed issue's does.
+    DELETED = 0xF85149
 
     MEDIUM = 0xD29922
 

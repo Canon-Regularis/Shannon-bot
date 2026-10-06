@@ -54,6 +54,17 @@ this module not needed at all. Two caveats, both already true elsewhere in the t
 are organisation-scope and in public preview, and granting an installed App a new permission
 suspends its deliveries until an admin accepts.
 
+Following a card off the board
+------------------------------
+Issue #198. A draft card leaves the board in two ways and neither is an event: it is archived,
+which somebody can undo, or deleted, which nobody can. So each pass also follows every mirrored
+draft to wherever the board has put it - an archived card shuts its thread, a card put back opens
+it again, and a deleted card ends it the way a conversion does. See `_settle_what_became_of`.
+
+A card on the read answers for itself. A card missing from it proves nothing, because a read can
+leave one out without saying so, so those are asked about one card at a time - the only request a
+quiet board ever spends budget on, and spaced so that stays small. See `CARD_READ_SPACING_SECONDS`.
+
 Things deliberately not done, so they are not re-litigated:
 
 - **Per-card concurrency.** discord.py buckets thread creation on the parent channel, so the calls
@@ -71,9 +82,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Mapping, Sequence
+import math
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -81,17 +95,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import COLUMN_WIDTH, Repository
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
-from shannon.db.stores.tracked_items import BoardRow, TrackedItemStore
-from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.db.stores.tracked_items import BoardRow, TicketThread, TrackedItemStore
+from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.formatting import (
     as_timestamp,
+    format_card_archived,
     format_card_changed,
     format_card_converted,
+    format_card_deleted,
+    format_card_restored,
 )
-from shannon.discord_bot.threads import PostsToThread, ShutsThread
+from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, ShutsThread
 from shannon.domain.board import board_owner as owner_of_board
-from shannon.domain.board import normalise, status_from_column
-from shannon.domain.enums import ObjectType, Status
+from shannon.domain.board import is_board_page, normalise, status_from_column
+from shannon.domain.enums import CardState, ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
@@ -131,8 +149,25 @@ RATE_LIMIT_CEILING = 3600
 # and an operator lowering it would be choosing a bandwidth bill they cannot see.
 UNVALIDATED_POLL_SECONDS = 60.0
 
+# Issue #198. How often the poller may ask GitHub about one card on its own, per board. A card the
+# listing has stopped showing may be deleted, archived out of a listing that leaves archived cards
+# out, or merely beyond what one read could prove it saw - and the only way to tell them apart is a
+# request per card, against the linker's budget, which the listing spends none of while nothing
+# changes. Ten seconds caps that at 360 an hour per board, a fraction of the linker's 5,000, and a
+# board where nothing went missing spends none. Not an environment knob, for the reason the one
+# above is not: it is the price of a question, not a preference.
+CARD_READ_SPACING_SECONDS = 10.0
+# How long a card GitHub says is still on the board, though the read left it out, waits before it
+# is asked about again. A read missing it is the board's shape - one too big to arrive whole - and
+# not news about the card, so asking every ten seconds would spend the budget on nothing.
+MISSED_CARD_RECHECK_SECONDS = 600.0
+# How long an archived card waits between questions, where the listing leaves archived cards out.
+# It is asked at all only so a card deleted out of the archive is noticed, and its thread was shut
+# when it was archived - so an hour's wait costs nothing anybody can see.
+ARCHIVED_CARD_RECHECK_SECONDS = 3600.0
 
-class SaysAndShuts(PostsToThread, ShutsThread, Protocol):
+
+class SaysAndShuts(PostsToThread, ShutsThread, KnowsItsServers, Protocol):
     """Posting one line in a thread and shutting it, for a thread nothing will use again.
 
     The poller otherwise reaches Discord only through the sync service, which renders items
@@ -140,8 +175,10 @@ class SaysAndShuts(PostsToThread, ShutsThread, Protocol):
     it has something to say that is not an item, and a thread going silent for ever with no
     explanation is the failure being fixed.
 
-    Composed from the two Protocols that already say these, rather than restating them: a
-    third copy of `post` would be a third thing to keep in step with the gateway.
+    Composed from the Protocols that already say these, rather than restating them: a third
+    copy of `post` would be a third thing to keep in step with the gateway. Whether the bot is
+    in a server at all rides along since issue #198, because Discord refuses a bot that has been
+    removed exactly as it refuses a missing permission, and only one of those is worth retrying.
     """
 
 
@@ -158,13 +195,30 @@ class MovesStatus(Protocol):
     ) -> WorkflowOutcome: ...
 
 
+class ReadsOneCard(Protocol):
+    """Reading one card on its own, for a card the board's listing has stopped showing.
+
+    Issue #198. Declared here, where it is consumed: `/refresh` reads a board once and asks nothing
+    of the sort. None means GitHub has no such card on the board, and nothing else - see
+    `HttpProjectBoards.read_card`, which keeps every other failure out of it.
+    """
+
+    async def read_card(
+        self, owner: str, project_number: int, card_id: int
+    ) -> BoardItem | None: ...
+
+
+class ReadsBoardsAndCards(ReadsBoards, ReadsOneCard, Protocol):
+    """Everything the poller asks GitHub about a board: its listing, and a card it leaves out."""
+
+
 class ProjectPoller:
     """Reads a board on a timer and syncs the cards that have moved since the last read."""
 
     def __init__(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
-        projects: ReadsBoards,
+        projects: ReadsBoardsAndCards,
         sync: SyncsItems,
         workflow: MovesStatus,
         threads: SaysAndShuts,
@@ -172,6 +226,7 @@ class ProjectPoller:
         polling: bool = True,
         interval: float = 60.0,
         may_set_status: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._projects = projects
@@ -181,6 +236,16 @@ class ProjectPoller:
         self._polling = polling
         self._interval = interval
         self._may_set_status = may_set_status
+        # What the spacing of single-card reads is measured on. Monotonic, because a wall clock
+        # stepped back by an NTP correction would hold every question back for as long as it moved.
+        self._clock = clock
+        # Issue #198, all three in memory: a restart costs a question or two, never a wrong answer.
+        # When each tracked card was last asked about on its own, by tracked item id; the cards
+        # GitHub has answered "no such card" for once, waiting on the second answer a deletion
+        # needs; and when each board last had a card asked about, by (owner casefolded, number).
+        self._asked: dict[int, float] = {}
+        self._gone_once: set[int] = set()
+        self._card_read_at: dict[tuple[str, int], float] = {}
         # Boards already said to be unreadable, so the line is loud once and then DEBUG. This
         # runs every couple of seconds since issue #189, and a board nobody's authorisation
         # stands behind - every board linked before issue #170, until somebody links it again -
@@ -304,12 +369,16 @@ class ProjectPoller:
         self._note_what_a_recheck_costs(board)
 
         items = once_each(listed)
+        # The cards on the board itself. An archived card is read now rather than dropped (issue
+        # #198), and nothing that mirrors or moves a card may see one: archiving is how work is
+        # put away, and mirroring it would put back what somebody put away.
+        active = [item for item in items if not item.archived]
 
         # Whether the board's Status field can be read at all, decided from the whole board
         # rather than from one card. A single card with no column is somebody clearing its
         # Status; every card with no column is the field itself gone, which is a shape nothing
         # below may believe. Only the board sees the difference.
-        readable = any(_fits(item.column) for item in items)
+        readable = any(_fits(item.column) for item in active)
 
         # Read HERE, beside the board, and deliberately not with the one below. `_move_tracked`
         # acts on a card having MOVED: it compares this listing against the column it last saw,
@@ -325,8 +394,17 @@ class ProjectPoller:
         # refuses a skipped column measures from exactly that column.
         seen = await self._board_state(board.repository_id)
 
+        # Issue #198, and here on purpose: after `seen`, so the window the comment above guards is
+        # as narrow as it was, and before the drafts, so a card coming back says so before the
+        # line saying what changed while it was away. Answers the cards whose sync must wait.
+        owed = await self._settle_what_became_of(board, items)
+
+        # Archived ones included, for the hand-over alone: a card converted to an issue is a
+        # conversion wherever it sits, and its draft thread is owed the hand-over either way.
         wrapped = [i for i in items if not i.is_draft]
-        moved = await self._mirror_drafts(board, [i for i in items if i.is_draft])
+        moved = await self._mirror_drafts(
+            board, [i for i in active if i.is_draft and i.item_id not in owed]
+        )
 
         # Read again, and after the drafts on purpose: a draft mirrored this pass has a row only
         # now, and the hand-over is the thing that needs to see it. The two reads answer different
@@ -334,11 +412,333 @@ class ProjectPoller:
         # read cannot be both without being wrong for one of them.
         state = await self._board_state(board.repository_id)
         await self._hand_over_converted(wrapped, state)
-        moved += await self._move_tracked(board, wrapped, readable, seen)
+        moved += await self._move_tracked(
+            board, [i for i in wrapped if not i.archived], readable, seen
+        )
 
         if moved:
-            logger.info("mirrored %s of %s cards that had moved", moved, len(items))
+            logger.info("mirrored %s of %s cards that had moved", moved, len(active))
         return moved
+
+    async def _settle_what_became_of(self, board: _Board, items: Sequence[BoardItem]) -> set[int]:
+        """Follow every mirrored draft card to wherever the board has put it. Issue #198.
+
+        An archived card shuts its thread, a card put back opens it again, and a deleted card ends
+        it the way a conversion does - and none of the three is an event, so they are read off the
+        board like everything else here.
+
+        A card on this read answers for itself, and needs no proof of which board it is on: a card
+        id is GitHub's, unique across every board there is. A card missing from the read proves
+        nothing at all - a read past its page cap, a page GitHub garbled and cursor paging over a
+        card being dragged all leave one out without saying so - so those are asked about on their
+        own, one at a time, and only this board's. See `_ask_about_a_missing_card`.
+
+        Answers the cards whose sync has to wait this pass: one coming back whose thread Discord
+        would not reopen yet. Synced anyway, the sync would write `open` over `archived`, and the
+        reopen would never be tried again over a card that is plainly back.
+        """
+        rows = await self._ticket_threads(board.repository_id)
+        if not self._still_in(board.guild_id):
+            # Out of the server, or not connected to it yet. Discord refuses the bot then exactly
+            # as it refuses a missing permission, and that refusal would be written off for good
+            # - so nothing is tried until it is back, and a card coming back is held out of its
+            # sync meanwhile, which would otherwise write `open` over the reopen still owed.
+            return {row.card_id for row in rows if row.archived}
+
+        listed = {item.item_id: item for item in items}
+        owed: set[int] = set()
+        missing: list[TicketThread] = []
+        for row in rows:
+            card = listed.get(row.card_id)
+            if card is None:
+                if _on_this_board(board, row):
+                    missing.append(row)
+                continue
+            # On the read, so whatever a question about it alone suspected is answered.
+            self._asked.pop(row.tracked_item_id, None)
+            self._gone_once.discard(row.tracked_item_id)
+            try:
+                await self._keep_its_page(board, row, card)
+                if not await self._follow(row, card):
+                    owed.add(row.card_id)
+            except Exception:
+                # One card's surprise is that card's, as in `_mirror_drafts`, and held back from
+                # its sync as well: whatever went wrong may have left its row half way.
+                logger.exception(
+                    "could not follow card %s to where the board has put it", row.card_id
+                )
+                owed.add(row.card_id)
+        await self._ask_about_a_missing_card(board, missing)
+        return owed
+
+    async def _follow(self, row: TicketThread, card: BoardItem) -> bool:
+        """Do to a card's thread what the board has done to the card.
+
+        Answers whether that is settled: false where Discord could not shut or reopen the thread
+        this pass and nothing was written, so the caller brings the card round again - and holds a
+        card coming back out of its sync meanwhile, see `_settle_what_became_of`.
+        """
+        fate = _fate_of(card, archived=row.archived)
+        if fate is _Fate.ARCHIVED:
+            return await self._archive(row)
+        if fate is _Fate.RESTORED:
+            return await self._restore(row)
+        return True
+
+    def _still_in(self, guild_id: int) -> bool:
+        """Whether the bot is in a server now. Not connected counts as no: waiting suits both."""
+        try:
+            return self._threads.is_in(guild_id)
+        except DiscordGatewayError:
+            return False
+
+    async def _archive(self, row: TicketThread) -> bool:
+        """Shut a thread whose card was archived, and say so. Issue #198.
+
+        Discord first and the row second, the opposite of a hand-over, because here the row is
+        the retry. A shut Discord could not make for a moment writes nothing, so the next pass
+        finds the card archived and the row open and asks again; written first, the row would
+        say archived over a thread nobody shut, and nothing would ever look again. A shut Discord
+        refuses outright is written off instead - asked every couple of seconds it would refuse
+        every time - and said without a word about the lock it did not get.
+        """
+        shut = await self._try_to_shut(row.thread_id, shut=True)
+        if shut is _Shut.LATER:
+            return False
+        if shut is _Shut.GONE:
+            # Somebody deleted the thread. Nothing to shut or tell, and pointing at it would leave
+            # the card with no thread when it comes back; let go, it comes back to a new one.
+            await self._record(row, CardState.ARCHIVED, forget=True)
+            return True
+        done = shut is _Shut.DONE
+        await self._record(row, CardState.ARCHIVED, locked=True if done else None)
+        logger.info("card %s was archived, so thread %s was shut", row.card_id, row.thread_id)
+        await self._say_and_shut_again(
+            row.thread_id,
+            format_card_archived(shut=done),
+            shut=done,
+            failing=f"tell thread {row.thread_id} its card was archived",
+        )
+        return True
+
+    async def _restore(self, row: TicketThread) -> bool:
+        """Reopen a thread whose card came back to the board, and say so. Issue #198.
+
+        On the card's presence and the row's say-so, never on its timestamp: whether GitHub
+        stamps a card it unarchives is not something this may assume, and a card nobody edited
+        while it was away is no less back. Anything that did change is said by the ordinary line
+        `_mirror_drafts` posts next, against the fields recorded before the card was archived -
+        which is why an archived card is never synced.
+
+        Discord first and the row second, as `_archive` explains. Answers whether the card's
+        sync may go ahead: not while a reopen Discord could not make for a moment is still owed,
+        because the sync writes `open` and would take the only record that it is.
+        """
+        reopened = await self._try_to_shut(row.thread_id, shut=False)
+        if reopened is _Shut.LATER:
+            return False
+        if reopened is _Shut.GONE:
+            # Let go of, so `_mirror_drafts` builds the card a new thread on this same pass.
+            await self._record(row, CardState.OPEN, forget=True)
+            return True
+        done = reopened is _Shut.DONE
+        await self._record(row, CardState.OPEN, locked=False if done else None)
+        if not done:
+            logger.warning(
+                "card %s is back on the board and thread %s stays shut over it: the bot needs "
+                "Manage Threads to reopen it, or somebody can unlock it by hand",
+                row.card_id,
+                row.thread_id,
+            )
+        await self._say_and_shut_again(
+            row.thread_id,
+            format_card_restored(reopened=done),
+            shut=False,
+            failing=f"tell thread {row.thread_id} its card is back on the board",
+        )
+        return True
+
+    async def _gone(self, row: TicketThread) -> None:
+        """A card GitHub says it does not have, believed the second time it says so. Issue #198.
+
+        Twice, on two passes, because what follows cannot be undone - the thread is let go of and
+        nothing will point at it again - while one 404 can be a board whose access changed between
+        the read and this question, which the next pass then finds unreadable and asks nothing.
+        """
+        if row.tracked_item_id not in self._gone_once:
+            self._gone_once.add(row.tracked_item_id)
+            logger.info(
+                "card %s is not on its board any more; asking once more before letting thread "
+                "%s go",
+                row.card_id,
+                row.thread_id,
+            )
+            return
+        self._gone_once.discard(row.tracked_item_id)
+        await self._retire(row)
+
+    async def _retire(self, row: TicketThread) -> None:
+        """End a deleted card's thread the way a converted card's is ended. Issue #198.
+
+        Let go of first and said second, exactly as the hand-over does and for its reason: a card
+        deleted cannot come back, so the pointer is what stops this repeating, and a Discord
+        refusal after it costs the line rather than a thread told it is finished on every pass.
+        """
+        await self._record(row, CardState.DELETED, forget=True)
+        logger.info(
+            "card %s was deleted from the board, so thread %s was let go of",
+            row.card_id,
+            row.thread_id,
+        )
+        shut = await self._shut_before_saying(
+            row.thread_id, before=f"saying its card {row.card_id} was deleted"
+        )
+        await self._say_and_shut_again(
+            row.thread_id,
+            format_card_deleted(shut=shut),
+            shut=shut,
+            failing=f"tell thread {row.thread_id} its card was deleted",
+        )
+
+    async def _try_to_shut(self, thread_id: int, *, shut: bool) -> _Shut:
+        """Shut or reopen a thread, answering what Discord made of it.
+
+        Four answers rather than a bool, because the callers do four different things: a thread
+        that is gone is let go of, a refusal that will never change is written off, and anything
+        else is tried again next pass.
+        """
+        try:
+            await self._threads.set_shut(thread_id=thread_id, shut=shut)
+        except ThreadNotFoundError:
+            return _Shut.GONE
+        except DiscordGatewayError as refusal:
+            logger.warning(
+                "could not %s thread %s: %s", "shut" if shut else "reopen", thread_id, refusal
+            )
+            return _Shut.REFUSED if isinstance(refusal, PermanentError) else _Shut.LATER
+        return _Shut.DONE
+
+    async def _record(
+        self,
+        row: TicketThread,
+        state: CardState,
+        *,
+        locked: bool | None = None,
+        forget: bool = False,
+    ) -> None:
+        """Write where a card stands, and what became of its thread, in one transaction.
+
+        The state first, because letting go of the pointer nulls the column every write here is
+        guarded on. `locked` is only ever what Discord has just done, never what was asked for -
+        None where it refused, which leaves the row saying nothing about a lock it never got.
+        """
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).remember_card_state(
+                row.tracked_item_id, thread_id=row.thread_id, state=state
+            )
+            pointers = ThreadPointerStore(session)
+            if forget:
+                await pointers.forget_thread(row.tracked_item_id, dead_thread_id=row.thread_id)
+            elif locked is not None:
+                await pointers.note_the_lock(
+                    row.tracked_item_id, thread_id=row.thread_id, locked=locked
+                )
+
+    async def _keep_its_page(self, board: _Board, row: TicketThread, card: BoardItem) -> None:
+        """Keep a listed draft's board page current. Issue #198.
+
+        The page is how a missing card is told to be this board's, and it names the board's
+        owner: a row written before that account was renamed names an owner the board no longer
+        has, so a card of its that later went missing would never be asked about. A card on the
+        read proves its page. Written only where it differs and is this board's page at all, so
+        a board nobody renamed costs a comparison and nothing else.
+        """
+        if card.html_url == row.board_url or not is_board_page(
+            card.html_url, owner=board.board_owner, number=board.project_number
+        ):
+            return
+        async with self._sessionmaker() as session, session.begin():
+            await TrackedItemStore(session).remember_board_page(
+                row.tracked_item_id, page=card.html_url
+            )
+
+    async def _ask_about_a_missing_card(
+        self, board: _Board, missing: Sequence[TicketThread]
+    ) -> None:
+        """Ask GitHub about one card the read left out, at most, and follow what it answers.
+
+        One at a time and spaced, because each question is a request against the linker's budget
+        where an unchanged listing costs none, and a board polled every couple of seconds would
+        otherwise spend it on cards merely out of the read's reach. See the three waits at the top
+        of this module.
+
+        Which card first: one GitHub already answered "no such card" for once, so a deletion is
+        confirmed rather than left half believed; then cards whose row says open, because one of
+        those missing is the news; then archived ones, asked about only so one deleted out of the
+        archive is noticed. Within each, the card asked about longest ago.
+
+        A deletion needs two answers, see `_gone`. Anything else GitHub says is followed at once,
+        and anything it cannot say this time is left for the wait to bring back round - except a
+        rate limit, which ends the pass as it does for the listing.
+        """
+        key = (board.board_owner.casefold(), board.project_number)
+        now = self._clock()
+        last = self._card_read_at.get(key)
+        if last is not None and now - last < CARD_READ_SPACING_SECONDS:
+            return
+        due = [row for row in missing if self._due(row, now)]
+        if not due:
+            return
+        row = min(
+            due,
+            key=lambda one: (
+                one.tracked_item_id not in self._gone_once,
+                one.archived,
+                self._asked.get(one.tracked_item_id, -math.inf),
+            ),
+        )
+        # Recorded before the question, so one that fails waits its turn rather than being asked
+        # again on every pass.
+        self._card_read_at[key] = now
+        self._asked[row.tracked_item_id] = now
+        try:
+            card = await self._projects.read_card(
+                board.board_owner, board.project_number, row.card_id
+            )
+        except GitHubRateLimitError:
+            raise
+        except ShannonError as unanswered:
+            # Never a deletion: only the card's own 404 is, and `read_card` keeps everything else
+            # out of None. Asked again once its wait comes round.
+            logger.warning(
+                "could not ask GitHub about card %s, which board %s belonging to %r no longer "
+                "lists: %s",
+                row.card_id,
+                board.project_number,
+                board.board_owner,
+                unanswered,
+            )
+            return
+        try:
+            if card is None:
+                await self._gone(row)
+            else:
+                self._gone_once.discard(row.tracked_item_id)
+                if not await self._follow(row, card):
+                    # GitHub has said what became of the card and only Discord is behind, so it is
+                    # due again at the board's next question rather than after its wait.
+                    self._asked.pop(row.tracked_item_id, None)
+        except Exception:
+            logger.exception("could not follow card %s to where the board has put it", row.card_id)
+
+    def _due(self, row: TicketThread, now: float) -> bool:
+        """Whether a missing card's wait has run out. A first "no such card" has none: the
+        second answer is what is waited for, and the spacing per board already paces it."""
+        if row.tracked_item_id in self._gone_once:
+            return True
+        asked = self._asked.get(row.tracked_item_id)
+        wait = ARCHIVED_CARD_RECHECK_SECONDS if row.archived else MISSED_CARD_RECHECK_SECONDS
+        return asked is None or now - asked >= wait
 
     async def _mirror_drafts(self, board: _Board, drafts: Sequence[BoardItem]) -> int:
         """A draft card is its own item, so it gets a thread of its own.
@@ -780,26 +1180,43 @@ class ProjectPoller:
         either: this runs before the cards that have moved are moved, so an exception here would
         cost every one of them for the whole pass.
         """
-        shut = True
+        shut = await self._shut_before_saying(thread_id, before=f"handing it over to {html_url}")
+        await self._say_and_shut_again(
+            thread_id,
+            format_card_converted(html_url, shut=shut),
+            shut=shut,
+            failing=f"hand thread {thread_id} over to {html_url}",
+        )
+
+    async def _shut_before_saying(self, thread_id: int, *, before: str) -> bool:
+        """Shut a thread about to be told it is finished, answering whether Discord did.
+
+        The first half of `_say_it_moved`'s order, shared with a deleted card's thread (issue
+        #198), which is finished the same way and says the same nothing about a lock it could not
+        take. `before` finishes the log line's sentence.
+        """
         try:
             await self._threads.set_shut(thread_id=thread_id, shut=True)
         except DiscordGatewayError as refusal:
-            logger.warning(
-                "could not shut thread %s before handing it over to %s: %s",
-                thread_id,
-                html_url,
-                refusal,
-            )
-            shut = False
+            logger.warning("could not shut thread %s before %s: %s", thread_id, before, refusal)
+            return False
+        return True
 
+    async def _say_and_shut_again(
+        self, thread_id: int, panel: Panel, *, shut: bool, failing: str
+    ) -> None:
+        """Post one line in a thread, and shut it again where it was shut: posting reopens it.
+
+        The second half of `_say_it_moved`'s order, one handler around both for the reason its
+        docstring gives, shared by every line the poller leaves in a thread it has just shut or
+        reopened. `failing` finishes the sentence "could not ..." for the log.
+        """
         try:
-            await self._threads.post(
-                thread_id=thread_id, panel=format_card_converted(html_url, shut=shut)
-            )
+            await self._threads.post(thread_id=thread_id, panel=panel)
             if shut:
                 await self._threads.set_shut(thread_id=thread_id, shut=True)
         except DiscordGatewayError as refusal:
-            logger.warning("could not hand thread %s over to %s: %s", thread_id, html_url, refusal)
+            logger.warning("could not %s: %s", failing, refusal)
 
     async def _remember_cards(
         self, wrapped: Sequence[BoardItem], state: Mapping[tuple[ObjectType, int], BoardRow]
@@ -833,6 +1250,10 @@ class ProjectPoller:
     async def _board_state(self, repository_id: int) -> Mapping[tuple[ObjectType, int], BoardRow]:
         async with self._sessionmaker() as session:
             return await TrackedItemStore(session).board_state(repository_id=repository_id)
+
+    async def _ticket_threads(self, repository_id: int) -> list[TicketThread]:
+        async with self._sessionmaker() as session:
+            return await TrackedItemStore(session).ticket_threads(repository_id=repository_id)
 
     async def run_forever(self) -> None:
         """Read the board until asked to stop.
@@ -1073,6 +1494,44 @@ def _has_moved(item: BoardItem, stored: datetime | None, thread_id: int | None) 
     return as_utc(item.updated_at) > as_utc(stored)
 
 
+class _Fate(StrEnum):
+    """What the board has done to a mirrored draft card since its row was last written."""
+
+    ARCHIVED = "archived"
+    RESTORED = "restored"
+
+
+class _Shut(StrEnum):
+    """What Discord made of a request to shut or reopen a thread. See `_try_to_shut`."""
+
+    DONE = "done"
+    GONE = "gone"
+    REFUSED = "refused"
+    LATER = "later"
+
+
+def _fate_of(card: BoardItem, *, archived: bool) -> _Fate | None:
+    """What has become of a card whose row says `archived`, or None where nothing has.
+
+    A card that is no longer a draft is nobody's business here: it was converted, and the
+    hand-over is what follows that, archived or not.
+    """
+    if not card.is_draft or card.archived is archived:
+        return None
+    return _Fate.ARCHIVED if card.archived else _Fate.RESTORED
+
+
+def _on_this_board(board: _Board, row: TicketThread) -> bool:
+    """Whether a ticket row belongs to the board this pass read, owner and number both.
+
+    Only asked of a card the read left out. A relink leaves the old board's rows behind, and
+    asked about on the new board every one of their cards answers that GitHub has no such card
+    - which would be read as deleted. The page names the board's number as well as its owner, so
+    it is the whole answer. See `domain.board.is_board_page`.
+    """
+    return is_board_page(row.board_url, owner=board.board_owner, number=board.project_number)
+
+
 @dataclass(frozen=True, slots=True)
 class _Board:
     """The registered repository and the board read against it, as plain values.
@@ -1091,6 +1550,9 @@ class _Board:
     project_number: int
     board_owner: str
     snapshot: RepositorySnapshot
+    # The server the repository is registered to, which a thread's shut is asked against before it
+    # is attempted. Issue #198.
+    guild_id: int
 
     @classmethod
     def of(cls, repository: Repository, project_number: int) -> _Board:
@@ -1108,4 +1570,5 @@ class _Board:
                 name=name,
                 html_url=repository.repo_url,
             ),
+            guild_id=repository.discord_guild_id,
         )
