@@ -7806,3 +7806,25 @@ feature end to end rather than assuming a predecessor the file never recorded.
   handed over.
 - **No migration.** A ticket row's `github_state` says where its card stands - `open`, `archived`
   or `deleted` - and its lock is the one the thread already records.
+
+## Whoever marks a pull request ready is not rung for it
+
+- **Whoever presses the button is left out, author or not** (#230). An author marking their own
+  pull request ready - the ordinary case - was rung by the bot's own line about a button they had
+  pressed a second earlier. Only the people who did not press it are rung now.
+- **This takes back #161's exception**, which kept the author in the audience whatever happened.
+  What #161 was right about holds without it: an author is told whenever somebody else marks
+  their pull request ready or puts it back into draft.
+- **Both halves.** Ready-for-review and back-to-draft share one audience function, so an author
+  drafting their own work back is not rung either. The README already said both reach everybody
+  "minus the person who pressed it, because they know", which is true again.
+- **Left out of every list.** The drop is by login, so an author who is also assigned is not rung
+  through the assignee list. Whoever pressed it is still named in the sentence, in plain text,
+  which rings nobody.
+- **A team is still a role mention.** Discord gives nobody a way to leave one person out of a role
+  ping, so somebody in a requested team linked to a role is still rung through it. Unchanged, and
+  already in the README.
+- **Tests.** The two that pinned the self-ping are inverted, one per half, and a third holds the
+  drop across the assignee list. Two tests about other things now have somebody else press the
+  button, so they still check what they were for. Three comments that compared their own rules to
+  this one are back to their pre-#161 words.
