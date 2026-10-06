@@ -588,6 +588,31 @@ class TestArchivedThreads:
 
         existing.edit.assert_awaited_once_with(archived=True, locked=True)
 
+    async def test_a_thread_discord_archived_by_itself_is_locked_on_its_way_out(self) -> None:
+        """Issue #198's review. Discord archives a quiet thread by itself and then refuses every
+        edit that does not unarchive it, so the one-edit shut was refused every time it was asked -
+        and a draft card is usually archived on the board once it has gone quiet, which is exactly
+        when its thread has. Locked on the way out of the archive and archived again after, so it
+        is never open in between."""
+        existing = thread(archived=True, locked=False)
+
+        async def as_discord_does(**changes: bool) -> None:
+            if existing.archived and changes.get("archived") is not False:
+                raise discord.HTTPException(MagicMock(status=400), "Thread is archived")
+            existing.archived = changes.get("archived", existing.archived)
+            existing.locked = changes.get("locked", existing.locked)
+
+        existing.edit.side_effect = as_discord_does
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        await gateway.set_shut(thread_id=500, shut=True)
+
+        assert [call.kwargs for call in existing.edit.await_args_list] == [
+            {"archived": False, "locked": True},
+            {"archived": True, "locked": True},
+        ]
+        assert (existing.archived, existing.locked) == (True, True)
+
     async def test_a_thread_already_shut_costs_no_call(self) -> None:
         existing = thread(archived=True, locked=True)
         gateway = DiscordThreadGateway(client_with(existing))

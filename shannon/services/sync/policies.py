@@ -202,7 +202,9 @@ class TicketPolicy:
     object_type = ObjectType.TICKET
     channel_fallback: ObjectType | None = None
     # A card in the Done column is DONE on the row, put there by the board and not by anybody,
-    # and its thread was never locked.
+    # and its thread was never locked for it. The one lock a ticket thread does get - its card
+    # archived or deleted off the board, issue #198 - is the poller's, set and lifted beside the
+    # card's own state rather than through a sync, so nothing here reads or settles it.
     lock_lives_in_the_row = False
 
     def render(
@@ -247,14 +249,21 @@ class TicketPolicy:
     def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
         """Left alone. A board column is not a closed state.
 
-        No GitHub event arrives when a card moves back out of Done, so nothing would open the
-        thread again.
+        Moving a card out of Done is not an event either, so a lock set here would have nothing to
+        lift it. What does end a card is taking it off the board, and that is followed by the poller
+        rather than here (issue #198): an archived card is never synced at all, so a sync is never
+        the place that learns of it.
         """
         assert isinstance(snapshot, TicketSnapshot)
         return None
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
-        """Never: a card in Done is a card somebody can drag back out."""
+        """Never: a card in Done is a card somebody can drag back out.
+
+        Not for an archived or deleted card either, whose row says so since issue #198. Their lock
+        belongs to the poller, which took it; this is asked only by a sync settling a lock it owes,
+        and no sync owes a ticket one.
+        """
         return False
 
     def thread_name(self, snapshot: TrackedSnapshot) -> str:

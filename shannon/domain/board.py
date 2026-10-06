@@ -144,6 +144,36 @@ def board_owner(*, project_owner: str | None, repo_name: str) -> str:
     return project_owner or repo_name.partition("/")[0]
 
 
+# The page a draft card is linked to, because a draft has none of its own: the board's. Written by
+# the board reader's `_board_url`, and read back here to say which board a ticket row came from.
+_BOARD_PAGE = re.compile(
+    r"https://github\.com/(?:users|orgs)/(?P<owner>[^/?#]+)/projects/(?P<number>[0-9]+)"
+)
+
+
+def is_board_page(url: str, *, owner: str, number: int) -> bool:
+    """Whether a ticket row's link is this board's own page, owner and number both.
+
+    Issue #198. A ticket row records its board twice - the number, and this page - and the number
+    alone is not a board: GitHub keeps the sequence per account. A server that relinks to another
+    owner's board of the same number still holds the old board's ticket rows, and a card missing
+    from the new board's listing is asked about on the new board - where every one of the old
+    cards answers that GitHub has no such card, and would be shut as deleted. The owner in the page
+    is what tells the two boards apart.
+
+    Owner compared without its case, as GitHub compares logins. The users-or-orgs half is not
+    compared: an account is one or the other, so the owner already decides it. The page a card
+    with an unreadable project link is given, `users/unknown`, never matches a real board, which
+    errs the safe way - such a card is never asked about on its own, so never shut as deleted.
+    """
+    found = _BOARD_PAGE.fullmatch(url)
+    return (
+        found is not None
+        and found["owner"].casefold() == owner.casefold()
+        and found["number"] == str(number)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ChosenBoard:
     """A board somebody named, and the owner where they named one.

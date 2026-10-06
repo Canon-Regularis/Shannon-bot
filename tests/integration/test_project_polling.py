@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -31,7 +32,13 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
-from shannon.services.projects import BoardItem, ProjectPoller
+from shannon.services.projects import (
+    ARCHIVED_CARD_RECHECK_SECONDS,
+    CARD_READ_SPACING_SECONDS,
+    MISSED_CARD_RECHECK_SECONDS,
+    BoardItem,
+    ProjectPoller,
+)
 from shannon.services.sync.items import SyncResult, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 from shannon.services.workflow import (
@@ -118,6 +125,7 @@ def poller_for(
         *,
         polling: bool = True,
         may_set_status: bool = True,
+        clock: Callable[[], float] = time.monotonic,
     ) -> ProjectPoller:
         """Allowed to move things unless a test says otherwise. Off is the shipped default and
         has its own tests; every other test here is about what a board that may move does."""
@@ -130,6 +138,7 @@ def poller_for(
             polling=polling,
             interval=0.01,
             may_set_status=may_set_status,
+            clock=clock,
         )
 
     return build
@@ -1964,7 +1973,9 @@ class TestACardThatIsAlreadyDoneWhenItIsFirstMirrored:
     ) -> None:
         """What makes shutting it on the way in unrecoverable rather than merely wrong.
 
-        Nothing in this bot ever unlocks a ticket thread. The unlock is reached only by
+        Nothing in this bot unlocks a thread a card coming back out of Done would need: the one
+        lock a ticket thread gets is its card archived off the board (issue #198), lifted when the
+        card comes back, and a column is not that. The sync's unlock is reached only by
         `locked` answering False and `TicketPolicy` answers None to everything, the branch that
         shuts a new thread runs only for a thread being opened, and `/status In review` refuses a
         ticket thread outright because the workflow is built for pull requests and issues. So a
@@ -2054,8 +2065,9 @@ class TestATicketWhoseThreadSomebodyDeleted:
         The board put that status there, not a person, and `TicketPolicy.locked` answers None to
         every snapshot on purpose: a column is not a closed state, and a card moves back out of
         Done. Shutting a rebuilt thread because the row says DONE would invent a lock the
-        original never had, and nothing anywhere would take it off again, so the card would come
-        back out of Done into a thread nobody could answer in.
+        original never had, and nothing would take it off again - the only lock the poller lifts
+        is the one archiving set (issue #198) - so the card would come back out of Done into a
+        thread nobody could answer in.
 
         The pull request rule this sits next to is the opposite and for the opposite reason: its
         DONE is `/status Done`, which locks, and the row is the only record of it.
@@ -2775,3 +2787,1051 @@ class TestRelinkingABoard:
         item = await db_session.scalar(select(TrackedItem).where(TrackedItem.id == tracked_id))
         assert item.project_item_id is None
         assert item.project_column is None, "a column from the old board survived the relink"
+
+
+# --------------------------------------------------------------------------------------------------
+# Issue #198: a draft card archived, restored or deleted on the board says so in its thread.
+# --------------------------------------------------------------------------------------------------
+
+BOARD_PAGE = f"https://github.com/users/{payloads.OWNER}/projects/{PROJECT}"
+
+
+class Clock:
+    """A monotonic clock a test moves by hand, for the spacing of cards asked about on their own."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class Hourly(Clock):
+    """A clock an hour on whenever it is read, so every wait has run out each time it is asked.
+
+    For the tests about what an answer DOES rather than when it is asked: each pass may ask, and a
+    deletion's second answer arrives on the very next one.
+    """
+
+    def __call__(self) -> float:
+        self.now += ARCHIVED_CARD_RECHECK_SECONDS + 1
+        return self.now
+
+
+@pytest.fixture
+async def draft_thread(
+    registered: Repository, board_channel: None, poller_for, db_session: AsyncSession
+) -> int:
+    """A draft card with a thread, exactly as an ordinary poll leaves it."""
+    await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+    row = await ticket(db_session)
+    assert row is not None and row.discord_thread_id is not None
+    return row.discord_thread_id
+
+
+async def thread_of(session: AsyncSession, card_id: int) -> int | None:
+    session.expire_all()
+    return await session.scalar(
+        select(TrackedItem.discord_thread_id).where(
+            TrackedItem.github_object_type == ObjectType.TICKET,
+            TrackedItem.github_object_id == card_id,
+        )
+    )
+
+
+def missing(*cards: BoardItem) -> FakeBoard:
+    """A board whose listing leaves these cards out, though GitHub still has every one of them."""
+    board = FakeBoard()
+    board.unlisted = list(cards)
+    return board
+
+
+class TestArchivingACard:
+    """A card archived on the board shuts its thread, says so once, and is not mirrored again
+    until it comes back. The listing marks it; nothing has to be asked."""
+
+    async def test_the_thread_is_shut(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_it_says_so_once(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        poller = poller_for(FakeBoard(card(item_id=CARD, archived=True)))
+        await poller.run_once()
+        await poller.run_once()
+
+        said = said_in(threads, draft_thread)
+        assert len(said) == 1, "the same card was announced as archived twice"
+        assert "### 📦 Archived" in said[0]
+        assert "Restore the card on the board to reopen it here." in said[0]
+
+    async def test_it_shuts_posts_and_shuts_again(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """The order every end state here keeps: shut so the line can claim it, post, and shut
+        again because posting reopens an archived thread."""
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        assert threads.shut_calls == [(draft_thread, True), (draft_thread, True)]
+        assert threads.shuts == [(draft_thread, True)]
+        assert threads.unarchived == [draft_thread], "the post did not reopen what the shut shut"
+
+    async def test_the_row_remembers_it(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """The pointer is KEPT, unlike a conversion's: this thread comes back with its card."""
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_locked, row.discord_thread_id) == (
+            "archived",
+            True,
+            draft_thread,
+        )
+
+    async def test_an_archived_card_is_not_mirrored(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """Edited while archived, and nothing moves. What was recorded before it went is what the
+        restore compares against, so every edit made meanwhile is said when it comes back."""
+        before = await ticket(db_session)
+        assert before is not None
+        stamp, fields = before.github_updated_at, before.shown_fields
+
+        edited = card(item_id=CARD, title="Renamed in the archive", at="2026-08-21T10:00:00Z")
+        await poller_for(FakeBoard(replace(edited, archived=True))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.title, row.github_updated_at, row.shown_fields) == (
+            "Write the poller",
+            stamp,
+            fields,
+        )
+        assert not any("Ticket updated" in body for _, body in threads.posts)
+
+    async def test_a_card_archived_before_it_was_ever_mirrored_gets_no_thread(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        assert threads.created == []
+        assert await ticket(db_session) is None
+
+    async def test_a_refused_shut_is_written_off_and_said_without_a_lock(
+        self,
+        draft_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A server that will not let the bot close a thread will not let it on the next pass
+        either, so it is asked once - and told nothing about a lock it does not have."""
+        threads.refuses_every_shut = True
+        poller = poller_for(FakeBoard(card(item_id=CARD, archived=True)))
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            await poller.run_once()
+            await poller.run_once()
+
+        said = said_in(threads, draft_thread)
+        assert len(said) == 1
+        assert "This card was archived on the board." in said[0]
+        assert "locked" not in said[0]
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_locked) == ("archived", None)
+        assert threads.shut_calls == [(draft_thread, True)], "a refusal was asked again"
+        assert "could not shut thread" in caplog.text
+
+    async def test_a_shut_discord_could_not_make_for_a_moment_is_tried_again(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """Discord first and the row second, because here the row is the retry: written first,
+        it would say archived over a thread nobody shut, and nothing would look again."""
+        threads.fail_next_shut = True
+        poller = poller_for(FakeBoard(card(item_id=CARD, archived=True)))
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "open", "a shut that never happened was written down"
+        assert said_in(threads, draft_thread) == []
+
+        await poller.run_once()
+
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+        assert len(said_in(threads, draft_thread)) == 1
+
+    async def test_a_refused_line_costs_the_line_and_keeps_the_shut(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        threads.post_error = DiscordGatewayError("Missing Access")
+
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "archived"
+
+    async def test_a_thread_somebody_deleted_is_let_go_of(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """Nothing to shut or tell. Kept, the pointer would leave the card with no thread when it
+        comes back; let go, it comes back to a new one."""
+        threads.threads.pop(draft_thread)
+
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("archived", None)
+
+    async def test_two_cards_archived_together_are_both_shut(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+    ) -> None:
+        second = card(item_id=CARD + 1, title="Second")
+        await poller_for(FakeBoard(card(item_id=CARD), second)).run_once()
+
+        await poller_for(
+            FakeBoard(card(item_id=CARD, archived=True), replace(second, archived=True))
+        ).run_once()
+
+        assert len(threads.threads) == 2
+        assert all((one.locked, one.archived) == (True, True) for one in threads.threads.values())
+
+    async def test_archiving_is_not_counted_as_mirroring(
+        self, draft_thread: int, poller_for
+    ) -> None:
+        assert await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once() == 0
+
+
+class TestArchivingACardTheReadLeavesOut:
+    """Where GitHub's listing leaves the archive out, an archived card is simply missing - and a
+    missing card proves nothing, so it is asked about on its own before anything is believed."""
+
+    async def test_a_card_gone_from_the_read_is_asked_about_on_its_own(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        board = missing(card(item_id=CARD, archived=True))
+
+        await poller_for(board).run_once()
+
+        assert board.card_reads == [(payloads.OWNER, PROJECT, CARD)]
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+        assert "### 📦 Archived" in said_in(threads, draft_thread)[0]
+
+    async def test_an_archived_card_is_asked_about_again_only_after_an_hour(
+        self, draft_thread: int, poller_for
+    ) -> None:
+        """Asked at all only so a card deleted out of the archive is noticed. Its thread is already
+        shut, so an hour's wait costs nothing anybody can see, and every ten seconds would."""
+        clock = Clock()
+        board = missing(card(item_id=CARD, archived=True))
+        poller = poller_for(board, clock=clock)
+        await poller.run_once()
+
+        clock.advance(ARCHIVED_CARD_RECHECK_SECONDS - 1)
+        await poller.run_once()
+        assert len(board.card_reads) == 1, "an archived card was asked about inside the hour"
+
+        clock.advance(1)
+        await poller.run_once()
+        assert len(board.card_reads) == 2
+
+    async def test_one_card_is_asked_about_at_a_time(
+        self, registered: Repository, board_channel: None, poller_for
+    ) -> None:
+        """Each question is a request against the linker's budget, where an unchanged listing
+        costs none - so they are spaced per board, however many cards went missing."""
+        await poller_for(FakeBoard(card(item_id=CARD), card(item_id=CARD + 1))).run_once()
+        clock = Clock()
+        board = missing(card(item_id=CARD, archived=True), card(item_id=CARD + 1, archived=True))
+        poller = poller_for(board, clock=clock)
+
+        await poller.run_once()
+        clock.advance(CARD_READ_SPACING_SECONDS - 1)
+        await poller.run_once()
+        assert len(board.card_reads) == 1, "a second card was asked about inside the spacing"
+
+        clock.advance(1)
+        await poller.run_once()
+        assert [read[2] for read in board.card_reads] == [CARD, CARD + 1]
+
+    async def test_a_shut_discord_could_not_make_is_asked_about_again_at_once(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """GitHub has already said what became of the card and only Discord is behind, so it is
+        due at the board's very next question rather than after its ten-minute wait."""
+        clock = Clock()
+        board = missing(card(item_id=CARD, archived=True))
+        threads.fail_next_shut = True
+        poller = poller_for(board, clock=clock)
+        await poller.run_once()
+        clock.advance(CARD_READ_SPACING_SECONDS)
+
+        await poller.run_once()
+
+        assert len(board.card_reads) == 2
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_a_card_still_open_is_asked_about_before_an_archived_one(
+        self, registered: Repository, board_channel: None, poller_for
+    ) -> None:
+        """One of those missing is the news. An archived one is only being watched for deletion."""
+        second = card(item_id=CARD + 1, title="Second")
+        await poller_for(FakeBoard(card(item_id=CARD), second)).run_once()
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True), second)).run_once()
+        board = missing(card(item_id=CARD, archived=True), second)
+
+        await poller_for(board).run_once()
+
+        assert [read[2] for read in board.card_reads] == [CARD + 1]
+
+
+class TestRestoringACard:
+    """A card brought back from the archive opens its thread again, says so, and the ordinary line
+    saying what changed follows - for everything edited while it was away."""
+
+    @pytest.fixture
+    async def archived_thread(self, draft_thread: int, poller_for) -> int:
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+        return draft_thread
+
+    async def test_the_thread_opens_again(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        thread = threads.threads[archived_thread]
+        assert (thread.locked, thread.archived) == (False, False)
+
+    async def test_it_says_so_once(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        poller = poller_for(FakeBoard(card(item_id=CARD)))
+        await poller.run_once()
+        await poller.run_once()
+
+        restored = [body for body in said_in(threads, archived_thread) if "Restored" in body]
+        assert len(restored) == 1
+        assert "This thread is open again." in restored[0]
+
+    async def test_the_row_remembers_it(
+        self, archived_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_locked, row.discord_thread_id) == (
+            "open",
+            False,
+            archived_thread,
+        )
+
+    async def test_what_changed_while_it_was_away_follows(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """Restored first, then what moved - against the fields recorded before it was archived,
+        which an archived card is never synced over."""
+        await poller_for(FakeBoard(filled())).run_once()
+        row = await ticket(db_session)
+        assert row is not None and row.discord_thread_id is not None
+        thread_id = row.discord_thread_id
+        edited = replace(filled(), priority_name="LOW", updated_at=LATER)
+
+        await poller_for(FakeBoard(replace(edited, archived=True))).run_once()
+        await poller_for(FakeBoard(edited)).run_once()
+
+        said = said_in(threads, thread_id)
+        assert [heading.split("\n")[0] for heading in said[:2]] == [
+            "### 📦 Archived",
+            "### 📤 Restored",
+        ]
+        assert "Ticket updated" in said[2]
+        assert "Priority: HIGH → LOW" in said[2]
+
+    async def test_a_card_restored_untouched_says_only_that(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        said = said_in(threads, archived_thread)
+        assert len(said) == 2
+        assert "Restored" in said[1]
+        assert not any("Ticket updated" in body for body in said)
+
+    async def test_restoring_does_not_wait_for_the_timestamp(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """Whether GitHub stamps a card it unarchives is not something this may assume. The card
+        here comes back with exactly the timestamp it was archived with."""
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        assert threads.threads[archived_thread].locked is False
+
+    async def test_a_reopen_discord_could_not_make_for_a_moment_holds_the_mirror_back(
+        self,
+        archived_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """Synced anyway, the sync would write `open` over `archived`, and the reopen would never
+        be tried again over a card that is plainly back."""
+        threads.fail_next_shut = True
+        renamed = card(item_id=CARD, title="Renamed while away", at="2026-08-21T10:00:00Z")
+        poller = poller_for(FakeBoard(renamed))
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.title) == ("archived", "Write the poller")
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.title) == ("open", "Renamed while away")
+        assert threads.threads[archived_thread].locked is False
+
+    async def test_a_refused_reopen_is_written_off_and_promises_nothing(
+        self,
+        archived_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        threads.lacks_manage_threads = True
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "open"
+        assert threads.threads[archived_thread].locked is True
+        assert "needs Manage Threads" in caplog.text
+        # And no line either: only Manage Threads may unarchive a locked thread, so the post is
+        # refused too, and the warning is the only place this is said.
+        assert not any("Restored" in body for body in said_in(threads, archived_thread))
+
+    async def test_a_reopen_refused_where_the_line_is_not_says_nothing_of_the_thread(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        """Discord refusing the reopen and not the line: the card is back, and the thread is not
+        said to be open again, because it is not."""
+        threads.refuses_every_shut = True
+
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        restored = [body for body in said_in(threads, archived_thread) if "Restored" in body]
+        assert len(restored) == 1
+        assert "open again" not in restored[0]
+
+    async def test_a_thread_somebody_deleted_is_rebuilt_on_the_same_pass(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        threads.threads.pop(archived_thread)
+
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "open"
+        assert row.discord_thread_id not in (None, archived_thread)
+
+    async def test_a_card_the_read_missed_is_restored_from_its_own_answer(
+        self, archived_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """Back on the board, says GitHub, though this read did not show it. That is back."""
+        await poller_for(missing(card(item_id=CARD))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "open"
+        assert threads.threads[archived_thread].locked is False
+
+
+class TestDeletingACard:
+    """A card deleted from the board ends its thread the way a converted one's is ended - once
+    GitHub has said twice, on two passes, that it has no such card. One answer could be a board
+    whose access changed between the read and the question, and letting a thread go is for good."""
+
+    async def test_one_missing_answer_is_not_enough(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        board = FakeBoard()
+
+        await poller_for(board, clock=Hourly()).run_once()
+
+        assert board.card_reads == [(payloads.OWNER, PROJECT, CARD)]
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+        assert said_in(threads, draft_thread) == []
+
+    async def test_the_second_one_lets_the_thread_go(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None, "the row was deleted rather than emptied"
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+
+    async def test_it_is_said_once(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        for _ in range(4):
+            await poller.run_once()
+
+        said = said_in(threads, draft_thread)
+        assert len(said) == 1
+        assert "### 🗑️ Deleted" in said[0]
+        assert "This thread is locked and archived." in said[0]
+
+    async def test_it_shuts_posts_and_shuts_again(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        assert threads.shut_calls == [(draft_thread, True), (draft_thread, True)]
+        assert threads.shuts == [(draft_thread, True)]
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_a_refused_shut_still_lets_go_and_says_nothing_about_locks(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        threads.refuses_every_shut = True
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.discord_thread_id is None
+        said = said_in(threads, draft_thread)
+        assert len(said) == 1
+        assert "locked" not in said[0]
+
+    async def test_a_refused_line_costs_the_line_not_the_hand_off(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        threads.post_error = DiscordGatewayError("Missing Access")
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_a_card_back_on_the_read_clears_the_suspicion(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """A 404, then the card listed after all: the next 404 is a first answer again."""
+        board = FakeBoard()
+        poller = poller_for(board, clock=Hourly())
+        await poller.run_once()
+        board.items = [card(item_id=CARD)]
+        await poller.run_once()
+        board.items = []
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+
+    async def test_an_archived_card_deleted_from_the_archive_says_so(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        board = FakeBoard(card(item_id=CARD, archived=True))
+        poller = poller_for(board, clock=Hourly())
+        await poller.run_once()
+        board.items = []
+
+        await poller.run_once()
+        await poller.run_once()
+
+        said = said_in(threads, draft_thread)
+        assert "### 📦 Archived" in said[0]
+        assert "### 🗑️ Deleted" in said[-1]
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+
+    async def test_the_second_answer_is_asked_for_as_soon_as_the_board_may_ask(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        """No ten-minute wait for it: the spacing per board is pace enough, and a deletion left
+        half believed is a thread left open over a card that has gone."""
+        clock = Clock()
+        poller = poller_for(FakeBoard(), clock=clock)
+        await poller.run_once()
+        clock.advance(CARD_READ_SPACING_SECONDS)
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+
+    async def test_a_deletion_half_believed_is_confirmed_before_anything_else(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        db_session: AsyncSession,
+    ) -> None:
+        """Second answers first, so a deletion is never queued behind cards that are merely out
+        of the read's reach."""
+        await poller_for(FakeBoard(card(item_id=CARD), card(item_id=CARD + 1))).run_once()
+        board = missing(card(item_id=CARD + 1))
+        poller = poller_for(board, clock=Hourly())
+
+        await poller.run_once()
+        await poller.run_once()
+
+        assert [read[2] for read in board.card_reads] == [CARD, CARD]
+        assert await thread_of(db_session, CARD) is None
+
+    async def test_a_surprise_while_saying_so_still_lets_the_thread_go(
+        self,
+        draft_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Let go of first and said second, as a conversion is: nothing that goes wrong in Discord
+        can leave a deleted card's thread waiting to be told again."""
+
+        async def surprising(*, thread_id: int, shut: bool) -> None:
+            raise RuntimeError("a surprise")
+
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        monkeypatch.setattr(threads, "set_shut", surprising)
+
+        with caplog.at_level("ERROR", logger="shannon.services.projects"):
+            await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+        assert f"could not follow card {CARD}" in caplog.text
+
+
+class TestACardTheReadMissed:
+    """A read can leave a card out without saying so - a board past its page cap, a page GitHub
+    garbled, a card dragged in the middle of the read. GitHub still has it, so nothing happens."""
+
+    async def test_a_card_github_still_has_keeps_its_thread(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        poller = poller_for(missing(card(item_id=CARD)), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+        assert said_in(threads, draft_thread) == []
+        assert threads.shut_calls == []
+
+    async def test_it_is_not_asked_about_again_for_ten_minutes(
+        self, draft_thread: int, poller_for
+    ) -> None:
+        """Its absence is the board's shape, not news about the card."""
+        clock = Clock()
+        board = missing(card(item_id=CARD))
+        poller = poller_for(board, clock=clock)
+        await poller.run_once()
+
+        clock.advance(MISSED_CARD_RECHECK_SECONDS - 1)
+        await poller.run_once()
+        assert len(board.card_reads) == 1
+
+        clock.advance(1)
+        await poller.run_once()
+        assert len(board.card_reads) == 2
+
+    async def test_a_github_that_will_not_say_does_nothing(
+        self,
+        draft_thread: int,
+        poller_for,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        board = FakeBoard()
+        board.card_error = GitHubUnavailableError("Server Error")
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            await poller_for(board, clock=Hourly()).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+        assert "could not ask GitHub about card" in caplog.text
+
+    async def test_a_refusal_is_not_a_deletion(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        board = FakeBoard()
+        board.card_error = GitHubAuthError("Bad credentials")
+        poller = poller_for(board, clock=Hourly())
+        for _ in range(3):
+            await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+
+    async def test_a_rate_limit_ends_the_pass(self, draft_thread: int, poller_for) -> None:
+        board = FakeBoard()
+        board.card_error = GitHubRateLimitError("API rate limit exceeded", retry_after=60)
+
+        with pytest.raises(GitHubRateLimitError):
+            await poller_for(board, clock=Hourly()).run_once()
+
+    async def test_a_card_that_became_an_issue_is_left_to_the_hand_over(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        board = missing(wraps(ObjectType.ISSUE, ISSUE_BEHIND_IT, item_id=CARD))
+
+        await poller_for(board, clock=Hourly()).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("open", draft_thread)
+        assert said_in(threads, draft_thread) == []
+
+
+class TestOnlyThisBoardsCardsAreAskedAbout:
+    """A relink leaves the old board's ticket rows behind. Asked about on the new board, each of
+    their cards would answer that GitHub has no such card - and be shut as deleted."""
+
+    async def test_a_card_from_the_board_this_server_used_to_mirror_is_not_asked_about(
+        self,
+        draft_thread: int,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        await link_board(db_session, registered, project_owner="acme")
+        board = FakeBoard()
+        poller = poller_for(board, clock=Hourly())
+        for _ in range(3):
+            await poller.run_once()
+
+        assert board.card_reads == []
+        assert await thread_of(db_session, CARD) == draft_thread
+
+    async def test_a_different_number_is_a_different_board(
+        self,
+        draft_thread: int,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        await link_board(db_session, registered, project_number=PROJECT + 1)
+        board = FakeBoard()
+
+        await poller_for(board, clock=Hourly()).run_once()
+
+        assert board.card_reads == []
+
+    async def test_the_owner_is_matched_however_it_was_written(
+        self,
+        draft_thread: int,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        await link_board(db_session, registered, project_owner=payloads.OWNER.lower())
+        board = FakeBoard()
+
+        await poller_for(board, clock=Hourly()).run_once()
+
+        assert [read[2] for read in board.card_reads] == [CARD]
+
+    async def test_a_card_on_the_read_needs_no_proof_of_board(
+        self,
+        draft_thread: int,
+        poller_for,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        """A card id is GitHub's and unique across every board, so a listed card is this board's
+        whatever its row says the board was."""
+        await link_board(db_session, registered, project_owner="acme")
+
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        assert threads.threads[draft_thread].locked is True
+
+    async def test_a_missing_card_is_asked_about_under_its_boards_owner(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        db_session: AsyncSession,
+    ) -> None:
+        """The board's owner, which is not always the repository's: a board named by its owner is
+        read under that owner, and so is any card of it asked about on its own."""
+        await link_board(db_session, registered, project_owner="acme")
+        on_acme = f"https://github.com/orgs/acme/projects/{PROJECT}"
+        await poller_for(FakeBoard(replace(card(item_id=CARD), html_url=on_acme))).run_once()
+        board = FakeBoard()
+
+        await poller_for(board).run_once()
+
+        assert board.card_reads == [("acme", PROJECT, CARD)]
+
+
+class TestABotOutOfItsServer:
+    """Discord refuses a bot that has been removed exactly as it refuses a missing permission, and
+    that refusal is written off - so while the bot is out, nothing is tried, and nothing is
+    written off that would never be tried again once it is back."""
+
+    async def test_an_archived_card_waits_for_the_bot_to_come_back(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        threads.removed_from = {1}
+        poller = poller_for(FakeBoard(card(item_id=CARD, archived=True)))
+
+        await poller.run_once()
+
+        assert threads.shut_calls == []
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_state == "open"
+
+        threads.removed_from = set()
+        await poller.run_once()
+
+        thread = threads.threads[draft_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_a_card_coming_back_is_held_out_of_its_sync_until_it_can_be_reopened(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """Synced while the bot is out, the row would say `open` and the reopen would never come."""
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+        threads.removed_from = {1}
+        back = card(item_id=CARD, title="Renamed while away", at="2026-08-21T10:00:00Z")
+        poller = poller_for(FakeBoard(back))
+
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.title) == ("archived", "Write the poller")
+
+        threads.removed_from = set()
+        await poller.run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.title) == ("open", "Renamed while away")
+        assert threads.threads[draft_thread].locked is False
+
+    async def test_a_gateway_that_cannot_say_counts_as_out(
+        self,
+        draft_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Not connected yet, during a start or a reconnect: waiting suits that too."""
+
+        def not_connected(guild_id: int) -> bool:
+            raise DiscordGatewayError("not connected")
+
+        monkeypatch.setattr(threads, "is_in", not_connected)
+
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        assert threads.shut_calls == []
+
+
+class TestKeepingACardsBoardPage:
+    """The page is what tells a missing card to be this board's, and it names the board's owner -
+    so a listed card keeps it current, and an account renamed since does not hide its cards."""
+
+    async def test_a_renamed_owners_page_is_taken_from_the_read(
+        self,
+        draft_thread: int,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        renamed = f"https://github.com/users/Canon-Renamed/projects/{PROJECT}"
+        await link_board(db_session, registered, project_owner="Canon-Renamed")
+
+        await poller_for(FakeBoard(replace(card(item_id=CARD), html_url=renamed))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_url == renamed
+
+    async def test_a_page_that_is_not_this_boards_is_not_taken(
+        self, draft_thread: int, poller_for, db_session: AsyncSession
+    ) -> None:
+        fallback = f"https://github.com/users/unknown/projects/{PROJECT}"
+
+        await poller_for(FakeBoard(replace(card(item_id=CARD), html_url=fallback))).run_once()
+
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.github_url == BOARD_PAGE
+
+
+class TestAnUnreadableBoardSettlesNothing:
+    async def test_nothing_is_asked_and_nothing_is_shut(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        board = FakeBoard()
+        board.error = GitHubAuthError("nobody's authorisation stands behind board 12")
+
+        await poller_for(board, clock=Hourly()).run_once()
+
+        assert board.card_reads == []
+        assert threads.shut_calls == []
+
+
+class TestAConvertedCardThatWasArchived:
+    async def test_the_hand_over_runs_and_nothing_is_said_about_archiving(
+        self, draft_thread: int, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+    ) -> None:
+        """A conversion is a conversion wherever the card sits."""
+        converted = wraps(ObjectType.ISSUE, ISSUE_BEHIND_IT, item_id=CARD)
+
+        await poller_for(FakeBoard(replace(converted, archived=True))).run_once()
+
+        said = said_in(threads, draft_thread)
+        assert len(said) == 1
+        assert "### 🟣 Converted" in said[0]
+        row = await ticket(db_session)
+        assert row is not None
+        assert row.discord_thread_id is None
+
+    async def test_an_archived_card_wrapping_a_pull_request_is_neither_paired_nor_moved(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        pr_event,
+        poller_for,
+        db_session: AsyncSession,
+    ) -> None:
+        """Archiving is how work is put away, so the board's column for it is no instruction."""
+        pull = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(pull)
+        archived = replace(wraps(ObjectType.PR, pull.github_object_id, item_id=701), archived=True)
+
+        await poller_for(FakeBoard(archived)).run_once()
+
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_id == pull.github_object_id)
+        )
+        assert item is not None
+        assert (item.project_item_id, item.project_column) == (None, None)
+
+
+class TestOneCardsSurpriseIsOnlyThatCard:
+    async def test_the_rest_of_the_board_is_still_followed(
+        self,
+        registered: Repository,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        second = card(item_id=CARD + 1, title="Second")
+        await poller_for(FakeBoard(card(item_id=CARD), second)).run_once()
+        first_thread = await thread_of(db_session, CARD)
+        second_thread = await thread_of(db_session, CARD + 1)
+        assert first_thread is not None and second_thread is not None
+        real = threads.set_shut
+
+        async def surprising(*, thread_id: int, shut: bool) -> None:
+            if thread_id == first_thread:
+                raise RuntimeError("a surprise")
+            await real(thread_id=thread_id, shut=shut)
+
+        monkeypatch.setattr(threads, "set_shut", surprising)
+
+        with caplog.at_level("ERROR", logger="shannon.services.projects"):
+            await poller_for(
+                FakeBoard(card(item_id=CARD, archived=True), replace(second, archived=True))
+            ).run_once()
+
+        assert threads.threads[second_thread].locked is True
+        assert f"could not follow card {CARD}" in caplog.text
+
+    async def test_a_surprise_over_a_missing_card_is_said_and_survived(
+        self,
+        draft_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        async def surprising(*, thread_id: int, shut: bool) -> None:
+            raise RuntimeError("a surprise")
+
+        monkeypatch.setattr(threads, "set_shut", surprising)
+
+        with caplog.at_level("ERROR", logger="shannon.services.projects"):
+            await poller_for(missing(card(item_id=CARD, archived=True))).run_once()
+
+        assert f"could not follow card {CARD}" in caplog.text

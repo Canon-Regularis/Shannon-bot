@@ -23,9 +23,9 @@ _KINDS = {
     RefreshScope.EVERYTHING: ("open item", "open items"),
     RefreshScope.PULL_REQUESTS: ("open pull request", "open pull requests"),
     RefreshScope.ISSUES: ("open issue", "open issues"),
-    # No "open" on these two: a draft card has no state to be open in, and `TicketPolicy` holds
-    # every one of them at "open" for ever. Calling them open items would be reporting a field
-    # nobody can change.
+    # No "open" on these two: a draft card has no GitHub state to be open in. The only other thing
+    # its row ever says is where the card went off the board (issue #198), and a card there is not
+    # offered at all, so "open" would be reporting a field nobody reads.
     RefreshScope.TICKETS: ("ticket", "tickets"),
 }
 

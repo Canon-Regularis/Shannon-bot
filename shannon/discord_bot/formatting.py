@@ -179,9 +179,9 @@ def format_ticket(
     not appear. That is deliberately not the same as rendering `None`: an always-empty field reads
     as data missing rather than data absent, which is what keeps a reviewers line off an issue.
 
-    `State` is still left out, for the reason the empty rows were: a ticket's state is hard-coded
-    open and nothing in this project can close it, because a board column is not a closed state.
-    The row could only ever say `Open`.
+    `State` is still left out. A board column is not a closed state, so a card in Done is as open as
+    one in Todo, and the one thing that ends a card - archiving or deleting it off the board, issue
+    #198 - also shuts the thread it would be shown in. The row could only ever say `Open`.
 
     **A description was documented here as impossible, and that was wrong.** The claim was that a
     board item carries no body text at all. It is true of a card wrapping an issue, whose own body
@@ -438,6 +438,55 @@ def format_card_converted(html_url: str, *, shut: bool) -> Panel:
     said = _CONVERTED.format(html_url)
     under = f"{said}\n{_SHUT}" if shut else said
     return _headed(_CONVERTED_HEADING, under, Accent.CONVERTED)
+
+
+# Issue #198. A draft card taken off the board, put back, or deleted. The same shape a conversion
+# gets, for the same reason: a heading worth finding by scrolling, a colour, and a line saying what
+# became of the thread - claimed only where the caller already made it so.
+#
+# Archiving is the one that can be undone, so its lock line says how, the way a closed issue's does;
+# a deletion cannot, so it gets the plain `_SHUT` a merge gets.
+_ARCHIVED_HEADING = "### 📦 Archived"
+_ARCHIVED = "-# This card was archived on the board."
+_SHUT_UNTIL_RESTORED = (
+    "-# This thread is locked and archived. Restore the card on the board to reopen it here."
+)
+_RESTORED_HEADING = "### 📤 Restored"
+_RESTORED = "-# This card is back on the board."
+_DELETED_HEADING = "### 🗑️ Deleted"
+_DELETED = "-# This card was deleted from the board."
+
+
+def format_card_archived(*, shut: bool) -> Panel:
+    """Tell a draft card's thread its card was archived. Issue #198.
+
+    `shut` is what the caller already DID, the contract `format_card_converted` has: the poller
+    shuts the thread, posts this, and shuts it again, so it knows. Where Discord refused, nothing
+    is said about the lock, rather than a promise of one that is not there.
+    """
+    under = f"{_ARCHIVED}\n{_SHUT_UNTIL_RESTORED}" if shut else _ARCHIVED
+    return _headed(_ARCHIVED_HEADING, under, Accent.ARCHIVED)
+
+
+def format_card_restored(*, reopened: bool) -> Panel:
+    """Tell a draft card's thread its card is back on the board. Issue #198.
+
+    `reopened` is whether Discord actually opened the thread again. Where it would not, the thread
+    is still shut and saying it is open again would be the one false sentence in it. Anything the
+    card gained while it was archived follows in its own line, the ordinary one a moved card gets.
+    """
+    under = f"{_RESTORED}\n{_OPEN_AGAIN}" if reopened else _RESTORED
+    return _headed(_RESTORED_HEADING, under, Accent.OPEN)
+
+
+def format_card_deleted(*, shut: bool) -> Panel:
+    """Tell a draft card's thread its card was deleted, and that the thread is finished. Issue #198.
+
+    The end a conversion, a closed issue and a merged pull request already get: shut, said, shut
+    again. `shut` is what the caller already did, as for the other two above.
+    """
+    under = f"{_DELETED}\n{_SHUT}" if shut else _DELETED
+    return _headed(_DELETED_HEADING, under, Accent.DELETED)
 
 
 # Issue #182. A card's board metadata moved. Blue, like every other line that reports something

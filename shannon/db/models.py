@@ -145,6 +145,10 @@ class TrackedItem(TimestampMixin, Base):
     github_object_number: Mapped[int] = mapped_column(nullable=False)
     github_url: Mapped[str] = mapped_column(String(URL_WIDTH), nullable=False)
     title: Mapped[str] = mapped_column(String(TITLE_WIDTH), nullable=False)
+    # GitHub's word for an issue or a pull request: open, closed or merged. A draft card has none,
+    # so a ticket's row says where the card stands on its board instead - open, archived or deleted,
+    # `CardState`, written by the poller. A ticket's own sync writes `open` over it, which is why a
+    # card coming back is held out of its sync until its thread has reopened. Issue #198.
     github_state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     discord_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -175,7 +179,8 @@ class TrackedItem(TimestampMixin, Base):
     shown_fields: Mapped[JsonObject | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # The lock this bot last set on the thread it points at. Null means it has not set one, and
     # it is cleared when the pointer moves, because a replacement thread starts open. Asking
-    # Discord on every delivery instead would retry a refused permission for ever.
+    # Discord on every delivery instead would retry a refused permission for ever. A ticket's is
+    # set when its card is archived and lifted when the card comes back. Issue #198.
     discord_thread_locked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[Status] = mapped_column(
         varchar_enum(Status, "item_status"), nullable=False, default=Status.NOT_REVIEWED

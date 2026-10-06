@@ -37,6 +37,7 @@ def card(
     iteration: str | None = None,
     area: str | None = None,
     body: str = "",
+    archived: bool = False,
 ) -> BoardItem:
     """A DRAFT card: `BoardItem.kind` defaults to TICKET and `content_id` to None, which is what
     `is_draft` reads. There is nothing on GitHub behind it.
@@ -46,6 +47,8 @@ def card(
     nobody filled in reach the same place, and most tests want a card that carries nothing so the
     thing they are about is the only thing in the block. A test about the metadata names what it
     needs; see `filled` below for one that carries the lot.
+
+    `archived` is a card in the board's archive, issue #198: read and marked, never mirrored.
     """
     return BoardItem(
         item_id=item_id,
@@ -61,6 +64,7 @@ def card(
         iteration=iteration,
         area=area,
         body=body,
+        archived=archived,
     )
 
 
@@ -116,12 +120,28 @@ class FakeBoard:
         # what nearly every test wants. `cheap=False` is the board that has outgrown a page, and
         # the only thing that changes is how long the poller waits before reading it again.
         self.cheap = cheap
+        # Issue #198. Cards GitHub still has that the listing leaves out - an archived card, where
+        # the listing leaves the archive out, or one a capped read never reached. `read_card`
+        # answers for them and the listing never does.
+        self.unlisted: list[BoardItem] = []
+        # Every card asked about on its own, as (owner, number, card id), and what to raise
+        # instead of answering.
+        self.card_reads: list[tuple[str, int, int]] = []
+        self.card_error: Exception | None = None
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
         self.reads.append((owner, project_number))
         if self.error is not None:
             raise self.error
         return list(self.items)
+
+    async def read_card(self, owner: str, project_number: int, card_id: int) -> BoardItem | None:
+        """One card on its own: the card the board has under that id, listed or not, or None -
+        which is GitHub answering 404 for a card it does not have."""
+        self.card_reads.append((owner, project_number, card_id))
+        if self.card_error is not None:
+            raise self.card_error
+        return next((one for one in (*self.items, *self.unlisted) if one.item_id == card_id), None)
 
     def can_recheck_cheaply(self, owner: str, project_number: int) -> bool:
         return self.cheap

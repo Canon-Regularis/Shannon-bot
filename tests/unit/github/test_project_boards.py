@@ -19,6 +19,7 @@ from shannon.github.errors import (
     GitHubNotFoundError,
     GitHubRateLimitError,
     GitHubRefusedError,
+    GitHubUnavailableError,
 )
 from shannon.github.paging import PagedRead
 from shannon.github.projects import (
@@ -97,6 +98,9 @@ class FakeJson:
         self.calls.append((path, params))
         if path.endswith("/fields"):
             return self.bodies.get("fields", [])
+        if "/items/" in path:
+            # One card read on its own, issue #198. Before the board's own path, which it is under.
+            return self.bodies.get("card", {})
         if "/projectsV2/" in path:
             # One board, opened by number. `list_board_items` pages instead, so nothing else
             # reaches this by that path.
@@ -357,12 +361,175 @@ class TestCardsThatWrapSomethingElse:
         assert parse_item(draft(content_type="Redacted"), PROJECT) is None
 
 
-class TestWhatIsNotMirrored:
-    def test_an_archived_card_is_skipped(self) -> None:
-        """Archiving is how somebody takes a card off a board without deleting it, so putting
-        its thread back would be undoing that."""
-        assert parse_item(draft(archived_at="2026-01-01T00:00:00Z"), PROJECT) is None
+class TestArchivedCards:
+    """Issue #198. An archived card used to be dropped as it was read, which made it look exactly
+    like a deleted one - absent - while the two ask opposite things of a thread: one comes back,
+    the other never does. So it is read like any card and marked, and nothing that mirrors a card
+    is handed one."""
 
+    def test_an_archived_card_is_read_and_marked(self) -> None:
+        card = parse_item(draft(archived_at="2026-01-01T00:00:00Z"), PROJECT)
+
+        assert card is not None
+        assert (card.title, card.archived) == ("Write the migration runbook", True)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [draft(), {key: value for key, value in draft().items() if key != "archived_at"}],
+        ids=["null", "missing"],
+    )
+    def test_a_card_on_the_board_is_not_marked(self, payload: dict[str, Any]) -> None:
+        card = parse_item(payload, PROJECT)
+
+        assert card is not None
+        assert card.archived is False
+
+    def test_an_archived_card_wrapping_an_issue_is_read_too(self) -> None:
+        """A conversion is a conversion wherever the card sits, and the hand-over must see it."""
+        card = parse_item(
+            draft(content_type="Issue", content=WRAPPED, archived_at="2026-01-01T00:00:00Z"),
+            PROJECT,
+        )
+
+        assert card is not None
+        assert (card.kind, card.archived) == (ObjectType.ISSUE, True)
+
+    async def test_a_read_hands_archived_cards_back_with_the_rest(self) -> None:
+        client = FakeJson(items=[draft(), draft(id=2, archived_at="2026-01-01T00:00:00Z")])
+
+        items = await HttpProjectBoards(client, FakeBoardCredentials()).list_board_items(
+            "monalisa", PROJECT
+        )
+
+        assert [(item.item_id, item.archived) for item in items] == [(74106766, False), (2, True)]
+
+    async def test_an_unchanged_board_still_says_which_cards_are_archived(self) -> None:
+        """A 304 replays the cards parsed last time, and the mark is part of what was parsed."""
+        client = FakeJson(items=[draft(archived_at="2026-01-01T00:00:00Z")], etag='"v1"')
+        boards = HttpProjectBoards(client, FakeBoardCredentials())
+        await boards.list_board_items("monalisa", PROJECT)
+
+        again = await boards.list_board_items("monalisa", PROJECT)
+
+        assert client.asked_with[-1] == '"v1"', "the second read was not the conditional one"
+        assert [item.archived for item in again] == [True]
+
+
+class CardPathFails(FakeJson):
+    """A client whose card path raises, the way the real one does for a status it maps."""
+
+    def __init__(self, error: Exception, **bodies: Any) -> None:
+        super().__init__(**bodies)
+        self.error = error
+
+    async def get_json(self, path: str, **params: Any) -> Any:
+        if "/items/" in path:
+            self.calls.append((path, params))
+            raise self.error
+        return await super().get_json(path, **params)
+
+
+class AccountLookupFails(FakeJson):
+    """A client whose account lookup answers 404, before any card is asked about."""
+
+    async def get_json(self, path: str, **params: Any) -> Any:
+        if path.startswith("/users/") and "/projectsV2" not in path:
+            raise GitHubNotFoundError("no such account")
+        return await super().get_json(path, **params)
+
+
+class TestReadingOneCardOnItsOwn:
+    """Issue #198. A card the board's listing has stopped showing is asked about by itself, and the
+    poller lets a thread go for good on the strength of the answer - so None, which it reads as
+    deleted, must mean GitHub has no such card and nothing else."""
+
+    async def test_it_asks_at_the_cards_own_path_as_the_board_is_read(self) -> None:
+        client = FakeJson(card=draft())
+
+        found = await HttpProjectBoards(client, FakeBoardCredentials(reads="gho_linker")).read_card(
+            "monalisa", PROJECT, 74106766
+        )
+
+        assert found is not None
+        assert (found.item_id, found.archived) == (74106766, False)
+        asked = [(path, params.get("token")) for path, params in client.calls if "/items/" in path]
+        assert asked == [(f"/users/monalisa/projectsV2/{PROJECT}/items/74106766", "gho_linker")]
+
+    async def test_it_asks_under_an_organisations_prefix(self) -> None:
+        client = FakeJson(account={"type": "Organization"}, card=draft())
+
+        await HttpProjectBoards(client, FakeBoardCredentials()).read_card("acme", PROJECT, 74106766)
+
+        assert any(
+            path == f"/orgs/acme/projectsV2/{PROJECT}/items/74106766" for path, _ in client.calls
+        )
+
+    async def test_an_archived_card_says_so(self) -> None:
+        client = FakeJson(card=draft(archived_at="2026-01-01T00:00:00Z"))
+
+        found = await HttpProjectBoards(client, FakeBoardCredentials()).read_card(
+            "monalisa", PROJECT, 74106766
+        )
+
+        assert found is not None
+        assert found.archived is True
+
+    async def test_a_card_github_does_not_have_is_none(self) -> None:
+        client = CardPathFails(GitHubNotFoundError("Not Found"))
+
+        found = await HttpProjectBoards(client, FakeBoardCredentials()).read_card(
+            "monalisa", PROJECT, 74106766
+        )
+
+        assert found is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubAuthError("Bad credentials"),
+            GitHubUnavailableError("Server Error"),
+            GitHubRateLimitError("API rate limit exceeded", retry_after=60),
+        ],
+        ids=["auth", "unavailable", "rate-limit"],
+    )
+    async def test_a_refusal_is_not_read_as_a_deletion(self, error: Exception) -> None:
+        client = CardPathFails(error)
+
+        with pytest.raises(type(error)):
+            await HttpProjectBoards(client, FakeBoardCredentials()).read_card(
+                "monalisa", PROJECT, 74106766
+            )
+
+    async def test_an_account_lookup_that_is_not_found_is_not_a_deletion(self) -> None:
+        """The account is asked about before the card, and its 404 says the board will not open -
+        not that the card has gone. Only the card's own path may answer None."""
+        client = AccountLookupFails(card=draft())
+
+        with pytest.raises(GitHubNotFoundError):
+            await HttpProjectBoards(client, FakeBoardCredentials()).read_card(
+                "monalisa", PROJECT, 74106766
+            )
+
+    async def test_an_answer_that_is_not_a_card_is_not_read_as_a_deletion(self) -> None:
+        client = FakeJson(card={"message": "something else entirely"})
+
+        with pytest.raises(GitHubUnavailableError, match="not a card"):
+            await HttpProjectBoards(client, FakeBoardCredentials()).read_card(
+                "monalisa", PROJECT, 74106766
+            )
+
+    async def test_a_board_nobodys_authorisation_stands_behind_is_not_asked(self) -> None:
+        client = FakeJson(card=draft())
+
+        with pytest.raises(GitHubAuthError):
+            await HttpProjectBoards(client, FakeBoardCredentials(reads="")).read_card(
+                "monalisa", PROJECT, 74106766
+            )
+
+        assert client.calls == [], "GitHub was asked with no authorisation behind it"
+
+
+class TestWhatIsNotMirrored:
     def test_a_card_with_no_title_anywhere_is_skipped(self) -> None:
         assert parse_item(draft(fields=[], content={}), PROJECT) is None
 

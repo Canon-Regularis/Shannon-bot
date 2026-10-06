@@ -84,6 +84,7 @@ from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.people import ItemPeople, PutsPeopleOnItems
+from shannon.services.projects import ReadsBoardsAndCards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.draft_cards import ReadsBoards
@@ -232,6 +233,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # so a fake that drifts narrower than the protocol would be found by whichever caller
     # happened to use the missing method rather than here.
     (ReadsBoards, FakeBoard),
+    # Issue #198. The poller asks one thing more than `/refresh` does - a card the listing left
+    # out, read on its own - and the fake it is tested against has to answer that too.
+    (ReadsBoardsAndCards, HttpProjectBoards),
+    (ReadsBoardsAndCards, FakeBoard),
     (RoleNames, ConfiguredRoles),
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),

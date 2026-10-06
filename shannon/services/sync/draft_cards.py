@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 
 class ReadsBoards(Protocol):
-    """Listing what is on a project board, which is all either caller asks of GitHub."""
+    """Listing what is on a project board, archived cards included and marked.
+
+    All `/refresh` asks of GitHub. The poller asks one thing more - a card the listing has stopped
+    showing, read on its own (issue #198) - and declares that where it consumes it.
+    """
 
     async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]: ...
 

@@ -7764,3 +7764,45 @@ feature end to end rather than assuming a predecessor the file never recorded.
   poll or `/refresh` took when it began, not GitHub's word, so following it could only put back a
   name a delivery had replaced since - and across owners, it would take the board off its linker for
   a move that never happened.
+
+## A card taken off the board says so in its thread
+
+- **An archived card shuts its thread.** Archiving a draft card did nothing: the reader dropped
+  archived cards as it read them, so an archived card and a deleted one looked the same - absent -
+  and nothing compared the board's cards with the threads they had. Now the card's thread is shut,
+  locked and archived as a closed issue's is, and told so with how to get it back (#198).
+- **A restored card reopens it.** On the card being back and the row saying archived, never on its
+  timestamp, since whether GitHub re-stamps a card it unarchives is not something to assume. The
+  ordinary "what changed" line follows for anything edited while it was away: an archived card is
+  never mirrored, so its fields are compared with what the thread last showed.
+- **A deleted card ends it.** The way a conversion does: let go of first, then shut, told and shut
+  again, because posting reopens an archived thread.
+- **A missing card is asked about on its own, and believed slowly.** A read can leave a card out
+  without saying so, so absence alone proves nothing. The card is read by itself - at most one every
+  ten seconds per board, a card GitHub still has again after ten minutes, an archived one hourly -
+  and counts as deleted only on the second 404, two passes apart. Only the linked board's own cards
+  are ever asked about, matched on the board's page, so a relink cannot shut the old board's
+  threads.
+- **Discord first for archive and restore, the row second.** The row is the retry: a shut or reopen
+  Discord could not make for a moment writes nothing and is tried again on the next pass - or, for a
+  card the read left out, at the board's next question rather than after its wait - and a card
+  coming back is held out of its sync until its thread reopens, so the sync cannot write `open` over
+  the only record that it is owed. A refusal that will not change is written off once and said
+  without a word about a lock it did not get, so granting Manage Threads afterwards does not reach
+  a card already passed over. A thread somebody deleted is let go of, and rebuilt when the card is
+  back.
+- **A bot out of its server tries nothing.** Discord refuses a bot that has been removed exactly as
+  it refuses a missing permission, and that refusal would be written off for good. So while the bot
+  is not in the server - or not connected to it yet - no thread is shut or reopened, and a card
+  coming back is held out of its sync until it can be.
+- **A thread Discord archived by itself can be shut.** Discord archives a quiet thread after a week
+  and then refuses every edit that does not unarchive it, so shutting one in a single edit was
+  refused every time - and a card is usually archived on the board once it has gone quiet, which is
+  exactly when its thread has. It is locked on its way out of the archive and archived again after,
+  never open in between. Every shut goes through the same gateway, so a converted card's hand-over
+  and a closed issue's thread get this too.
+- **`/refresh tickets` never offers an archived card**, and an archived card wrapping an issue or
+  a pull request neither moves its item nor pairs with it. A card converted while archived is still
+  handed over.
+- **No migration.** A ticket row's `github_state` says where its card stands - `open`, `archived`
+  or `deleted` - and its lock is the one the thread already records.
