@@ -26,7 +26,7 @@ from shannon.services.sync.policies import PullRequestPolicy
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import blocked_on_a_row
+from tests.support.db import blocked_on_a_row, link_board
 
 pytestmark = pytest.mark.integration
 
@@ -241,6 +241,28 @@ class TestARepositoryRenamedOnGitHub:
         assert stored.repo_name == "Canon-Regularis/Shannon"
         assert stored.repo_url == "https://github.com/Canon-Regularis/Shannon"
 
+    async def test_a_transfer_to_another_account_leaves_the_board_behind(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Found reviewing #201, end to end through a delivery. The row follows the repository to
+        its new owner, and the board it had stays with the old one rather than turning into the new
+        owner's board of the same number."""
+        await link_board(db_session, registered)
+        service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy())
+        repository_id = registered.id
+
+        await service.sync(_transferred_to("Someone-Else", owner_id=424242))
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Someone-Else/Shannon-bot"
+        assert (stored.project_owner, stored.github_owner_id) == ("Canon-Regularis", 424242)
+
     async def test_an_unchanged_name_is_left_alone(
         self,
         registered: Repository,
@@ -284,6 +306,17 @@ def _renamed_to(name: str, *, at: str | None = None):
     payload["repository"]["name"] = name
     payload["repository"]["full_name"] = f"Canon-Regularis/{name}"
     payload["repository"]["html_url"] = f"https://github.com/Canon-Regularis/{name}"
+    snapshot = parse_pull_request_event("edited", payload)
+    assert snapshot is not None
+    return snapshot
+
+
+def _transferred_to(owner: str, *, owner_id: int):
+    """The same repository, handed to another account."""
+    payload = payloads.pull_request_event("edited")
+    payload["repository"]["owner"] = payloads.user(owner, owner_id)
+    payload["repository"]["full_name"] = f"{owner}/{payloads.REPO}"
+    payload["repository"]["html_url"] = f"https://github.com/{owner}/{payloads.REPO}"
     snapshot = parse_pull_request_event("edited", payload)
     assert snapshot is not None
     return snapshot
@@ -401,6 +434,24 @@ class TestARepositoryTheAppCanSee:
         found = await InstallationStore(db_session).for_owner("Canon-Regularis")
         assert found is not None
         assert found.installation_id == 42
+
+    async def test_the_owners_account_is_recorded(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        """Found reviewing #201: what later tells a transfer from a renamed account."""
+        service = RepositoryRegistrationService(
+            db_sessionmaker,
+            FakeGitHubClient(
+                repositories={"canon-regularis/shannon-bot": replace(SNAPSHOT, owner_id=80922799)}
+            ),
+            FakeInstallations(installation=42),
+        )
+
+        await service.register(guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK)
+
+        stored = await RepositoryStore(db_session).get_by_guild(1)
+        assert stored is not None
+        assert stored.github_owner_id == 80922799
 
     async def test_a_private_repository_is_recorded_as_private(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession

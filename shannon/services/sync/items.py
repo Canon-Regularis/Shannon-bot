@@ -19,7 +19,7 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import KnowsItsServers, Notify, OpensThreads, ShutsThread
-from shannon.domain.enums import ActorRole, Status
+from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, TrackedSnapshot
@@ -729,12 +729,19 @@ class ItemSyncService:
         # believe such a payload about anything; the name is the piece that was believing it.
         #
         # Below the item, because until the row is there the answer above is not known yet.
-        if not superseded:
+        #
+        # And never for a ticket. A draft card has no repository on GitHub, so its snapshot carries
+        # the copy of the row its poll or /refresh took when it began, not GitHub's word. Followed,
+        # that copy can only leave the row alone or put back a name a delivery has replaced since -
+        # and put back across owners, it would read as a move nothing can prove, taking the board
+        # off its linker for a move that never happened. Found reviewing #201.
+        if not superseded and object_type is not ObjectType.TICKET:
             await repositories.follow_rename(
                 placement.repository,
                 repo_name=snapshot.repository.full_name,
                 repo_url=snapshot.repository.html_url,
                 private=snapshot.repository.private,
+                owner_id=snapshot.repository.owner_id,
             )
 
         roles: Mapping[ActorRole, Sequence[Actor]] = self._policy.assignments(snapshot)

@@ -80,12 +80,13 @@ class TestWhoMayEvenAsk:
         """It will not fall back to a Discord role. The role is what this command exists to stop
         being sufficient, so a half-configured deployment must do nothing rather than less."""
         command, interaction, _, service, repo = run_it(
-            verification=FakeVerification(configured=False)
+            verification=FakeVerification(can_prove_identity=False)
         )
 
         await command.callback(interaction, repo)
 
         assert "cannot verify who you are on GitHub" in interaction.reply
+        assert "SHANNON_DISCORD_CLIENT_ID" in interaction.reply
         assert service.calls == []
 
 
@@ -96,7 +97,8 @@ class TestTheFirstRun:
 
         await command.callback(interaction, repo)
 
-        assert "authorize" in interaction.reply
+        assert "https://shannon.example.com/oauth/start?state=abc" in interaction.reply
+        assert "Discord checks that it is you" in interaction.reply
         assert verification.links_handed_out == 1
 
     async def test_nothing_is_unregistered_on_that_run(self) -> None:

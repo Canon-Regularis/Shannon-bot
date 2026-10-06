@@ -119,6 +119,7 @@ class RepositoryRegistrationService:
                     repo_url=snapshot.html_url,
                     discord_guild_id=guild_id,
                     private=snapshot.private,
+                    owner_id=snapshot.owner_id,
                 )
             except IntegrityError as conflict:
                 # Two people running /register at the same moment both get past the checks

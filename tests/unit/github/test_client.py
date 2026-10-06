@@ -887,6 +887,35 @@ class TestWhichCredentialACallCarries:
 
         assert seen == ["Bearer gho_a_person"], "the installation token won, so a board would 403"
 
+    async def test_an_explicit_credential_goes_on_every_page(self) -> None:
+        """Issue #201. Listing somebody's boards is a board read like any other, and a paged read
+        had no way to carry a person's credential at all - so the picker's list went out as the App
+        installation, which holds no Projects permission and cannot see a private board.
+
+        Every page rather than the first, because the cursor's later pages are requests in their
+        own right, and the supplier is never asked: an installation token on page two would be the
+        same defect one request later.
+        """
+        seen: list[str | None] = []
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            calls["n"] += 1
+            more = (
+                {"Link": '<https://api.github.com/next?after=cursor>; rel="next"'}
+                if calls["n"] == 1
+                else {}
+            )
+            return httpx.Response(200, content=json.dumps([]), headers=more)
+
+        tokens = FakeTokens(acme="ghs_installation")
+        async with client_with(handler, tokens=tokens) as client:
+            [page async for page in client.get_pages("/items", owner="acme", token="gho_chooser")]
+
+        assert seen == ["Bearer gho_chooser", "Bearer gho_chooser"]
+        assert tokens.asked == [], "the installation was asked, so a page could go out as the App"
+
     async def test_no_explicit_credential_still_asks_the_supplier(self) -> None:
         """The other arm, and every call in the project that is not about a board."""
         seen: list[str | None] = []
@@ -2112,8 +2141,9 @@ class TestWritingToAProjectBoard:
     """`patch_json`, the one write that does not go to a repository.
 
     Deliberately absent from the `GitHubClient` Protocol: that one carries the JSON readers only
-    because the wiring hands the same object to the board reader when no project token is set,
-    and a PATCH there would give every service the ability to write to any path.
+    because the wiring hands the same object to the board reader, which sends each read with a
+    person's authorisation, and a PATCH there would give every service the ability to write to
+    any path.
     """
 
     async def test_it_sends_the_body_with_patch(self) -> None:

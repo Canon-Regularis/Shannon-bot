@@ -296,13 +296,14 @@ class TestProvingYouAdministerIt:
         """Rather than falling back to the role check. A control somebody can turn off by leaving
         a setting out is not one, and nobody inside Discord could tell that it had been."""
         service = StubRegistration()
-        verification = FakeVerification(configured=False)
+        verification = FakeVerification(can_prove_identity=False)
 
         interaction = await run(service, project_manager(), verification=verification)
 
         assert service.calls == []
         assert verification.links_handed_out == 0, "it started a round trip it cannot finish"
         assert "client secret" in interaction.said
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in interaction.said
 
     async def test_it_refuses_before_handing_out_a_link_to_somebody_without_the_role(self) -> None:
         """The role gate stays first. Minting a link writes an unauthenticated row, so an ungated

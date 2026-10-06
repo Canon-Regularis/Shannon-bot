@@ -137,9 +137,10 @@ def repository(payload: object) -> RepositorySnapshot | None:
     if not isinstance(repo_id, int) or not isinstance(name, str) or not name:
         return None
 
-    owner = _owner_login(payload)
-    if owner is None:
+    found = _owner(payload)
+    if found is None:
         return None
+    owner, owner_id = found
 
     html_url = payload.get("html_url")
     if not isinstance(html_url, str) or not html_url:
@@ -154,18 +155,21 @@ def repository(payload: object) -> RepositorySnapshot | None:
         name=name,
         html_url=html_url,
         private=private if isinstance(private, bool) else None,
+        owner_id=owner_id,
     )
 
 
-def _owner_login(payload: Payload) -> str | None:
+def _owner(payload: Payload) -> tuple[str, int | None] | None:
+    """The owner's login, and its account id where the owner block carries one."""
     owner = actor(payload.get("owner"))
     if owner is not None:
-        return owner.login
+        return owner.login, owner.github_user_id
 
-    # Nothing read here arrives without an owner block; this covers one that turns up malformed.
+    # Nothing read here arrives without an owner block; this covers one that turns up malformed,
+    # which names an account and says nothing about which one it is.
     full_name = payload.get("full_name")
     if isinstance(full_name, str) and "/" in full_name:
-        return full_name.split("/", 1)[0]
+        return full_name.split("/", 1)[0], None
     return None
 
 

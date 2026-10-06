@@ -89,6 +89,7 @@ from shannon.discord_bot.formatting import (
     format_card_converted,
 )
 from shannon.discord_bot.threads import PostsToThread, ShutsThread
+from shannon.domain.board import board_owner as owner_of_board
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
@@ -168,8 +169,6 @@ class ProjectPoller:
         workflow: MovesStatus,
         threads: SaysAndShuts,
         *,
-        project_number: int = 0,
-        board_owner: str = "",
         polling: bool = True,
         interval: float = 60.0,
         may_set_status: bool = False,
@@ -179,14 +178,15 @@ class ProjectPoller:
         self._sync = sync
         self._workflow = workflow
         self._threads = threads
-        # A default for a deployment that has not run `/set_board` yet, rather than the one
-        # board there is. Zero means none, which is what it always meant.
-        self._project_number = project_number
-        self._board_owner = board_owner
         self._polling = polling
         self._interval = interval
         self._may_set_status = may_set_status
-        self._said = False
+        # Boards already said to be unreadable, so the line is loud once and then DEBUG. This
+        # runs every couple of seconds since issue #189, and a board nobody's authorisation
+        # stands behind - every board linked before issue #170, until somebody links it again -
+        # used to put a warning in the log on every pass. Let go of once the board reads, so a
+        # board that breaks again later is news again.
+        self._unreadable: set[tuple[str, int]] = set()
         self._stopping = False
         self._stopped = asyncio.Event()
         # Whether every board the last pass read can be re-read for a conditional request. Set
@@ -232,7 +232,7 @@ class ProjectPoller:
         """Read every linked board and sync what moved, answering with how many cards that was.
 
         Boards are re-read from the database at the top of every pass rather than resolved once
-        at boot, which is the whole of how `/set_board` takes effect without a restart. A board
+        at boot, which is the whole of how `/board link` takes effect without a restart. A board
         linked at 12:00:05 is polled at 12:00:07, and the command's reply says so. Pushing a
         wake-up from the command instead would couple the command table to the poller instance
         to save two seconds, once - an argument that was thin when the interval was a minute and
@@ -252,14 +252,15 @@ class ProjectPoller:
 
     async def _poll(self, board: _Board) -> int:
         """One board: read it, and sync the cards that have moved since the last read."""
+        key = (board.board_owner.casefold(), board.project_number)
         try:
             listed = await self._projects.list_board_items(board.board_owner, board.project_number)
         except UNREADABLE as unreadable:
             # Named rather than left to the loop's `logger.exception`, which answers a
             # misconfiguration with a traceback once a minute. Both answers are caught together
-            # because an operator cannot act on the difference: a fine-grained token that is not
-            # authorised for an organisation answers 404 as readily as 403, so telling the two
-            # apart in the message would be a confident guess rather than a diagnosis.
+            # because an operator cannot act on the difference: GitHub hides a private board
+            # from an authorisation that cannot see it behind 404 as readily as 403, so telling
+            # the two apart in the message would be a confident guess rather than a diagnosis.
             #
             # Three things can be wrong and the log cannot tell which, so it names all three.
             # A board GitHub does not have, an owner it was asked under - the number is a
@@ -270,25 +271,33 @@ class ProjectPoller:
             # token to blame: since issue #170 a board is read under the authorisation of whoever
             # linked it, so "nobody authorised this" and "their authorisation no longer opens it"
             # both arrive here as a board that will not open. Both are fixed the same way, by
-            # somebody running the two commands again, which is what the line says.
+            # somebody linking it again - one command and one click since issue #201 - which is
+            # what the line says.
             #
             # The repository is named because there can now be several boards, and a line saying
             # only that "board 3" failed is one an operator cannot act on when two servers each
             # have one.
-            logger.warning(
+            #
+            # Loud once per board, then DEBUG, for the reason the fields warning gives: a line
+            # that repeats every pass is one whoever reads the log learns to scroll past.
+            level = logging.WARNING if key not in self._unreadable else logging.DEBUG
+            self._unreadable.add(key)
+            logger.log(
+                level,
                 "could not read board %s belonging to %r for %s, so there is nothing to mirror "
-                "(%s). Run /set_board in that server to check the number against the board's "
-                "URL and the owner against who owns it - the number is a sequence GitHub keeps "
-                "per account, so the pair means something neither half does alone. If those are "
-                "right, nobody has authorised this bot to read that board, or the authorisation "
-                "it had has been withdrawn on GitHub: whoever links it runs /authorise_board and "
-                "then /set_board again",
+                "(%s). Run /board show in that server to see whose authorisation it is read "
+                "with, and check the number against the board's URL and the owner against who "
+                "owns it - the number is a sequence GitHub keeps per account, so the pair means "
+                "something neither half does alone. If those are right, nobody has authorised "
+                "this bot to read that board, or the authorisation it had has been withdrawn on "
+                "GitHub: running /board link again and signing in puts it right",
                 board.project_number,
                 board.board_owner,
                 board.snapshot.full_name,
                 unreadable,
             )
             return 0
+        self._unreadable.discard(key)
 
         # Asked after the read rather than before it, because the read is what decides the answer:
         # a board is only known cheap once one of its pages has come back unfull and validated.
@@ -904,13 +913,12 @@ class ProjectPoller:
     async def _boards(self) -> Sequence[_Board]:
         """Every board to read this pass, newest state of the database each time.
 
-        A linked board wins over the configured one, per repository and per pass. The settings
-        are a default for a deployment that has not run `/set_board` yet, not a fallback for one
-        whose command failed: once any repository carries a board of its own, they stop applying
-        anywhere, because half-honouring them would poll one server from the database and
-        another from the environment with nothing saying which.
+        A board is one a repository has linked, and nothing else. There used to be a second arm,
+        reading a board named in the environment where no repository had linked one; since issue
+        #170 a board is read under its linker's authorisation, and one named in the environment
+        had no linker, so that arm could only ever return a board that would not open.
 
-        The refusal this replaces stopped the poller outright with more than one server
+        The refusal it replaced stopped the poller outright with more than one server
         registered, and said to set the number to zero or give that server a deployment of its
         own. That was never a guard against a hard problem - it was the shape of a missing
         column. Nothing elected which repository a board belonged to because nothing recorded it.
@@ -921,46 +929,14 @@ class ProjectPoller:
         silently stopped.
         """
         async with self._sessionmaker() as session:
-            repositories = RepositoryStore(session)
-            linked = await repositories.with_boards()
-            if linked:
-                return [
-                    _Board.of(row, number, row.project_owner or "")
-                    for row in linked
-                    # Narrowed per row rather than trusted from the WHERE clause, which filters
-                    # in SQL and tells the type checker nothing.
-                    if (number := row.project_number) is not None
-                ]
-
-            if self._project_number <= 0:
-                return []
-
-            found = await repositories.registered(at_most=2)
-            if len(found) == 1:
-                return [_Board.of(found[0], self._project_number, self._board_owner)]
-
-            if found:
-                self._say_once(
-                    "%s servers are registered and the board settings name one board between "
-                    "them, so nothing says whose it is and no board is read. Run /set_board in "
-                    "the server it belongs to; the settings are a default for a deployment that "
-                    "has not done that yet",
-                    len(found),
-                )
-            return []
-
-    def _say_once(self, message: str, *args: object) -> None:
-        """Say something the operator has to act on, once rather than once a minute.
-
-        This runs on a timer for as long as the process lives, so a line repeated every pass is
-        one people learn to scroll past. It used to stop the task instead, which put the fact
-        somewhere `/health` could report it - affordable when it meant one board could not be
-        read, and not affordable now that it would take every other server's board down with it.
-        """
-        if self._said:
-            return
-        self._said = True
-        logger.error(message, *args)
+            linked = await RepositoryStore(session).with_boards()
+            return [
+                _Board.of(row, number)
+                for row in linked
+                # Narrowed per row rather than trusted from the WHERE clause, which filters in SQL
+                # and tells the type checker nothing.
+                if (number := row.project_number) is not None
+            ]
 
     async def _mirrored(self, repository_id: int) -> dict[int, tuple[datetime | None, int | None]]:
         async with self._sessionmaker() as session:
@@ -1103,11 +1079,12 @@ class _Board:
 
     Two owners, kept apart on purpose. `board_owner` addresses the board; the snapshot's owner
     names the repository every mirrored card is filed under. They are the same account often
-    enough to invite one field, and the cost of that is not a misleading log line: the sync
-    hands each snapshot's full name to `follow_rename`, which writes it to the `repositories`
-    row. One poll would rename the registered repository to the board owner's, and `of` scrapes
-    the fallback owner back out of that row, so every later poll would read the wrong board
-    even with the setting taken away again.
+    enough to invite one field, and the cost of that was not a misleading log line: the sync
+    handed each snapshot's full name to `follow_rename`, which wrote it to the `repositories`
+    row. One poll renamed the registered repository to the board owner's, and `of` scraped the
+    fallback owner back out of that row, so every later poll read the wrong board. The sync no
+    longer follows a ticket's repository at all - this snapshot is a copy of the row, not
+    GitHub's word - and the two stay apart regardless.
     """
 
     repository_id: int
@@ -1116,12 +1093,15 @@ class _Board:
     snapshot: RepositorySnapshot
 
     @classmethod
-    def of(cls, repository: Repository, project_number: int, board_owner: str = "") -> _Board:
+    def of(cls, repository: Repository, project_number: int) -> _Board:
+        """The board a repository has linked, addressed the one way `domain.board` writes down."""
         owner, _, name = repository.repo_name.partition("/")
         return cls(
             repository_id=repository.id,
             project_number=project_number,
-            board_owner=board_owner or owner,
+            board_owner=owner_of_board(
+                project_owner=repository.project_owner, repo_name=repository.repo_name
+            ),
             snapshot=RepositorySnapshot(
                 github_repo_id=repository.github_repo_id,
                 owner=owner,

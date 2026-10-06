@@ -60,13 +60,21 @@ class Repository(TimestampMixin, Base):
     # written before the column existed. Rewritten from the repository object on every sync, so
     # it corrects itself on the next delivery rather than needing a backfill.
     private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The GitHub account id of the repository's owner, beside the name because only the id tells a
+    # renamed account from a different one. Found reviewing #201: a repository transferred to
+    # another account kept a board stored as its own owner's, so the next poll read the NEW
+    # owner's board of the same number. Null until somebody says - every row written before the
+    # column - and learned from the next delivery, the way `private` is.
+    github_owner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # The project board mirrored into this repository's server, by the number in its URL. Null
     # means none, which is what every row written before this was and needs no backfill.
     project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Who owns that board, where it is not this repository's own owner. Null means it is. A board
     # number is a sequence GitHub keeps per account, so the pair addresses a board and neither
-    # half does alone - which is why this is stored beside the number rather than derived.
+    # half does alone - which is why this is stored beside the number rather than derived. Null
+    # follows the repository through a rename; a move to ANOTHER account writes the old owner in
+    # here on the way, so the board stays where it was linked - see `follow_rename`.
     project_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # The Discord member whose GitHub authorisation this board's own reads are made under. Issue
     # #170. Null means nobody has authorised one, and that reads as a board that cannot be read -
@@ -389,7 +397,7 @@ class BoardAuthorization(TimestampMixin, Base):
 
     Keying on the owner instead was the first design and it was wrong in a way worth recording.
     A token granted by account X does read any board X owns, so it looks sound; but
-    `linked_to_board` only refuses two repositories sharing the SAME board, so two servers may
+    `mirroring` only refuses two repositories sharing the SAME board, so two servers may
     link two DIFFERENT boards both owned by X. Keyed on X, one server's board would then be read
     under the other server's member's credential - a credential used across a tenancy boundary,
     which is the exact thing this table exists to prevent.
@@ -465,13 +473,16 @@ class GitHubInstallation(TimestampMixin, Base):
 class IdentityVerification(TimestampMixin, Base):
     """One outstanding "prove who you are on GitHub" link, and the only thing tying it back.
 
-    Two commands hand these out and they are finished differently, which is what `purpose` is
+    Several commands hand these out and they are finished differently, which is what `purpose` is
     for: `/link` is done the moment the link is followed, and `/unregister` destroys a binding
     and everything mirrored under it, so it waits to be run again where there is somebody to
-    report the answer to. Rows here outlive the
-    unbinding they authorised: this table is keyed by guild, not by repository. The callback GitHub
-    redirects to is unauthenticated, so `state` is CSRF token and session identifier at once.
-    Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race in the database.
+    report the answer to. A board link can also carry the board somebody chose, for the same
+    reason the purpose is here: the callback has nothing else to read it from. Rows here outlive
+    the unbinding they authorised: this table is keyed by guild, not by repository. The callbacks
+    are unauthenticated, and since #201's review `state` only names the row: what makes them safe is
+    `bound_browser`, the browser Discord said is held by the member the link was issued for, which
+    `consume` matches. Consumed by an UPDATE filtering on `consumed_at IS NULL`, so two clicks race
+    in the database.
     """
 
     __tablename__ = "identity_verifications"
@@ -494,6 +505,31 @@ class IdentityVerification(TimestampMixin, Base):
         nullable=False,
         server_default=text("'LINK'"),
     )
+    # The board a board link was handed out to link, so that following it can link as well as
+    # authorise. Issue #201. On the row and never in the URL: the state stays the only thing in
+    # the link, and nobody can edit the board on its way to GitHub and back. Null means authorise
+    # only, which every other purpose is and every row written before the column was. The owner
+    # is null where nobody named one, as `Repository.project_owner` is.
+    board_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    board_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Whose board a bare number meant when the link was handed out: the repository's owner then.
+    # Found reviewing #201. A bare number is "this repository's own owner's", worked out when the
+    # link is followed - and a repository transferred in between made it the NEW owner's board of
+    # that number. Null where an owner was named, which means the same thing whenever it is read.
+    board_chosen_under: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The browser that proved, through Discord, that it is held by the member this link was issued
+    # for - as a keyed hash of a cookie only that browser holds, never the cookie itself. Null until
+    # then, and `consume` matches nothing that is null, so a link nobody has proved cannot be spent
+    # by anybody: holding the state alone completes nothing. Found reviewing #201: a forwarded link
+    # signed its issuer in as whoever clicked it.
+    bound_browser: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The tiers the command that handed this link out was gated on, as `CommandRole` values joined
+    # with commas: written by `/board link` and `/board authorise`, and null for every identity
+    # link. Found reviewing #201. Following a board link keeps a credential that acts as the
+    # member, and for `/board link` points the server at a board, up to ten minutes after the
+    # command checked the role - so the callback asks Discord again, for exactly these. Text rather
+    # than an enum column, because this layer sits below the one that names the tiers.
+    tier: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -176,7 +176,8 @@ log says so on the first one that does arrive.
 on, in which case Message Content must be ticked under Bot first; see `/log_conversation` below.
 Otherwise there is nothing to turn on there and nothing for Discord to approve.
 Pinging somebody works from the account map `/link` builds, and reading somebody's roles works
-from what Discord sends with the command itself. Invite it with the `bot` and
+from what Discord sends with the command itself - except when a board link is followed, which asks
+Discord for that one member over REST, and that needs no intent either. Invite it with the `bot` and
 `applications.commands` scopes and these permissions:
 
 ```text
@@ -215,12 +216,22 @@ On the very first start the commands are registered globally, and Discord serves
 that can take up to an hour to catch up. The log says so. Until it does, typing `/` shows nothing
 and there is nothing wrong: wait, or restart the Discord client, which usually shortens it.
 
+**Discord sign-in.** Every one-time link goes through Discord before GitHub, so that only the
+member who ran the command can finish it: a link that went straight to GitHub was finished by
+whoever clicked it, and GitHub skips its consent page for an application somebody has authorised
+before. It uses the bot's own application as an OAuth client. Under OAuth2 in the Developer Portal,
+add `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` as a redirect, copy the Client ID into
+`SHANNON_DISCORD_CLIENT_ID`, and reset the Client Secret into `SHANNON_DISCORD_CLIENT_SECRET` - the
+bot token is a separate credential and is not touched. Leave Public Client off. Until both are set,
+every command that hands out a link refuses, and the bot says so at startup.
+
 **Then, in the server, in this order.**
 
 ```text
 /register <github_repo_link>          twice: prove you administer it, then bind it here
 /set_channel issues #channel          where issue threads go
-/set_channel project tickets #channel only if a board is being mirrored
+/board link <board>                   only if a board is being mirrored: one link, one click
+/set_channel project tickets #channel and where its tickets go
 /link                                 each person, once: open the link and that is it
 /link_team <team> @role               so a review asked of a team reaches somebody
 ```
@@ -329,14 +340,18 @@ What is shared, and what that costs:
   at organisation level only, so a board cannot be reached through the App at all — and asking the
   App for an organisation permission suspends event delivery to the installation until somebody
   accepts, which would stop every webhook in every registered repository. So boards go through a
-  separately registered classic **OAuth App**, and each person authorises it for themselves with
-  `/authorise_board`.
+  separately registered classic **OAuth App**, and each person authorises it for themselves:
+  `/board link` asks as part of linking a board, and `/board authorise` on its own. An
+  organisation's board also needs the organisation to approve that app — organisations restrict
+  OAuth apps by default, and GitHub's sign-in screen has a **Grant** button for an owner and a
+  **Request** button for anybody else — and, where it enforces SAML single sign-on, an active SSO
+  session. Neither is a scope, so no scope fixes them.
 - **A board is read as whoever linked it, and a card is moved as whoever moved it.** That replaced
   one classic token belonging to one human account, shared by every server, with the `project`
   scope across every project that account could see — so one leak was write access to all of them,
   and the board's history named the token's owner whoever had actually asked. Authorisations are
   stored encrypted with `SHANNON_BOARD_CREDENTIAL_KEY`, which is the only encrypted column in the
-  schema, and anybody can withdraw theirs at any time.
+  schema, and anybody can withdraw theirs at any time with `/board withdraw`, which takes no role.
 - **One webhook secret per source.** The App has its own, and the endpoint also accepts
   `SHANNON_GITHUB_WEBHOOK_SECRET` so a repository configured the old way keeps working while a
   deployment moves across. Delete the per-repository webhook once the App is installed: until you
@@ -345,13 +360,16 @@ What is shared, and what that costs:
 - **One set of role names.** `SHANNON_ROLE_*` are read once at startup and apply everywhere, so a
   server that calls its managers something else grants nothing to anybody but guild
   administrators. This is the one that surprises people.
-- **One board per repository, set from Discord.** `/set_board` records which project a server's
-  repository mirrors, so two servers each get their own and neither is guessed at.
-  `SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` are now only a default for a
-  deployment that has not run the command, and they stop applying anywhere once any repository
-  carries a board of its own. With more than one server registered and nothing but the settings,
-  no board is read and the log says to run the command - it used to stop the poller outright for
-  everybody, which was affordable while there could only be one board.
+- **One board per repository, set from Discord.** `/board link` records which project a server's
+  repository mirrors, so two servers each get their own and neither is guessed at. A board is
+  read under the authorisation of whoever linked it, so `/board link` is the only way to mirror
+  one; there is no setting that names a board. A board linked as the repository's own owner's
+  follows a renamed repository, and a renamed account once the bot has recorded its account id. It
+  stays behind with the old owner when the repository is transferred to another account: the same
+  number under the new owner is a different board. Where the bot cannot tell which it was, the
+  board is kept under the old owner and not read until somebody links it again: naming that owner
+  if the repository was transferred, since a bare number would now mean the new owner's board, or
+  by the bare number if the account only renamed itself, whose old login GitHub releases.
 - **One poller, still.** Nothing elects a leader, so two pollers racing on one card can each put
   its row back and undo the other's finished move, permanently. `SHANNON_POLL_BOARDS=false` on
   every replica but one is what prevents that. It used to be the project number set to zero, which
@@ -385,11 +403,13 @@ at the door.
 `. Signs the JWT that is traded for an installation token |
 | `SHANNON_GITHUB_APP_CLIENT_SECRET` | empty | Exchanges the OAuth code for `/link`, `/register` and `/unregister`. Empty makes all three refuse rather than hand out a broken link, which since issue #135 means a deployment without it cannot bind a repository at all |
 | `SHANNON_GITHUB_APP_WEBHOOK_SECRET` | empty | The App's own HMAC secret, accepted alongside the one below while a deployment moves across |
-| `SHANNON_PUBLIC_BASE_URL` | empty | The origin the OAuth `redirect_uri` is built from. Must match the callback URL set on the App. The same origin GitHub already reaches for webhooks |
+| `SHANNON_PUBLIC_BASE_URL` | empty | The origin every OAuth `redirect_uri` is built from, Discord's and GitHub's. Must match the redirects set on the App, the board OAuth App and the Discord application. The same origin GitHub already reaches for webhooks |
+| `SHANNON_DISCORD_CLIENT_ID` | empty | The bot's own Discord application, as an OAuth client. Every one-time link opens on this bot and asks Discord who is holding the browser before GitHub is asked anything, so a link only works for the member who ran the command. Copy it from OAuth2 in the Developer Portal, where `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` is added as a redirect |
+| `SHANNON_DISCORD_CLIENT_SECRET` | empty | Exchanges Discord's code for who signed in, and nothing else is asked of Discord: the scope is `identify`. Reset it under OAuth2; the bot token is a separate credential. Empty, or an empty id, makes `/link`, `/register`, `/unregister`, `/board link` and `/board authorise` refuse rather than hand out a link anybody it was forwarded to could finish, and the bot says so at startup |
 | `SHANNON_GITHUB_BOARD_CLIENT_ID` | empty | The **second** registered application, a classic **OAuth App** rather than a GitHub App, used only to authorise a project board. GitHub publishes no App permission for a user-owned board and granting an installed App an organisation permission suspends its event delivery until an admin accepts, so boards cannot go through the App above. Register it with the redirect URI `<SHANNON_PUBLIC_BASE_URL>/oauth/github/callback`, wildcard matching **off**, device flow **off**, and *Expire user access tokens* **off** |
-| `SHANNON_GITHUB_BOARD_CLIENT_SECRET` | empty | Exchanges the OAuth code for a board authorisation. Empty makes `/set_board` refuse rather than send somebody to GitHub to grant something that cannot be used |
+| `SHANNON_GITHUB_BOARD_CLIENT_SECRET` | empty | Exchanges the OAuth code for a board authorisation. Empty makes `/board link` and `/board authorise` refuse rather than send somebody to GitHub to grant something that cannot be used, and so does an empty `SHANNON_BOARD_CREDENTIAL_KEY` |
 | `SHANNON_BOARD_CREDENTIAL_KEY` | empty | The Fernet key those authorisations are encrypted with — the only encryption in this schema, because a board authorisation is the one thing stored here that *acts as* somebody rather than describing them. A comma-separated list, newest first: the cipher writes with the first key and reads with any, so a rotation does not make everybody authorise again. Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Unset or unreadable means boards are off and said so once, rather than a process that will not start |
-| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where the OAuth round trip is not configured. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
+| `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. `/link` records a login somebody typed and GitHub was never asked whose it is, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. Every link made since issue #144 is proved by construction, so the rows this can refuse are the ones written before it. Ignored where `SHANNON_GITHUB_APP_CLIENT_ID`, `SHANNON_GITHUB_APP_CLIENT_SECRET` or `SHANNON_PUBLIC_BASE_URL` is unset. Not where only Discord sign-in is missing: there it is still enforced, and a member who never proved a link is refused and cannot prove one until `SHANNON_DISCORD_CLIENT_ID` and `SHANNON_DISCORD_CLIENT_SECRET` are set, which `/link` says. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
@@ -401,11 +421,9 @@ at the door.
 | `SHANNON_BUILD` | `unknown` | The commit the image was built from, reported by `/health`. Written by the Dockerfile, so do not set it: compose passes `.env` into the container and it would override the real one. It is the only setting missing from `.env.example`, for that reason |
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
-| `SHANNON_POLL_BOARDS` | `true` | Whether **this** process reads project boards. Run the poller in one replica: nothing elects a leader, and two racing on one card can each undo the other's finished move. This is the switch that says which replica, a job the number below used to do |
-| `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | A **default** board, for a deployment that has not run `/set_board` yet, by the number in its URL. Zero means none. A board belongs to a repository and is recorded on its row; this and the owner below stop applying anywhere once any repository has one |
-| `SHANNON_GITHUB_PROJECT_OWNER` | empty | The account owning that **default** board, where it is not the registered repository's own owner. Empty means it is. That number is a sequence GitHub keeps per account, so a board under a different owner is a different board rather than a missing one |
+| `SHANNON_POLL_BOARDS` | `true` | Whether **this** process reads project boards. Run the poller in one replica: nothing elects a leader, and two racing on one card can each undo the other's finished move. This is the switch that says which replica, a job a board number in the environment used to do |
 | `SHANNON_PROJECT_POLL_SECONDS` | `2.0` | How often that board is read. The read is conditional, so an unchanged board costs no rate-limit budget; floored at `1.0` |
-| `SHANNON_BOARD_MAY_MOVE_CARDS` | `true` | The other direction: whether a status set in Discord drags the item's card on the board. On, because a server that ran `/set_board` asked for its board to be the truth. It needs a token that may **write** — Projects: Read and write for an organisation's board, a classic `project` token for a personal one; a read-only token answers 403, which is logged and swallowed, since the label, the row and the thread have all landed by then. Turning it off stops the card being written and nothing else — the board is still read, so a move its column order forbids is still refused. A card this bot has never seen on a board is left alone either way: the pairing is learnt by polling, and GitHub answers no per-item project lookup |
+| `SHANNON_BOARD_MAY_MOVE_CARDS` | `true` | The other direction: whether a status set in Discord drags the item's card on the board. On, because a server that ran `/board link` asked for its board to be the truth. The card is written as whoever moved it, with the authorisation they granted through `/board authorise` or `/board link` — the `project` scope, which the sign-in checks GitHub actually granted — and somebody who has granted none is refused by `/status` and `/priority` before anything is written. Turning it off stops the card being written and nothing else — the board is still read, so a move its column order forbids is still refused. A card this bot has never seen on a board is left alone either way: the pairing is learnt by polling, and GitHub answers no per-item project lookup |
 | `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
 | `SHANNON_WORKER_POLL_SECONDS` | `2.0` | How often an empty queue is checked |
 | `SHANNON_WORKER_BATCH_SIZE` | `10` | |
@@ -421,17 +439,20 @@ at the door.
 
 A project board is read on a timer rather than delivered. GitHub sends `projects_v2` webhooks
 for organisation projects only and none at all for a personal account's, and the `project_card`
-events the requirements name belong to Projects (classic), which was sunset in August 2024. The
-token needs project read access, and the board's tickets need a channel: they have no fallback,
-so `/set_channel project tickets` is what turns the mirror on.
+events the requirements name belong to Projects (classic), which was sunset in August 2024. It is
+read with the authorisation of whoever linked it, so that person must be able to see it - and an
+organisation's board also needs the organisation to approve the board OAuth App. The board's
+tickets need a channel: they have no fallback, so `/set_channel project tickets` is what turns
+the mirror on.
 
 Either kind of owner works. Which one it is is asked of GitHub rather than configured, because a
 setting for it can be wrong and go stale, and the board number alone cannot tell you: GitHub
 keeps that number as a sequence per account, so `github.com/users/you/projects/3` and
-`github.com/orgs/yours/projects/3` are two real boards that are not each other. Set
-`SHANNON_GITHUB_PROJECT_OWNER` when the board is not owned by the account owning the registered
-repository — without it the owner is taken from the repository's name, which is right for most
-deployments and quietly wrong rather than obviously broken for the rest.
+`github.com/orgs/yours/projects/3` are two real boards that are not each other. Give `/board
+link` an `owner` - or paste the board's URL, which carries it - when the board is not owned by
+the account owning the registered repository: without one the owner is taken from the
+repository's name, which is right for most deployments and quietly wrong rather than obviously
+broken for the rest.
 
 One rule spans fields: `worker_lease_seconds` must cover `worker_batch_size *
 worker_delivery_timeout_seconds`, or construction fails. A lease expiring mid-batch would let a
@@ -489,11 +510,15 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | --- | --- | --- |
 | `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
 | `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
-| `/set_board <board> [owner]` | Admin, Project Manager | Which GitHub project board this server's repository mirrors, picked from the boards that owner has. The board is opened before it is stored, so a number that is a digit out or a token that cannot see it is a sentence here rather than a warning once a minute in a log. None stops mirroring one. Two repositories may not share a board: each would open its own thread for every card |
+| `/board link <board> [owner]` | Admin, Project Manager | Which GitHub project board this server's repository mirrors, picked from the boards that owner has — listed as you, so your private boards are offered. Until you have authorised the list is empty, and nothing is asked of GitHub: type the number or paste the board's URL, which carries the owner. The board is opened with your own authorisation before it is stored, so a number that is a digit out is a sentence here rather than a warning in a log. Not authorised yet, or it will not open with what you granted: it hands you one link, and signing in authorises **and** links — there is nothing else to run. Following it asks Discord again whether you still hold the role, so a role taken away in between takes the link with it. Two servers may not share a board: each would open its own thread for every card |
+| `/board unlink` | Admin, Project Manager | Stops mirroring the board. The authorisation it was read with is forgotten too, and the reply names whose it was: forgetting this copy is not revoking the grant, and only they can do that, on GitHub |
+| `/board authorise` | Admin, Project Manager | Lets the cards you move with `/status` and `/priority` move as you on GitHub. One link, and signing in is the whole of it; following it asks Discord again whether you still hold the role. Changes nothing about which board is mirrored |
+| `/board withdraw` | Anyone, for their own | Forgets the authorisation you gave this bot in this server. No role, deliberately: deleting a credential that is yours must not depend on a role you may since have lost |
+| `/board show` | Admin, Project Manager | Which board this server mirrors, who linked it, whether it still opens with their authorisation, and whether you have authorised yourself |
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/set_board` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing |
+| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
 | `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
@@ -511,18 +536,19 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 
 **The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:
 
-- **Mirroring a card into a thread** is behind the Developer tier, like the other three, because `/refresh tickets` is its on-demand equivalent. It had no flag and no equivalent until that scope existed; what it had instead was the webhook path's argument, which is ungated by design — on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. Two things still gate it beyond the tier: it cannot happen at all until somebody with Admin or Project Manager runs **both** `/set_board` and `/set_channel project tickets` — tickets are the one kind with no fallback channel — and until an operator sets a project token. Note what the tier split now means: a Developer can spend the project token's quota, which is the poller's own, while linking the board stays Admin or Project Manager. It pings nobody either way: a draft card names no assignees and its block carries no mentions.
+- **Mirroring a card into a thread** is behind the Developer tier, like the other three, because `/refresh tickets` is its on-demand equivalent. It had no flag and no equivalent until that scope existed; what it had instead was the webhook path's argument, which is ungated by design — on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. Two things still gate it beyond the tier: it cannot happen at all until somebody with Admin or Project Manager runs **both** `/board link` and `/set_channel project tickets` — tickets are the one kind with no fallback channel. Note what the tier split now means: a Developer can spend the linker's rate limit, which is what the poller reads the board with, while linking the board stays Admin or Project Manager. It pings nobody either way: a draft card names no assignees and its block carries no mentions.
 - **A card changing an item's status** is behind `SHANNON_BOARD_MAY_SET_STATUS`, off by default, because that one *does* have a Discord equivalent to bypass: `/status` is Project Manager only, and nothing GitHub sends with a board says who dragged the card.
 
-The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, which is **on**, because a board somebody linked is a board they want kept. It needs a token that may write; without one the card is left alone and the refusal is logged. Turning it off stops the write and nothing else: the board's own column order is still read, and a move that skips a column is still refused.
+The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, which is **on**, because a board somebody linked is a board they want kept. The card is moved as whoever set the status, so they need to have authorised: `/status` and `/priority` refuse up front for somebody who has not, because that is the one board failure they can put right themselves. Turning it off stops the write and nothing else: the board's own column order is still read, and a move that skips a column is still refused.
 
 Guild only, and replies are ephemeral with one exception: `/link @member` posts its note where that person can see it, because it is addressed to them and they are not the one watching for a reply. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
 
-`/mentions` is the one command with no role behind it. Every other one decides something about
-the server; that one decides whether your own name notifies you, and asking a project manager to
+`/mentions` is the one command with no role behind it; `/link` for your own account and `/board
+withdraw` are the halves of commands that take none. Every other one decides something about
+the server; `/mentions` decides whether your own name notifies you, and asking a project manager to
 turn off your own pings is a request nobody makes twice. It reaches everything this bot writes
 except a role: `@org/team` pings the whole Discord role and Discord gives nobody a way to leave
 one person out of one.
@@ -535,8 +561,9 @@ would only stop somebody proving who they are.
 
 Asking somebody else to connect theirs is a project manager's job, because that half pings a
 member in public and a bot that will ping anybody on anybody's say-so is a spam tool. It hands out
-no link: the authorisation URL records whoever it was issued for, so one shown to anybody but that
-person is that person's identity in whoever's hands hold it.
+no link: a link is only ever issued for whoever ran the command, so the member is asked to run
+`/link` and get their own. Discord refuses anybody else who follows a link, before GitHub is asked
+anything.
 
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single
@@ -620,7 +647,7 @@ rather than abandoning the rest.
 | `muted_members` | Who asked not to be notified, per server. A row is the whole of the fact, so no row means pinged |
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and is asked when this has nothing, so a missing row costs a read of the App's own installations and then writes itself down |
-| `identity_verifications` | Outstanding one-time links. The `state` is the only thread from an unauthenticated callback back to the person who ran the command, so it is the CSRF token and the session at once, and `purpose` is the only record of which command sent them |
+| `identity_verifications` | Outstanding one-time links. The `state` names the row a browser is following and completes nothing on its own: `bound_browser` is the browser Discord said is held by the member the link was issued for, as a hash keyed by a cookie only that browser holds, and a link is spent by that browser alone. `purpose` is the only record of which command sent them. A board link also carries the board somebody chose, so following it both authorises and links; it is kept here and never in the URL, so nothing can change it on the way to GitHub and back. And `tier`, the roles the board command was gated on, which following the link asks Discord about again before anything is kept |
 | `verified_identities` | Who a Discord account proved to be on GitHub, kept briefly. Separate from `user_links` because that row is deleted and rewritten by `/link`, and because a link is a claim while this is something GitHub vouched for |
 | `board_authorizations` | The GitHub authorisation one person granted so one server could reach their project board, with the token **encrypted**. The only encrypted column in the schema, and the first credential this project stores: everything else it keeps about somebody describes them, where this one acts as them. One row per person per server, which is how both readers reach it — a card move by whoever ran the command, a poll by the member named in `repositories.project_linked_by` |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
@@ -631,7 +658,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0031`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0036`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
@@ -645,6 +672,9 @@ for as long as the App is installed on it.
 | --- | --- |
 | `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing header or unusable body, 401 for a bad signature, 413 past the 25MB cap, 500 if the secret is unset |
 | `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, `version` as the commit answering, 503 if any of the first three is false |
+| `GET /oauth/start` | Where a one-time link opens. 303 to Discord, leaving the `__Host-shannon_round_trip` cookie that holds the round trip to this browser, and writing nothing. 400 for a link that has expired, been used or never existed |
+| `GET /oauth/discord/callback` | 303 on to GitHub once Discord names the member the link was issued for, in the browser that opened it. 400 for anybody else, another browser, or a cancelled sign-in |
+| `GET /oauth/github/callback` | A plain-text page saying who signed in and what happens next, for that browser alone. 400 otherwise. All three answer 500 where Discord sign-in is not configured |
 
 `version` is the commit the image was built from. It is there because a change that was merged
 and never deployed and a change that does not work look identical from outside, and telling them
@@ -669,7 +699,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Six things the bot is known to get wrong. All are narrow, and all are written down here rather
+Seven things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -714,6 +744,14 @@ call per commit asking whether the default branch already has it, which triples 
 in order to hide something that is true. A rebase is a separate case and is handled: every commit
 on a rewritten branch has a new hash, so the thread says the branch was force-pushed rather than
 announcing them all again.
+
+**A link opened on a phone.** A one-time link goes through Discord before GitHub, and a phone
+with the Discord app installed can open Discord's page in the app rather than in the browser the
+link began in. The round trip is held to that browser by a cookie, so the return is refused, with a
+page saying to finish where it began, and nothing is recorded. Opening the link in a desktop
+browser, or pasting it into the phone's browser while signed in to discord.com, works. Somebody
+who has never authorised the bot's Discord application sees its consent page once; after that
+Discord skips it, in any browser.
 
 **A message this bot has sent cannot go back to being plain text.** Discord's components flag is
 one way: once it has seen a message carrying one, that flag can never be taken off it. Every block

@@ -70,6 +70,8 @@ class ProvesAccounts(Protocol):
 
     `configured` is here because a deployment with no public URL cannot run the round trip at
     all, and refusing a command nobody in that server could satisfy is only a way to break it.
+    It is the App's half alone. A deployment missing only Discord cannot run the round trip
+    either, and still enforces, on purpose - see `_must_be_proved`.
     """
 
     @property
@@ -288,6 +290,9 @@ class ItemPeople:
         URL cannot run the round trip, so `/link` refuses there too, and turning this on would
         leave every member of that server holding a link they have no way to prove and a command
         that will not act on it.
+
+        The App's half alone, and not Discord's, for the reason `access.py` gives: a deployment
+        missing only Discord still enforces, and `/link` names what it lacks.
         """
         return self._require_proved and self._proof.configured
 

@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 OWNER = "Canon-Regularis"
+# The account behind OWNER. Every repository payload carries it, and a row registered from one
+# records it, so a delivery that says nothing new about the owner writes nothing.
+OWNER_ID = 80922799
 REPO = "Shannon-bot"
 REPO_ID = 1255504909
 # The commit a pull request currently points at, and so the one a check suite reports on. Its
@@ -48,7 +51,7 @@ def repository(**overrides: Any) -> dict[str, Any]:
         "name": REPO,
         "full_name": f"{OWNER}/{REPO}",
         "html_url": f"https://github.com/{OWNER}/{REPO}",
-        "owner": user(OWNER, 80922799),
+        "owner": user(OWNER, OWNER_ID),
         "private": False,
     }
     payload.update(overrides)

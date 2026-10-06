@@ -445,7 +445,7 @@ class FakeGitHubClient:
         return self.bodies.get(path, [])
 
     async def get_pages(
-        self, path: str, *, owner: str = "", **params: str | int
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> AsyncIterator[object]:
         self.json_calls.append((path, params))
         self.json_owners.append(owner)

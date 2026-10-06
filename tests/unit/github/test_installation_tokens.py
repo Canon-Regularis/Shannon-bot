@@ -747,7 +747,7 @@ class TestWhoseLoginGetsWrittenDown:
     The store keys every row on `account_login.strip().lower()`, so the row has to be written
     under a spelling that can be read back. Writing the string the caller asked about put that
     at the mercy of whatever the caller had - and the owner is not always a login this bot
-    vouched for: `/set_board` takes a free-text owner option.
+    vouched for: a `/pr` or `/issue` link's owner arrives in whatever case it was pasted in.
     """
 
     async def test_the_login_github_gave_is_the_one_kept(self) -> None:
@@ -768,8 +768,9 @@ class TestWhoseLoginGetsWrittenDown:
         Matching the way the store keys its rows is what closes it, and nothing is lost, because
         GitHub logins are ASCII - which is precisely why the two agree on every real one.
 
-        The owner is not always a login this bot vouched for: `/set_board` takes a free-text owner
-        option, and it reaches here through `_owner_kind`.
+        No caller can hand this a non-ASCII owner today: a pasted link's owner and `/board link`'s
+        are both held to ASCII first. So this is defence in depth - it keeps the match in line
+        with how the store keys its rows, whatever a future caller passes.
         """
         handler, _ = lists(installed("somebody"))
         directory = FakeDirectory()

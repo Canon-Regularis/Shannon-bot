@@ -7541,3 +7541,226 @@ feature end to end rather than assuming a predecessor the file never recorded.
   genuinely differs and stays separate; what was duplicated was the exception tuple and a diagnosis
   that named a setting which no longer exists. Both are in one place, and the advice names the two
   commands somebody can actually run.
+
+## One command for a board, and one click to link it
+
+- **`/set_board` and `/authorise_board` were one job done as two commands.** A board is read as
+  whoever linked it (#170), so linking one for the first time meant `/set_board`, a refusal,
+  `/authorise_board`, a trip to GitHub, and `/set_board` again - and undoing it was split the same
+  way, with the two places that said how disagreeing with each other. Issue #201.
+- **`/board` has five halves.** `link` and `unlink` take the tier that speaks for the server;
+  `authorise` and `show` take `BOARD_ROLES`, the tiers whose authorisation is ever actually used -
+  linkers and card movers - which is the same two today, written as a union so a change to either
+  says what it does to the other. `withdraw` takes none, because deleting a credential that is yours
+  must not depend on a role you may since have lost. Like `/link`, the factory keeps its gate and
+  its own tests hold the tiers, and `UNGATED` is `{"mentions"}` again.
+- **Linking is one click.** With no authorisation yet - or one the board will not open with -
+  `/board link` hands out one link that remembers the board chosen, and following it authorises and
+  links: the shape `/link` already had. The board rides on the pending row (migration `0032`), never
+  in the URL. The page the browser lands on says which board is mirrored now, or why it is not, and
+  keeps the authorisation either way, because the sign-in itself worked; anything unexpected is
+  logged and still answered 200 rather than shown as a server error.
+- **The board was opened and listed as the App, not as the person.** The check that a board exists
+  and the picker both sent no credential, which the client fills in with the App installation's
+  token - and the App holds no Projects permission. So a private board could not be linked or even
+  offered, and the refusal blamed "your GitHub authorisation", which had never been sent. Both go
+  out as the person choosing now, on every page of a listing, and a test reads the header off the
+  wire. With no authorisation at all the picker offers nothing and asks GitHub nothing.
+- **A board's own reads refuse before any request when nobody's authorisation stands behind it.**
+  An empty credential was never "anonymous" on its way through the client: it was the App
+  installation's token, which only failed because the App holds no Projects permission today. The
+  refusal is the same exception a 401 raises, so no caller needed a new branch.
+- **A board is told apart by whose it is.** The row stores its owner as null where it is the
+  repository's own, and the comparison never resolved that. Two servers each linking their own
+  account's #1 were one board, so the second was refused and told the first one's repository name;
+  one server naming another's board by its owner was a different board, so it was allowed - and the
+  poll, which finds a board's credential by the board, then read it under the wrong server's member.
+  The owner is resolved in one query now, case-insensitively, for the taken-check and the poll alike,
+  and a board two rows still claim is read as nobody's until one of them lets go.
+- **A refusal names no other server.** "Another server already mirrors that board" replaces the other
+  repository's name, which let anybody who could link a board list other servers' repositories,
+  private ones included, one board number at a time.
+- **The picker remembers one member at a time.** A listing made under one person's authorisation
+  includes their private boards, so the cache is keyed by owner, server and member, and expired
+  entries are let go when a new one is kept.
+- **The scope GitHub granted is checked.** GitHub lets a person grant less than was asked and
+  issues a token all the same. A board sign-in short of `project` now keeps nothing and says so,
+  where before it was kept and found out later as a card that would not move.
+- **No scope was added.** `project` covers user and organisation boards; no Projects v2 document
+  asks for `read:org`; and `repo`, the only scope that might let a card wrapping a private
+  repository's issue be read, is full control of every private repository the person can reach.
+  An organisation's board needs the organisation to approve the OAuth App, which is not a scope,
+  and the sign-in text says where to press Grant or Request.
+- **A deployment with no encryption key no longer sends anybody to GitHub.** `usable` existed for
+  exactly that question and nothing asked it.
+- **Unlinking says whose authorisation went**, which the #170 entry above said it did, and it did
+  not. The grant is forgotten after the unlink commits, so a failed unlink forgets nothing.
+- **Input that crashed the command is a sentence now.** A digit from another script got past the
+  parser and failed on the way to an integer; an eleven-digit number reached Postgres and came back
+  as "Something went wrong here"; an owner of any length was written into a 255-character column.
+  Owners are held to GitHub's own login shape - underscore included, which an Enterprise Managed
+  User's login carries - and a long paste is cut before it is quoted, so the sentence after it
+  still arrives.
+- **A pasted board URL with a view on it is a board.** Boards open on `/projects/6/views/1`, so that
+  is what the address bar holds - and it was refused as "not a board" all along, under a comment
+  saying views were accepted.
+- **A long board title no longer empties the picker.** Discord refuses a choice name over a hundred
+  characters by showing nothing at all, so labels are cut, at the end, where `#6` survives.
+- **Relinking the same board keeps every card pairing.** One click made "link the board this server
+  already mirrors" the ordinary case, and forgetting there threw the pairings away for a poll to
+  rebuild. The forget also moved after the GitHub read, so it no longer holds row locks across one.
+- **A revoked grant reads as a board that will not open**, with a fresh link, rather than GitHub's
+  raw sentence about a `/users/` path - the account lookup is folded in with the board itself.
+- **`/board show`** says which board is mirrored, who linked it - by their Discord account, never
+  their GitHub login - whether it still opens with their authorisation, whether another server
+  claims it too, and whether the asker has authorised.
+- **`/priority` refuses up front like `/status`** where the mover has authorised nothing. It wrote
+  the label, failed the card write for want of a credential, and swallowed that under a reply saying
+  it had worked. Both refuse only where there is a write to make, which now includes the board
+  having a field for the state at all: GitHub's default template ships no Priority field, and an
+  unauthorised `/priority` there was refused for a write that could never happen. The board is
+  asked last, read as the board is read, so a member who has authorised pays nothing for it.
+- **A card move never goes out with an empty credential.** Somebody with no authorisation who gets
+  past the refusal - board writes off, or no field to write - has nothing sent at all, where the
+  write used to be attempted with a credential the client filled in with the App's.
+- **An unreadable board is said once, not every pass.** The poll runs every couple of seconds since
+  #189, and a board nobody's authorisation stands behind - every board linked before #170, until
+  somebody links it again - put a warning in the log on every one. Loud once per board now, then
+  DEBUG, and loud again if it reads and then breaks.
+- **`SHANNON_GITHUB_PROJECT_NUMBER` no longer names a working board, and says so.** It could not
+  have since #170: a board is read under the authorisation of whoever linked it, and a board named
+  only in the environment has nobody recorded against it. The docs still called it a default; they
+  say what it is now, and the container logs an error at startup while it is set. Removing the
+  setting and the poller's arm for it is left for its own change.
+- **Every test that assumed a flat command walks groups now**: the Discord-limits test, the gate
+  table, and the words test - which also requires `/board` to be followed by a real subcommand, and
+  reads the OAuth page, where a stale `/set_board` had sat unseen since #170.
+- **Discord permission overrides set on the two old commands do not carry over**, and one set on
+  `/board` hides `withdraw` too, because Discord applies overrides per top-level command.
+
+## A link signs in only the member it was issued for
+
+- **A forwarded link signed its issuer in as whoever clicked it.** A link pointed straight at
+  GitHub's authorize page and its callback trusted nothing but the state, and GitHub skips its
+  consent page for an application somebody has already authorised. So a link forwarded to such a
+  person was finished by them, without them seeing anything, and recorded as the issuer: a name
+  under `/link`, the evidence `/register` and `/unregister` act on, and for a board a `project`
+  token that acts as whoever clicked. Every purpose shared it. It dates from #144 and #170, and
+  #201 made it worth more by making private boards linkable. Found reviewing #201.
+- **A link opens on this bot now, and goes through Discord first.** `/oauth/start` leaves a cookie
+  and sends the browser to Discord, asking for `identify` and nothing else. `/oauth/discord/callback`
+  hears which account is holding the browser, and only if that is the member the link was issued
+  for is the browser written down and sent on to GitHub. Anybody else is refused with nothing
+  recorded and nothing asked of GitHub, and the log names the issuer, never whoever followed it.
+- **Every state that leaves this bot is sealed to the cookie.** `S.mac`, an HMAC keyed by the
+  cookie, one per leg, so nobody can push a round trip of their own into somebody else's browser:
+  they cannot compute the seal for a cookie they do not hold. The row keeps a hash keyed by the
+  cookie (migration `0033`) and never the cookie, and a link is spent by that browser alone - the
+  state on its own completes nothing.
+- **The cookie is `__Host-`, Secure, HttpOnly and Lax**, for as long as a link lives. Opening a link
+  writes nothing, so a link preview costs nothing, and two links in one browser share the cookie
+  rather than knocking each other over.
+- **Two new settings, and no link without them.** `SHANNON_DISCORD_CLIENT_ID` and
+  `SHANNON_DISCORD_CLIENT_SECRET`, from the bot's own application, with
+  `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` added there as a redirect. Unset, every command
+  that hands out a link refuses - failing closed - and the container says so at startup, naming the
+  redirect. `configured` still means the App alone: two services read it to decide whether
+  `SHANNON_REQUIRE_PROVED_LINKS` is enforced, and folding Discord into it would have switched that
+  off on exactly the deployments that had not set Discord up.
+- **A link handed out before this cannot be finished.** It pointed straight at GitHub and nothing
+  ever bound it, so it reads as expired, which costs ten minutes at most.
+- **What a forwarded link already recorded is not undone by this.** Rows written before it in
+  `verified_identities`, `user_links` and `board_authorizations` are worth a look for a login that
+  does not belong to the member it sits under.
+
+## A board link asks Discord for the role again when it is followed
+
+- **The role was checked once, when the command ran.** A board link does something the moment it
+  is followed - it keeps an authorisation that acts as the member, and `/board link` points the
+  server at a board - and it can be followed up to ten minutes later. A role taken away in between
+  went unnoticed. Found reviewing #201.
+- **The tier the command was gated on rides on the row** (migration `0034`): `/board link` writes
+  the tiers that link, `/board authorise` the tiers that authorise. Following the link asks Discord
+  for the member as they are now, puts them through the same gate the command used, and refuses
+  before the code is exchanged - so a refusal keeps nothing, links nothing and spends the link.
+- **Fetched, not remembered.** With the members intent off, discord.py keeps no current record of
+  anybody's roles, so the member is fetched over REST, which needs no intent. A browser waits five
+  seconds at most - and the request itself is never cancelled, because cancelling discord.py while
+  it sleeps out a global rate limit would leave every later request waiting for good.
+- **A server Discord has listed and not yet filled in counts as unreachable.** After a fresh
+  identify every server is a stub with no roles until its own event arrives, while the client still
+  reports itself ready; a member fetched against one would read as having lost the role.
+- **Failing closed.** Discord not answering, a server the bot cannot see, or a refusal to look the
+  member up is a refusal too, with its own page: "could not check" is not "allowed". A tier name
+  this code no longer knows is dropped rather than guessed at, which narrows the question towards
+  administrators; a board link handed out before this is asked about as administrators only.
+- **Identity links never ask.** A `/register` or `/unregister` link records a proof and nothing
+  more, and running the command again asks for the role again; a `/link` link binds the account,
+  but linking yourself takes no role.
+- **One gate.** The container builds the permission gate once, for the commands and for this
+  second question, so both read the tiers the same way.
+
+## No board is named in the environment
+
+- **`SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` are gone**, with the startup
+  error that said they could not work and the poller's arm that read them. Since #170 a board is
+  read under the authorisation of whoever linked it, and a board named in the environment had
+  nobody recorded against it, so it could never be opened. #201 said this was left for its own
+  change; this is it. An old `.env` that still sets them starts as before - a line with no
+  setting behind it is ignored.
+- **A board is one a repository has linked, and nothing else.** The poller reads exactly the
+  repositories `/board link` has written a board on, and `_Board` addresses each through the one
+  `board_owner` rule the rest of the code uses, rather than a copy of it.
+- **The poller tests link their board.** About a hundred of them were handed a board by the
+  environment without meaning to; they link one on the row now, as a server does, and the five
+  that tested the environment arm went with it.
+
+## A repository moving to another account leaves its board behind
+
+- **A transfer used to re-point the board.** A board stored with no owner means "this repository's
+  own owner", and a board number is a sequence GitHub keeps per account. When a repository was
+  transferred, the next delivery renamed the row and that null quietly became the NEW owner's board
+  of the same number - a stranger's cards, read under the linker's authorisation. Found reviewing
+  #201.
+- **The owner's account id is kept** (migration `0035`), read off every repository payload, written
+  at `/register` and learned by the next delivery like `private`. A payload that does not say leaves
+  it alone - unless it moves the name to another owner, when the id it would leave describes the
+  owner being left and is forgotten. Only the id tells a transfer from an account that was renamed,
+  which keeps its id.
+- **The board stays behind.** Where the owner half of the name changes and nothing proves it is the
+  same account, `follow_rename` writes the old owner onto the board before the name moves, and says
+  so in the log with what to run. A board somebody named an owner for is never rewritten, and a
+  change of case is not a move.
+- **Unknown counts as moved, and stops the reading.** A row from before the column, or a payload
+  with no id, cannot be told from a renamed account - whose old login GitHub releases to whoever
+  claims it next. So the board is kept under the old owner AND taken off its linker: the poll stops
+  reading it until somebody runs `/board link`, rather than read a stranger's board under the freed
+  login. The log line names the linker, because `/board unlink` finds whose authorisation to let go
+  of on the row: after this it finds nobody, and any they still hold stays until they run
+  `/board withdraw`.
+- **Whatever writes the name or the id decides from the row as it is now.** A delivery reads the
+  row without a lock, so wherever it is about to write the name or the owner's id it reads the row
+  again first, held, and decides everything from what it says then. Otherwise a `/board link`
+  committed after its read was overwritten, or carried to the new owner; and two deliveries for two
+  items overlapping a transfer could leave one account's login beside the other's id - the pairing
+  a later move is judged by. The lock is `FOR NO KEY UPDATE`: `FOR UPDATE` would also wait on the
+  key-share lock a new item's insert takes through its foreign key, so two syncs of two new items
+  would deadlock.
+- **`/board link` refuses a board the repository has moved away from.** It asks the row's name
+  again after it writes, and refuses, writing nothing, where the repository moved to another owner
+  while the board was being opened. A one-click link remembers whose board a bare number meant when
+  it was handed out (migration `0036`), and is refused where the repository has moved away from
+  that owner by the time it is followed - ten minutes is long enough for a transfer, and a bare
+  number would otherwise mean the NEW owner's board. Both refusals, and `/board show` for a board
+  that is not being read, say how to get it back: `/board link` naming the old owner if the
+  repository was transferred, since a bare number would link the new owner's - or by the bare
+  number if the account only renamed itself, whose old login GitHub releases.
+- **A board is written whole.** The ORM leaves a column out of the UPDATE where the new value equals
+  the one the session read, and `/board link` reads the row without a lock and then asks GitHub. So
+  a board another link committed in between kept whichever of its columns this one's read agreed
+  with: a board number under somebody else's owner, or no linker behind a link the reply called
+  done. All three columns are written every time now, and the last link wins whole.
+- **A draft card no longer follows its repository's name.** Its snapshot is the copy of the row its
+  poll or `/refresh` took when it began, not GitHub's word, so following it could only put back a
+  name a delivery had replaced since - and across owners, it would take the board off its linker for
+  a move that never happened.

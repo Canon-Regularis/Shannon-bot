@@ -64,7 +64,7 @@ class MissedTickets(StrEnum):
     """Why a run covered no tickets, where that is worth saying out loud.
 
     Three members rather than a flag, because each sends somebody somewhere different: to
-    `/set_board`, to `/set_channel`, or to the project token and the log. `CardMove` settled the
+    `/board link`, to `/set_channel`, or to `/board show` and the log. `CardMove` settled the
     same question the same way, and said why: only some of the ways of declining are worth telling
     a person about.
 
@@ -87,7 +87,7 @@ _REFUSALS: dict[MissedTickets, tuple[type[ShannonError], str]] = {
     MissedTickets.NO_BOARD: (
         BoardNotLinkedError,
         "No board is linked to this server, so there are no tickets to mirror. "
-        "Run /set_board first.",
+        "Run /board link first.",
     ),
     MissedTickets.NO_CHANNEL: (
         SyncFailedError,
@@ -97,8 +97,8 @@ _REFUSALS: dict[MissedTickets, tuple[type[ShannonError], str]] = {
     MissedTickets.UNREADABLE: (
         BoardUnreadableError,
         "The board this server mirrors could not be read, so no tickets were covered. "
-        "Nobody may have authorised this bot to read it, or the board moved; the log says "
-        "what GitHub answered.",
+        "/board show says whose authorisation it is read with, and the log says what went "
+        "wrong.",
     ),
 }
 
@@ -225,7 +225,7 @@ class RepositoryRefresh:
 
         The board coordinates and the ticket channel come out of the SAME read as the repository.
         This used to return the repository alone, which read as tidy and was not: a second read to
-        find the board would leave a window for /set_board to land between the two, so a run could
+        find the board would leave a window for /board link to land between the two, so a run could
         mirror against one board having decided against another. Two more scalars and a boolean
         cost nothing here and remove the question.
         """

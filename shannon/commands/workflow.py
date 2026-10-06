@@ -254,8 +254,8 @@ def _no_column(outcome: WorkflowOutcome, said: str) -> str:
     the same reason - reporting only the half that did not land reads as nothing having
     happened.
 
-    The other three ways a card can stay put say nothing. No project token and a board that
-    cannot be read at all are invisible and identical for every command until an operator
+    The other three ways a card can stay put say nothing. Board writes turned off and a board
+    that cannot be read at all are invisible and identical for every command until an operator
     changes something; a warning attached to a fix the caller cannot make is noise. This one
     they will see for themselves the moment they open the board.
 

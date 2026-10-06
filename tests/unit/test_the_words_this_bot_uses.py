@@ -28,6 +28,7 @@ from shannon.container import build_container
 from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
+from tests.support.commands import runnable
 
 SOURCE = pathlib.Path(__file__).resolve().parents[2] / "shannon"
 
@@ -42,7 +43,11 @@ REPLY_CALLS = frozenset({"done", "owed", "refused"})
 # A slash command, and not a path segment. What tells them apart is what follows: a command
 # ends a word, and `/oauth/github/callback` and `/installations/new` carry on with another
 # segment. The lookbehind keeps the middle of a URL out for the same reason.
-_SLASH_COMMAND = re.compile(r"(?<![\w/])/([a-z][a-z0-9_]*)(?![\w/])")
+#
+# With the word after it, where there is one, because a command with subcommands is only ever
+# run as a pair - `/board link` - and the second word is the half that could be wrong. For a flat
+# command the second word is just the sentence carrying on, and is ignored.
+_SLASH_COMMAND = re.compile(r"(?<![\w/])/([a-z][a-z0-9_]*)(?: ([a-z][a-z0-9_]*))?(?![\w/])")
 
 
 def _modules(*packages: str) -> list[tuple[pathlib.Path, ast.Module]]:
@@ -110,14 +115,53 @@ def _spoken(*packages: str) -> list[tuple[pathlib.Path, ast.AST, list[str]]]:
 
 
 def _installed_commands() -> set[str]:
-    """Every name the container really registers, built against an engine nothing connects to."""
+    """Every command somebody can actually run, as they would type it.
+
+    Built from what the container really registers, against an engine nothing connects to. A
+    group is not in it - Discord will not run `/board` bare - but each of its subcommands is, under
+    its full name: `board link`.
+    """
     container = build_container(
         threads=FakeThreadGateway(),
         settings=Settings(github_webhook_secret=SecretStr("x")),
         engine=create_async_engine("postgresql+asyncpg://nobody@localhost/nothing"),
         github=FakeGitHubClient(),
     )
-    return {command.name for command in container.commands}
+    return {command.qualified_name for command in runnable(container.commands)}
+
+
+def _the_pages_after_signing_in() -> list[tuple[str, str]]:
+    """What the three OAuth routes answer a browser with, which names commands too.
+
+    Not in `SPOKEN_TO`, because the rest of `api/` is route paths - `/oauth`, `/health` - that
+    look like commands and are not. So the page module's own constants are read instead: every
+    upper-case string, and every string in an upper-case mapping. The board's page named
+    `/set_board` for a release after that stopped being how anything was undone, and nothing here
+    could see it.
+    """
+    from shannon.api.routes import oauth
+
+    found: list[tuple[str, str]] = []
+    for name, value in vars(oauth).items():
+        if not name.isupper():
+            continue
+        if isinstance(value, str):
+            found.append((name, value))
+        if isinstance(value, dict):
+            found.extend((name, text) for text in value.values() if isinstance(text, str))
+    return found
+
+
+def _named_by(text: str, groups: set[str]) -> list[str]:
+    """Every command a piece of text names, as it would have to be typed.
+
+    A group's name alone is kept as it is, so it reads as unknown: a sentence telling somebody to
+    run `/board` is telling them to run something Discord will not.
+    """
+    return [
+        f"{first} {second}".strip() if first in groups else first
+        for first, second in _SLASH_COMMAND.findall(text)
+    ]
 
 
 def test_every_command_a_sentence_names_is_one_that_exists() -> None:
@@ -129,14 +173,24 @@ def test_every_command_a_sentence_names_is_one_that_exists() -> None:
     this standardisation made exactly that mistake in its own list.
     """
     installed = _installed_commands()
+    groups = {name.split(" ", 1)[0] for name in installed if " " in name}
     named: dict[str, str] = {}
     for path, node, parts in _spoken(*SPOKEN_TO):
         for part in parts:
-            for found in _SLASH_COMMAND.findall(part):
+            for found in _named_by(part, groups):
                 named.setdefault(found, _where(path, node))
+    for constant, text in _the_pages_after_signing_in():
+        for found in _named_by(text, groups):
+            named.setdefault(found, f"shannon/api/routes/oauth.py:{constant}")
 
     unknown = {name: place for name, place in named.items() if name not in installed}
     assert not unknown, f"sentences name commands that do not exist: {unknown}"
+
+
+def test_the_page_after_signing_in_is_read_at_all() -> None:
+    """The check above is only worth something if it finds the pages, and an empty list would
+    pass it silently."""
+    assert _the_pages_after_signing_in(), "no page text was found to check"
 
 
 def test_only_one_module_decides_what_a_mark_is() -> None:

@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import re
 
+from discord import app_commands
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from shannon.config import Settings
 from shannon.container import build_container
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
+from tests.support.commands import runnable
 
 # Discord's own rule for a chat input command, narrowed to what this project actually uses. The
 # real pattern admits several non-Latin scripts; nothing here needs them, and a name that would
@@ -31,6 +33,10 @@ NAME = re.compile(r"^[-_a-z0-9]{1,32}$")
 MAX_COMMANDS = 100
 MAX_PARAMETERS = 25
 MAX_DESCRIPTION = 100
+# A group's own ceiling, which discord.py does check as each subcommand is added - so this can only
+# fail by the factory raising - but it is the rule a sixth `/board` half would meet, and worth
+# reading here beside the others.
+MAX_SUBCOMMANDS = 25
 
 # The choice ceilings, none of which discord.py checks on the way past. `Choice.__init__` stores
 # whatever it is handed: no length on the name, none on the value, no count on the list, and no
@@ -60,17 +66,32 @@ def commands():
     return container.commands
 
 
+def named():
+    """Every name and description Discord is sent: each installed command, and each subcommand of
+    a group. A group carries both of its own, and Discord holds them to the same rules."""
+    installed = commands()
+    return [*installed, *(one for one in runnable(installed) if one.parent is not None)]
+
+
 def test_every_command_name_is_one_discord_will_take() -> None:
-    for command in commands():
-        assert NAME.match(command.name), f"/{command.name} is not a name Discord accepts"
+    for command in named():
+        assert NAME.match(command.name), f"/{command.qualified_name} is not a name Discord accepts"
 
 
 def test_every_description_fits_and_is_not_empty() -> None:
     """An empty description is refused outright, and an over-long one takes the sync down with
     it, so the whole application fails to register over one command's help text."""
-    for command in commands():
+    for command in named():
         length = len(command.description)
-        assert 1 <= length <= MAX_DESCRIPTION, f"/{command.name} description is {length} chars"
+        assert 1 <= length <= MAX_DESCRIPTION, (
+            f"/{command.qualified_name} description is {length} chars"
+        )
+
+
+def test_a_group_holds_no_more_than_discord_will_take() -> None:
+    for group in commands():
+        if isinstance(group, app_commands.Group):
+            assert 1 <= len(group.commands) <= MAX_SUBCOMMANDS, f"/{group.name} has too many"
 
 
 def test_every_parameter_is_one_discord_will_take() -> None:
@@ -81,13 +102,14 @@ def test_every_parameter_is_one_discord_will_take() -> None:
     name and count assertions beside it are the ones that can go red. Choices are checked below,
     where nothing shortens anything first.
     """
-    for command in commands():
-        assert len(command.parameters) <= MAX_PARAMETERS, f"/{command.name} has too many options"
+    for command in runnable(commands()):
+        name = command.qualified_name
+        assert len(command.parameters) <= MAX_PARAMETERS, f"/{name} has too many options"
         for parameter in command.parameters:
-            assert NAME.match(parameter.name), f"/{command.name} {parameter.name} is not a name"
+            assert NAME.match(parameter.name), f"/{name} {parameter.name} is not a name"
             length = len(parameter.description)
             assert 1 <= length <= MAX_DESCRIPTION, (
-                f"/{command.name} {parameter.name} description is {length} chars"
+                f"/{name} {parameter.name} description is {length} chars"
             )
 
 
@@ -104,22 +126,24 @@ def test_there_are_not_more_commands_than_discord_will_register() -> None:
 
 
 def test_every_choice_is_one_discord_will_take() -> None:
-    for command in commands():
+    for command in runnable(commands()):
         for parameter in command.parameters:
             offered = parameter.choices
             assert len(offered) <= MAX_CHOICES, (
-                f"/{command.name} {parameter.display_name} offers {len(offered)} choices"
+                f"/{command.qualified_name} {parameter.display_name} offers {len(offered)} choices"
             )
             for choice in offered:
                 name = len(choice.name)
                 assert 1 <= name <= MAX_CHOICE_NAME, (
-                    f"/{command.name} {parameter.display_name} choice name is {name} chars"
+                    f"/{command.qualified_name} {parameter.display_name} choice name is "
+                    f"{name} chars"
                 )
                 # Every choice here is a string one, where the limit is Discord's hundred
                 # characters. An integer choice would be bounded by its range instead.
                 value = len(str(choice.value))
                 assert 1 <= value <= MAX_CHOICE_VALUE, (
-                    f"/{command.name} {parameter.display_name} choice value is {value} chars"
+                    f"/{command.qualified_name} {parameter.display_name} choice value is "
+                    f"{value} chars"
                 )
 
 
@@ -128,9 +152,10 @@ def test_no_two_choices_on_one_option_share_a_value() -> None:
     name gets changed and the value does not. The picker then offers two entries that do the same
     thing, and the application never registers at all, so nothing in Discord works rather than one
     command being odd."""
-    for command in commands():
+    for command in runnable(commands()):
         for parameter in command.parameters:
             values = [choice.value for choice in parameter.choices]
             assert len(values) == len(set(values)), (
-                f"/{command.name} {parameter.display_name} offers one value twice: {values}"
+                f"/{command.qualified_name} {parameter.display_name} offers one value twice: "
+                f"{values}"
             )

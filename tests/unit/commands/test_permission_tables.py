@@ -12,7 +12,6 @@ import inspect
 import pkgutil
 
 import pytest
-from discord import app_commands
 
 import shannon.commands
 from shannon.commands._permissions import REGISTER_ROLES, SYNC_ROLES, UNGATED
@@ -20,6 +19,7 @@ from shannon.config import Settings
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
 from tests.fakes.discord_objects import FakeGuildPermissions, FakeMember, FakeRole
+from tests.support.commands import runnable
 
 
 def member(*role_names: str, administrator: bool = False) -> FakeMember:
@@ -126,11 +126,16 @@ def every_command_factory() -> dict[str, object]:
 
 
 def commands_from(factory: object) -> list[str]:
-    """The Discord names a factory produces, taking whatever stubs its arguments need."""
+    """The Discord names a factory produces, taking whatever stubs its arguments need.
+
+    Every runnable command, a group's subcommands under their full names. A group is not a
+    `Command`, so reading only those would let an ungated factory that builds one contribute
+    nothing here - and pass this check whatever it gated.
+    """
     parameters = inspect.signature(factory).parameters
     built = factory(*(object() for _ in parameters))
     made = built if isinstance(built, tuple) else (built,)
-    return [command.name for command in made if isinstance(command, app_commands.Command)]
+    return [command.qualified_name for command in runnable(made)]
 
 
 def test_the_commands_that_take_no_gate_are_the_ones_named() -> None:

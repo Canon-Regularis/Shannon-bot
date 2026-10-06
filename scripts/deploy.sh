@@ -416,9 +416,9 @@ if verify "$TARGET_COMMIT" "$VERIFY_TIMEOUT_SECONDS"; then
   else
     say "Deployed $TARGET_COMMIT, but the proxy is not forwarding everything"
     info "https://${HOSTNAME_VALUE}/oauth/github/callback answered 404, which is Caddy's"
-    info "catch-all rather than this bot. /link and /unregister hand out links to that path,"
-    info "so both are broken until it is fixed. Check the Caddyfile has a handle block for it"
-    info "and recreate the container:"
+    info "catch-all rather than this bot. Every one-time link - /link, /register, /unregister"
+    info "and /board - goes through /oauth/*, so all of them are broken until it is fixed. Check"
+    info "the Caddyfile has a handle block for it and recreate the container:"
     info "    docker compose -f $COMPOSE_FILE up -d --force-recreate caddy"
   fi
   info "$HEALTH_BODY"

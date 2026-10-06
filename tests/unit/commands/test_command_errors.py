@@ -211,11 +211,11 @@ class TestTheBackstop:
         bot = ShannonBot(explain_error=reply_for)
         with caplog.at_level("ERROR", logger="shannon.discord_bot.client"):
             await bot.tree.on_error(
-                FakeInteraction(command=a_command("set_board")),
+                FakeInteraction(command=a_command("refresh")),
                 wrapped(RuntimeError("boom")),
             )
 
-        assert "the slash command set_board failed" in caplog.text
+        assert "the slash command refresh failed" in caplog.text
         assert "boom" in caplog.text
 
     async def test_an_interaction_with_no_command_is_still_logged(

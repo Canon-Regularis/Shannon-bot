@@ -45,7 +45,7 @@ class BoardNotLinkedError(ShannonError):
     """This server mirrors no board, asked for something that only a board can answer.
 
     Distinct from `BoardUnreadableError`, because the two send somebody to different places: this
-    one to `/set_board`, that one to the project token and the log. A caller that merely wants to
+    one to `/board link`, that one to `/board show` and the log. A caller that merely wants to
     know whether a board exists reads the row instead; this is for a caller that asked for the
     board's contents by name.
     """
@@ -55,12 +55,26 @@ class BoardTakenError(ShannonError):
     """Another registered repository is already mirroring this board."""
 
 
+class BoardMovedError(ShannonError):
+    """The repository moved to another owner while its board was being opened, so the board that
+    opened is not the one a link would now point at."""
+
+
 class ReadsProjects(Protocol):
-    """Listing an owner's boards and opening one, which is all this needs of GitHub."""
+    """Listing an owner's boards and opening one, which is all this needs of GitHub.
 
-    async def list_boards(self, owner: str) -> Sequence[ProjectListing]: ...
+    Both as somebody in particular, and the credential is REQUIRED here although the reader
+    underneath defaults it. Issue #201: with nothing passed, the client fills the credential in
+    with the App installation's token - and the App holds no Projects permission, so the picker
+    and the check that a board exists both ran as something that cannot see a private board, while
+    the refusal blamed the person's own authorisation. Required at the seam, nothing can forget it.
+    """
 
-    async def get_board(self, owner: str, project_number: int) -> ProjectListing | None: ...
+    async def list_boards(self, owner: str, *, token: str) -> Sequence[ProjectListing]: ...
+
+    async def get_board(
+        self, owner: str, project_number: int, *, token: str
+    ) -> ProjectListing | None: ...
 
 
 class ReadsColumns(Protocol):
@@ -71,7 +85,7 @@ class ReadsColumns(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class BoardLink:
-    """What somebody who ran the command is told."""
+    """What somebody who linked a board is told."""
 
     repo_name: str
     owner: str
@@ -80,6 +94,51 @@ class BoardLink:
     # The board this replaced, where it replaced one. A command that silently swapped a board
     # for another reads as having done nothing when the number was a digit out.
     replaced: int | None = None
+    # Whose that board was, because the number alone does not say: a board is a number under
+    # an account, and moving from one account's #3 to another's is a swap that the numbers
+    # cannot show. Empty where nothing was replaced.
+    replaced_owner: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BoardUnlinked:
+    """What somebody who unlinked a board is told."""
+
+    repo_name: str
+    # The board it stopped mirroring, or None where it was mirroring none.
+    replaced: int | None
+    # The member whose authorisation was forgotten with it, where there was one to forget. Named
+    # in the reply because they are the only person who can also revoke it on GitHub, and the
+    # person who ran the command may well not be them.
+    forgot: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class BoardStanding:
+    """Which board a server mirrors and whose authorisation stands behind it, for `/board show`.
+
+    Plain facts rather than a sentence, so the command decides how to say them - and so nothing
+    here ever holds the linker's GitHub login, which is theirs: the reply names them by their
+    Discord account, which the server already knows.
+    """
+
+    repo_name: str
+    # None where it mirrors no board, and then the three after it say nothing.
+    number: int | None
+    owner: str
+    # The board's own title where it opened, under the authorisation it is read with. None where
+    # it would not open, or was not tried because nobody's authorisation stands behind it.
+    title: str | None
+    linked_by: int | None
+    # Whether the authorisation it was linked with is still held. False with a linker named is a
+    # member who withdrew, or one whose authorisation no longer decrypts.
+    held: bool
+    # The asker's own GitHub login, where they have authorised in this server. Theirs to see.
+    yours: str | None
+    # Whether another server's repository mirrors the same board too. Only a pair linked
+    # before boards were told apart by whose they are can be in that state, and the poll reads
+    # such a board as nobody's - so saying it was read would be the one wrong answer here.
+    shared: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,48 +147,91 @@ class _Remembered:
     until: datetime
 
 
-class OwnerBoards:
-    """Answers which boards an owner has, asking GitHub no more than it has to."""
+class HeldAuthorisation(Protocol):
+    """As much of one person's authorisation as linking a board needs.
 
-    def __init__(
-        self,
-        projects: ReadsProjects,
-        *,
-        now: Callable[[], datetime] = lambda: datetime.now(UTC),
-        lifetime: timedelta = LIFETIME,
-    ) -> None:
-        self._projects = projects
-        self._now = now
-        self._lifetime = lifetime
-        self._held: dict[str, _Remembered] = {}
+    The credential a board is opened with, and the account it belongs to - which is shown back to
+    nobody but that person. Structural, so this module needs nothing from the one that decrypts.
+    """
 
-    async def listed(self, owner: str) -> tuple[ProjectListing, ...]:
-        key = owner.casefold()
-        remembered = self._held.get(key)
-        now = self._now()
-        if remembered is not None and remembered.until > now:
-            return remembered.boards
+    @property
+    def token(self) -> str: ...
 
-        found = tuple(await self._projects.list_boards(owner))
-        self._held[key] = _Remembered(boards=found, until=now + self._lifetime)
-        return found
+    @property
+    def github_login(self) -> str: ...
 
 
 class HoldsBoardAuthorisations(Protocol):
     """The authorisations a board is reached with, as much of them as linking a board needs.
 
-    Two members and no cipher: this service decides whether somebody HAS authorised and tells the
-    store to let one go, and never handles a token. Declared here because this is where it is
-    consumed, which is the pattern the rest of the project already uses for a narrow handle.
+    No cipher, and nothing kept: this service asks whether somebody has authorised, hands their
+    credential straight to the board reader - the way the workflow hands a mover's to a card
+    write - and tells the store to let one go. It never stores a token or writes one to a log.
+    Declared here because this is where it is consumed, which is the pattern the rest of the
+    project already uses for a narrow handle.
     """
 
-    async def granted_to(self, *, guild_id: int, discord_user_id: int) -> object | None: ...
+    async def granted_to(
+        self, *, guild_id: int, discord_user_id: int
+    ) -> HeldAuthorisation | None: ...
 
     async def forget(self, *, guild_id: int, discord_user_id: int) -> bool: ...
 
 
+class OwnerBoards:
+    """Answers which boards an owner has as one member can see them, asking GitHub no more than
+    it has to.
+
+    Per member, and that is the point of the key rather than a detail of it. Issue #201: a listing
+    is made under the authorisation of whoever is choosing, so it includes the private boards
+    their account can see - and a cache keyed on the owner alone would offer one member's private
+    board titles to the next person, in any server, who typed the same owner. The server is in the
+    key too, because an authorisation is granted per server.
+    """
+
+    def __init__(
+        self,
+        projects: ReadsProjects,
+        authorisations: HoldsBoardAuthorisations,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        lifetime: timedelta = LIFETIME,
+    ) -> None:
+        self._projects = projects
+        self._authorisations = authorisations
+        self._now = now
+        self._lifetime = lifetime
+        self._held: dict[tuple[str, int, int], _Remembered] = {}
+
+    async def listed(self, owner: str, *, guild_id: int, member: int) -> tuple[ProjectListing, ...]:
+        key = (owner.casefold(), guild_id, member)
+        remembered = self._held.get(key)
+        now = self._now()
+        if remembered is not None and remembered.until > now:
+            return remembered.boards
+
+        # On a miss only: a keystroke that is answered from memory costs no lookup and no
+        # decryption either.
+        granted = await self._authorisations.granted_to(guild_id=guild_id, discord_user_id=member)
+        if granted is None:
+            # Nothing, and GitHub is not asked. A blank credential is not "anonymous" on this
+            # path: the client fills it in with the App installation's token, which is exactly
+            # what issue #201 took off it. Not remembered either - it costs one lookup, and
+            # somebody who authorises a moment from now should see their boards on the next
+            # keystroke rather than two minutes later.
+            return ()
+
+        found = tuple(await self._projects.list_boards(owner, token=granted.token))
+        # Expired entries go on the way in. Keyed per member, this would otherwise gain an entry
+        # for everybody who ever opened the picker and never lose one.
+        self._held = {kept: entry for kept, entry in self._held.items() if entry.until > now}
+        self._held[key] = _Remembered(boards=found, until=now + self._lifetime)
+        return found
+
+
 class BoardLinkingService:
-    """Backs `/set_board`: which board a server's repository mirrors."""
+    """Backs `/board`: which board a server's repository mirrors, and whose authorisation
+    reads it."""
 
     def __init__(
         self,
@@ -143,11 +245,14 @@ class BoardLinkingService:
         self._boards = boards
         self._authorisations = authorisations
 
-    async def choices_for(self, guild_id: int, typed_owner: str) -> tuple[ProjectListing, ...]:
+    async def choices_for(
+        self, guild_id: int, typed_owner: str, *, acting: int
+    ) -> tuple[ProjectListing, ...]:
         """The boards to offer, under the owner asked for or the repository's own.
 
-        Answers nothing rather than raising for a server with no repository: this feeds an
-        autocomplete, which has nowhere to put a refusal.
+        As the member choosing, which is what lets their private boards be offered at all - see
+        `OwnerBoards`. Answers nothing rather than raising for a server with no repository: this
+        feeds an autocomplete, which has nowhere to put a refusal.
         """
         owner = typed_owner.strip()
         if not owner:
@@ -156,22 +261,38 @@ class BoardLinkingService:
                 if repository is None:
                     return ()
                 owner = repository.repo_name.partition("/")[0]
-        return await self._boards.listed(owner)
+        return await self._boards.listed(owner, guild_id=guild_id, member=acting)
 
     async def assign(
-        self, *, guild_id: int, project_number: int | None, typed_owner: str, acting: int
+        self,
+        *,
+        guild_id: int,
+        project_number: int,
+        typed_owner: str,
+        acting: int,
+        chosen_under: str | None = None,
     ) -> BoardLink:
-        """Point this server's repository at a board, or at none.
+        """Point this server's repository at a board.
 
         The board is opened BEFORE it is stored. A picker's suggestions are only suggestions, so
         the number that arrives here may be typed, may be a digit out, and may name a board
-        nobody authorised this bot to see - and every one of those stored is a warning once a
-        minute in a log rather than a sentence read by the person who caused it.
+        nobody authorised this bot to see - and every one of those stored is a warning in a log
+        rather than a sentence read by the person who caused it.
 
-        `acting` is whoever ran the command, and since issue #170 that is not bookkeeping: their
+        `acting` is whoever linked it, and since issue #170 that is not bookkeeping: their
         authorisation is what the board will be read under from here on, so it is recorded on the
-        row and the command refuses without one. Linking a board somebody else authorised would
-        put this straight back where it started, with one person's credential serving a server.
+        row and this refuses without one. Linking a board somebody else authorised would put
+        this straight back where it started, with one person's credential serving a server.
+
+        And the board is opened WITH that authorisation. Issue #201: this used to check only that
+        one existed and then open the board with no credential at all, which the client fills in
+        with the App installation's token - so a private board was refused with a sentence
+        blaming an authorisation that was never sent.
+
+        `chosen_under` is whose board a bare number meant when the board was chosen, for a link
+        followed later than that: a one-click link, up to ten minutes later. Found reviewing #201.
+
+        Every refusal raises inside the one transaction, so a refused link writes nothing at all.
         """
         async with self._sessionmaker() as session, session.begin():
             repositories = RepositoryStore(session)
@@ -179,82 +300,218 @@ class BoardLinkingService:
             if repository is None:
                 raise NotRegisteredError("This server has no repository yet. Run /register first.")
 
-            replaced = repository.project_number
-            # Before the branch rather than in each arm: one statement, no new arm to
-            # cover, and both refusals below raise inside this same transaction, so a
-            # refused /set_board still writes nothing at all.
-            await TrackedItemStore(session).forget_the_board(repository.id)
-            own_owner = repository.repo_name.partition("/")[0]
-            if project_number is None:
-                # Whoever authorised it is told to let it go, not merely unpointed. A credential
-                # kept for a board this server no longer mirrors is a credential nothing will
-                # ever use and nobody remembers granting - which is the worst kind to still hold.
-                # GitHub's own grant stands until the person withdraws it, and the reply says so.
-                if repository.project_linked_by is not None:
-                    await self._authorisations.forget(
-                        guild_id=guild_id, discord_user_id=repository.project_linked_by
-                    )
-                await repositories.set_board(repository, project_number=None, project_owner=None)
-                return BoardLink(
-                    repo_name=repository.repo_name,
-                    owner=own_owner,
-                    number=0,
-                    title="",
-                    replaced=replaced,
-                )
-
-            if (
-                await self._authorisations.granted_to(guild_id=guild_id, discord_user_id=acting)
-                is None
-            ):
-                # Before the board is opened, because opening it is what needs the credential.
-                # Raised inside the transaction like the two below, so a refused /set_board
-                # writes nothing at all - including the `forget_the_board` above.
+            # Before the board is opened, because opening it is what needs the credential.
+            granted = await self._authorisations.granted_to(
+                guild_id=guild_id, discord_user_id=acting
+            )
+            if granted is None:
                 raise BoardNotAuthorisedError(
                     "This bot has no GitHub authorisation from you, so it cannot check that board "
-                    "exists or read it afterwards. Run /authorise_board and sign in to GitHub, "
-                    "then run this again. A board is read as whoever links it, which is why it "
-                    "has to be you."
+                    "exists or read it afterwards. Run /board link and sign in to GitHub when it "
+                    "asks: a board is read as whoever links it, which is why it has to be you."
                 )
 
             stored_owner = typed_owner.strip() or None
-            owner = stored_owner or own_owner
-            listing = await self._projects.get_board(owner, project_number)
+            owner = board_owner(project_owner=stored_owner, repo_name=repository.repo_name)
+            # A bare number is worked out only now, and a one-click link is followed up to ten
+            # minutes after the board was chosen. Where the repository moved to another owner in
+            # between, it now means the NEW owner's board of that number - not the one the member
+            # picked from a list of the old owner's. Found reviewing #201. Before GitHub is asked
+            # anything, because there is nothing to open.
+            if (
+                stored_owner is None
+                and chosen_under is not None
+                and owner.casefold() != chosen_under.casefold()
+            ):
+                raise BoardMovedError(
+                    f"{repository.repo_name} has moved away from {chosen_under} since board "
+                    f"#{project_number} was chosen as {chosen_under}'s, so nothing was linked. "
+                    f"Run /board link again: naming {chosen_under} as the owner if the repository "
+                    f"was transferred and it is still {chosen_under}'s board you want, or by its "
+                    f"number alone if {chosen_under} only renamed itself {owner}."
+                )
+            listing = await self._projects.get_board(owner, project_number, token=granted.token)
             if listing is None:
                 raise BoardUnreadableError(
                     f"{owner} has no project board numbered {project_number} that your GitHub "
                     "authorisation can open. Check the number against the board's URL, and the "
-                    f"owner against who owns it - a board number is a sequence GitHub keeps per "
+                    "owner against who owns it - a board number is a sequence GitHub keeps per "
                     "account, so the pair means something neither half does alone. If the board "
-                    f"belongs to somebody else, {owner} has to be named here and your "
-                    "authorisation has to cover it."
+                    "belongs to somebody else, name its owner too, and your authorisation has to "
+                    "cover it."
                 )
 
-            taken = await repositories.linked_to_board(
-                project_number=project_number, project_owner=stored_owner
-            )
-            if taken is not None and taken.id != repository.id:
+            # After the board opened rather than before, so this only ever answers somebody who
+            # can see the board for themselves - and it names nobody. The repository that has it
+            # is another server's, so its name is not this server's to be told: a refusal that
+            # named it would let anybody who can run this list other servers' repositories, one
+            # board number at a time. Issue #201.
+            others = [
+                one
+                for one in await repositories.mirroring(project_number=project_number, owner=owner)
+                if one.id != repository.id
+            ]
+            if others:
                 # Two repositories on one board each mirror every draft card into their own
                 # server, because a tracked item is keyed by repository and nothing compares
                 # across them. One query to refuse it is cheaper than the pair of threads.
                 raise BoardTakenError(
-                    f"{taken.repo_name} is already mirroring that board. A board belongs to one "
-                    "repository here, because each would open its own thread for every card."
+                    "Another server already mirrors that board. A board belongs to one server "
+                    "here, because each would open its own thread for every card."
                 )
 
+            replaced = repository.project_number
+            was = board_owner(
+                project_owner=repository.project_owner, repo_name=repository.repo_name
+            )
+            if replaced != project_number or was.lower() != owner.lower():
+                # A card id and a column belong to the board they are on, and mean nothing - or
+                # something wrong - on another; `forget_the_board` says why at length. Not on a
+                # relink of the SAME board, though, which one click has made the ordinary case:
+                # every re-authorisation is one, and forgetting there would throw away every card
+                # pairing for a poll to rebuild, for nothing.
+                #
+                # Here rather than before the refusals above, which is where it used to be: it
+                # updates every tracked item in the repository, and doing that first held those
+                # row locks across the GitHub read in between.
+                await TrackedItemStore(session).forget_the_board(repository.id)
             await repositories.set_board(
                 repository,
                 project_number=project_number,
                 project_owner=stored_owner,
                 linked_by=acting,
             )
+            # Asked again of the row as it is now. GitHub was asked under the owner the read above
+            # named, with no lock held, so a transfer's first delivery may have renamed the row in
+            # between - and the UPDATE just made waited for it to commit. A board stored as the
+            # repository's own owner's would then be the NEW owner's board of that number, read
+            # under this member's authorisation: the transfer bug again, from the other side.
+            # Found reviewing #201. Refused, and the raise takes the write back with it. A named
+            # owner is nobody's repository, so it cannot have moved.
+            read_as = repository.repo_name
+            await session.refresh(repository, ["repo_name"])
+            now = board_owner(project_owner=stored_owner, repo_name=repository.repo_name)
+            if now.casefold() != owner.casefold():
+                raise BoardMovedError(
+                    f"{read_as} moved to {repository.repo_name} while the board was being "
+                    f"checked, so nothing was linked. Run /board link again: naming {owner} as "
+                    "the owner if the repository was transferred and it is still that account's "
+                    f"board #{project_number} you want, or by its number alone if {owner} only "
+                    f"renamed itself {now}."
+                )
             return BoardLink(
                 repo_name=repository.repo_name,
                 owner=owner,
                 number=listing.number,
                 title=listing.title,
                 replaced=replaced,
+                replaced_owner=was if replaced is not None else "",
             )
+
+    async def unassign(self, *, guild_id: int) -> BoardUnlinked:
+        """Stop mirroring this server's board, and let go of the authorisation it was read with.
+
+        Whoever authorised it is told to let it go, not merely unpointed. A credential kept for a
+        board this server no longer mirrors is a credential nothing will ever use and nobody
+        remembers granting - which is the worst kind to still hold. GitHub's own grant stands until
+        that person withdraws it there, which the reply says, naming them.
+
+        Forgotten after the board is unlinked rather than inside the same transaction: the
+        credential lives in its own table behind its own session, so "inside" would have meant
+        committing the forget first - and a board left linked with nobody's authorisation behind
+        it, had the unlink then failed.
+        """
+        async with self._sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_guild(guild_id)
+            if repository is None:
+                raise NotRegisteredError("This server has no repository yet. Run /register first.")
+
+            repo_name = repository.repo_name
+            replaced = repository.project_number
+            linked_by = repository.project_linked_by
+            await TrackedItemStore(session).forget_the_board(repository.id)
+            await repositories.set_board(repository, project_number=None, project_owner=None)
+
+        # A server with no board has nobody recorded against it, and reaching for a credential
+        # under a null member would be asking the store about user zero.
+        forgot = linked_by is not None and await self._authorisations.forget(
+            guild_id=guild_id, discord_user_id=linked_by
+        )
+        return BoardUnlinked(
+            repo_name=repo_name, replaced=replaced, forgot=linked_by if forgot else None
+        )
+
+    async def standing(self, *, guild_id: int, asking: int) -> BoardStanding:
+        """What this server mirrors, whose authorisation reads it, and whether that still works.
+
+        The board is opened under the authorisation it is actually read with, never the asker's,
+        because the question is whether the POLL can read it - and never with no credential,
+        which the client would fill in with the App installation's. Somebody whose board has
+        quietly stopped mirroring should be able to find out why from one command.
+        """
+        async with self._sessionmaker() as session:
+            repository = await RepositoryStore(session).get_by_guild(guild_id)
+            if repository is None:
+                raise NotRegisteredError("This server has no repository yet. Run /register first.")
+            repo_name = repository.repo_name
+            number = repository.project_number
+            linked_by = repository.project_linked_by
+            owner = board_owner(project_owner=repository.project_owner, repo_name=repo_name)
+            # The same question `reading` asks before the poll may read a board at all.
+            claims = (
+                ()
+                if number is None
+                else await RepositoryStore(session).mirroring(project_number=number, owner=owner)
+            )
+        shared = len(claims) > 1
+
+        mine = await self._authorisations.granted_to(guild_id=guild_id, discord_user_id=asking)
+        theirs = (
+            None
+            if linked_by is None
+            else await self._authorisations.granted_to(guild_id=guild_id, discord_user_id=linked_by)
+        )
+        # Not opened where it is shared either: the poll will not read it, so whether it would
+        # open is not the question.
+        listing = (
+            None
+            if number is None or theirs is None or shared
+            else await self._projects.get_board(owner, number, token=theirs.token)
+        )
+        return BoardStanding(
+            repo_name=repo_name,
+            number=number,
+            owner=owner,
+            title=listing.title if listing is not None else None,
+            linked_by=linked_by,
+            held=theirs is not None,
+            yours=mine.github_login if mine is not None else None,
+            shared=shared,
+        )
+
+
+def said(link: BoardLink) -> str:
+    """What linking a board changed, in one sentence.
+
+    One function for the reply in Discord and for the page a browser lands on after a one-click
+    link, so the two cannot drift. A swapped board reads as having done nothing when the number was
+    a digit out, so the old one is named rather than left for somebody to notice a week later -
+    with its owner where that is what changed, because the same number under another account is
+    another board, and `assign` has already forgotten every card pairing on that account.
+    """
+    if link.replaced is None:
+        moved = ""
+    elif link.replaced_owner and link.replaced_owner.lower() != link.owner.lower():
+        moved = f" It was mirroring {link.replaced_owner}'s board #{link.replaced}."
+    elif link.replaced != link.number:
+        moved = f" It was mirroring #{link.replaced}."
+    else:
+        moved = ""
+    return (
+        f"{link.repo_name} now mirrors {link.owner}'s board #{link.number}, {link.title}.{moved} "
+        "Cards appear at the next poll rather than at once."
+    )
 
 
 @dataclass(frozen=True, slots=True)

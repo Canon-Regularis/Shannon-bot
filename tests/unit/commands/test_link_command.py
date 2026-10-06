@@ -5,10 +5,9 @@ whose it was. What is left asks, and nobody types anything: the account written 
 GitHub answered for whoever signed in, and following the link is the whole of it.
 
 Two things here are worth more than the wording. The first is that naming a member hands out **no
-link at all** — the URL is a bearer credential, so one issued for somebody else is that person's
-identity in whoever's hands hold it, and the note in the channel carries none. The second is that
-the note is the one message this bot sends that anybody but its caller can see, which is only
-assertable at all since the fakes started recording it.
+link at all**: a link is issued for whoever ran the command and nobody else, and the note in the
+channel carries none. The second is that the note is the one message this bot sends that anybody
+but its caller can see, which is only assertable at all since the fakes started recording it.
 """
 
 from __future__ import annotations
@@ -32,8 +31,8 @@ BOB = 777
 
 
 class FakeVerification:
-    def __init__(self, *, configured: bool = True) -> None:
-        self.configured = configured
+    def __init__(self, *, can_prove_identity: bool = True) -> None:
+        self.can_prove_identity = can_prove_identity
         self.issued_for: list[int] = []
         self.purposes: list[VerificationPurpose] = []
 
@@ -42,7 +41,7 @@ class FakeVerification:
     ) -> str:
         self.issued_for.append(discord_user_id)
         self.purposes.append(purpose)
-        return "https://github.com/login/oauth/authorize?state=abc"
+        return "https://shannon.example.com/oauth/start?state=abc"
 
 
 async def fire(
@@ -96,9 +95,9 @@ class TestConnectingYourOwn:
         assert verification.issued_for == [ALICE]
 
     async def test_the_link_is_issued_for_whoever_ran_it_and_nobody_else(self) -> None:
-        """The invariant the whole command is built around. Whoever opens the URL is recorded as
-        the person it was issued for, so an id taken from an argument would be an identity handed
-        to whoever happened to be holding the link."""
+        """The invariant the whole command is built around: a link is only ever issued for
+        whoever ran the command. Since #201's review Discord would refuse anybody else who
+        followed one, but issuing nothing for an argument is the rule that rests on."""
         command, interaction, verification = run_it()
 
         await fire(command, interaction, somebody_else())
@@ -123,6 +122,17 @@ class TestConnectingYourOwn:
 
         assert "again" not in interaction.reply
 
+    async def test_it_says_where_the_link_goes_first(self) -> None:
+        """In a browser, and Discord before GitHub. Found reviewing #201: the link only goes on
+        for the member it was issued for, which is worth knowing before Discord asks."""
+        command, interaction, _ = run_it()
+
+        await fire(command, interaction)
+
+        assert "in your browser" in interaction.reply
+        assert "Discord checks that it is you" in interaction.reply
+        assert "https://shannon.example.com/oauth/start?state=abc" in interaction.reply
+
     async def test_run_outside_a_server_it_says_so(self) -> None:
         """`guild_only` keeps this out of a direct message, and the check stays anyway: the
         decorator is Discord's and this is what happens if it is ever removed or not enforced."""
@@ -137,11 +147,15 @@ class TestConnectingYourOwn:
     async def test_a_deployment_that_cannot_verify_anybody_says_so(self) -> None:
         """Said above the branch, because neither half of this works without it: asking somebody
         to go and try would be as useless as handing out a link that goes nowhere."""
-        command, interaction, verification = run_it(verification=FakeVerification(configured=False))
+        command, interaction, verification = run_it(
+            verification=FakeVerification(can_prove_identity=False)
+        )
 
         await fire(command, interaction)
 
         assert "cannot check who you are on GitHub" in interaction.reply
+        assert "SHANNON_DISCORD_CLIENT_ID" in interaction.reply
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in interaction.reply
         assert verification.issued_for == []
 
 
@@ -150,9 +164,9 @@ class TestAskingSomebodyElse:
         """The security test, and the direct replacement for the promise `/verify` used to carry
         that no link would ever be issued for anybody but the caller.
 
-        A link issued for another member and shown to whoever asked is that member's identity:
-        the URL is a bearer credential, and the row records the person it was issued for rather
-        than the person who opens it.
+        A link issued for another member and shown to whoever asked would be recorded as that
+        member. Since #201's review Discord would refuse anybody else who followed it, but issuing
+        nothing is the rule this rests on rather than a check further along.
         """
         command, interaction, verification = run_it(who=project_manager())
 

@@ -25,20 +25,25 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import BoardAuthorization, UserLink
+from shannon.db.models import BoardAuthorization, IdentityVerification, UserLink, VerifiedIdentity
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.user_links import LinkedAccount, UserLinkStore
+from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.services.board_credentials import BoardCredentials
 from shannon.services.linking import UserLinkingService
 from shannon.services.verification import (
     BOARD_SCOPE,
+    NO_APPLICATION,
     GitHubIdentityVerification,
     OAuthClient,
     VerificationError,
 )
+from tests.fakes.board_links import NoBoardLinks
+from tests.fakes.tiers import FakeTiers
 from tests.support.credentials import BOARD_KEY, OTHER_BOARD_KEY
 from tests.support.db import register_repository
+from tests.support.round_trip import DISCORD_APP, discord_says, round_trip, state_of, to_github
 
 pytestmark = pytest.mark.integration
 
@@ -48,12 +53,19 @@ BOB = 777
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=UTC)
 
 
-def github_says(*, login: str = "octocat", user_id: int = 583231):
-    """A GitHub that completes the round trip and names one account."""
+def github_says(*, login: str = "octocat", user_id: int = 583231, scope: object = BOARD_SCOPE):
+    """A GitHub that completes the round trip and names one account.
+
+    `scope` is what the token response says was granted, and by default it is everything a board
+    asks for. Issue #201: a board is refused on less, so a GitHub that answered without it would
+    be one no board in this file could be authorised through.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/access_token"):
-            return httpx.Response(200, content=json.dumps({"access_token": "gho_abc"}))
+            return httpx.Response(
+                200, content=json.dumps({"access_token": "gho_abc", "scope": scope})
+            )
         return httpx.Response(200, content=json.dumps({"login": login, "id": user_id}))
 
     return handler
@@ -65,13 +77,14 @@ async def verifying(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     keys: str = BOARD_KEY,
+    discord: OAuthClient = DISCORD_APP,
 ) -> AsyncIterator[GitHubIdentityVerification]:
     """The real service over a real linking service, which is the point of this file.
 
     A stand-in for the linking half would prove the call was made and nothing about what it
     wrote, and what it writes is the whole question here.
     """
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(discord_says(handler))) as http:
         yield GitHubIdentityVerification(
             sessionmaker,
             UserLinkingService(sessionmaker),
@@ -79,6 +92,10 @@ async def verifying(
             # stand-in would prove the call was made and nothing about what landed in the row,
             # and whether the stored token is the token is the whole question for a board.
             BoardCredentials(sessionmaker, keys=keys),
+            # No link in this file carries a board: linking one on the way back is
+            # `test_one_click_board_linking.py`'s subject, with the real service behind it.
+            board_links=NoBoardLinks(),
+            tiers=FakeTiers(),
             client_id="Iv23liAbC",
             client_secret="shh",
             oauth_url="https://github.com",
@@ -87,12 +104,9 @@ async def verifying(
             board=OAuthClient(
                 client_id="Ov23liBoard", client_secret="board-shh", scope=BOARD_SCOPE
             ),
+            discord=discord,
             now=lambda: NOW,
         )
-
-
-def _state(link: str) -> str:
-    return link.partition("state=")[2]
 
 
 async def followed(
@@ -101,11 +115,11 @@ async def followed(
     purpose: VerificationPurpose,
     discord_user_id: int = ALICE,
 ) -> None:
-    """Hand out a link for somebody and have them open it."""
+    """Hand out a link for somebody and have them follow it, through Discord as themselves."""
     link = await verification.link_for(
         guild_id=GUILD, discord_user_id=discord_user_id, purpose=purpose
     )
-    await verification.redeem(state=_state(link), code="abc")
+    await round_trip(verification, link, member=discord_user_id)
 
 
 class TestFollowingALinkLinksYou:
@@ -161,9 +175,9 @@ class TestFollowingALinkLinksYou:
     async def test_it_is_written_for_whoever_the_link_was_issued_for(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
-        """The row carries the Discord account, and the URL is a bearer credential for exactly
-        that: whoever opens it is recorded as that person. Which is why nothing ever hands one
-        out for somebody other than the person in front of it."""
+        """The row carries the Discord account, and the link is finished for exactly that
+        account - by them alone, since #201's review, because Discord has to name them first. Which
+        is why nothing ever hands one out for somebody other than the person in front of it."""
         async with verifying(db_sessionmaker, github_says()) as verification:
             await followed(verification, purpose=VerificationPurpose.LINK, discord_user_id=BOB)
 
@@ -227,10 +241,10 @@ class TestAProofBeatsAClaim:
             two = await first.link_for(
                 guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.LINK
             )
-            await first.redeem(state=_state(one), code="abc")
+            await round_trip(first, one, member=ALICE)
 
         async with verifying(db_sessionmaker, github_says(login="wanderer", user_id=900)) as then:
-            await then.redeem(state=_state(two), code="abc")
+            await round_trip(then, two, member=ALICE)
 
         db_session.expunge_all()
         found = await UserLinkStore(db_session).account_for(guild_id=GUILD, discord_user_id=ALICE)
@@ -256,8 +270,9 @@ class TestAuthorisingABoard:
             link = await verification.link_for(
                 guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
             )
+            at = await to_github(verification, link, member=ALICE)
 
-        assert "scope=project" in link
+        assert "scope=project" in at.url
 
     async def test_an_identity_link_still_asks_for_no_scope_at_all(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
@@ -268,8 +283,14 @@ class TestAuthorisingABoard:
         job requires, on a link people are told to click.
         """
         async with verifying(db_sessionmaker, github_says()) as verification:
-            links = [
-                await verification.link_for(guild_id=GUILD, discord_user_id=ALICE, purpose=purpose)
+            pages = [
+                await to_github(
+                    verification,
+                    await verification.link_for(
+                        guild_id=GUILD, discord_user_id=ALICE, purpose=purpose
+                    ),
+                    member=ALICE,
+                )
                 for purpose in (
                     VerificationPurpose.LINK,
                     VerificationPurpose.REGISTER,
@@ -277,7 +298,7 @@ class TestAuthorisingABoard:
                 )
             ]
 
-        assert all("scope" not in link for link in links), links
+        assert all("scope" not in page.url for page in pages), pages
 
     async def test_the_board_link_names_the_board_application(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
@@ -286,15 +307,23 @@ class TestAuthorisingABoard:
         user-owned board and granting an installed App an organisation one suspends its event
         delivery until an admin accepts."""
         async with verifying(db_sessionmaker, github_says()) as verification:
-            board = await verification.link_for(
-                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
+            board = await to_github(
+                verification,
+                await verification.link_for(
+                    guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
+                ),
+                member=ALICE,
             )
-            identity = await verification.link_for(
-                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.LINK
+            identity = await to_github(
+                verification,
+                await verification.link_for(
+                    guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.LINK
+                ),
+                member=ALICE,
             )
 
-        assert "client_id=Ov23liBoard" in board
-        assert "client_id=Iv23liAbC" in identity
+        assert "client_id=Ov23liBoard" in board.url
+        assert "client_id=Iv23liAbC" in identity.url
 
     async def test_the_code_is_exchanged_against_the_application_that_issued_it(
         self, db_sessionmaker: async_sessionmaker[AsyncSession]
@@ -308,7 +337,9 @@ class TestAuthorisingABoard:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/access_token"):
                 asked.append(request.content.decode())
-                return httpx.Response(200, content=json.dumps({"access_token": "gho_abc"}))
+                return httpx.Response(
+                    200, content=json.dumps({"access_token": "gho_abc", "scope": BOARD_SCOPE})
+                )
             return httpx.Response(200, content=json.dumps({"login": "octocat", "id": 583231}))
 
         async with verifying(db_sessionmaker, handler) as verification:
@@ -403,13 +434,17 @@ class TestAuthorisingABoard:
         deployment that cannot keep it has sent somebody to GitHub for nothing - and left a real
         authorisation standing on their account with nothing here using it. Saying "done" would be
         a lie they could not check.
+
+        Late rather than never, since issue #201: `can_authorise_a_board` says no up front where
+        there is no key, so what reaches this is a key that went away between the link being
+        handed out and being followed.
         """
         async with verifying(db_sessionmaker, github_says(), keys="") as verification:
             link = await verification.link_for(
                 guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
             )
             with pytest.raises(VerificationError, match="could not keep"):
-                await verification.redeem(state=_state(link), code="abc")
+                await round_trip(verification, link, member=ALICE)
 
         assert await db_session.scalar(select(BoardAuthorization.secret)) is None
 
@@ -468,9 +503,10 @@ class TestAuthorisingABoard:
     ) -> None:
         """Two registrations, either of which can be missing on its own.
 
-        `configured` is still about the App alone, deliberately: six callers ask it before
-        offering /link, /register or /unregister, and a deployment that has not registered the
-        board OAuth App must not have those three refused along with it.
+        `configured` is still about the App alone, deliberately. The commands read
+        `can_prove_identity` since #201's review; what still reads this is the enforcement of
+        SHANNON_REQUIRE_PROVED_LINKS, which neither a missing board OAuth App nor a missing
+        Discord half may switch off.
         """
         async with verifying(db_sessionmaker, github_says()) as both:
             assert both.configured is True
@@ -481,17 +517,47 @@ class TestAuthorisingABoard:
                 db_sessionmaker,
                 UserLinkingService(db_sessionmaker),
                 BoardCredentials(db_sessionmaker, keys=BOARD_KEY),
+                board_links=NoBoardLinks(),
+                tiers=FakeTiers(),
                 client_id="Iv23liAbC",
                 client_secret="shh",
                 oauth_url="https://github.com",
                 public_base_url="https://shannon.example.com",
                 http=http,
+                discord=DISCORD_APP,
             )
             assert app_only.configured is True
             assert app_only.can_authorise_a_board is False, (
                 "a deployment with no OAuth App would hand out a link to an application that "
                 "does not exist"
             )
+
+    async def test_a_deployment_without_discord_authorises_no_board(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Found reviewing #201. A board link goes through Discord like every other link, so
+        without it there is no board link either, however completely the board's own application
+        and key are set up."""
+        async with verifying(db_sessionmaker, github_says(), discord=NO_APPLICATION) as missing:
+            assert missing.can_authorise_a_board is False
+            assert missing.can_prove_identity is False
+            assert missing.configured is True
+
+    async def test_a_deployment_that_cannot_keep_an_authorisation_does_not_offer_one(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Issue #201. The OAuth App being registered is not enough on its own: with no key the
+        round trip runs perfectly well and then cannot store its answer, so the only honest place
+        to say so is before anybody is sent to GitHub rather than after they come back."""
+        async with verifying(db_sessionmaker, github_says(), keys="") as keyless:
+            assert keyless.configured is True
+            assert keyless.can_authorise_a_board is False, (
+                "a deployment with no key would send somebody to grant something it then throws "
+                "away"
+            )
+
+        async with verifying(db_sessionmaker, github_says()) as keyed:
+            assert keyed.can_authorise_a_board is True
 
     async def test_the_token_reaches_no_log_line(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], caplog: pytest.LogCaptureFixture
@@ -503,6 +569,139 @@ class TestAuthorisingABoard:
                 await followed(verification, purpose=VerificationPurpose.BOARD)
 
         assert "gho_abc" not in caplog.text
+
+
+class TestTheBoardALinkIsFor:
+    """Issue #201. One link both authorises and links, so the board somebody chose rides on the
+    row the browser lands on - and only there."""
+
+    async def test_it_rides_on_the_row_and_never_in_the_url(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        """The state stays the only thing in the link. A board in the URL would be one the
+        browser could change on its way through Discord and GitHub and back; the row is the one
+        place nothing outside this process can touch."""
+        async with verifying(db_sessionmaker, github_says()) as verification:
+            plain = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
+            )
+            chosen = await verification.link_for(
+                guild_id=GUILD,
+                discord_user_id=ALICE,
+                purpose=VerificationPurpose.BOARD,
+                board=ChosenBoard(number=6, owner="acme"),
+            )
+
+            # And where the link goes next, which since #201's review is GitHub only after
+            # Discord: no board there either.
+            plain_at = await to_github(verification, plain, member=ALICE)
+            chosen_at = await to_github(verification, chosen, member=ALICE)
+
+        # Found by everything after `state=`, so nothing else can be riding on the end of it.
+        row = await db_session.scalar(
+            select(IdentityVerification).where(IdentityVerification.state == state_of(chosen))
+        )
+        assert row is not None
+        assert (row.board_number, row.board_owner) == (6, "acme")
+        # And byte for byte the link it would have been without one, up to the state, which is
+        # random in both - the link, and the GitHub page it leads to.
+        assert chosen.partition("state=")[0] == plain.partition("state=")[0]
+        assert chosen_at.url.partition("state=")[0] == plain_at.url.partition("state=")[0]
+
+
+class TestWhatGitHubActuallyGranted:
+    """Issue #201. Asked for is not granted.
+
+    GitHub documents that a person can grant an application less than it asked for, and answers
+    with a token all the same, with what was really granted in `scope`. A board kept on less would
+    be found out later, as a board that will not open or a card that will not move, and a long way
+    from the one person who could fix it. So the sign-in refuses there and then, and keeps nothing.
+    """
+
+    async def refused(
+        self, sessionmaker: async_sessionmaker[AsyncSession], scope: object, *, code: str = "abc"
+    ) -> None:
+        """A board round trip GitHub answers with `scope`, which this expects to be turned away."""
+        async with verifying(sessionmaker, github_says(scope=scope)) as verification:
+            link = await verification.link_for(
+                guild_id=GUILD, discord_user_id=ALICE, purpose=VerificationPurpose.BOARD
+            )
+            with pytest.raises(VerificationError, match="granted less access"):
+                await round_trip(verification, link, member=ALICE, code=code)
+
+    @pytest.mark.parametrize("scope", ["", "read:project"])
+    async def test_a_board_granted_less_than_it_asked_for_keeps_nothing(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        scope: str,
+    ) -> None:
+        """Nothing at all, and read without write - the second is the one somebody might choose
+        on purpose, and it would leave every card move refusing."""
+        await self.refused(db_sessionmaker, scope)
+
+        assert await db_session.scalar(select(BoardAuthorization.secret)) is None
+        # Not even a proof. The refusal comes before GitHub is asked who signed in, so the row
+        # that answer would have written is not there either.
+        assert await db_session.scalar(select(VerifiedIdentity.github_login)) is None
+
+    @pytest.mark.parametrize("scope", [None, ["project"]])
+    async def test_a_scope_that_is_not_text_counts_as_nothing_granted(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        scope: object,
+    ) -> None:
+        """Null reads the same as a response with no `scope` at all, and the right word in the
+        wrong shape is still not a grant: guessing at what GitHub meant is how a short grant would
+        be kept."""
+        await self.refused(db_sessionmaker, scope)
+
+        assert await db_session.scalar(select(BoardAuthorization.secret)) is None
+
+    @pytest.mark.parametrize("scope", ["project", "project,read:org", " project "])
+    async def test_a_board_granted_what_it_asked_for_is_kept(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], scope: str
+    ) -> None:
+        """Alongside something else too, since `scope` lists everything the token carries and that
+        can be more than this asked for; and with stray space round it, which costs nothing to
+        forgive."""
+        async with verifying(db_sessionmaker, github_says(scope=scope)) as verification:
+            await followed(verification, purpose=VerificationPurpose.BOARD)
+
+        held = await BoardCredentials(db_sessionmaker, keys=BOARD_KEY).granted_to(
+            guild_id=GUILD, discord_user_id=ALICE
+        )
+        assert held is not None
+        assert held.token == "gho_abc"
+
+    @pytest.mark.parametrize(
+        "purpose",
+        [VerificationPurpose.LINK, VerificationPurpose.REGISTER, VerificationPurpose.UNREGISTER],
+    )
+    async def test_an_identity_granted_no_scope_is_still_signed_in(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], purpose: VerificationPurpose
+    ) -> None:
+        """What a GitHub App's user token answers with, because identity asked for nothing - and
+        nothing asked for is nothing missing, which is why the check has no purpose to look at."""
+        async with verifying(db_sessionmaker, github_says(scope="")) as verification:
+            await followed(verification, purpose=purpose)
+            proved = await verification.ever_proved(guild_id=GUILD, discord_user_id=ALICE)
+
+        assert proved is not None
+        assert (proved.login, proved.github_user_id) == ("octocat", 583231)
+
+    async def test_a_refusal_names_what_was_missing_and_no_credential(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Which scope was short is what an operator needs. The token and the code are both
+        credentials, and a log file is the one place either could come to rest."""
+        with caplog.at_level("DEBUG"):
+            await self.refused(db_sessionmaker, "read:project", code="the-code")
+
+        assert "without project" in caplog.text
+        assert "gho_abc" not in caplog.text
+        assert "the-code" not in caplog.text
 
 
 class TestWhoseAuthorisationABoardIsReadUnder:
@@ -557,8 +756,8 @@ class TestWhoseAuthorisationABoardIsReadUnder:
         self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
     ) -> None:
         """`project_owner` is null where the board belongs to the repository's own account, which
-        is what most rows say. Looked for both ways round, because the caller addresses the board
-        by the owner it resolved rather than by the null."""
+        is what most rows say. Resolved in the query, because the caller addresses the board by
+        the owner it resolved rather than by the null - see `RepositoryStore.mirroring`."""
         credentials = BoardCredentials(db_sessionmaker, keys=BOARD_KEY)
         await self.linked(db_session, guild_id=1, number=6, owner=None, linked_by=ALICE)
         await credentials.remember(
@@ -576,7 +775,7 @@ class TestWhoseAuthorisationABoardIsReadUnder:
     ) -> None:
         """THE test for this change, and the bug an earlier design had.
 
-        `linked_to_board` refuses two repositories on the SAME board, but two servers may link two
+        `mirroring` refuses two repositories on the SAME board, but two servers may link two
         DIFFERENT boards both owned by the same account. Resolved by owner, one server's board
         would be read under the other server's member's grant - a user credential crossing a
         tenancy boundary, which is exactly what this replaced.

@@ -27,8 +27,8 @@ def create_app(
     # Set by the lifespan once the worker exists. Without it /health can only report that the
     # port is open.
     app.state.liveness = None
-    # Set by the lifespan once the container exists. The OAuth route is entered from outside
-    # rather than called, so it reads what it needs off app state.
+    # Set by the lifespan once the container exists. The OAuth routes are entered from outside
+    # rather than called, so they read what they need off app state.
     app.state.verification = None
     app.include_router(webhooks.router)
     app.include_router(health.router)

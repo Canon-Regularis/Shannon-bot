@@ -4,6 +4,7 @@ from collections.abc import Collection
 from typing import Protocol
 
 from shannon.discord_bot.roles import CommandRole
+from shannon.discord_bot.threads import FindsMembers
 
 
 class RoleNames(Protocol):
@@ -59,3 +60,28 @@ class PermissionGate:
         if not names:
             return f"You are not allowed to use /{command}."
         return f"You need one of these roles to use /{command}: {', '.join(names)}."
+
+
+class MemberTiers:
+    """Whether a member holds a tier in a server now, asked of Discord rather than remembered.
+
+    Found reviewing #201. A slash command is gated on the roles Discord sends with it, but a board
+    link is followed up to ten minutes later, from a browser, with no interaction to read roles
+    off. So this fetches the member and puts them through the same gate the command used, which is
+    what makes the second answer comparable with the first.
+    """
+
+    def __init__(self, members: FindsMembers, gate: PermissionGate) -> None:
+        self._members = members
+        self._gate = gate
+
+    async def holds(
+        self, *, guild_id: int, discord_user_id: int, tiers: Collection[CommandRole]
+    ) -> bool:
+        """Any of `tiers`, as the command's gate reads them: an administrator holds every one.
+
+        Somebody no longer in the server holds none. Where Discord cannot be asked this raises
+        `DiscordGatewayError`, which is a different answer and the caller's to refuse on.
+        """
+        member = await self._members.member(guild_id=guild_id, user_id=discord_user_id)
+        return member is not None and self._gate.allows(member, tiers)

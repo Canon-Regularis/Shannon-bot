@@ -12,7 +12,7 @@ from discord import app_commands
 from shannon.discord_bot.capture import CapturedMessage, captured, from_a_person, has_words
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.responses import reply
-from shannon.discord_bot.slash import SlashCommand
+from shannon.discord_bot.slash import Installable
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,8 @@ def build_intents(*, capture_messages: bool = False) -> discord.Intents:
 
     `message_content` is privileged: a Developer Portal toggle, and Discord's approval past a
     hundred servers, which is why it is behind a setting. Without it every message arrives with
-    `content` empty. `members` is not needed, since nothing here looks a member up, and would set
+    `content` empty. `members` is not needed: the one member lookup, when a board link is
+    followed, is a REST fetch of a single member, which needs no intent. Turning it on would set
     `chunk_guilds_at_startup`, delaying the READY the delivery worker waits on.
     """
     intents = discord.Intents.default()
@@ -94,7 +95,7 @@ class ShannonBot(discord.Client):
         self._letting_go = asyncio.Semaphore(LETTING_GO_AT_ONCE)
         self._capturing: CapturesMessages | None = None
         self._transcribing = asyncio.Semaphore(TRANSCRIBING_AT_ONCE)
-        self._pending: list[SlashCommand] = []
+        self._pending: list[Installable] = []
         # `is_ready` cannot answer this: it reports whether the cache has ever been filled, is set
         # once when READY arrives and cleared only by `close`, so a connection that came up and
         # later died still reads as ready.
@@ -120,7 +121,7 @@ class ShannonBot(discord.Client):
         with contextlib.suppress(discord.HTTPException):
             await reply(interaction, self._explain_error(error))
 
-    def install(self, *commands: SlashCommand) -> None:
+    def install(self, *commands: Installable) -> None:
         self._pending.extend(commands)
 
     def tell_when_a_channel_goes(self, gone: ChannelGone) -> None:

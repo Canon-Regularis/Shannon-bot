@@ -103,6 +103,7 @@ class ManualSync:
                     repo_name=named.full_name,
                     repo_url=named.html_url,
                     private=named.private,
+                    owner_id=named.owner_id,
                 )
         return named.full_name
 

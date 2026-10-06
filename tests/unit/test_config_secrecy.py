@@ -25,6 +25,9 @@ APP_WEBHOOK_SECRET = "placeholder-github-app-webhook-secret"
 # is the one thing standing between a database copy and acting as them. Issue #170.
 BOARD_SECRET = "placeholder-github-board-client-secret"
 BOARD_KEY = "placeholder-board-credential-key"
+# The bot's own Discord application as an OAuth client, which every one-time link now goes through
+# before GitHub. Found reviewing #201. Its secret exchanges a code for who somebody is on Discord.
+DISCORD_SECRET = "placeholder-discord-client-secret"
 
 LEAKS = (
     BOT_TOKEN,
@@ -34,6 +37,7 @@ LEAKS = (
     APP_WEBHOOK_SECRET,
     BOARD_SECRET,
     BOARD_KEY,
+    DISCORD_SECRET,
     "not-a-real-password",
 )
 
@@ -48,6 +52,7 @@ def settings() -> Settings:
         github_app_webhook_secret=APP_WEBHOOK_SECRET,
         github_board_client_secret=BOARD_SECRET,
         board_credential_key=BOARD_KEY,
+        discord_client_secret=DISCORD_SECRET,
         database_url=DATABASE_URL,
     )
 
@@ -99,6 +104,7 @@ def test_the_values_are_still_readable_when_asked_for(settings: Settings) -> Non
     assert settings.github_app_webhook_secret.get_secret_value() == APP_WEBHOOK_SECRET
     assert settings.github_board_client_secret.get_secret_value() == BOARD_SECRET
     assert settings.board_credential_key.get_secret_value() == BOARD_KEY
+    assert settings.discord_client_secret.get_secret_value() == DISCORD_SECRET
     assert settings.database_url.get_secret_value() == DATABASE_URL
 
 
@@ -113,6 +119,7 @@ def test_an_unset_secret_reads_as_empty() -> None:
     assert bare.github_app_webhook_secret.get_secret_value() == ""
     assert bare.github_board_client_secret.get_secret_value() == ""
     assert bare.board_credential_key.get_secret_value() == ""
+    assert bare.discord_client_secret.get_secret_value() == ""
     # SecretStr defines __len__, so an empty one is falsy. Worth pinning down, because the
     # startup path and the webhook route both branch on a credential being absent.
     assert not bare.discord_token
@@ -160,9 +167,9 @@ STAMPED_BY_THE_BUILD = {"SHANNON_BUILD"}
 
 def test_the_example_env_file_names_every_setting() -> None:
     """The file says to copy it and fill it in, so a setting it leaves out is a feature nobody
-    setting the bot up will find. `SHANNON_GITHUB_PROJECT_NUMBER` was the one that mattered: it
-    defaults to zero, zero means the board is never read, and the whole board mirror was
-    therefore invisible to anybody who started from this file.
+    setting the bot up will find. A board number was the one that mattered, back when a board
+    could be named here: it defaulted to zero, zero meant the board was never read, and the whole
+    board mirror was therefore invisible to anybody who started from this file.
     """
     from pathlib import Path
 

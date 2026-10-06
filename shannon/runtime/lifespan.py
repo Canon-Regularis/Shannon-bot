@@ -292,7 +292,7 @@ def build_lifespan(
         probes = build_probe_engine(container.engine)
         liveness = ProcessLiveness(probes)
         app.state.liveness = liveness
-        # The OAuth callback reads this off app state: it is entered from outside the process
+        # The OAuth routes read this off app state: they are entered from outside the process
         # rather than called by anything inside it.
         app.state.verification = container.verification
 

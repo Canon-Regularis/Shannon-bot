@@ -75,6 +75,31 @@ class TestARepository:
 
         assert mapping.repository(payload) is None
 
+    def test_the_owners_account_id_is_carried(self) -> None:
+        """Found reviewing #201: the id, not the login, tells a transfer from a renamed account."""
+        found = mapping.repository(
+            {"id": 5, "name": "widget", "owner": {"login": "acme", "id": 42}}
+        )
+
+        assert found is not None
+        assert (found.owner, found.owner_id) == ("acme", 42)
+
+    @pytest.mark.parametrize("owner_id", ["42", 4.2, None])
+    def test_an_owner_id_that_is_not_a_number_is_no_id(self, owner_id: object) -> None:
+        found = mapping.repository(
+            {"id": 5, "name": "widget", "owner": {"login": "acme", "id": owner_id}}
+        )
+
+        assert found is not None
+        assert found.owner_id is None
+
+    def test_an_owner_named_only_by_the_full_name_has_no_id(self) -> None:
+        """A name says nothing about which account it is."""
+        found = mapping.repository({"id": 5, "name": "widget", "full_name": "acme/widget"})
+
+        assert found is not None
+        assert (found.owner, found.owner_id) == ("acme", None)
+
     @pytest.mark.parametrize("url", UNUSABLE_URLS)
     def test_an_unusable_link_falls_back_to_one_that_works(self, url: object) -> None:
         found = mapping.repository(

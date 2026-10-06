@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -17,6 +18,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import COLUMN_WIDTH, TITLE_WIDTH, Repository, TrackedItem
+from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError
@@ -43,7 +45,8 @@ from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.boards import PROJECT, FakeBoard, card, filled, wraps
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
-from tests.support.db import map_channel, register_repository
+from tests.support import github_payloads as payloads
+from tests.support.db import link_board, map_channel, register_repository
 from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
@@ -56,6 +59,21 @@ LATER_STILL = datetime(2026, 8, 22, 10, 0, tzinfo=UTC)
 
 TICKET_CHANNEL = 4242
 REPO_FULL = "canon-regularis/shannon-bot"
+
+
+@pytest.fixture
+async def registered(db_session: AsyncSession) -> Repository:
+    """A repository with both channel mappings and board PROJECT linked to it.
+
+    What /register, /set_channel and /board link leave behind. Every test here used to be handed its
+    board by the environment instead, through an arm the poller no longer has: since issue #170 a
+    board is read under the authorisation of whoever linked it, and one named in the environment
+    had nobody behind it. So the board is linked on the row, which is the only way there is.
+    """
+    repository = await register_repository(db_session)
+    await map_channel(db_session, repository, ObjectType.ISSUE, channel_id=98)
+    await link_board(db_session, repository)
+    return repository
 
 
 @pytest.fixture
@@ -98,8 +116,6 @@ def poller_for(
     def build(
         board: FakeBoard,
         *,
-        project_number: int = PROJECT,
-        board_owner: str = "",
         polling: bool = True,
         may_set_status: bool = True,
     ) -> ProjectPoller:
@@ -111,8 +127,6 @@ def poller_for(
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             workflow,
             threads,
-            project_number=project_number,
-            board_owner=board_owner,
             polling=polling,
             interval=0.01,
             may_set_status=may_set_status,
@@ -127,6 +141,31 @@ async def stored_tickets(session: AsyncSession) -> list[TrackedItem]:
         select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.TICKET)
     )
     return list(rows.all())
+
+
+class RenamedWhileRead(FakeBoard):
+    """A board read in the same breath as the account owning the repository renames itself: the
+    delivery saying so commits after the pass has copied the row, before its cards are synced."""
+
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], *items: BoardItem, to: str
+    ) -> None:
+        super().__init__(*items)
+        self._sessionmaker = sessionmaker
+        self._to = to
+
+    async def list_board_items(self, owner: str, project_number: int) -> Sequence[BoardItem]:
+        async with self._sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_guild(1)
+            assert repository is not None
+            await repositories.follow_rename(
+                repository,
+                repo_name=self._to,
+                repo_url=f"https://github.com/{self._to}",
+                owner_id=payloads.OWNER_ID,
+            )
+        return await super().list_board_items(owner, project_number)
 
 
 class TestReadingABoard:
@@ -197,14 +236,15 @@ class TestReadingABoard:
         assert board.reads == [("Canon-Regularis", PROJECT)]
 
     async def test_a_board_owned_somewhere_else_is_read_under_that_owner(
-        self, board_channel: None, poller_for
+        self, board_channel: None, poller_for, registered: Repository, db_session: AsyncSession
     ) -> None:
         """Scraping the owner off the repository is not a near miss when the board belongs to
         another account. That number is a sequence GitHub keeps per account, so the scraped
         owner can have a board with it too, and reading it mirrors a stranger's cards in here."""
+        await link_board(db_session, registered, project_owner="acme")
         board = FakeBoard(card())
 
-        await poller_for(board, board_owner="acme").run_once()
+        await poller_for(board).run_once()
 
         assert board.reads == [("acme", PROJECT)]
 
@@ -212,22 +252,53 @@ class TestReadingABoard:
         self, board_channel: None, poller_for, registered: Repository, db_session: AsyncSession
     ) -> None:
         """Two owners that are the same account often enough to invite one field, and the cost
-        of collapsing them is not a log line. Every mirrored card carries a repository snapshot,
-        and the sync hands that snapshot's name to `follow_rename`, which writes it to the
-        `repositories` row. One poll would rename the registered repository to the board
-        owner's - and the board owner is scraped back out of that row next poll, so the wrong
-        board would be read from then on even with the setting taken away again.
+        of collapsing them was not a log line. Every mirrored card carries a repository snapshot,
+        and the sync handed that snapshot's name to `follow_rename`, which wrote it to the
+        `repositories` row. One poll renamed the registered repository to the board owner's -
+        and the board owner was scraped back out of that row next poll, so the wrong board was
+        read from then on. A ticket's repository is not followed at all any more, so this holds
+        twice over.
         """
+        await link_board(db_session, registered, project_owner="acme")
         # Read before the poll: asserting on the attribute afterwards is a lazy load on an
         # expired instance outside the greenlet rather than an assertion.
         repository_id, name = registered.id, registered.repo_name
 
-        await poller_for(FakeBoard(card()), board_owner="acme").run_once()
+        await poller_for(FakeBoard(card())).run_once()
 
         db_session.expire_all()
         stored = await db_session.get(Repository, repository_id)
         assert stored is not None
         assert stored.repo_name == name
+
+    async def test_a_pass_that_copied_the_row_before_a_rename_does_not_put_the_old_name_back(
+        self,
+        board_channel: None,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Found reviewing #201. A draft card has no repository on GitHub, so it is synced with
+        the copy of the row the pass took when it began. Followed, that copy put back a name a
+        delivery had replaced since - and across owners, with no id to prove the account the
+        same, it would read as a move: the board taken off its linker, and the log naming a move
+        that never happened."""
+        registered.project_linked_by = 555
+        await link_board(db_session, registered)
+        repository_id = registered.id
+        renamed = f"{payloads.OWNER}-renamed/{payloads.REPO}"
+
+        with caplog.at_level(logging.WARNING, logger="shannon.db.stores.repositories"):
+            await poller_for(RenamedWhileRead(db_sessionmaker, card(), to=renamed)).run_once()
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert (stored.repo_name, stored.project_owner) == (renamed, None)
+        assert stored.project_linked_by == 555, "a board came off its linker for nothing"
+        assert "nothing on record" not in caplog.text
 
 
 class TestABoardAndMoreThanOneServer:
@@ -239,16 +310,6 @@ class TestABoardAndMoreThanOneServer:
     problem; it was the shape of a missing column. A board recorded against a repository answers
     the question the refusal was standing in for, so the refusal is gone.
     """
-
-    async def test_one_server_is_still_polled_from_the_settings(
-        self, board_channel: None, poller_for
-    ) -> None:
-        """The default the settings name still applies where nothing else does, so a deployment
-        that upgrades without running the command keeps working exactly as it did."""
-        poller = poller_for(FakeBoard(card()))
-
-        assert await poller.run_once() == 1
-        assert poller.stopping is False
 
     async def test_a_second_server_no_longer_stops_the_mirror(
         self, board_channel: None, poller_for, db_session: AsyncSession
@@ -264,54 +325,6 @@ class TestABoardAndMoreThanOneServer:
         await poller.run_once()
 
         assert poller.stopping is False
-
-    async def test_the_settings_alone_still_read_no_board_with_two_servers(
-        self, board_channel: None, poller_for, db_session: AsyncSession
-    ) -> None:
-        """The ambiguity itself has not gone away, only the punishment for it. One number and two
-        repositories still says nothing about whose board it is, and guessing would mirror one
-        server's cards into one server's channels while the other saw a feature that does not
-        work."""
-        await register_repository(
-            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
-        )
-        board = FakeBoard(card())
-
-        await poller_for(board).run_once()
-
-        assert board.reads == []
-
-    async def test_it_says_to_run_the_command_rather_than_to_turn_it_off(
-        self, board_channel: None, poller_for, db_session: AsyncSession, caplog
-    ) -> None:
-        """The advice reversed with the fix. It used to say to set the number to zero or give
-        that server a deployment of its own, because there was no third answer; there is one
-        now, and it is one command."""
-        await register_repository(
-            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
-        )
-
-        with caplog.at_level(logging.ERROR):
-            await poller_for(FakeBoard(card())).run_once()
-
-        assert "/set_board" in caplog.text
-
-    async def test_it_says_so_once_rather_than_once_a_minute(
-        self, board_channel: None, poller_for, db_session: AsyncSession, caplog
-    ) -> None:
-        """This runs on a timer for as long as the process lives. Stopping the task used to be
-        what kept the line from repeating; without that, a line every pass is one people learn to
-        scroll past."""
-        await register_repository(
-            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
-        )
-        poller = poller_for(FakeBoard(card()))
-
-        with caplog.at_level(logging.ERROR):
-            await poller.run_once()
-            await poller.run_once()
-
-        assert caplog.text.count("/set_board") == 1
 
     async def test_two_servers_each_with_their_own_board_are_both_read(
         self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
@@ -329,21 +342,6 @@ class TestABoardAndMoreThanOneServer:
         await poller_for(board).run_once()
 
         assert sorted(board.reads) == [("Canon-Regularis", PROJECT), ("other", 77)]
-
-    async def test_a_linked_board_wins_over_the_settings(
-        self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
-    ) -> None:
-        """Once any repository carries a board of its own the settings stop applying anywhere.
-        Half-honouring them would poll one server out of the database and another out of the
-        environment, with nothing saying which was which."""
-        registered.project_number = 91
-        registered.project_owner = "acme"
-        await db_session.commit()
-        board = FakeBoard(card())
-
-        await poller_for(board, project_number=PROJECT, board_owner="ignored").run_once()
-
-        assert board.reads == [("acme", 91)]
 
 
 class TestNotDoingWorkTwice:
@@ -406,16 +404,19 @@ class TestNotDoingWorkTwice:
 
 
 class TestWhenThereIsNothingToDo:
-    async def test_no_project_configured_reads_nothing(
-        self, board_channel: None, poller_for
+    async def test_a_server_with_no_board_linked_reads_nothing(
+        self, board_channel: None, poller_for, registered: Repository, db_session: AsyncSession
     ) -> None:
-        """Zero means none. Polling a board nobody asked for spends API calls on nothing."""
+        """A board is one a repository has linked and nothing else, so a registered server with
+        none is read for nothing. Polling a board nobody asked for spends API calls on nothing."""
+        registered.project_number = None
+        await db_session.commit()
         board = FakeBoard(card())
 
-        synced = await poller_for(board, project_number=0).run_once()
+        synced = await poller_for(board).run_once()
 
         assert synced == 0
-        assert board.reads == [], "a board was read with no project configured"
+        assert board.reads == [], "a board was read with none linked"
 
     async def test_a_replica_told_not_to_poll_reads_nothing(
         self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
@@ -448,6 +449,40 @@ class TestWhenThereIsNothingToDo:
 
 
 class TestTheLoop:
+    async def test_an_unreadable_board_is_said_once_rather_than_every_pass(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A pass runs every couple of seconds since issue #189, and a board nobody's
+        authorisation stands behind - every board linked before issue #170, until somebody links
+        it again - used to put this line in the log on every one of them."""
+        board = FakeBoard(card())
+        board.error = GitHubAuthError("nobody's authorisation stands behind board 3")
+        poller = poller_for(board)
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            for _ in range(3):
+                await poller.run_once()
+
+        assert caplog.text.count("could not read board") == 1
+
+    async def test_a_board_that_reads_again_is_news_when_it_breaks_again(
+        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Once is per breakage rather than per process: a board that came back and then went
+        again is something an operator has not been told about yet."""
+        board = FakeBoard(card())
+        poller = poller_for(board)
+
+        with caplog.at_level("WARNING", logger="shannon.services.projects"):
+            board.error = GitHubAuthError("revoked")
+            await poller.run_once()
+            board.error = None
+            await poller.run_once()
+            board.error = GitHubAuthError("revoked again")
+            await poller.run_once()
+
+        assert caplog.text.count("could not read board") == 2
+
     @pytest.mark.parametrize(
         "refusal",
         [
@@ -457,7 +492,13 @@ class TestTheLoop:
         ids=["not found", "refused"],
     )
     async def test_a_board_it_cannot_read_says_which_settings_to_check(
-        self, board_channel: None, poller_for, caplog: pytest.LogCaptureFixture, refusal: Exception
+        self,
+        board_channel: None,
+        poller_for,
+        registered: Repository,
+        db_session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+        refusal: Exception,
     ) -> None:
         """Left to the loop's catch-all this is a traceback a minute that never says what was
         asked for.
@@ -469,17 +510,19 @@ class TestTheLoop:
         The repository is named too. There can be several boards now, so a line saying only that
         board 12 failed is one nobody can act on when two servers each have one.
         """
+        await link_board(db_session, registered, project_owner="acme")
         board = FakeBoard(card())
         board.error = refusal
 
         with caplog.at_level("WARNING", logger="shannon.services.projects"):
-            assert await poller_for(board, board_owner="acme").run_once() == 0
+            assert await poller_for(board).run_once() == 0
 
-        assert "/set_board" in caplog.text
-        assert "/authorise_board" in caplog.text, (
+        assert "/board show" in caplog.text, "it did not say where to see whose it is"
+        assert "/board link again" in caplog.text, (
             "it did not name the one cause a reader can act on: nobody has authorised it"
         )
-        assert "acme" in caplog.text
+        # The owner as the line formats it, because both refusals name acme in their own text.
+        assert "belonging to 'acme'" in caplog.text, "it did not name the board's owner"
         assert REPO_FULL.split("/")[1] in caplog.text.lower(), "it did not name the repository"
         assert "Traceback" not in caplog.text
 
@@ -540,7 +583,6 @@ class TestTheLoop:
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             workflow,
             threads,
-            project_number=PROJECT,
             interval=600.0,
         )
 
@@ -1434,9 +1476,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
         """
         sync = ExplodingSync()
         board = FakeBoard(card(item_id=901), card(item_id=902))
-        poller = ProjectPoller(
-            db_sessionmaker, board, sync, workflow, threads, project_number=PROJECT, interval=0.01
-        )
+        poller = ProjectPoller(db_sessionmaker, board, sync, workflow, threads, interval=0.01)
 
         with caplog.at_level("ERROR", logger="shannon.services.projects"):
             assert await poller.run_once() == 0
@@ -1463,7 +1503,6 @@ class TestOneCardTakingTheWholeBoardWithIt:
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             moves,
             threads,
-            project_number=PROJECT,
             interval=0.01,
             may_set_status=True,
         )
@@ -1495,7 +1534,6 @@ class TestOneCardTakingTheWholeBoardWithIt:
             build_item_sync(db_sessionmaker, threads, TicketPolicy()),
             moves,
             threads,
-            project_number=PROJECT,
             interval=0.01,
             may_set_status=True,
         )
@@ -2706,7 +2744,7 @@ class TestACommandLandingWhileTheBoardIsBeingRead:
 
 
 class TestRelinkingABoard:
-    """`/set_board` lets go of the card ids, and has to let go of the columns with them.
+    """`/board link` lets go of the card ids, and has to let go of the columns with them.
 
     A column name belongs to its board exactly as a card id does. Kept across a relink it is wrong
     twice over: the poller compares the new board's listing against a column from the old one and

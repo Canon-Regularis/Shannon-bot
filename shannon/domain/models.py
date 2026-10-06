@@ -64,6 +64,10 @@ class RepositorySnapshot:
     # None means GitHub did not say. A webhook payload always carries the flag, but a trimmed or
     # cached body may not, and reading a missing field as public would state something unchecked.
     private: bool | None = None
+    # The GitHub account id of whoever owns the repository, or None where GitHub did not say. A
+    # login changes when an account is renamed and moves when a repository is transferred, and
+    # only the id tells those two apart. Found reviewing #201.
+    owner_id: int | None = None
 
     @property
     def full_name(self) -> str:

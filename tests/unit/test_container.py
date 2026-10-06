@@ -8,6 +8,8 @@ from pydantic import SecretStr
 
 from shannon.config import Settings
 from shannon.container import build_container
+from shannon.discord_bot.permissions import MemberTiers
+from shannon.services.verification import OAuthClient
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
@@ -75,8 +77,9 @@ class TestClosingTheContainer:
 
     async def test_everything_else_opened_here_is_closed_too(self) -> None:
         """Not just `github`. The App's own client signs with a JWT rather than an installation
-        token, so it is a second client, and the board keeps a third when it has its own token.
-        Both were built in the wiring, reachable from nowhere else, and closed by nothing."""
+        token, so it is a second client, and the board's writer is a third, built in every
+        deployment whether or not card writes are on. Both were built in the wiring, reachable
+        from nowhere else, and closed by nothing."""
         container = container_with(DisposableEngine(), FakeGitHubClient())
         opened = _Closeable()
         container.also_opened = (*container.also_opened, opened)
@@ -105,7 +108,7 @@ class TestWhatItWiresUp:
 
         assert sorted(command.name for command in container.commands) == [
             "assign",
-            "authorise_board",
+            "board",
             "issue",
             "label",
             "link",
@@ -118,7 +121,6 @@ class TestWhatItWiresUp:
             "regenerate",
             "register",
             "request_review",
-            "set_board",
             "set_channel",
             "status",
             "stop_conversation",
@@ -239,6 +241,116 @@ class TestSayingWhenNoAppIsConfigured:
         assert "no GitHub App is configured" not in caplog.text
 
 
+class TestSayingWhenDiscordSignInIsMissing:
+    """Found reviewing #201. Every one-time link now goes through Discord before GitHub, so a
+    deployment that set up a GitHub sign-in and not the Discord half refuses every link - which is
+    the decision, failing closed. Said once at boot, with the redirect it needs, rather than found
+    out one refused command at a time."""
+
+    SECRET = "placeholder-discord-client-secret"
+
+    def booted(self, caplog: pytest.LogCaptureFixture, **settings: Any) -> Any:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            return container_with(
+                DisposableEngine(),
+                FakeGitHubClient(),
+                Settings(github_webhook_secret="x", **settings),
+            )
+
+    def test_an_app_sign_in_without_discord_is_said_at_boot(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self.booted(
+            caplog,
+            github_app_client_secret=SecretStr("shh"),
+            public_base_url="https://shannon.example.com/",
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_ID" in caplog.text
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+        assert "https://shannon.example.com/oauth/discord/callback" in caplog.text
+
+    def test_a_board_sign_in_without_discord_is_said_at_boot(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """With the placeholder for a base URL nobody set, so the line still says where."""
+        self.booted(caplog, github_board_client_id="Ov23liBoard")
+
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+        assert "<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback" in caplog.text
+
+    def test_half_of_discord_is_still_said(self, caplog: pytest.LogCaptureFixture) -> None:
+        self.booted(
+            caplog,
+            github_app_client_secret=SecretStr("shh"),
+            discord_client_id="1180000000000000",
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+
+    def test_all_of_it_says_nothing_and_signs_in_with_discord(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        container = self.booted(
+            caplog,
+            github_app_client_id="Iv23liAbC",
+            github_app_client_secret=SecretStr("shh"),
+            public_base_url="https://shannon.example.com",
+            discord_client_id="1180000000000000",
+            discord_client_secret=SecretStr(self.SECRET),
+        )
+
+        assert "SHANNON_DISCORD" not in caplog.text
+        assert container.verification is not None
+        assert container.verification.can_sign_in_with_discord is True
+        assert container.verification.can_prove_identity is True
+        # The wiring itself, in literals. A refactor that dropped the scope or crossed a secret
+        # would leave every check above passing and every link dead at Discord.
+        assert container.verification._discord == OAuthClient(
+            client_id="1180000000000000", client_secret=self.SECRET, scope="identify"
+        )
+
+    def test_a_deployment_with_no_sign_in_at_all_says_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nothing hands out a link there, so a missing Discord half refuses nothing new."""
+        container = self.booted(caplog)
+
+        assert "SHANNON_DISCORD" not in caplog.text
+        assert container.verification is not None
+        assert container.verification.can_sign_in_with_discord is False
+
+    def test_the_secret_is_never_said(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Even where the line fires because the other half is missing."""
+        self.booted(
+            caplog,
+            github_board_client_id="Ov23liBoard",
+            discord_client_secret=SecretStr(self.SECRET),
+        )
+
+        assert "SHANNON_DISCORD_CLIENT_ID" in caplog.text
+        assert self.SECRET not in caplog.text
+
+
+class TestTheBoardLinksSecondQuestion:
+    """Found reviewing #201. Following a board link asks Discord, through the gateway the bot
+    already holds, whether the member still holds the tier the command was gated on."""
+
+    def test_it_is_asked_of_the_gateway(self) -> None:
+        threads = FakeThreadGateway()
+        container = build_container(
+            threads=threads,
+            settings=Settings(github_webhook_secret="x"),
+            engine=DisposableEngine(),
+            github=FakeGitHubClient(),
+        )
+
+        assert container.verification is not None
+        tiers = container.verification._tiers
+        assert isinstance(tiers, MemberTiers)
+        assert tiers._members is threads
+
+
 class TestWhatTurningOffCardWritesTurnsOff:
     """Issue #179. `SHANNON_BOARD_MAY_MOVE_CARDS` stops the bot WRITING to a board, and that is
     the whole of what it is for.
@@ -268,8 +380,8 @@ class TestWhatTurningOffCardWritesTurnsOff:
         return container.poller._projects  # type: ignore[attr-defined]
 
     async def test_with_writes_off_the_board_has_no_writer(self) -> None:
-        """ "Off" as a fact of the wiring rather than a check somebody could forget, which is the
-        same way having no project token at all turns it off."""
+        """ "Off" as a fact of the wiring rather than a check somebody could forget: the flag is
+        the only thing that withholds the writer."""
         board = self.board_of(self.a_container(may_move=False))
 
         assert board._writer is None
@@ -307,8 +419,8 @@ class TestABoardWithNoTokenToReadItWith:
     is silent and looks like something else: a board that will not open reads exactly like a wrong
     number. So each direction is said once, loudly, at startup.
 
-    What this replaced was keyed to SHANNON_GITHUB_PROJECT_NUMBER, which `/set_board` had already
-    made obsolete - so a deployment that linked its boards with the command got no check at all.
+    What this replaced was keyed to SHANNON_GITHUB_PROJECT_NUMBER, which linking a board by
+    command had already made obsolete - so a deployment that did that got no check at all.
     This one is keyed to the settings themselves, which is the part a container can actually see:
     it has no event loop and no connection, so it cannot ask the database whether a board is
     linked. A board nobody authorised finds out on the poll path, per board, once.

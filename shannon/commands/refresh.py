@@ -34,11 +34,11 @@ _KINDS = {
 # complete, the same way one holds `_KINDS`.
 _MISSED = {
     MissedTickets.NO_BOARD: "No board is linked to this server, so tickets were not covered. "
-    "Run /set_board to include them.",
+    "Run /board link to include them.",
     MissedTickets.NO_CHANNEL: "No channel is mapped for this board's tickets, so they were not "
     "covered. Run /set_channel to include them.",
     MissedTickets.UNREADABLE: "The board could not be read, so tickets were not covered. "
-    "The log says what GitHub answered.",
+    "/board show says whose authorisation it is read with, and the log says what went wrong.",
 }
 
 # Discord shows the description, the value is what reaches the callback, and the choices appear

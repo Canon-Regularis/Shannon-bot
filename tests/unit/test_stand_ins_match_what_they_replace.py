@@ -17,6 +17,7 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.commands.board import AuthorisesBoards
 from shannon.commands.conversations import LogsConversations
 from shannon.commands.link import ProvesIdentity
 from shannon.commands.link_team import LinksTeams
@@ -24,6 +25,7 @@ from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.people import PutsSomebodyOnAnItem
 from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
+from shannon.commands.register import VerifiesIdentity as ProvesBeforeRegistering
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
@@ -33,10 +35,11 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.client import CapturesMessages, ShannonBot
-from shannon.discord_bot.permissions import RoleNames
+from shannon.discord_bot.permissions import MemberTiers, RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
+    FindsMembers,
     FindsThreads,
     OpensThreads,
     PostsToThread,
@@ -69,6 +72,7 @@ from shannon.runtime.lifespan import (
     RunsDeliveries,
 )
 from shannon.runtime.liveness import ProcessLiveness
+from shannon.services.board_credentials import BoardCredentials
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -115,7 +119,12 @@ from shannon.services.unregistration import (
     ReadsPermissions,
     RepositoryUnregistrationService,
 )
-from shannon.services.verification import BindsProvedAccounts, GitHubIdentityVerification
+from shannon.services.verification import (
+    BindsProvedAccounts,
+    GitHubIdentityVerification,
+    HoldsTiers,
+    KeepsBoardAuthorisations,
+)
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.boards import FakeBoard
 from tests.fakes.github import FakeGitHubClient
@@ -123,6 +132,7 @@ from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
 from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.fakes.threads import FakeThreadGateway
+from tests.fakes.tiers import FakeTiers
 
 # Both halves matter. The fakes are what the tests run against, and the real implementations are
 # what production runs against, and neither is checked by anything else.
@@ -191,7 +201,21 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (SaysThings, FakeGitHubClient),
     (SaysThings, HttpGitHubClient),
     (BindsProvedAccounts, UserLinkingService),
+    # Missing until issue #201 gave it a second member. `usable` is read before anybody is sent to
+    # GitHub, and an implementation without it would fail only once somebody tried.
+    (KeepsBoardAuthorisations, BoardCredentials),
     (ProvesIdentity, GitHubIdentityVerification),
+    # Missing until #201's review renamed what each of them reads. Three protocols over one
+    # service, each declared where it is consumed, so each is a separate place to drift.
+    (ProvesBeforeRegistering, GitHubIdentityVerification),
+    (AuthorisesBoards, GitHubIdentityVerification),
+    # Found reviewing #201: a board link asks Discord again, when it is followed, whether the
+    # member still holds the tier. Both sides of each, because every test that follows a board
+    # link runs against the fakes.
+    (HoldsTiers, MemberTiers),
+    (HoldsTiers, FakeTiers),
+    (FindsMembers, DiscordThreadGateway),
+    (FindsMembers, FakeThreadGateway),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
     (ResolvesMentions, TeamLinkStore),

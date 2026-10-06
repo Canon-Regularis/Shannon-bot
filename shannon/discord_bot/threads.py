@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from typing import Final, NotRequired, Protocol, TypedDict
 
+import aiohttp
 import discord
 from discord import ui
 
@@ -31,6 +33,12 @@ THREAD_NAME_LIMIT = 100
 
 # The only channel types Discord will open a thread in.
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
+
+# How long a browser waits on Discord to say who one member is, before that counts as no answer.
+# The one caller is a board link being followed. It ends the WAIT and nothing else: discord.py's
+# request runs on to its own end, for the reason `DiscordThreadGateway.member` gives. Found
+# reviewing #201.
+MEMBER_LOOKUP_SECONDS = 5
 
 
 class _Notified(TypedDict):
@@ -202,6 +210,12 @@ class KnowsItsServers(Protocol):
     def is_in(self, guild_id: int) -> bool: ...
 
 
+class FindsMembers(Protocol):
+    """A server's member as Discord has them now, or None where they are not in it."""
+
+    async def member(self, *, guild_id: int, user_id: int) -> object | None: ...
+
+
 class ThreadGateway(
     OpensThreads,
     PostsToThread,
@@ -209,6 +223,7 @@ class ThreadGateway(
     ShutsThread,
     FindsThreads,
     KnowsItsServers,
+    FindsMembers,
     Protocol,
 ):
     """Everything this project does to Discord threads, in one object.
@@ -244,6 +259,9 @@ class DiscordThreadGateway:
 
     def __init__(self, client: discord.Client) -> None:
         self._client = client
+        # Member lookups that outlived the wait for them, held until discord.py is done with them:
+        # the event loop keeps only a weak reference to a task. See `member`.
+        self._lookups: set[asyncio.Task[discord.Member]] = set()
 
     async def create(
         self, *, channel_id: int, name: str, panel: Panel, notify: Notify = None
@@ -391,6 +409,61 @@ class DiscordThreadGateway:
         """
         self._require_a_connection()
         return self._client.get_guild(guild_id) is not None
+
+    async def member(self, *, guild_id: int, user_id: int) -> discord.Member | None:
+        """A member of a server as Discord has them now, or None if they are not in it.
+
+        Fetched, never read from the cache. With the members intent off, discord.py keeps no
+        current record of anybody's roles - it caches little beyond the bot itself and whoever is
+        in a voice channel, and no member update arrives to keep even those current - and a role
+        taken away a minute ago is exactly what this is asked about. Found reviewing #201.
+
+        Not in the server is an answer and nothing else is. A server the bot cannot see, a
+        refusal, an outage or no answer in time all raise, so the caller can tell "no longer a
+        member" from "could not ask" - and refuse on either. That includes a server Discord has
+        listed and not yet filled in: after a fresh identify every server is a stub with no roles
+        and no owner until its own event arrives, while the client still reports itself ready, and
+        a member fetched against one holds nothing, which would read as a lost role.
+
+        The WAIT is limited, never discord.py's request. Cancelling that request can interrupt
+        discord.py while it sleeps out a global rate limit, and it reopens the gate for every other
+        request only once that sleep ends, so one cancelled lookup would leave the whole bot unable
+        to reach Discord until a restart. A lookup that runs out of time is left to finish on its
+        own instead, and its answer goes unread.
+        """
+        self._require_a_connection()
+        guild = self._client.get_guild(guild_id)
+        if guild is None or guild.unavailable:
+            raise DiscordGatewayError(
+                f"the bot cannot see server {guild_id}, so nobody in it can be asked about"
+            )
+        lookup = asyncio.create_task(guild.fetch_member(user_id))
+        self._lookups.add(lookup)
+        lookup.add_done_callback(self._settled)
+        done, _ = await asyncio.wait({lookup}, timeout=MEMBER_LOOKUP_SECONDS)
+        try:
+            if not done:
+                raise TimeoutError
+            return lookup.result()
+        except discord.NotFound:
+            return None
+        except (discord.HTTPException, aiohttp.ClientError, OSError, TimeoutError) as exc:
+            # Forbidden lands here as well, deliberately: a member the bot is not allowed to look
+            # up is one it cannot vouch for, which is not the same as one who has left.
+            raise DiscordGatewayError(
+                f"Discord would not say whether {user_id} is in server {guild_id}: "
+                f"{type(exc).__name__} {exc}"
+            ) from exc
+
+    def _settled(self, lookup: asyncio.Task[discord.Member]) -> None:
+        """Let go of a finished lookup, and read how it ended.
+
+        Read even where nobody is waiting for it any more, so a late failure is not reported as an
+        exception nobody retrieved.
+        """
+        self._lookups.discard(lookup)
+        with contextlib.suppress(asyncio.CancelledError):
+            lookup.exception()
 
     async def delete(self, *, thread_id: int) -> None:
         """Remove a thread the sync path opened and then could not use.

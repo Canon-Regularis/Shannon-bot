@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -29,11 +30,12 @@ from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.domain.models import Actor
 from shannon.github.errors import GitHubUnavailableError
-from shannon.services.people import ItemPeople
+from shannon.services.people import ItemPeople, ProvesAccounts
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.round_trip import without_discord
 from tests.support.stack import DeliveryClient, deliver, registered_stack
 
 pytestmark = pytest.mark.integration
@@ -112,7 +114,7 @@ def proof() -> FakeProof:
 def people_service(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     github: FakeGitHubClient,
-    proof: FakeProof,
+    proof: ProvesAccounts,
     *,
     require_proved: bool = False,
 ) -> ItemPeople:
@@ -771,7 +773,7 @@ class TestALinkNobodyProved:
 
         assert github.people_calls == []
 
-    async def test_a_deployment_that_cannot_verify_anybody_warns_rather_than_refusing(
+    async def test_a_deployment_with_no_app_sign_in_warns_rather_than_refusing(
         self,
         tracked,
         linked,
@@ -790,6 +792,27 @@ class TestALinkNobodyProved:
 
         assert outcome.proved is False
         assert github.people_calls == [("add_assignees", (REPO_FULL, 12), ("newbie",))]
+
+    async def test_a_deployment_missing_only_discord_still_refuses(
+        self,
+        tracked,
+        linked,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Not the escape hatch above. Found reviewing #201's fix: without Discord nobody can
+        prove anything either, and this still refuses, on purpose - `/link` names the settings it
+        lacks, and leaving Discord unset must not switch enforcement off. Against the real
+        service, because what is pinned is which of its properties the gate reads."""
+        async with httpx.AsyncClient() as http:
+            verification = without_discord(db_sessionmaker, http)
+            service = people_service(db_sessionmaker, github, verification, require_proved=True)
+
+            with pytest.raises(WorkflowRefusedError, match="run /link"):
+                await service.assign(thread_id=thread_for(threads, 98), discord_user_id=ALICE)
+
+        assert github.people_calls == []
 
     async def test_a_proof_survives_a_rename(
         self,

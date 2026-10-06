@@ -91,7 +91,7 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (SyncFailedError, "{message}"),
     # Both name the board and the command that puts it right, so a template could add nothing.
     # `BoardUnreadableError` had no row at all until `/refresh` learned to read a board: it is
-    # raised inside `/set_board`, which answers its own refusals, so nothing had ever asked this
+    # raised inside `/board link`, which answers its own refusals, so nothing had ever asked this
     # table about one and it came out as "Something went wrong here."
     (BoardNotLinkedError, "{message}"),
     (BoardUnreadableError, "{message}"),

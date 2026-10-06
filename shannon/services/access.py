@@ -50,8 +50,13 @@ class ProvesAccounts(Protocol):
     Two members, and the second one used not to be needed. While an unproved caller was let
     through, a deployment that cannot run the round trip had no proofs, so every caller answered
     None and the gate was inert by construction. Once `require_proved` can turn that same None
-    into a refusal, inert by construction becomes refusing everything by construction - so
-    whether the round trip exists has to be asked rather than inferred.
+    into a refusal, inert by construction becomes refusing everything by construction - so it is
+    asked rather than inferred.
+
+    `configured` answers whether the App's half is set up - its client id and secret and a public
+    URL - and not whether a link can be followed today. A deployment missing only Discord cannot
+    run the round trip either, and still enforces, on purpose: `/link` names the settings it
+    lacks, and leaving Discord unset must not switch enforcement off. See `refusal_for`.
     """
 
     @property
@@ -97,6 +102,11 @@ class GitHubAccess:
             # refuse every one of these commands for everybody, for ever, with the only remedy
             # being a setting nobody would connect to the symptom. The same pairing guards
             # `/assign`, for the same reason.
+            #
+            # The App's half alone, and deliberately not Discord's. Since #201's review a link
+            # needs both, but a deployment still missing Discord keeps enforcing this: `/link`
+            # refuses there by naming the two settings it lacks, which ties the remedy to the
+            # symptom - and leaving Discord unset must not be a way to switch enforcement off.
             if self._require_proved and self._proof.configured:
                 return (
                     "Nobody has proved which GitHub account is yours in this server, and this "

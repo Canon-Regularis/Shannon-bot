@@ -141,28 +141,31 @@ class BoardCredentials:
         """The credential a linked board's own reads are made under, or an empty string.
 
         Satisfies `WhoTheBoardIsReadAs`, and the empty string is the contract rather than a
-        shrug: the client reads a blank credential as "send no Authorization header", so an
-        unauthorised board goes out anonymous and GitHub answers 404 for a private board or 403
-        for a private project. Both land in the `GitHubNotFoundError | GitHubAuthError` pair that
-        all three unreadable-board sites already catch, so "nobody authorised this" needs no new
-        branch anywhere - it is a board that will not open, which is what it is.
+        shrug: no member's credential goes out, and nothing else does either.
+        `HttpProjectBoards._read_as` refuses before any request with a GitHubAuthError, which is
+        in the `GitHubNotFoundError | GitHubAuthError` pair every unreadable-board site already
+        catches - so "nobody authorised this" needs no new branch anywhere: it is a board that
+        will not open, which is what it is.
 
         Keyed on the BOARD and resolved through the member recorded against it, never on the
         owner. Two servers may link two different boards owned by the same account, and an
         owner-keyed lookup would read one server's board under the other's member's grant.
+
+        And the board is resolved by whose it actually is, in one query - see
+        `RepositoryStore.mirroring`. This used to look for the owner as stored and then fall back
+        to ANY row with the number and a null owner, which is any server's own board of that
+        number: a server that named another's board by its owner was found first, and its
+        member's credential read the other server's board. Issue #201.
         """
         async with self._sessionmaker() as session:
-            linked = await RepositoryStore(session).linked_to_board(
-                project_number=project_number, project_owner=owner
+            mirroring = await RepositoryStore(session).mirroring(
+                project_number=project_number, owner=owner
             )
-            # The owner is stored as null where it is the repository's own, so a board addressed
-            # under its owner's name has to be looked for both ways round. One query each rather
-            # than one cleverer one: this runs once per poll and the second only when the first
-            # found nothing.
-            if linked is None:
-                linked = await RepositoryStore(session).linked_to_board(
-                    project_number=project_number, project_owner=None
-                )
+            # Exactly one, or nobody's. Two repositories on one board could be linked before the
+            # owner was resolved, and choosing between them would be reading one server's board
+            # under the other server's member - the thing keying this on the board prevents. So
+            # neither is read until one lets go, and the poll says the board will not open.
+            linked = mirroring[0] if len(mirroring) == 1 else None
             if linked is None or linked.project_linked_by is None:
                 return ""
             held = await BoardAuthorizationStore(session).held(

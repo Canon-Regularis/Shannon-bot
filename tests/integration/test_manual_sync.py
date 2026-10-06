@@ -29,6 +29,7 @@ from shannon.services.sync.manual import (
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import link_board
 
 pytestmark = pytest.mark.integration
 
@@ -306,6 +307,73 @@ class TestARenamedRepository:
         stored = await db_session.get(Repository, repository_id)
         assert stored is not None
         assert stored.repo_name == "Canon-Regularis/Shannon"
+
+    async def test_a_transfer_to_another_account_leaves_the_board_behind(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        sync_service: ItemSyncService,
+    ) -> None:
+        """Found reviewing #201. `/pr` asks GitHub for the repository to confirm the link, which is
+        a second place the name catches up - and so a second place a transfer has to be told from a
+        rename."""
+        await link_board(db_session, registered)
+        moved = replace(
+            REPO,
+            owner="Someone-Else",
+            html_url="https://github.com/Someone-Else/Shannon-bot",
+            owner_id=424242,
+        )
+        github = FakeGitHubClient(
+            pull_requests={("someone-else/shannon-bot", 7): replace(SNAPSHOT, repository=moved)},
+            repositories={"someone-else/shannon-bot": moved},
+        )
+        service = build_pull_request_sync(db_sessionmaker, github, sync_service)
+        repository_id = registered.id
+
+        await service.sync_link(
+            guild_id=1, link="https://github.com/Someone-Else/Shannon-bot/pull/7"
+        )
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Someone-Else/Shannon-bot"
+        assert (stored.project_owner, stored.github_owner_id) == ("Canon-Regularis", 424242)
+
+    async def test_a_renamed_account_keeps_its_board_through_pr_too(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        sync_service: ItemSyncService,
+    ) -> None:
+        """The same account under a new login, which `/pr` can only tell from a transfer by the
+        id GitHub sends with the repository - so it has to pass that id on."""
+        await link_board(db_session, registered)
+        moved = replace(
+            REPO,
+            owner="Canon-Renamed",
+            html_url="https://github.com/Canon-Renamed/Shannon-bot",
+            owner_id=payloads.OWNER_ID,
+        )
+        github = FakeGitHubClient(
+            pull_requests={("canon-renamed/shannon-bot", 7): replace(SNAPSHOT, repository=moved)},
+            repositories={"canon-renamed/shannon-bot": moved},
+        )
+        service = build_pull_request_sync(db_sessionmaker, github, sync_service)
+        repository_id = registered.id
+
+        await service.sync_link(
+            guild_id=1, link="https://github.com/Canon-Renamed/Shannon-bot/pull/7"
+        )
+
+        db_session.expire_all()
+        stored = await db_session.get(Repository, repository_id)
+        assert stored is not None
+        assert stored.repo_name == "Canon-Renamed/Shannon-bot"
+        assert stored.project_owner is None, "a renamed account's board was left behind"
 
     async def test_the_matching_link_costs_no_extra_call(
         self, registered: Repository, manual: ManualSync, github: FakeGitHubClient

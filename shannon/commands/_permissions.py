@@ -28,7 +28,16 @@ WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 # half takes the tier that speaks for the server. A command gated on one of its arguments cannot
 # be described by a list of names, so this stays a list of commands anybody may run whatever they
 # type, and `/link`'s own tests hold the tier.
-# `/authorise_board` joins it for the same reason, and with the same caveat written into its
-# own docstring: granting a credential of your own is yours to decide, a gate could only stop
-# somebody volunteering one, and withdrawing it is possible on GitHub whatever this bot allows.
-UNGATED = frozenset({"mentions", "authorise_board"})
+#
+# `/board` is the same shape since issue #201: four of its halves are gated and `withdraw` is not,
+# because deleting a credential that is yours must not depend on a role you may since have lost.
+# So it keeps its gate too, and its own tests hold the tiers. `/authorise_board` used to sit in
+# this set, ungated whole, which let anybody hand over a credential nothing would ever use.
+UNGATED = frozenset({"mentions"})
+
+# Whoever's authorisation a board ever actually uses: the tier that links one, whose grant the
+# board is read with, and the tier that moves cards, whose grant each move is made with. `/board
+# authorise` and `/board show` take it, so a credential is only collected from somebody it could
+# serve. Today that is the same two tiers as `REGISTER_ROLES`, and written as the union so that a
+# change to either says what it does to the other.
+BOARD_ROLES = REGISTER_ROLES | WORKFLOW_ROLES

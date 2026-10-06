@@ -77,9 +77,10 @@ PAGE_SIZE = 100
 
 # The ways a board refuses to open, which three callers catch together and none can tell
 # apart. A board GitHub does not have answers 404; an authorisation that may not see it
-# answers 403; and no authorisation at all goes out anonymous and answers either, depending
-# on whether the project is private. An operator cannot act on the difference and the log
-# carries which it was, so the three sites that read a board fold them into one answer each.
+# answers 403, and one revoked or expired answers 401. A board nobody's authorisation stands
+# behind is not asked at all: `_read_as` refuses it before any request, with the same
+# GitHubAuthError. An operator cannot act on the difference and the log carries which it
+# was, so the three sites that read a board fold them into one answer each.
 UNREADABLE = (GitHubNotFoundError, GitHubAuthError)
 
 # What GitHub calls the thing a card wraps, mapped to what this bot calls it. Issues and pull
@@ -251,10 +252,11 @@ class WritesJson(Protocol):
     """Sending JSON at a path, which is all a board write needs.
 
     Its own Protocol beside the reader rather than a method on `GitHubClient`. That one carries
-    `get_json` only because the wiring hands the same object to the board reader when no project
-    token is set; putting a PATCH there would hand every service in this project the ability to
-    write to any path with an installation token, which is strictly wider than anything else on
-    it and is exactly what the module docstring says a handle must not be.
+    `get_json` only because the wiring hands the same object to the board reader as its
+    transport, every read carrying a person's authorisation; putting a PATCH there would hand
+    every service in this project the ability to write to any path with an installation token,
+    which is strictly wider than anything else on it and is exactly what the module docstring
+    says a handle must not be.
     """
 
     async def patch_json(
@@ -270,7 +272,7 @@ class ReadsJson(Protocol):
     ) -> object: ...
 
     def get_pages(
-        self, path: str, *, owner: str = "", **params: str | int
+        self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> AsyncIterator[object]: ...
 
     async def get_pages_since(
@@ -290,7 +292,7 @@ class WhoTheBoardIsReadAs(Protocol):
     One member, declared here because this is where it is consumed. Issue #170.
 
     **Why not `SuppliesTokens`.** That one answers `token_for(owner)`, and an owner cannot identify
-    a person: `linked_to_board` refuses two repositories on the SAME board, but two servers may
+    a person: `mirroring` refuses two repositories on the SAME board, but two servers may
     link two DIFFERENT boards both owned by the same account. Keyed on the owner, one server's
     board would be read under the other server's member's grant - a credential crossing a tenancy
     boundary, which is the exact thing the authorisation replaced.
@@ -315,10 +317,10 @@ class HttpProjectBoards:
     ) -> None:
         self._client = client
         self._credentials = credentials
-        # None where this deployment has no project token. The reader falls back to the App
-        # client, which holds no Projects permission at all, so there is nothing to fall back
-        # to for a write - and leaving it None makes "no token means no board writes" a fact of
-        # the wiring rather than a check somebody could forget.
+        # None where SHANNON_BOARD_MAY_MOVE_CARDS is off: `may_write` reports it and `move_card`
+        # answers NO_WRITER. The writer carries no credential of its own - every write passes
+        # the mover's as `as_` - so leaving it None makes "writes off means no board writes" a
+        # fact of the wiring rather than a check somebody could forget.
         self._writer = writer
         self._fields: dict[tuple[str, int], BoardFields] = {}
         self._kinds: dict[str, str] = {}
@@ -353,11 +355,19 @@ class HttpProjectBoards:
 
         Over the same prefix the reads use, so the organisation-or-person decision is made once
         and a picker cannot offer a board the poller then cannot open.
+
+        Under the credential of whoever is choosing, on every page. Issue #201: the listing used to
+        go out with none, which the client answers with the App installation's token - and the
+        App holds no Projects permission, so a private board was never offered to the person who
+        could open it.
         """
         kind = await self._owner_kind(owner, token)
         listings: list[ProjectListing] = []
         async for body in self._client.get_pages(
-            f"/{kind}/{quote(owner, safe='')}/projectsV2", owner=owner, per_page=PAGE_SIZE
+            f"/{kind}/{quote(owner, safe='')}/projectsV2",
+            owner=owner,
+            token=token,
+            per_page=PAGE_SIZE,
         ):
             rows = body if is_json_list(body) else []
             listings.extend(listing for row in rows if (listing := parse_listing(row)) is not None)
@@ -372,20 +382,26 @@ class HttpProjectBoards:
         it reads, rather than a warning once a minute in a log nobody is watching. A picker's
         suggestions are only suggestions - discord.py says so - so the number that arrives here
         may never have been offered.
+
+        The account lookup is inside the same fold as the board itself. It is the FIRST request
+        made with the person's credential, so a grant they revoked on GitHub answers 401 there and
+        a mistyped owner answers 404 there - and outside the fold both reached the person as
+        GitHub's raw sentence about a `/users/` path, which names neither the board nor the
+        credential. Issue #201.
         """
-        board = await self._board_path(owner, project_number, token)
         try:
+            board = await self._board_path(owner, project_number, token)
             body = await self._client.get_json(board, owner=owner, token=token)
         except UNREADABLE as unopenable:
             # Logged before it is folded, because folding is what costs the evidence. The reply
             # lists what to check and cannot say WHICH, so without this line the one hard fact -
-            # 403 means a credential and 404 means a board - is thrown away at the moment
+            # 401 and 403 mean a credential and 404 means a board - is thrown away at the moment
             # somebody most needs it.
             logger.warning("could not open board %s for %r: %s", project_number, owner, unopenable)
             # Folded into the answer this already gives for an unusable board, because an
             # operator cannot act on the difference and the caller has one sentence to say.
             # A board GitHub does not have, a token that may not see it, and a token that is
-            # not there at all are 404, 403 and 403 - and GitHub's own words for those name
+            # not there at all are 404, 403 and 401 - and GitHub's own words for those name
             # neither the board nor the credential, which is every question worth asking.
             return None
         return parse_listing(body)
@@ -407,10 +423,10 @@ class HttpProjectBoards:
         typed over the same union and `_refuse_a_name_this_bot_owns` already branches on it.
 
         An answer rather than a bool, because the ways of declining are not alike and one of
-        them is worth telling a person about. No token and an unreadable Status field are
-        both invisible on the board and identical for every command; a board with no column
-        for this state is permanent until somebody edits it AND visible, because the person
-        will open the board and find the card where it was.
+        them is worth telling a person about. Board writes turned off and an unreadable Status
+        field are both invisible on the board and identical for every command; a board with no
+        column for this state is permanent until somebody edits it AND visible, because the
+        person will open the board and find the card where it was.
 
         UNSET never arrives. The picker offers three priorities and `priority_change` raises
         on a fourth long before this, so a guard here would be an arm no caller can take -
@@ -500,7 +516,7 @@ class HttpProjectBoards:
         Archiving is how a card is taken off the board without deleting it, so mirroring one
         would put back a thread for work already put away.
         """
-        token = await self._credentials.reading(owner, project_number)
+        token = await self._read_as(owner, project_number)
         board = await self._board_path(owner, project_number, token)
         fields = await self._board_fields(board, owner, project_number, token)
         params: dict[str, str | int] = {"per_page": PAGE_SIZE}
@@ -542,6 +558,40 @@ class HttpProjectBoards:
             # that cannot be trusted is not worth the reading.
             self._listed.pop(key, None)
         return items
+
+    async def _read_as(self, owner: str, project_number: int) -> str:
+        """The credential a board's own reads go out under, refusing before any request without one.
+
+        Issue #201. `reading` answers an empty string for a board nobody's authorisation stands
+        behind - nobody linked it, the linker withdrew, two servers claim it - and an empty
+        credential is not "anonymous" on its way through the client: it is filled in with the App
+        installation's token for the owner. That only ever failed because the App holds no Projects
+        permission today, which is a thing an installation can be granted. So no authorisation means
+        no request, refused here as the authorisation failure it is - the same exception a 401 or a
+        403 would raise, which every caller of these three reads already treats as a board that will
+        not open.
+        """
+        token = await self._credentials.reading(owner, project_number)
+        if not token:
+            raise GitHubAuthError(
+                f"nobody's authorisation stands behind board {project_number} belonging to {owner}"
+            )
+        return token
+
+    async def takes(self, *, owner: str, project_number: int, state: Status | Priority) -> bool:
+        """Whether this board has the field a state is written to. See `MovesCards.takes`.
+
+        Read as the BOARD is read - its linker's authorisation, and no request at all where
+        nobody's stands behind it - because the member asking has none, which is why this is
+        being asked. Out of the same cached fields `move_card` resolves against, so the
+        question and the write cannot disagree about whether the field is there.
+        """
+        token = await self._read_as(owner, project_number)
+        board = await self._board_path(owner, project_number, token)
+        fields = await self._board_fields(board, owner, project_number, token)
+        return fields is not None and (
+            fields.priority is not None if isinstance(state, Priority) else True
+        )
 
     @property
     def may_write(self) -> bool:
@@ -635,7 +685,7 @@ class HttpProjectBoards:
         nowhere to put a refusal, so having nothing to offer and having nothing to say are the
         same outcome to it.
         """
-        token = await self._credentials.reading(owner, project_number)
+        token = await self._read_as(owner, project_number)
         board = await self._board_path(owner, project_number, token)
         self._fields.pop((owner, project_number), None)
         fields = await self._board_fields(board, owner, project_number, token)
@@ -661,7 +711,7 @@ class HttpProjectBoards:
 
         None where the board cannot be read at all, which the caller reads as no rule to apply.
         """
-        token = await self._credentials.reading(owner, project_number)
+        token = await self._read_as(owner, project_number)
         board = await self._board_path(owner, project_number, token)
         self._fields.pop((owner, project_number), None)
         fields = await self._board_fields(board, owner, project_number, token)

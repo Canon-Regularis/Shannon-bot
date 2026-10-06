@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import gc
 from unittest.mock import MagicMock, NonCallableMagicMock, create_autospec
 
+import aiohttp
 import discord
 import pytest
 from discord import ui
@@ -907,6 +910,166 @@ class TestBeforeTheGatewayIsConnected:
 
 def gateway_for(client: MagicMock) -> DiscordThreadGateway:
     return DiscordThreadGateway(client)
+
+
+class TestFindingAMember:
+    """Asked when a board link is followed, whether the member still holds the tier the command
+    was gated on. Found reviewing #201. Not in the server is an answer and nothing else is: the
+    caller refuses on both, but tells the person different things."""
+
+    def gateway_seeing(self, guild: object | None, *, ready: bool = True) -> DiscordThreadGateway:
+        client = client_with(None, ready=ready)
+        # Server 1 and no other, so a lookup by the wrong id finds nothing.
+        client.get_guild.side_effect = {1: guild}.get
+        return DiscordThreadGateway(client)
+
+    def a_guild(self, *, unavailable: bool = False) -> NonCallableMagicMock:
+        """A server, filled in unless said otherwise. Autospec reads the slot as a truthy mock."""
+        guild = stub_for(discord.Guild)
+        guild.unavailable = unavailable
+        return guild
+
+    async def test_the_member_is_fetched_rather_than_read_from_the_cache(self) -> None:
+        """With the members intent off, discord.py keeps no current record of anybody's roles -
+        and a role taken away a minute ago is exactly what this is asked about."""
+        guild = self.a_guild()
+        found = stub_for(discord.Member)
+        guild.fetch_member.return_value = found
+
+        assert await self.gateway_seeing(guild).member(guild_id=1, user_id=555) is found
+        guild.fetch_member.assert_awaited_once_with(555)
+        guild.get_member.assert_not_called()
+
+    async def test_somebody_not_in_the_server_is_none(self) -> None:
+        guild = self.a_guild()
+        guild.fetch_member.side_effect = discord.NotFound(MagicMock(status=404), "Unknown Member")
+
+        assert await self.gateway_seeing(guild).member(guild_id=1, user_id=555) is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            discord.Forbidden(MagicMock(status=403), "Missing Access"),
+            discord.HTTPException(MagicMock(status=503), "unavailable"),
+            discord.DiscordServerError(MagicMock(status=502), "bad gateway"),
+            aiohttp.ClientConnectionError("connection reset"),
+            OSError("network unreachable"),
+            TimeoutError(),
+        ],
+        ids=["forbidden", "503", "server-error", "connection", "os", "timeout"],
+    )
+    async def test_anything_else_is_not_an_answer(self, error: Exception) -> None:
+        """A refusal included: a member the bot may not look up is one it cannot vouch for, which
+        is not the same as one who has left."""
+        guild = self.a_guild()
+        guild.fetch_member.side_effect = error
+
+        with pytest.raises(DiscordGatewayError, match="would not say whether 555"):
+            await self.gateway_seeing(guild).member(guild_id=1, user_id=555)
+
+    async def test_no_answer_in_time_is_not_an_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A browser is waiting on this, and discord.py would otherwise wait out a rate limit."""
+        monkeypatch.setattr("shannon.discord_bot.threads.MEMBER_LOOKUP_SECONDS", 0.01)
+        guild = self.a_guild()
+        answer = asyncio.Event()
+
+        async def answers_late(member_id: int) -> object:
+            await answer.wait()
+            return stub_for(discord.Member)
+
+        guild.fetch_member.side_effect = answers_late
+        gateway = self.gateway_seeing(guild)
+
+        with pytest.raises(DiscordGatewayError, match="TimeoutError"):
+            await gateway.member(guild_id=1, user_id=555)
+
+        answer.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    async def test_a_lookup_that_runs_out_of_time_is_left_to_finish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Found reviewing the fix. Cancelling discord.py's request can interrupt it while it
+        sleeps out a global rate limit, and it reopens the gate for every other request only once
+        that sleep ends - so the lookup is waited on for a while and never cancelled."""
+        monkeypatch.setattr("shannon.discord_bot.threads.MEMBER_LOOKUP_SECONDS", 0.01)
+        guild = self.a_guild()
+        answer = asyncio.Event()
+
+        async def answers_late(member_id: int) -> object:
+            await answer.wait()
+            return stub_for(discord.Member)
+
+        guild.fetch_member.side_effect = answers_late
+        gateway = self.gateway_seeing(guild)
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway.member(guild_id=1, user_id=555)
+        (lookup,) = gateway._lookups
+        assert not lookup.done(), "the lookup was cancelled rather than left to finish"
+
+        answer.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert lookup.done() and not lookup.cancelled()
+        assert gateway._lookups == set(), "a finished lookup was held on to"
+
+    async def test_a_late_failure_is_not_reported_as_never_retrieved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nobody is waiting for the answer by then, so it is read when it arrives."""
+        monkeypatch.setattr("shannon.discord_bot.threads.MEMBER_LOOKUP_SECONDS", 0.01)
+        loop = asyncio.get_running_loop()
+        reported: list[dict[str, object]] = []
+        loop.set_exception_handler(lambda _, context: reported.append(context))
+        guild = self.a_guild()
+        answer = asyncio.Event()
+
+        async def fails_late(member_id: int) -> object:
+            await answer.wait()
+            raise discord.HTTPException(MagicMock(status=503), "unavailable")
+
+        guild.fetch_member.side_effect = fails_late
+        gateway = self.gateway_seeing(guild)
+        try:
+            with pytest.raises(DiscordGatewayError):
+                await gateway.member(guild_id=1, user_id=555)
+            answer.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            gc.collect()
+        finally:
+            loop.set_exception_handler(None)
+
+        assert reported == []
+
+    async def test_a_server_listed_but_not_filled_in_is_not_asked_about(self) -> None:
+        """After a fresh identify every server is a stub with no roles and no owner until its own
+        event arrives, while the client still reports itself ready. A member fetched against one
+        holds nothing, which would read as a lost role rather than as no answer."""
+        guild = self.a_guild(unavailable=True)
+
+        with pytest.raises(DiscordGatewayError, match="cannot see server 1"):
+            await self.gateway_seeing(guild).member(guild_id=1, user_id=555)
+        guild.fetch_member.assert_not_awaited()
+
+    async def test_a_server_the_bot_cannot_see_is_not_asked_about(self) -> None:
+        """Removed from it, or not cached yet during a start: either way nobody in it can be
+        vouched for, and an empty answer would read as the member having left."""
+        with pytest.raises(DiscordGatewayError, match="cannot see server 1"):
+            await self.gateway_seeing(None).member(guild_id=1, user_id=555)
+
+    async def test_a_client_that_is_not_connected_is_not_asked(self) -> None:
+        guild = self.a_guild()
+        gateway = self.gateway_seeing(guild, ready=False)
+
+        with pytest.raises(DiscordGatewayError):
+            await gateway.member(guild_id=1, user_id=555)
+        guild.fetch_member.assert_not_awaited()
 
 
 class TestWhoAMessageMayNotify:
