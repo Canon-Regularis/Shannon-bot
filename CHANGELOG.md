@@ -7699,3 +7699,68 @@ feature end to end rather than assuming a predecessor the file never recorded.
   but linking yourself takes no role.
 - **One gate.** The container builds the permission gate once, for the commands and for this
   second question, so both read the tiers the same way.
+
+## No board is named in the environment
+
+- **`SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` are gone**, with the startup
+  error that said they could not work and the poller's arm that read them. Since #170 a board is
+  read under the authorisation of whoever linked it, and a board named in the environment had
+  nobody recorded against it, so it could never be opened. #201 said this was left for its own
+  change; this is it. An old `.env` that still sets them starts as before - a line with no
+  setting behind it is ignored.
+- **A board is one a repository has linked, and nothing else.** The poller reads exactly the
+  repositories `/board link` has written a board on, and `_Board` addresses each through the one
+  `board_owner` rule the rest of the code uses, rather than a copy of it.
+- **The poller tests link their board.** About a hundred of them were handed a board by the
+  environment without meaning to; they link one on the row now, as a server does, and the five
+  that tested the environment arm went with it.
+
+## A repository moving to another account leaves its board behind
+
+- **A transfer used to re-point the board.** A board stored with no owner means "this repository's
+  own owner", and a board number is a sequence GitHub keeps per account. When a repository was
+  transferred, the next delivery renamed the row and that null quietly became the NEW owner's board
+  of the same number - a stranger's cards, read under the linker's authorisation. Found reviewing
+  #201.
+- **The owner's account id is kept** (migration `0035`), read off every repository payload, written
+  at `/register` and learned by the next delivery like `private`. A payload that does not say leaves
+  it alone - unless it moves the name to another owner, when the id it would leave describes the
+  owner being left and is forgotten. Only the id tells a transfer from an account that was renamed,
+  which keeps its id.
+- **The board stays behind.** Where the owner half of the name changes and nothing proves it is the
+  same account, `follow_rename` writes the old owner onto the board before the name moves, and says
+  so in the log with what to run. A board somebody named an owner for is never rewritten, and a
+  change of case is not a move.
+- **Unknown counts as moved, and stops the reading.** A row from before the column, or a payload
+  with no id, cannot be told from a renamed account - whose old login GitHub releases to whoever
+  claims it next. So the board is kept under the old owner AND taken off its linker: the poll stops
+  reading it until somebody runs `/board link`, rather than read a stranger's board under the freed
+  login. The log line names the linker, because `/board unlink` finds whose authorisation to let go
+  of on the row: after this it finds nobody, and any they still hold stays until they run
+  `/board withdraw`.
+- **Whatever writes the name or the id decides from the row as it is now.** A delivery reads the
+  row without a lock, so wherever it is about to write the name or the owner's id it reads the row
+  again first, held, and decides everything from what it says then. Otherwise a `/board link`
+  committed after its read was overwritten, or carried to the new owner; and two deliveries for two
+  items overlapping a transfer could leave one account's login beside the other's id - the pairing
+  a later move is judged by. The lock is `FOR NO KEY UPDATE`: `FOR UPDATE` would also wait on the
+  key-share lock a new item's insert takes through its foreign key, so two syncs of two new items
+  would deadlock.
+- **`/board link` refuses a board the repository has moved away from.** It asks the row's name
+  again after it writes, and refuses, writing nothing, where the repository moved to another owner
+  while the board was being opened. A one-click link remembers whose board a bare number meant when
+  it was handed out (migration `0036`), and is refused where the repository has moved away from
+  that owner by the time it is followed - ten minutes is long enough for a transfer, and a bare
+  number would otherwise mean the NEW owner's board. Both refusals, and `/board show` for a board
+  that is not being read, say how to get it back: `/board link` naming the old owner if the
+  repository was transferred, since a bare number would link the new owner's - or by the bare
+  number if the account only renamed itself, whose old login GitHub releases.
+- **A board is written whole.** The ORM leaves a column out of the UPDATE where the new value equals
+  the one the session read, and `/board link` reads the row without a lock and then asks GitHub. So
+  a board another link committed in between kept whichever of its columns this one's read agreed
+  with: a board number under somebody else's owner, or no linker behind a link the reply called
+  done. All three columns are written every time now, and the last link wins whole.
+- **A draft card no longer follows its repository's name.** Its snapshot is the copy of the row its
+  poll or `/refresh` took when it began, not GitHub's word, so following it could only put back a
+  name a delivery had replaced since - and across owners, it would take the board off its linker for
+  a move that never happened.

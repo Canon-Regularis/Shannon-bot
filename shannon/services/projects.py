@@ -89,6 +89,7 @@ from shannon.discord_bot.formatting import (
     format_card_converted,
 )
 from shannon.discord_bot.threads import PostsToThread, ShutsThread
+from shannon.domain.board import board_owner as owner_of_board
 from shannon.domain.board import normalise, status_from_column
 from shannon.domain.enums import ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
@@ -168,8 +169,6 @@ class ProjectPoller:
         workflow: MovesStatus,
         threads: SaysAndShuts,
         *,
-        project_number: int = 0,
-        board_owner: str = "",
         polling: bool = True,
         interval: float = 60.0,
         may_set_status: bool = False,
@@ -179,14 +178,9 @@ class ProjectPoller:
         self._sync = sync
         self._workflow = workflow
         self._threads = threads
-        # The board named in the environment, which cannot be read since issue #170 - nobody is
-        # recorded against it - and which the container says so about at boot. Zero means none.
-        self._project_number = project_number
-        self._board_owner = board_owner
         self._polling = polling
         self._interval = interval
         self._may_set_status = may_set_status
-        self._said = False
         # Boards already said to be unreadable, so the line is loud once and then DEBUG. This
         # runs every couple of seconds since issue #189, and a board nobody's authorisation
         # stands behind - every board linked before issue #170, until somebody links it again -
@@ -919,13 +913,12 @@ class ProjectPoller:
     async def _boards(self) -> Sequence[_Board]:
         """Every board to read this pass, newest state of the database each time.
 
-        A linked board wins over the configured one, per repository and per pass. The settings
-        cannot be read since issue #170 - a board is read under its linker's authorisation, and
-        one named in the environment has no linker - so the arm that returns one is a board that
-        will not open, said once; the container says why at boot. Once any repository carries a
-        board of its own they stop applying anywhere, as before.
+        A board is one a repository has linked, and nothing else. There used to be a second arm,
+        reading a board named in the environment where no repository had linked one; since issue
+        #170 a board is read under its linker's authorisation, and one named in the environment
+        had no linker, so that arm could only ever return a board that would not open.
 
-        The refusal this replaces stopped the poller outright with more than one server
+        The refusal it replaced stopped the poller outright with more than one server
         registered, and said to set the number to zero or give that server a deployment of its
         own. That was never a guard against a hard problem - it was the shape of a missing
         column. Nothing elected which repository a board belonged to because nothing recorded it.
@@ -936,46 +929,14 @@ class ProjectPoller:
         silently stopped.
         """
         async with self._sessionmaker() as session:
-            repositories = RepositoryStore(session)
-            linked = await repositories.with_boards()
-            if linked:
-                return [
-                    _Board.of(row, number, row.project_owner or "")
-                    for row in linked
-                    # Narrowed per row rather than trusted from the WHERE clause, which filters
-                    # in SQL and tells the type checker nothing.
-                    if (number := row.project_number) is not None
-                ]
-
-            if self._project_number <= 0:
-                return []
-
-            found = await repositories.registered(at_most=2)
-            if len(found) == 1:
-                return [_Board.of(found[0], self._project_number, self._board_owner)]
-
-            if found:
-                self._say_once(
-                    "%s servers are registered and the board settings name one board between "
-                    "them, so nothing says whose it is and no board is read. Run /board link in "
-                    "the server it belongs to; the settings are a default for a deployment that "
-                    "has not done that yet",
-                    len(found),
-                )
-            return []
-
-    def _say_once(self, message: str, *args: object) -> None:
-        """Say something the operator has to act on, once rather than once a minute.
-
-        This runs on a timer for as long as the process lives, so a line repeated every pass is
-        one people learn to scroll past. It used to stop the task instead, which put the fact
-        somewhere `/health` could report it - affordable when it meant one board could not be
-        read, and not affordable now that it would take every other server's board down with it.
-        """
-        if self._said:
-            return
-        self._said = True
-        logger.error(message, *args)
+            linked = await RepositoryStore(session).with_boards()
+            return [
+                _Board.of(row, number)
+                for row in linked
+                # Narrowed per row rather than trusted from the WHERE clause, which filters in SQL
+                # and tells the type checker nothing.
+                if (number := row.project_number) is not None
+            ]
 
     async def _mirrored(self, repository_id: int) -> dict[int, tuple[datetime | None, int | None]]:
         async with self._sessionmaker() as session:
@@ -1118,11 +1079,12 @@ class _Board:
 
     Two owners, kept apart on purpose. `board_owner` addresses the board; the snapshot's owner
     names the repository every mirrored card is filed under. They are the same account often
-    enough to invite one field, and the cost of that is not a misleading log line: the sync
-    hands each snapshot's full name to `follow_rename`, which writes it to the `repositories`
-    row. One poll would rename the registered repository to the board owner's, and `of` scrapes
-    the fallback owner back out of that row, so every later poll would read the wrong board
-    even with the setting taken away again.
+    enough to invite one field, and the cost of that was not a misleading log line: the sync
+    handed each snapshot's full name to `follow_rename`, which wrote it to the `repositories`
+    row. One poll renamed the registered repository to the board owner's, and `of` scraped the
+    fallback owner back out of that row, so every later poll read the wrong board. The sync no
+    longer follows a ticket's repository at all - this snapshot is a copy of the row, not
+    GitHub's word - and the two stay apart regardless.
     """
 
     repository_id: int
@@ -1131,12 +1093,15 @@ class _Board:
     snapshot: RepositorySnapshot
 
     @classmethod
-    def of(cls, repository: Repository, project_number: int, board_owner: str = "") -> _Board:
+    def of(cls, repository: Repository, project_number: int) -> _Board:
+        """The board a repository has linked, addressed the one way `domain.board` writes down."""
         owner, _, name = repository.repo_name.partition("/")
         return cls(
             repository_id=repository.id,
             project_number=project_number,
-            board_owner=board_owner or owner,
+            board_owner=owner_of_board(
+                project_owner=repository.project_owner, repo_name=repository.repo_name
+            ),
             snapshot=RepositorySnapshot(
                 github_repo_id=repository.github_repo_id,
                 owner=owner,

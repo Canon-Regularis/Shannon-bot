@@ -113,19 +113,15 @@ class Settings(BaseSettings):
     #
     # Run the poller in ONE replica. Nothing elects a leader, so two pollers racing on one card
     # can each put its row back and undo the other's finished move, permanently. This is the
-    # switch that says which replica - a job the number below used to do, badly and now not at
-    # all: a board is linked by /board link, so a second replica would start polling the moment
+    # switch that says which replica - a job a board number in the environment used to do, badly:
+    # a board is linked by /board link now, so a second replica would start polling the moment
     # somebody ran the command, with no environment change anywhere to notice.
+    #
+    # There is no setting naming a board any more. Since issue #170 a board is read under the
+    # authorisation of whoever linked it, and one named here had nobody recorded against it, so
+    # it could never be opened. An old .env that still sets the two is ignored like any other
+    # line this has no field for.
     poll_boards: bool = True
-
-    # A board named in the environment rather than linked, which NOTHING READS ANY MORE. Since
-    # issue #170 a board is read under the authorisation of whoever linked it, and a board named
-    # here has nobody recorded against it, so it cannot be opened; the container says so at
-    # boot. Kept so an existing .env still starts, and slated for removal. Run /board link.
-    github_project_number: int = Field(default=0, ge=0)
-    # Who owns that board, read no more than the number above is. `/board link`'s owner option
-    # is where an owner is named now.
-    github_project_owner: str = ""
     # How often a linked board is read. Two seconds, matching the delivery worker, and that
     # parity is the point: a ticket and an issue now reach Discord on the same clock, where a
     # ticket used to wait a mean of thirty seconds for a sixty-second one. Issue #189.

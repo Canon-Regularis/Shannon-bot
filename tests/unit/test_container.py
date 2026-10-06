@@ -470,29 +470,4 @@ class TestABoardWithNoTokenToReadItWith:
             container_with(DisposableEngine(), FakeGitHubClient())
 
         assert "SHANNON_BOARD_CREDENTIAL_KEY" not in caplog.text
-
-    def test_a_board_named_in_the_environment_is_said_to_be_unreadable(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Issue #201. Since #170 a board is read under the authorisation of whoever linked it,
-        and one named only in the environment has nobody recorded against it - so it can never
-        be opened, and the deployment that set it would otherwise find out as a board that
-        silently never mirrors."""
-        with caplog.at_level(logging.ERROR, logger="shannon.container"):
-            container_with(
-                DisposableEngine(),
-                FakeGitHubClient(),
-                Settings(github_webhook_secret="x", github_project_number=6),
-            )
-
-        assert "SHANNON_GITHUB_PROJECT_NUMBER" in caplog.text
-        assert "/board link" in caplog.text
-
-    def test_no_board_in_the_environment_says_nothing_about_one(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        with caplog.at_level(logging.ERROR, logger="shannon.container"):
-            container_with(DisposableEngine(), FakeGitHubClient())
-
-        assert "SHANNON_GITHUB_PROJECT_NUMBER" not in caplog.text
         assert "SHANNON_GITHUB_BOARD_CLIENT_ID" not in caplog.text

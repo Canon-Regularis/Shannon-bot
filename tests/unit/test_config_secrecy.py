@@ -167,9 +167,9 @@ STAMPED_BY_THE_BUILD = {"SHANNON_BUILD"}
 
 def test_the_example_env_file_names_every_setting() -> None:
     """The file says to copy it and fill it in, so a setting it leaves out is a feature nobody
-    setting the bot up will find. `SHANNON_GITHUB_PROJECT_NUMBER` was the one that mattered: it
-    defaults to zero, zero means the board is never read, and the whole board mirror was
-    therefore invisible to anybody who started from this file.
+    setting the bot up will find. A board number was the one that mattered, back when a board
+    could be named here: it defaulted to zero, zero meant the board was never read, and the whole
+    board mirror was therefore invisible to anybody who started from this file.
     """
     from pathlib import Path
 

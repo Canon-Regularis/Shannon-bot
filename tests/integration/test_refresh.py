@@ -707,8 +707,6 @@ class TestACardWhoseMirrorFailed:
                 authorisations=FakeBoardCredentials(),
             ),
             threads,
-            project_number=PROJECT,
-            board_owner="",
             polling=True,
         )
         mirrored = await poller.run_once()

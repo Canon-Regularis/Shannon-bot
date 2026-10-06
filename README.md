@@ -363,9 +363,13 @@ What is shared, and what that costs:
 - **One board per repository, set from Discord.** `/board link` records which project a server's
   repository mirrors, so two servers each get their own and neither is guessed at. A board is
   read under the authorisation of whoever linked it, so `/board link` is the only way to mirror
-  one: `SHANNON_GITHUB_PROJECT_NUMBER` and `SHANNON_GITHUB_PROJECT_OWNER` name a board nobody
-  is recorded against, which cannot be read, and the bot says so once at startup if they are
-  set. They are kept only so an existing `.env` still starts.
+  one; there is no setting that names a board. A board linked as the repository's own owner's
+  follows a renamed repository, and a renamed account once the bot has recorded its account id. It
+  stays behind with the old owner when the repository is transferred to another account: the same
+  number under the new owner is a different board. Where the bot cannot tell which it was, the
+  board is kept under the old owner and not read until somebody links it again: naming that owner
+  if the repository was transferred, since a bare number would now mean the new owner's board, or
+  by the bare number if the account only renamed itself, whose old login GitHub releases.
 - **One poller, still.** Nothing elects a leader, so two pollers racing on one card can each put
   its row back and undo the other's finished move, permanently. `SHANNON_POLL_BOARDS=false` on
   every replica but one is what prevents that. It used to be the project number set to zero, which
@@ -417,9 +421,7 @@ at the door.
 | `SHANNON_BUILD` | `unknown` | The commit the image was built from, reported by `/health`. Written by the Dockerfile, so do not set it: compose passes `.env` into the container and it would override the real one. It is the only setting missing from `.env.example`, for that reason |
 | `SHANNON_GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise |
 | `SHANNON_GITHUB_TIMEOUT_SECONDS` | `10.0` | |
-| `SHANNON_POLL_BOARDS` | `true` | Whether **this** process reads project boards. Run the poller in one replica: nothing elects a leader, and two racing on one card can each undo the other's finished move. This is the switch that says which replica, a job the number below used to do |
-| `SHANNON_GITHUB_PROJECT_NUMBER` | `0` | **No longer read as a board.** It named a board in the environment, and a board is now read under the authorisation of whoever linked it, so one named here can never be opened; the bot logs an error at startup while it is set. Run `/board link` instead, then remove it |
-| `SHANNON_GITHUB_PROJECT_OWNER` | empty | The owner of that board, read no more than the number is. `/board link`'s `owner` option is where an owner is named now |
+| `SHANNON_POLL_BOARDS` | `true` | Whether **this** process reads project boards. Run the poller in one replica: nothing elects a leader, and two racing on one card can each undo the other's finished move. This is the switch that says which replica, a job a board number in the environment used to do |
 | `SHANNON_PROJECT_POLL_SECONDS` | `2.0` | How often that board is read. The read is conditional, so an unchanged board costs no rate-limit budget; floored at `1.0` |
 | `SHANNON_BOARD_MAY_MOVE_CARDS` | `true` | The other direction: whether a status set in Discord drags the item's card on the board. On, because a server that ran `/board link` asked for its board to be the truth. The card is written as whoever moved it, with the authorisation they granted through `/board authorise` or `/board link` — the `project` scope, which the sign-in checks GitHub actually granted — and somebody who has granted none is refused by `/status` and `/priority` before anything is written. Turning it off stops the card being written and nothing else — the board is still read, so a move its column order forbids is still refused. A card this bot has never seen on a board is left alone either way: the pairing is learnt by polling, and GitHub answers no per-item project lookup |
 | `SHANNON_BOARD_MAY_SET_STATUS` | `false` | Whether dragging a card may change the item's status. Off, because nothing GitHub sends says who moved a card, so a board that could move items would be a way past the Project Manager role below |
@@ -656,7 +658,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0034`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0036`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 

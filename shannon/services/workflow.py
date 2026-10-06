@@ -1042,8 +1042,8 @@ class ItemWorkflow:
         at least sees it fail and can run it again; nobody is standing over the poller.
 
         Only where the row still says what this wrote, which is enough for one process and not
-        for two. Nothing in the deployment stops a second replica, and every replica with a
-        project number set polls the same board on the same interval, so the two ask for the same
+        for two. Nothing in the deployment stops a second replica, and every replica with board
+        polling on reads the same boards on the same interval, so the two ask for the same
         status for the same card. The other one, polling while this one is in Discord, finds the
         row already saying DONE and records the column, which is this one's whole retry marker;
         then this one cannot tell that from its own write and puts the row back, undoing a move

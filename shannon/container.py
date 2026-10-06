@@ -822,16 +822,6 @@ def build_container(
             "board authorisation cannot be kept and every board will read as unauthorised. "
             "Generate a key and restart."
         )
-    if settings.github_project_number:
-        # Since issue #170 a board is read under the authorisation of whoever linked it, and a
-        # board named only in the environment has nobody recorded against it - so it can never
-        # be opened. Said once here rather than discovered as a board that silently never
-        # mirrors. Issue #201.
-        logger.error(
-            "SHANNON_GITHUB_PROJECT_NUMBER is set, and a board named only in the environment "
-            "cannot be read: a board is read under the authorisation of whoever linked it. Run "
-            "/board link in the server it belongs to, then remove the setting."
-        )
     if settings.board_credential_key.get_secret_value() and not settings.github_board_client_id:
         logger.error(
             "SHANNON_BOARD_CREDENTIAL_KEY is set and SHANNON_GITHUB_BOARD_CLIENT_ID is not, so "
@@ -968,8 +958,6 @@ def build_container(
             build_item_sync(sessionmaker, threads, TicketPolicy()),
             workflow,
             threads,
-            project_number=settings.github_project_number,
-            board_owner=settings.github_project_owner,
             polling=settings.poll_boards,
             interval=settings.project_poll_seconds,
             may_set_status=settings.board_may_set_status,
