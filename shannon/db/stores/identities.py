@@ -42,6 +42,9 @@ class SpentLink:
     # none - every identity link, and every board link handed out before the column existed.
     # Strings rather than tiers, because this layer sits below the one that names them.
     tier: frozenset[str] | None = None
+    # Whose board the board's bare number meant when the link was handed out, or None where an
+    # owner was named, no board was, or the link predates the column. Found reviewing #201.
+    chosen_under: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +77,7 @@ class IdentityVerificationStore:
         lifetime: timedelta,
         board: ChosenBoard | None = None,
         tier: frozenset[str] | None = None,
+        chosen_under: str | None = None,
     ) -> None:
         """Hand out a link that expires a fixed time from now.
 
@@ -90,6 +94,9 @@ class IdentityVerificationStore:
         And the tier the command was gated on, where it was a board command, so the callback can
         ask Discord whether the member still holds it. Found reviewing #201. Sorted, so one set of
         tiers is always written the same way.
+
+        And whose board a bare number meant, which only the caller can say: it is the repository's
+        owner as it stands now, and following the link may be ten minutes away.
         """
         await self._session.execute(
             pg_insert(IdentityVerification).values(
@@ -103,6 +110,7 @@ class IdentityVerificationStore:
                 # `repositories.project_owner` spells the same absence.
                 board_owner=(board.owner or None) if board else None,
                 tier=None if tier is None else ",".join(sorted(tier)),
+                board_chosen_under=chosen_under,
             )
         )
 
@@ -183,6 +191,7 @@ class IdentityVerificationStore:
                 IdentityVerification.board_number,
                 IdentityVerification.board_owner,
                 IdentityVerification.tier,
+                IdentityVerification.board_chosen_under,
             )
         )
         found = spent.first()
@@ -197,6 +206,7 @@ class IdentityVerificationStore:
             tier=None
             if found[5] is None
             else frozenset(name for name in found[5].split(",") if name),
+            chosen_under=found[6],
         )
 
     async def prune(self, *, keep_for: timedelta) -> int:

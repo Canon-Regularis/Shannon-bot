@@ -56,9 +56,10 @@ from shannon.db.stores.identities import (
     SpentLink,
     VerifiedIdentityStore,
 )
+from shannon.db.stores.repositories import RepositoryStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.roles import CommandRole
-from shannon.domain.board import ChosenBoard
+from shannon.domain.board import ChosenBoard, board_owner
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
 from shannon.github.responses import json_object
@@ -267,7 +268,13 @@ class LinksTheBoardChosen(Protocol):
     """
 
     async def assign(
-        self, *, guild_id: int, project_number: int, typed_owner: str, acting: int
+        self,
+        *,
+        guild_id: int,
+        project_number: int,
+        typed_owner: str,
+        acting: int,
+        chosen_under: str | None = None,
     ) -> BoardLink: ...
 
 
@@ -480,9 +487,19 @@ class GitHubIdentityVerification:
         reason the board is. An identity link carries none: a `/register` or `/unregister` link
         records a proof and nothing more, and running the command again asks for the role again,
         and a `/link` link binds the account, but linking yourself takes no role.
+
+        A board chosen by a bare number is written down with whose board that number meant now:
+        the repository's owner, which following the link checks is still its owner. Found
+        reviewing #201 - see `IdentityVerification.board_chosen_under`. Read in the transaction
+        that hands the link out, so the two are one moment.
         """
         state = secrets.token_urlsafe(STATE_BYTES)
         async with self._sessionmaker() as session, session.begin():
+            chosen_under = None
+            if board is not None and not board.owner:
+                repository = await RepositoryStore(session).get_by_guild(guild_id)
+                if repository is not None:
+                    chosen_under = board_owner(project_owner=None, repo_name=repository.repo_name)
             await IdentityVerificationStore(session).issue(
                 state=state,
                 guild_id=guild_id,
@@ -491,6 +508,7 @@ class GitHubIdentityVerification:
                 lifetime=LINK_LIFETIME,
                 board=board,
                 tier=None if tier is None else frozenset(role.value for role in tier),
+                chosen_under=chosen_under,
             )
         return f"{self._public_base_url}/oauth/start?state={state}"
 
@@ -762,6 +780,7 @@ class GitHubIdentityVerification:
                 project_number=spent.board.number,
                 typed_owner=spent.board.owner,
                 acting=spent.discord_user_id,
+                chosen_under=spent.chosen_under,
             )
         except ShannonError as refusal:
             return BoardNotLinked(reason=refusal.message)

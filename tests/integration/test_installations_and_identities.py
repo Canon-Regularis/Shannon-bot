@@ -736,6 +736,26 @@ class TestWhichBoardALinkWasFor:
         assert spent is not None
         assert spent.board == ChosenBoard(number=6, owner="")
 
+    async def test_whose_board_a_bare_number_meant_survives_the_round_trip(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Found reviewing #201: following the link is refused where the repository has moved
+        away from it since."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LIVE,
+            board=ChosenBoard(number=6),
+            chosen_under="acme",
+        )
+
+        spent = await spend(store, "s1")
+        assert spent is not None
+        assert (spent.board, spent.chosen_under) == (ChosenBoard(number=6), "acme")
+
     async def test_a_link_that_names_no_board_only_authorises(
         self, db_session: AsyncSession
     ) -> None:

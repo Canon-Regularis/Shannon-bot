@@ -17,6 +17,7 @@ owner happened to be written down, and the picker's memory belongs to one member
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -33,12 +34,14 @@ from shannon.services.boards import (
     LIFETIME,
     BoardColumns,
     BoardLinkingService,
+    BoardMovedError,
     BoardTakenError,
     BoardUnreadableError,
     OwnerBoards,
 )
+from tests.support import github_payloads as payloads
 from tests.support.credentials import BOARD_KEY
-from tests.support.db import register_repository
+from tests.support.db import blocked_on_a_row, register_repository
 
 pytestmark = pytest.mark.integration
 
@@ -79,6 +82,98 @@ class FakeProjects:
         if not self.opens:
             return None
         return next((one for one in self.boards if one.number == project_number), None)
+
+
+class MovedWhileOpening(FakeProjects):
+    """A board that opens - and, while it is being opened, the repository's next delivery renames
+    the row and commits, the way a transfer's first delivery would."""
+
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], *, to: str, owner_id: int
+    ) -> None:
+        super().__init__(PROJECT)
+        self._sessionmaker = sessionmaker
+        self._to = to
+        self._owner_id = owner_id
+
+    async def get_board(
+        self, owner: str, project_number: int, *, token: str
+    ) -> ProjectListing | None:
+        async with self._sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_guild(1)
+            assert repository is not None
+            await repositories.follow_rename(
+                repository,
+                repo_name=self._to,
+                repo_url=f"https://github.com/{self._to}",
+                owner_id=self._owner_id,
+            )
+        return await super().get_board(owner, project_number, token=token)
+
+
+class MovingWhileOpening(FakeProjects):
+    """A board that opens while the repository's next delivery is renaming the row: written and
+    still uncommitted, so the row is held until the test lets it go."""
+
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], *, to: str, owner_id: int
+    ) -> None:
+        super().__init__(PROJECT)
+        self._sessionmaker = sessionmaker
+        self._to = to
+        self._owner_id = owner_id
+        self.held: AsyncSession | None = None
+
+    async def get_board(
+        self, owner: str, project_number: int, *, token: str
+    ) -> ProjectListing | None:
+        self.held = self._sessionmaker()
+        await self.held.begin()
+        repositories = RepositoryStore(self.held)
+        repository = await repositories.get_by_guild(1)
+        assert repository is not None
+        await repositories.follow_rename(
+            repository,
+            repo_name=self._to,
+            repo_url=f"https://github.com/{self._to}",
+            owner_id=self._owner_id,
+        )
+        return await super().get_board(owner, project_number, token=token)
+
+
+class WrittenWhileOpening(FakeProjects):
+    """A board that opens - and, while it is being opened, another link commits a board of its
+    own onto the same repository."""
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        *,
+        number: int,
+        owner: str | None,
+        linked_by: int,
+    ) -> None:
+        super().__init__(PROJECT)
+        self._sessionmaker = sessionmaker
+        self._number = number
+        self._owner = owner
+        self._linked_by = linked_by
+
+    async def get_board(
+        self, owner: str, project_number: int, *, token: str
+    ) -> ProjectListing | None:
+        async with self._sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_guild(1)
+            assert repository is not None
+            await repositories.set_board(
+                repository,
+                project_number=self._number,
+                project_owner=self._owner,
+                linked_by=self._linked_by,
+            )
+        return await super().get_board(owner, project_number, token=token)
 
 
 @pytest.fixture
@@ -141,6 +236,17 @@ async def authorise(
         github_login=f"member{member}",
         github_user_id=member,
         token=token,
+    )
+
+
+def linking_with(
+    projects: FakeProjects,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    authorisations: BoardCredentials,
+) -> BoardLinkingService:
+    """The service, over a board reader one test needs to be its own."""
+    return BoardLinkingService(
+        sessionmaker, projects, OwnerBoards(projects, authorisations), authorisations
     )
 
 
@@ -424,6 +530,251 @@ class TestOneBoardPerServer:
         )
 
         assert link.number == PROJECT
+
+
+class TestTheRepositoryMovingWhileTheBoardOpens:
+    """Found reviewing #201. The board is opened under the owner one read of the row named, and
+    GitHub is asked with no lock held, so a transfer's first delivery can rename the row in
+    between. Stored as the repository's own owner's, the board would then have been the NEW
+    owner's board of that number, read under the linker's authorisation."""
+
+    async def test_a_board_opened_under_the_owner_it_left_is_not_linked(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        repository_id = registered.id
+        projects = MovedWhileOpening(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+
+        with pytest.raises(BoardMovedError, match="moved to someone-else/Shannon-bot"):
+            await linking_with(projects, db_sessionmaker, authorisations).assign(
+                guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+            )
+
+        row = await stored(db_session, repository_id)
+        assert row.repo_name == "someone-else/Shannon-bot", "the move itself was taken back"
+        assert (row.project_number, row.project_linked_by) == (None, None)
+
+    async def test_a_board_named_by_its_owner_is_linked_all_the_same(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A named owner is nobody's repository, so the move cannot have changed which board it
+        is."""
+        repository_id = registered.id
+        projects = MovedWhileOpening(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+
+        await linking_with(projects, db_sessionmaker, authorisations).assign(
+            guild_id=1, project_number=PROJECT, typed_owner="boards-inc", acting=LINKER
+        )
+
+        row = await stored(db_session, repository_id)
+        assert (row.project_number, row.project_owner) == (PROJECT, "boards-inc")
+
+    async def test_a_rename_under_the_same_owner_is_linked_and_named_as_it_is_now(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+    ) -> None:
+        """A board belongs to an account, and the account has not changed."""
+        renamed = f"{payloads.OWNER}/renamed"
+        projects = MovedWhileOpening(db_sessionmaker, to=renamed, owner_id=payloads.OWNER_ID)
+
+        link = await linking_with(projects, db_sessionmaker, authorisations).assign(
+            guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+        )
+
+        assert (link.repo_name, link.number) == (renamed, PROJECT)
+
+    async def test_a_move_still_in_flight_when_the_board_is_written_is_caught(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Asked after the UPDATE rather than before it, because only the UPDATE waits for a move
+        still in flight to commit. Asked before, the name would read as it was, and the link would
+        land on the moved row."""
+        repository_id = registered.id
+        projects = MovingWhileOpening(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+        linking = asyncio.create_task(
+            linking_with(projects, db_sessionmaker, authorisations).assign(
+                guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+            )
+        )
+        try:
+            await blocked_on_a_row(db_sessionmaker, linking)
+            assert projects.held is not None
+            await projects.held.commit()
+        finally:
+            if projects.held is not None:
+                await projects.held.close()
+
+        with pytest.raises(BoardMovedError, match="moved to someone-else/Shannon-bot"):
+            await linking
+
+        row = await stored(db_session, repository_id)
+        assert row.repo_name == "someone-else/Shannon-bot"
+        assert (row.project_number, row.project_linked_by) == (None, None)
+
+    async def test_the_refusal_says_how_to_keep_the_board_that_was_meant(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+    ) -> None:
+        """Running /board link again with the same bare number would link the NEW owner's board
+        of that number after a transfer - so the way to the old one is named. After an account
+        renamed itself the bare number is the right board, and the old login names nobody's, so
+        that way is named as well."""
+        projects = MovedWhileOpening(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+
+        with pytest.raises(BoardMovedError) as refused:
+            await linking_with(projects, db_sessionmaker, authorisations).assign(
+                guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+            )
+
+        said = refused.value.message
+        assert "naming Canon-Regularis as the owner if the repository was transferred" in said
+        assert "by its number alone if Canon-Regularis only renamed itself someone-else" in said
+
+
+class TestABoardChosenBeforeTheRepositoryMoved:
+    """Found reviewing #201. A one-click link is followed up to ten minutes after the board was
+    chosen, by a bare number meaning the repository's owner's board then. `chosen_under` is that
+    owner, and a repository that has moved away from it since is refused before GitHub is asked."""
+
+    async def test_a_bare_number_chosen_under_the_owner_it_left_is_refused_unopened(
+        self,
+        service: BoardLinkingService,
+        projects: FakeProjects,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        repository_id = registered.id
+
+        with pytest.raises(BoardMovedError, match="has moved away from acme"):
+            await service.assign(
+                guild_id=1,
+                project_number=PROJECT,
+                typed_owner="",
+                acting=LINKER,
+                chosen_under="acme",
+            )
+
+        assert projects.opened == [], "the new owner's board was opened"
+        assert (await stored(db_session, repository_id)).project_number is None
+
+    async def test_the_owner_it_was_chosen_under_is_compared_without_its_case(
+        self, service: BoardLinkingService, registered: Repository
+    ) -> None:
+        link = await service.assign(
+            guild_id=1,
+            project_number=PROJECT,
+            typed_owner="",
+            acting=LINKER,
+            chosen_under=payloads.OWNER.upper(),
+        )
+
+        assert link.number == PROJECT
+
+    async def test_an_owner_somebody_named_is_not_second_guessed(
+        self, service: BoardLinkingService, registered: Repository
+    ) -> None:
+        """A named owner is the board's whoever owns the repository, so there is nothing to have
+        moved."""
+        link = await service.assign(
+            guild_id=1,
+            project_number=PROJECT,
+            typed_owner="boards-inc",
+            acting=LINKER,
+            chosen_under="acme",
+        )
+
+        assert link.owner == "boards-inc"
+
+
+class TestABoardIsWrittenWhole:
+    """Found reviewing #201. The ORM leaves a column out of the UPDATE where the new value equals
+    the one the session read - and /board link reads the row without a lock, then asks GitHub. So a
+    board another link committed in between kept whichever of its columns this link's read happened
+    to agree with: a mixture neither link made, under a reply describing a third."""
+
+    async def test_an_owner_another_link_wrote_meanwhile_does_not_survive(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        repository_id = registered.id
+        projects = WrittenWhileOpening(
+            db_sessionmaker, number=77, owner="boards-inc", linked_by=OTHER
+        )
+
+        await linking_with(projects, db_sessionmaker, authorisations).assign(
+            guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+        )
+
+        row = await stored(db_session, repository_id)
+        assert (row.project_number, row.project_owner, row.project_linked_by) == (
+            PROJECT,
+            None,
+            LINKER,
+        )
+
+    async def test_the_same_board_linked_again_is_written_again(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Linking the board a row already has changes no column at all, so it used to write
+        nothing - and a different board linked meanwhile stayed, under this link's reply."""
+        repository_id = registered.id
+        registered.project_number = PROJECT
+        registered.project_linked_by = LINKER
+        await db_session.commit()
+        projects = WrittenWhileOpening(db_sessionmaker, number=77, owner=None, linked_by=OTHER)
+
+        await linking_with(projects, db_sessionmaker, authorisations).assign(
+            guild_id=1, project_number=PROJECT, typed_owner="", acting=LINKER
+        )
+
+        row = await stored(db_session, repository_id)
+        assert (row.project_number, row.project_linked_by) == (PROJECT, LINKER)
+
+    async def test_a_linker_a_move_took_off_is_put_back(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        authorisations: BoardCredentials,
+        registered: Repository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A move nothing can prove takes the board off its linker. Linked again, naming the old
+        owner, while that move commits, the linker equals what the read saw - so it was left out,
+        and a reply saying linked stood over a board nobody's authorisation stands behind."""
+        repository_id = registered.id
+        registered.github_owner_id = None
+        registered.project_number = PROJECT
+        registered.project_linked_by = LINKER
+        await db_session.commit()
+        projects = MovedWhileOpening(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+
+        await linking_with(projects, db_sessionmaker, authorisations).assign(
+            guild_id=1, project_number=PROJECT, typed_owner=payloads.OWNER, acting=LINKER
+        )
+
+        row = await stored(db_session, repository_id)
+        assert (row.project_owner, row.project_linked_by) == (payloads.OWNER, LINKER)
 
 
 class TestUnlinking:

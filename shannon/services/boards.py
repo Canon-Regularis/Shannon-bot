@@ -55,6 +55,11 @@ class BoardTakenError(ShannonError):
     """Another registered repository is already mirroring this board."""
 
 
+class BoardMovedError(ShannonError):
+    """The repository moved to another owner while its board was being opened, so the board that
+    opened is not the one a link would now point at."""
+
+
 class ReadsProjects(Protocol):
     """Listing an owner's boards and opening one, which is all this needs of GitHub.
 
@@ -259,7 +264,13 @@ class BoardLinkingService:
         return await self._boards.listed(owner, guild_id=guild_id, member=acting)
 
     async def assign(
-        self, *, guild_id: int, project_number: int, typed_owner: str, acting: int
+        self,
+        *,
+        guild_id: int,
+        project_number: int,
+        typed_owner: str,
+        acting: int,
+        chosen_under: str | None = None,
     ) -> BoardLink:
         """Point this server's repository at a board.
 
@@ -277,6 +288,9 @@ class BoardLinkingService:
         one existed and then open the board with no credential at all, which the client fills in
         with the App installation's token - so a private board was refused with a sentence
         blaming an authorisation that was never sent.
+
+        `chosen_under` is whose board a bare number meant when the board was chosen, for a link
+        followed later than that: a one-click link, up to ten minutes later. Found reviewing #201.
 
         Every refusal raises inside the one transaction, so a refused link writes nothing at all.
         """
@@ -299,6 +313,23 @@ class BoardLinkingService:
 
             stored_owner = typed_owner.strip() or None
             owner = board_owner(project_owner=stored_owner, repo_name=repository.repo_name)
+            # A bare number is worked out only now, and a one-click link is followed up to ten
+            # minutes after the board was chosen. Where the repository moved to another owner in
+            # between, it now means the NEW owner's board of that number - not the one the member
+            # picked from a list of the old owner's. Found reviewing #201. Before GitHub is asked
+            # anything, because there is nothing to open.
+            if (
+                stored_owner is None
+                and chosen_under is not None
+                and owner.casefold() != chosen_under.casefold()
+            ):
+                raise BoardMovedError(
+                    f"{repository.repo_name} has moved away from {chosen_under} since board "
+                    f"#{project_number} was chosen as {chosen_under}'s, so nothing was linked. "
+                    f"Run /board link again: naming {chosen_under} as the owner if the repository "
+                    f"was transferred and it is still {chosen_under}'s board you want, or by its "
+                    f"number alone if {chosen_under} only renamed itself {owner}."
+                )
             listing = await self._projects.get_board(owner, project_number, token=granted.token)
             if listing is None:
                 raise BoardUnreadableError(
@@ -350,6 +381,24 @@ class BoardLinkingService:
                 project_owner=stored_owner,
                 linked_by=acting,
             )
+            # Asked again of the row as it is now. GitHub was asked under the owner the read above
+            # named, with no lock held, so a transfer's first delivery may have renamed the row in
+            # between - and the UPDATE just made waited for it to commit. A board stored as the
+            # repository's own owner's would then be the NEW owner's board of that number, read
+            # under this member's authorisation: the transfer bug again, from the other side.
+            # Found reviewing #201. Refused, and the raise takes the write back with it. A named
+            # owner is nobody's repository, so it cannot have moved.
+            read_as = repository.repo_name
+            await session.refresh(repository, ["repo_name"])
+            now = board_owner(project_owner=stored_owner, repo_name=repository.repo_name)
+            if now.casefold() != owner.casefold():
+                raise BoardMovedError(
+                    f"{read_as} moved to {repository.repo_name} while the board was being "
+                    f"checked, so nothing was linked. Run /board link again: naming {owner} as "
+                    "the owner if the repository was transferred and it is still that account's "
+                    f"board #{project_number} you want, or by its number alone if {owner} only "
+                    f"renamed itself {now}."
+                )
             return BoardLink(
                 repo_name=repository.repo_name,
                 owner=owner,

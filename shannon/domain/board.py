@@ -132,7 +132,10 @@ def board_owner(*, project_owner: str | None, repo_name: str) -> str:
     as permanent and wrote the card off for good.
 
     Null means the board belongs to the repository's own owner, which is what every row written
-    before the column existed says and needs no backfill.
+    before the column existed says and needs no backfill. It follows the repository through a
+    rename of the repository, and of the account where its id proves it the same one; a move to
+    another account, or one nothing can tell from it, writes the old owner in first, because the
+    same number under the new owner is a different board.
 
     Plain values rather than a `Repository`, so `domain` stays free of the ORM - the argument
     `shannon/services/sync/draft_cards.py` already makes for `snapshot_of`. Nothing here imports

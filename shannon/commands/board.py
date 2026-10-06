@@ -579,19 +579,20 @@ def _shown(standing: BoardStanding) -> str:
     elif standing.linked_by is None:
         state = (
             f"{standing.repo_name} mirrors {board}, but nobody's authorisation stands behind it, "
-            "so it is not being read. Linking it again with /board link fixes that."
+            f"so it is not being read. Linking it again with {_relinked(standing)} fixes that."
         )
     elif not standing.held:
         state = (
             f"{standing.repo_name} mirrors {board}, linked by <@{standing.linked_by}>, whose "
             "authorisation is gone, so it is not being read. They can sign in again with "
-            "/board authorise, or anybody who links boards can link it again with /board link."
+            "/board authorise, or anybody who links boards can link it again with "
+            f"{_relinked(standing)}."
         )
     elif standing.title is None:
         state = (
             f"{standing.repo_name} mirrors {board}, linked by <@{standing.linked_by}>, but it does "
             "not open with their authorisation: it was revoked on GitHub, or no longer reaches the "
-            "board. Linking it again with /board link fixes that."
+            f"board. Linking it again with {_relinked(standing)} fixes that."
         )
     else:
         state = (
@@ -599,3 +600,23 @@ def _shown(standing: BoardStanding) -> str:
             f"<@{standing.linked_by}>'s GitHub authorisation."
         )
     return f"{state}\n\n-# {yours}"
+
+
+def _relinked(standing: BoardStanding) -> str:
+    """The command that links this board again: naming its owner wherever a bare number would mean
+    another board, and the bare number as well, for an owner that may only have renamed itself.
+
+    A bare number is "this repository's own owner's", so for a board kept under the owner its
+    repository was transferred away from, `/board link` alone would link the NEW owner's board of
+    that number - the very board it was kept apart from. But an account that renamed itself
+    releases its old login to whoever claims it, so naming that login opens nobody's board, or a
+    stranger's; and from the logins alone the two look the same. So both are offered, each with
+    when it applies. Found reviewing #201.
+    """
+    here = standing.repo_name.partition("/")[0]
+    if standing.owner.casefold() == here.casefold():
+        return "/board link"
+    return (
+        f"/board link board:{standing.number} owner:{standing.owner} (or /board link "
+        f"board:{standing.number} alone, if {standing.owner} only renamed itself {here})"
+    )

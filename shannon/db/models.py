@@ -60,13 +60,21 @@ class Repository(TimestampMixin, Base):
     # written before the column existed. Rewritten from the repository object on every sync, so
     # it corrects itself on the next delivery rather than needing a backfill.
     private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The GitHub account id of the repository's owner, beside the name because only the id tells a
+    # renamed account from a different one. Found reviewing #201: a repository transferred to
+    # another account kept a board stored as its own owner's, so the next poll read the NEW
+    # owner's board of the same number. Null until somebody says - every row written before the
+    # column - and learned from the next delivery, the way `private` is.
+    github_owner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # The project board mirrored into this repository's server, by the number in its URL. Null
     # means none, which is what every row written before this was and needs no backfill.
     project_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Who owns that board, where it is not this repository's own owner. Null means it is. A board
     # number is a sequence GitHub keeps per account, so the pair addresses a board and neither
-    # half does alone - which is why this is stored beside the number rather than derived.
+    # half does alone - which is why this is stored beside the number rather than derived. Null
+    # follows the repository through a rename; a move to ANOTHER account writes the old owner in
+    # here on the way, so the board stays where it was linked - see `follow_rename`.
     project_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # The Discord member whose GitHub authorisation this board's own reads are made under. Issue
     # #170. Null means nobody has authorised one, and that reads as a board that cannot be read -
@@ -504,6 +512,11 @@ class IdentityVerification(TimestampMixin, Base):
     # is null where nobody named one, as `Repository.project_owner` is.
     board_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     board_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Whose board a bare number meant when the link was handed out: the repository's owner then.
+    # Found reviewing #201. A bare number is "this repository's own owner's", worked out when the
+    # link is followed - and a repository transferred in between made it the NEW owner's board of
+    # that number. Null where an owner was named, which means the same thing whenever it is read.
+    board_chosen_under: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # The browser that proved, through Discord, that it is held by the member this link was issued
     # for - as a keyed hash of a cookie only that browser holds, never the cookie itself. Null until
     # then, and `consume` matches nothing that is null, so a link nobody has proved cannot be spent

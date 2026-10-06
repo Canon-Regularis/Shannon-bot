@@ -19,13 +19,15 @@ async def register_repository(
     github_repo_id: int = payloads.REPO_ID,
     repo_name: str = f"{payloads.OWNER}/{payloads.REPO}",
     private: bool | None = False,
+    github_owner_id: int | None = payloads.OWNER_ID,
 ) -> Repository:
     """The state /register leaves behind, without going through GitHub.
 
-    `private` matches what the payload helpers say, so a sync driven by one of them learns nothing
-    new about the repository and leaves the row alone. Registration records the visibility, and
-    every delivery afterwards keeps it current, so a fixture that left it unknown would have every
-    test's first sync writing the row for a reason that has nothing to do with the test.
+    `private` and `github_owner_id` match what the payload helpers say, so a sync driven by one of
+    them learns nothing new about the repository and leaves the row alone. Registration records
+    both, and every delivery afterwards keeps them current, so a fixture that left either unknown
+    would have every test's first sync writing the row for a reason that has nothing to do with the
+    test.
     """
     repository = Repository(
         github_repo_id=github_repo_id,
@@ -33,6 +35,7 @@ async def register_repository(
         repo_url=f"https://github.com/{repo_name}",
         discord_guild_id=guild_id,
         private=private,
+        github_owner_id=github_owner_id,
     )
     session.add(repository)
     await session.commit()
@@ -78,7 +81,8 @@ async def link_board(
     `project_owner` stays null by default, which is not laziness: null means "this repository's own
     owner", and writing today's answer into the row instead would survive a rename. Both the poller
     and the refresh path fall back to the repository owner when it is null, so the default is the
-    case nearly every server is in.
+    case nearly every server is in. A move to another account is the one thing that writes it, on
+    the way - see `RepositoryStore.follow_rename`.
     """
     repository.project_number = project_number
     repository.project_owner = project_owner

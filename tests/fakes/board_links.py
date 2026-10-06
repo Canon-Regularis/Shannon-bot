@@ -17,6 +17,12 @@ class NoBoardLinks:
     """`LinksTheBoardChosen` for a test whose links never carry a board."""
 
     async def assign(
-        self, *, guild_id: int, project_number: int, typed_owner: str, acting: int
+        self,
+        *,
+        guild_id: int,
+        project_number: int,
+        typed_owner: str,
+        acting: int,
+        chosen_under: str | None = None,
     ) -> BoardLink:
         raise AssertionError("a link that carried no board tried to link one")

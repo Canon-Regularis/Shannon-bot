@@ -802,6 +802,44 @@ class TestShowing:
         assert interaction.mark == OWED
         assert "nobody's authorisation stands behind it" in interaction.said
 
+    async def test_a_board_left_behind_by_a_move_is_linked_again_by_naming_its_owner(
+        self,
+    ) -> None:
+        """Found reviewing #201. A board kept under the owner its repository moved away from has
+        nobody behind it, and `/board link` with a bare number would link the NEW owner's board of
+        that number - the one it was kept apart from. So the way back names the owner, and the bare
+        number as well, for an account that only renamed itself: its old login names nobody."""
+        built = Built(
+            boards=StubBoards(
+                standing_is=standing(
+                    repo_name="someone-else/widget", title=None, linked_by=None, held=False
+                )
+            )
+        )
+        interaction = FakeInteraction(user=project_manager())
+
+        await fire(built.sub("show"), interaction)
+
+        assert (
+            "Linking it again with /board link board:3 owner:acme (or /board link board:3 alone, "
+            "if acme only renamed itself someone-else) fixes that"
+        ) in interaction.said
+
+    async def test_the_repositorys_own_board_is_linked_again_by_its_number_alone(self) -> None:
+        """Whatever case the owner is written in."""
+        built = Built(
+            boards=StubBoards(
+                standing_is=standing(
+                    repo_name="ACME/widget", title=None, linked_by=None, held=False
+                )
+            )
+        )
+        interaction = FakeInteraction(user=project_manager())
+
+        await fire(built.sub("show"), interaction)
+
+        assert "Linking it again with /board link fixes that" in interaction.said
+
     async def test_a_linker_who_withdrew(self) -> None:
         built = Built(boards=StubBoards(standing_is=standing(title=None, held=False)))
         interaction = FakeInteraction(user=project_manager())

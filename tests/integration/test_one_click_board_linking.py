@@ -20,12 +20,14 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.api.routes import oauth
 from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
-from shannon.db.models import Repository
+from shannon.db.models import IdentityVerification, Repository
 from shannon.db.stores.identities import IdentityVerificationStore
+from shannon.db.stores.repositories import RepositoryStore
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
@@ -43,6 +45,7 @@ from shannon.services.verification import (
     OAuthClient,
 )
 from tests.fakes.tiers import FakeTiers
+from tests.support import github_payloads as payloads
 from tests.support.credentials import BOARD_KEY
 from tests.support.db import register_repository
 from tests.support.round_trip import (
@@ -251,6 +254,112 @@ class TestFollowingTheLinkLinksTheBoard:
 
         assert response.status_code == 200
         assert "Q3 {login} {0}" in response.text
+
+
+class TestARepositoryThatMovesBeforeTheLinkIsFollowed:
+    """Found reviewing #201. A bare number is the repository's own owner's board, worked out when
+    the link is followed - up to ten minutes after the board was chosen from a list of the owner's
+    boards then. A transfer in between made it the NEW owner's board of that number, opened and
+    linked under the authorisation just granted."""
+
+    async def handed_out(
+        self, verification: GitHubIdentityVerification, board: ChosenBoard = THE_BOARD
+    ) -> str:
+        return await verification.link_for(
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            board=board,
+            tier=REGISTER_ROLES,
+        )
+
+    async def moved(
+        self, sessionmaker: async_sessionmaker[AsyncSession], *, to: str, owner_id: int
+    ) -> None:
+        """The delivery that follows the repository somewhere else, committed."""
+        async with sessionmaker() as session, session.begin():
+            repositories = RepositoryStore(session)
+            repository = await repositories.get_by_guild(GUILD)
+            assert repository is not None
+            await repositories.follow_rename(
+                repository, repo_name=to, repo_url=f"https://github.com/{to}", owner_id=owner_id
+            )
+
+    async def followed(self, verification: GitHubIdentityVerification, url: str) -> httpx.Response:
+        async with browser_on(verification) as client:
+            return await followed_in(client, url, member=ALICE)
+
+    async def test_whose_board_a_bare_number_meant_is_written_down_with_the_link(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+    ) -> None:
+        """And nothing for an owner somebody named, which means the same whenever it is read."""
+        async with verifying(db_sessionmaker, FakeProjects()) as verification:
+            await self.handed_out(verification)
+            await self.handed_out(verification, ChosenBoard(number=PROJECT, owner="acme"))
+
+        written = await db_session.scalars(
+            select(IdentityVerification.board_chosen_under).order_by(IdentityVerification.id)
+        )
+        assert written.all() == [payloads.OWNER, None]
+
+    async def test_a_board_chosen_under_the_owner_it_left_is_not_linked(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+    ) -> None:
+        projects = FakeProjects()
+
+        async with verifying(db_sessionmaker, projects) as verification:
+            url = await self.handed_out(verification)
+            await self.moved(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+            response = await self.followed(verification, url)
+
+        assert response.status_code == 200
+        assert "the board was not linked" in response.text
+        assert f"has moved away from {payloads.OWNER}" in response.text
+        assert f"naming {payloads.OWNER} as the owner if the repository was transferred" in (
+            response.text
+        )
+        assert f"by its number alone if {payloads.OWNER} only renamed itself someone-else" in (
+            response.text
+        )
+        assert projects.tokens == [], "the new owner's board was opened"
+        assert (await stored(db_session, registered.id)).project_number is None
+        assert await kept(db_sessionmaker)
+
+    async def test_a_rename_under_the_same_owner_still_links(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+    ) -> None:
+        async with verifying(db_sessionmaker, FakeProjects()) as verification:
+            url = await self.handed_out(verification)
+            await self.moved(
+                db_sessionmaker, to=f"{payloads.OWNER}/renamed", owner_id=payloads.OWNER_ID
+            )
+            response = await self.followed(verification, url)
+
+        assert f"now mirrors {payloads.OWNER}'s board #3, Roadmap." in response.text
+        assert (await stored(db_session, registered.id)).project_number == PROJECT
+
+    async def test_a_board_named_by_its_owner_is_linked_wherever_the_repository_went(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+    ) -> None:
+        async with verifying(db_sessionmaker, FakeProjects()) as verification:
+            url = await self.handed_out(verification, ChosenBoard(number=PROJECT, owner="acme"))
+            await self.moved(db_sessionmaker, to="someone-else/Shannon-bot", owner_id=8)
+            response = await self.followed(verification, url)
+
+        assert "acme's board #3" in response.text
+        assert (await stored(db_session, registered.id)).project_owner == "acme"
 
 
 class TestALinkThatCannotBeFinished:
