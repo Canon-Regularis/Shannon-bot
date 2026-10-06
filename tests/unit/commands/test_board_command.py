@@ -13,12 +13,14 @@ can hold, and has to be turned away with a sentence.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Collection
 from typing import Any, cast
 
 import discord
 import pytest
 from discord import app_commands
 
+from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
 from shannon.commands.board import (
     MOST_CHOICES,
     MOST_LABEL,
@@ -30,6 +32,7 @@ from shannon.commands.board import (
     build_board_command,
 )
 from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
+from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
@@ -138,6 +141,7 @@ class FakeVerification:
         self.issued_for: list[int] = []
         self.purposes: list[VerificationPurpose] = []
         self.boards: list[ChosenBoard | None] = []
+        self.tiers: list[frozenset[CommandRole]] = []
 
     async def link_for(
         self,
@@ -146,10 +150,12 @@ class FakeVerification:
         discord_user_id: int,
         purpose: VerificationPurpose,
         board: ChosenBoard | None = None,
+        tier: Collection[CommandRole],
     ) -> str:
         self.issued_for.append(discord_user_id)
         self.purposes.append(purpose)
         self.boards.append(board)
+        self.tiers.append(frozenset(tier))
         return URL
 
 
@@ -639,6 +645,33 @@ class TestUnlinking:
         await fire(built.sub("unlink"), interaction)
 
         assert "/register" in interaction.said
+
+
+class TestTheTierRidesWithTheLink:
+    """Found reviewing #201. A link is followed up to ten minutes after the command checked the
+    role, and following it asks Discord again for the tier the command was gated on - so each half
+    that hands one out has to say which."""
+
+    async def test_linking_carries_the_tier_that_links(self) -> None:
+        built = Built(boards=StubBoards(error=BoardNotAuthorisedError("none")))
+
+        await fire(built.sub("link"), FakeInteraction(user=administrator()), "3")
+
+        assert built.verification.tiers == [REGISTER_ROLES]
+
+    async def test_a_board_that_will_not_open_carries_it_too(self) -> None:
+        built = Built(boards=StubBoards(error=BoardUnreadableError("acme has no board numbered 3")))
+
+        await fire(built.sub("link"), FakeInteraction(user=administrator()), "3")
+
+        assert built.verification.tiers == [REGISTER_ROLES]
+
+    async def test_authorising_carries_the_tier_that_authorises(self) -> None:
+        built = Built()
+
+        await fire(built.sub("authorise"), FakeInteraction(user=project_manager()))
+
+        assert built.verification.tiers == [BOARD_ROLES]
 
 
 class TestAuthorisingWithoutLinking:

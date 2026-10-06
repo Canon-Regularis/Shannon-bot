@@ -40,6 +40,7 @@ from shannon.services.verification import (
     VerificationError,
 )
 from tests.fakes.board_links import NoBoardLinks
+from tests.fakes.tiers import FakeTiers
 from tests.support.credentials import BOARD_KEY, OTHER_BOARD_KEY
 from tests.support.db import register_repository
 from tests.support.round_trip import DISCORD_APP, discord_says, round_trip, state_of, to_github
@@ -94,6 +95,7 @@ async def verifying(
             # No link in this file carries a board: linking one on the way back is
             # `test_one_click_board_linking.py`'s subject, with the real service behind it.
             board_links=NoBoardLinks(),
+            tiers=FakeTiers(),
             client_id="Iv23liAbC",
             client_secret="shh",
             oauth_url="https://github.com",
@@ -516,6 +518,7 @@ class TestAuthorisingABoard:
                 UserLinkingService(db_sessionmaker),
                 BoardCredentials(db_sessionmaker, keys=BOARD_KEY),
                 board_links=NoBoardLinks(),
+                tiers=FakeTiers(),
                 client_id="Iv23liAbC",
                 client_secret="shh",
                 oauth_url="https://github.com",

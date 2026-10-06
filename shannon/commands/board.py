@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Collection, Coroutine, Sequence
 from typing import Any, Protocol
 
 import discord
@@ -41,6 +41,7 @@ from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
 from shannon.commands._replies import words_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, owed, refused, reply
+from shannon.discord_bot.roles import CommandRole
 from shannon.discord_bot.slash import SlashGroup
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
@@ -202,6 +203,11 @@ class AuthorisesBoards(Protocol):
     own property rather than an argument to `configured`, because the two applications are
     registered separately and either can be missing on its own - a deployment with the App and no
     OAuth App must still be able to run `/link`.
+
+    `tier` is required, and is the set this command gated the half on. Found reviewing #201: the
+    link is followed up to ten minutes later, and following it asks Discord again for that tier,
+    so a half that forgot to say which would be one whose links nobody but an administrator
+    could finish.
     """
 
     @property
@@ -214,6 +220,7 @@ class AuthorisesBoards(Protocol):
         discord_user_id: int,
         purpose: VerificationPurpose,
         board: ChosenBoard | None = None,
+        tier: Collection[CommandRole],
     ) -> str: ...
 
 
@@ -338,6 +345,7 @@ def build_board_command(
             guild_id=guild_id,
             discord_user_id=interaction.user.id,
             purpose=VerificationPurpose.BOARD,
+            tier=BOARD_ROLES,
         )
         await reply(interaction, owed(SIGN_IN.format(url=url)))
 
@@ -413,6 +421,8 @@ async def _sign_in_to_link(
         discord_user_id=interaction.user.id,
         purpose=VerificationPurpose.BOARD,
         board=wanted,
+        # The tier `/board link` is gated on, which is the only half that comes through here.
+        tier=REGISTER_ROLES,
     )
     message = (
         WILL_NOT_OPEN.format(reason=reason, url=url)

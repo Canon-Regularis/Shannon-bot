@@ -53,7 +53,7 @@ from shannon.discord_bot.formatting import (
     format_state_change,
     format_team_ping,
 )
-from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.permissions import MemberTiers, PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.slash import Installable
 from shannon.discord_bot.threads import ThreadGateway
@@ -894,11 +894,16 @@ def build_container(
     board_linking = BoardLinkingService(
         sessionmaker, boards, OwnerBoards(boards, board_credentials), board_credentials
     )
+    # One gate for every command and for the board link's second check. Found reviewing #201: a
+    # board link asks Discord again, when it is followed, for the tier the command was gated on,
+    # and it has to read that tier exactly as the command did.
+    gate = PermissionGate(ConfiguredRoles.from_settings(settings))
     verification = GitHubIdentityVerification(
         sessionmaker,
         links,
         board_credentials,
         board_links=board_linking,
+        tiers=MemberTiers(threads, gate),
         client_id=settings.github_app_client_id,
         client_secret=settings.github_app_client_secret.get_secret_value(),
         oauth_url=settings.github_oauth_url,
@@ -984,7 +989,7 @@ def build_container(
         commands=_commands(
             sessionmaker,
             github,
-            PermissionGate(ConfiguredRoles.from_settings(settings)),
+            gate,
             workflow,
             pr_sync,
             issue_sync,

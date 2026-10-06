@@ -754,6 +754,43 @@ class TestWhichBoardALinkWasFor:
         assert spent is not None
         assert spent.board is None
 
+    async def test_the_tier_survives_the_round_trip(self, db_session: AsyncSession) -> None:
+        """Found reviewing #201: the tier a board command was gated on, which following the link
+        asks Discord about again. Sorted on the way in, so one set is always written one way."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LIVE,
+            tier=frozenset({"PROJECT_MANAGER", "ADMIN"}),
+        )
+
+        row = await db_session.scalar(
+            select(IdentityVerification).where(IdentityVerification.state == "s1")
+        )
+        assert row is not None
+        assert row.tier == "ADMIN,PROJECT_MANAGER"
+        spent = await spend(store, "s1")
+        assert spent is not None
+        assert spent.tier == frozenset({"ADMIN", "PROJECT_MANAGER"})
+
+    async def test_a_link_with_no_tier_spends_as_none(self, db_session: AsyncSession) -> None:
+        """Every identity link, and every board link from before the column."""
+        store = IdentityVerificationStore(db_session)
+        await store.issue(
+            state="s1",
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.LINK,
+            lifetime=LIVE,
+        )
+
+        spent = await spend(store, "s1")
+        assert spent is not None
+        assert spent.tier is None
+
     async def test_two_links_for_one_person_keep_their_own_boards(
         self, db_session: AsyncSession
     ) -> None:

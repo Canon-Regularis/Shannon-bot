@@ -510,6 +510,13 @@ class IdentityVerification(TimestampMixin, Base):
     # by anybody: holding the state alone completes nothing. Found reviewing #201: a forwarded link
     # signed its issuer in as whoever clicked it.
     bound_browser: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The tiers the command that handed this link out was gated on, as `CommandRole` values joined
+    # with commas: written by `/board link` and `/board authorise`, and null for every identity
+    # link. Found reviewing #201. Following a board link keeps a credential that acts as the
+    # member, and for `/board link` points the server at a board, up to ten minutes after the
+    # command checked the role - so the callback asks Discord again, for exactly these. Text rather
+    # than an enum column, because this layer sits below the one that names the tiers.
+    tier: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

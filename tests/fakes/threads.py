@@ -110,6 +110,10 @@ class FakeThreadGateway:
         # Servers this bot has been removed from, which is not the same as a permission it was
         # never given even though Discord answers both the same way.
         self.removed_from: set[int] = set()
+        # Who is in which server, for the board link's second question. Found reviewing #201.
+        # Nobody unless a test says so; `member_lookup_fails` stands for Discord not answering.
+        self.members: dict[tuple[int, int], object] = {}
+        self.member_lookup_fails: Exception | None = None
         # Opening the thread and writing the first message in it are two Discord calls and two
         # permissions, so the second can be refused on its own. The thread is real by then, and
         # the real gateway hands its id back with the failure so the row can point at it.
@@ -218,6 +222,11 @@ class FakeThreadGateway:
         """In every server, unless a test says otherwise. Set False to stand for a bot that has
         been removed, which Discord reports as the same refusal as a missing permission."""
         return guild_id not in self.removed_from
+
+    async def member(self, *, guild_id: int, user_id: int) -> object | None:
+        if self.member_lookup_fails is not None:
+            raise self.member_lookup_fails
+        return self.members.get((guild_id, user_id))
 
     async def set_shut(self, *, thread_id: int, shut: bool) -> None:
         self.shut_calls.append((thread_id, shut))

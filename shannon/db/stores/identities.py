@@ -38,6 +38,10 @@ class SpentLink:
     # other purpose, and every link that named no board. Issue #201. A default, so a link that
     # carries none reads exactly as it did before there was anything to carry.
     board: ChosenBoard | None = None
+    # The tiers the command was gated on, as the names it stored, or None for a link that carries
+    # none - every identity link, and every board link handed out before the column existed.
+    # Strings rather than tiers, because this layer sits below the one that names them.
+    tier: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,7 @@ class IdentityVerificationStore:
         purpose: VerificationPurpose,
         lifetime: timedelta,
         board: ChosenBoard | None = None,
+        tier: frozenset[str] | None = None,
     ) -> None:
         """Hand out a link that expires a fixed time from now.
 
@@ -81,6 +86,10 @@ class IdentityVerificationStore:
 
         The board is written now for the same reason, where a board link was handed out to link
         one. Issue #201. Here rather than in the URL, so nobody can change it on the way.
+
+        And the tier the command was gated on, where it was a board command, so the callback can
+        ask Discord whether the member still holds it. Found reviewing #201. Sorted, so one set of
+        tiers is always written the same way.
         """
         await self._session.execute(
             pg_insert(IdentityVerification).values(
@@ -93,6 +102,7 @@ class IdentityVerificationStore:
                 # A blank owner is "nobody named one", which the column spells as null, the way
                 # `repositories.project_owner` spells the same absence.
                 board_owner=(board.owner or None) if board else None,
+                tier=None if tier is None else ",".join(sorted(tier)),
             )
         )
 
@@ -172,6 +182,7 @@ class IdentityVerificationStore:
                 IdentityVerification.purpose,
                 IdentityVerification.board_number,
                 IdentityVerification.board_owner,
+                IdentityVerification.tier,
             )
         )
         found = spent.first()
@@ -183,6 +194,9 @@ class IdentityVerificationStore:
             purpose=found[2],
             # A null owner back to the blank `ChosenBoard` uses for "nobody named one".
             board=None if found[3] is None else ChosenBoard(number=found[3], owner=found[4] or ""),
+            tier=None
+            if found[5] is None
+            else frozenset(name for name in found[5].split(",") if name),
         )
 
     async def prune(self, *, keep_for: timedelta) -> int:

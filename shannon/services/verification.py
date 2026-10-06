@@ -40,7 +40,7 @@ import hmac
 import logging
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn, Protocol
@@ -56,6 +56,8 @@ from shannon.db.stores.identities import (
     SpentLink,
     VerifiedIdentityStore,
 )
+from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
@@ -127,6 +129,22 @@ NOT_YOURS = (
 DISCORD_REFUSED = "Discord would not complete the sign-in. Try the command in Discord again."
 
 DISCORD_SILENT = "Discord would not say who signed in. Try the command in Discord again."
+
+# A board link followed by somebody who has lost, since it was handed out, the role the command
+# was gated on. Found reviewing #201. Nothing was kept here, but GitHub holds the grant on its side
+# all the same, and only they can take that back.
+NO_LONGER_ALLOWED = (
+    "You no longer hold a role in that server that may do this, so nothing was kept and no board "
+    "was linked. GitHub may still list this app under Applications in your GitHub settings, where "
+    "you can revoke it."
+)
+
+# Discord could not be asked whether they still hold it. A refusal all the same: "could not check"
+# is not "allowed".
+CANNOT_ASK = (
+    "Discord could not be asked whether you still hold the role this needs, so nothing was kept. "
+    "Try the command in Discord again in a minute."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +244,20 @@ class KeepsBoardAuthorisations(Protocol):
     ) -> bool: ...
 
 
+class HoldsTiers(Protocol):
+    """Whether a member holds any of a set of tiers in a server, asked of Discord now.
+
+    Declared here because this is where it is consumed, the pattern `BindsProvedAccounts` sets.
+    Found reviewing #201: a board link is followed up to ten minutes after the command checked the
+    role, and following it keeps a credential that acts as the member. Raises `DiscordGatewayError`
+    where Discord cannot be asked, which the caller treats as a refusal.
+    """
+
+    async def holds(
+        self, *, guild_id: int, discord_user_id: int, tiers: Collection[CommandRole]
+    ) -> bool: ...
+
+
 class LinksTheBoardChosen(Protocol):
     """Linking the board a one-click link was issued for, as the member who followed it.
 
@@ -289,6 +321,7 @@ class GitHubIdentityVerification:
         boards: KeepsBoardAuthorisations,
         *,
         board_links: LinksTheBoardChosen,
+        tiers: HoldsTiers,
         discord: OAuthClient,
         client_id: str,
         client_secret: str,
@@ -302,6 +335,9 @@ class GitHubIdentityVerification:
         self._links = links
         self._boards = boards
         self._board_links = board_links
+        # Who still holds the tier a board link was handed out under. Required for the reason
+        # `discord` below is: a default would be a way to follow a board link without asking.
+        self._tiers = tiers
         # The App, for the three purposes that only need to know who somebody is. Kept as loose
         # arguments rather than folded into an `OAuthClient` so that every existing caller and
         # every existing fake reads exactly as it did; what is new here is the second client.
@@ -418,6 +454,7 @@ class GitHubIdentityVerification:
         discord_user_id: int,
         purpose: VerificationPurpose,
         board: ChosenBoard | None = None,
+        tier: Collection[CommandRole] | None = None,
     ) -> str:
         """A one-time link for this person in this server, which opens on this bot.
 
@@ -437,6 +474,12 @@ class GitHubIdentityVerification:
         `board` is the board a board link is handed out to link, where it is handed out for one.
         Issue #201: one link both authorises and links, so the choice has to survive the trip to
         GitHub and back. It is written on the row beside the purpose and never into the URL.
+
+        `tier` is the set of tiers the command handing a board link out was gated on, and the one
+        `redeem` asks Discord about again. Found reviewing #201. Written on the row for the same
+        reason the board is. An identity link carries none: a `/register` or `/unregister` link
+        records a proof and nothing more, and running the command again asks for the role again,
+        and a `/link` link binds the account, but linking yourself takes no role.
         """
         state = secrets.token_urlsafe(STATE_BYTES)
         async with self._sessionmaker() as session, session.begin():
@@ -447,6 +490,7 @@ class GitHubIdentityVerification:
                 purpose=purpose,
                 lifetime=LINK_LIFETIME,
                 board=board,
+                tier=None if tier is None else frozenset(role.value for role in tier),
             )
         return f"{self._public_base_url}/oauth/start?state={state}"
 
@@ -593,6 +637,9 @@ class GitHubIdentityVerification:
             )
         if spent is None:
             raise VerificationError(UNFOLLOWABLE)
+        # Before the code is exchanged, so a refusal keeps nothing at all.
+        if spent.purpose is VerificationPurpose.BOARD:
+            await self._still_holds_the_tier(spent)
 
         # Against the application the purpose named, which the spent row has just told us. This is
         # why the state is consumed FIRST and not merely for the replay rule: the callback carries
@@ -651,6 +698,43 @@ class GitHubIdentityVerification:
             purpose=spent.purpose,
             board=board,
         )
+
+    async def _still_holds_the_tier(self, spent: SpentLink) -> None:
+        """Ask Discord, now, whether the member still holds the tier the command was gated on.
+
+        Found reviewing #201. A board link does something the moment it is followed - it keeps a
+        credential that acts as the member, and for `/board link` points the server at a board -
+        and the role was checked when the command ran, up to ten minutes before. A role taken away
+        in between takes the link with it.
+
+        Failing closed: where Discord cannot be asked, that is a refusal too, since "could not
+        check" is not "allowed". A tier this code no longer knows is dropped rather than guessed
+        at, which narrows the question towards administrators, who hold every tier; and a board
+        link from before the tier was written down is asked about as administrators only, for the
+        same reason and for ten minutes at most.
+        """
+        tiers = _known_tiers(spent.tier or frozenset())
+        try:
+            held = await self._tiers.holds(
+                guild_id=spent.guild_id, discord_user_id=spent.discord_user_id, tiers=tiers
+            )
+        except DiscordGatewayError as unreachable:
+            logger.warning(
+                "could not ask Discord whether discord:%s may still finish a board link in guild "
+                "%s: %s",
+                spent.discord_user_id,
+                spent.guild_id,
+                unreachable,
+            )
+            raise VerificationError(CANNOT_ASK) from unreachable
+        if not held:
+            logger.info(
+                "discord:%s no longer holds the tier a board link was handed out under in guild "
+                "%s, so nothing was kept",
+                spent.discord_user_id,
+                spent.guild_id,
+            )
+            raise VerificationError(NO_LONGER_ALLOWED)
 
     async def _link_what_was_chosen(self, spent: SpentLink) -> BoardLinked | BoardNotLinked | None:
         """Point the server at the board a one-click link was issued for, as the member it names.
@@ -817,6 +901,12 @@ class GitHubIdentityVerification:
                 "GitHub would not say who signed in. Try the command in Discord again."
             )
         return login, github_user_id
+
+
+def _known_tiers(stored: frozenset[str]) -> frozenset[CommandRole]:
+    """The stored tier names this code still knows, as tiers; anything else is dropped."""
+    known = {role.value for role in CommandRole}
+    return frozenset(CommandRole(name) for name in stored if name in known)
 
 
 def _mac(browser: str, leg: str, state: str) -> str:

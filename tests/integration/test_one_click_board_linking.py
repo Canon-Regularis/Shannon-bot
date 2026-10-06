@@ -23,7 +23,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.api.routes import oauth
+from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
 from shannon.db.models import Repository
+from shannon.db.stores.identities import IdentityVerificationStore
+from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.github.projects import ProjectListing
@@ -32,11 +36,13 @@ from shannon.services.boards import BoardLinkingService, OwnerBoards
 from shannon.services.linking import UserLinkingService
 from shannon.services.verification import (
     BOARD_SCOPE,
+    LINK_LIFETIME,
     BoardLinked,
     BoardNotLinked,
     GitHubIdentityVerification,
     OAuthClient,
 )
+from tests.fakes.tiers import FakeTiers
 from tests.support.credentials import BOARD_KEY
 from tests.support.db import register_repository
 from tests.support.round_trip import (
@@ -55,10 +61,14 @@ GUILD = 1
 ALICE = 555
 NOW = datetime(2026, 10, 4, 12, 0, 0, tzinfo=UTC)
 PROJECT = 3
+# A link written straight into the table, shaped like one this bot mints.
+UNREAD = "u" * 43
 # The board most of these links are handed out for. A constant rather than a call in an
 # argument default, which ruff refuses on the general grounds that most such defaults are
 # mutable.
 THE_BOARD = ChosenBoard(number=PROJECT)
+# The two halves of `/board` that hand out a link, as the board and the tier each sends with it.
+BOTH_HALVES = [(THE_BOARD, REGISTER_ROLES), (None, BOARD_ROLES)]
 
 
 def github_says(*, scope: str = "project", login: str = "octocat"):
@@ -104,6 +114,7 @@ async def verifying(
     *,
     handler: Callable[[httpx.Request], httpx.Response] | None = None,
     keys: str = BOARD_KEY,
+    tiers: FakeTiers | None = None,
 ) -> AsyncIterator[GitHubIdentityVerification]:
     """The real services, end to end, over a GitHub that is a function."""
     credentials = BoardCredentials(sessionmaker, keys=keys)
@@ -117,6 +128,7 @@ async def verifying(
             UserLinkingService(sessionmaker),
             credentials,
             board_links=linking,
+            tiers=tiers or FakeTiers(),
             client_id="Iv23liAbC",
             client_secret="shh",
             oauth_url="https://github.com",
@@ -135,13 +147,19 @@ async def follow(
     *,
     board: ChosenBoard | None = THE_BOARD,
     guild_id: int = GUILD,
+    tier: frozenset[CommandRole] = REGISTER_ROLES,
 ) -> httpx.Response:
-    """Hand out a board link for Alice, carrying `board`, and have her browser follow it."""
+    """Hand out a board link for Alice, carrying `board`, and have her browser follow it.
+
+    Gated on the tier `/board link` uses unless a test says otherwise, because that is the half
+    that hands out a link carrying a board.
+    """
     url = await verification.link_for(
         guild_id=guild_id,
         discord_user_id=ALICE,
         purpose=VerificationPurpose.BOARD,
         board=board,
+        tier=tier,
     )
     async with browser_on(verification) as client:
         return await followed_in(client, url, member=ALICE)
@@ -474,6 +492,170 @@ class TestTheOutcomeTheRouteIsHanded:
 
         assert isinstance(verified.board, BoardNotLinked)
         assert "numbered 3" in verified.board.reason
+
+
+class TestTheRoleIsAskedForAgainWhenTheLinkIsFollowed:
+    """Found reviewing #201. The role was checked when the command ran, and the link can be
+    followed up to ten minutes later - from a browser, with no interaction to read roles off. So
+    following a board link asks Discord again, before anything is kept or linked."""
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_a_role_lost_in_between_keeps_nothing_and_links_nothing(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        github = github_says()
+        asked: list[httpx.Request] = []
+
+        def recorded(request: httpx.Request) -> httpx.Response:
+            asked.append(request)
+            return github(request)
+
+        async with verifying(
+            db_sessionmaker, FakeProjects(), handler=recorded, tiers=FakeTiers(held=False)
+        ) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 400
+        assert "no longer hold a role" in response.text
+        assert asked == [], "GitHub was asked to spend a code for somebody no longer allowed"
+        assert not await kept(db_sessionmaker)
+        assert (await stored(db_session, registered.id)).project_number is None
+
+    async def test_the_refusal_uses_the_link_up(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """Running the command again asks for the role the ordinary way, which is the right place
+        for the answer to come from."""
+        async with verifying(
+            db_sessionmaker, FakeProjects(), tiers=FakeTiers(held=False)
+        ) as verification:
+            url = await verification.link_for(
+                guild_id=GUILD,
+                discord_user_id=ALICE,
+                purpose=VerificationPurpose.BOARD,
+                board=THE_BOARD,
+                tier=REGISTER_ROLES,
+            )
+            async with browser_on(verification) as client:
+                github = await to_github_in(client, url, member=ALICE)
+                callback = {"code": "abc", "state": state_of(github)}
+                first = await client.get("/oauth/github/callback", params=callback)
+                second = await client.get("/oauth/github/callback", params=callback)
+
+        assert "no longer hold a role" in first.text
+        assert "expired or has already been used" in second.text
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_discord_not_answering_keeps_nothing_either(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        """Failing closed: could not check is not allowed."""
+        tiers = FakeTiers(fails=DiscordGatewayError("Discord is down"))
+        github = github_says()
+        asked: list[httpx.Request] = []
+
+        def recorded(request: httpx.Request) -> httpx.Response:
+            asked.append(request)
+            return github(request)
+
+        async with verifying(
+            db_sessionmaker, FakeProjects(), handler=recorded, tiers=tiers
+        ) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 400
+        assert "Discord could not be asked" in response.text
+        assert asked == [], "GitHub was asked to spend a code nobody could vouch for"
+        assert not await kept(db_sessionmaker)
+        assert (await stored(db_session, registered.id)).project_number is None
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_it_asks_about_the_tier_the_link_was_handed_out_under(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        tiers = FakeTiers()
+
+        async with verifying(db_sessionmaker, FakeProjects(), tiers=tiers) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 200
+        assert tiers.asked == [(GUILD, ALICE, tier)]
+
+    async def test_an_identity_link_never_asks(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A `/register` or `/unregister` link records a proof and nothing more, and running the
+        command again asks for the role again; a `/link` link binds the account, but linking
+        yourself takes no role. So a member with no role at all still finishes any of them."""
+        tiers = FakeTiers(held=False)
+
+        async with verifying(db_sessionmaker, FakeProjects(), tiers=tiers) as verification:
+            for purpose in (
+                VerificationPurpose.LINK,
+                VerificationPurpose.REGISTER,
+                VerificationPurpose.UNREGISTER,
+            ):
+                url = await verification.link_for(
+                    guild_id=GUILD, discord_user_id=ALICE, purpose=purpose
+                )
+                await round_trip(verification, url, member=ALICE)
+
+        assert tiers.asked == []
+
+    @pytest.mark.parametrize(
+        ("written", "asked"),
+        [
+            (frozenset({"PROJECT_MANAGER", "TEA_MAKER"}), frozenset({CommandRole.PROJECT_MANAGER})),
+            (frozenset({"TEA_MAKER"}), frozenset()),
+            (None, frozenset()),
+        ],
+        ids=["one-known-one-not", "none-known", "from-before-the-column"],
+    )
+    async def test_a_tier_this_code_cannot_read_narrows_the_question(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+        written: frozenset[str] | None,
+        asked: frozenset[CommandRole],
+    ) -> None:
+        """A name this code no longer knows is dropped rather than guessed at, which narrows the
+        question towards administrators - who hold every tier - and a board link from before the
+        tier was written down is asked about as administrators only."""
+        await IdentityVerificationStore(db_session).issue(
+            state=UNREAD,
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            purpose=VerificationPurpose.BOARD,
+            lifetime=LINK_LIFETIME,
+            board=THE_BOARD,
+            tier=written,
+        )
+        await db_session.commit()
+        tiers = FakeTiers()
+
+        async with verifying(db_sessionmaker, FakeProjects(), tiers=tiers) as verification:
+            await round_trip(
+                verification,
+                f"https://shannon.example.com/oauth/start?state={UNREAD}",
+                member=ALICE,
+            )
+
+        assert tiers.asked == [(GUILD, ALICE, asked)]
 
 
 class TestThePages:

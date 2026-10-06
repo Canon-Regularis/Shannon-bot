@@ -53,7 +53,8 @@ def build_intents(*, capture_messages: bool = False) -> discord.Intents:
 
     `message_content` is privileged: a Developer Portal toggle, and Discord's approval past a
     hundred servers, which is why it is behind a setting. Without it every message arrives with
-    `content` empty. `members` is not needed, since nothing here looks a member up, and would set
+    `content` empty. `members` is not needed: the one member lookup, when a board link is
+    followed, is a REST fetch of a single member, which needs no intent. Turning it on would set
     `chunk_guilds_at_startup`, delaying the READY the delivery worker waits on.
     """
     intents = discord.Intents.default()

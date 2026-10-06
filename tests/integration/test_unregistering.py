@@ -39,6 +39,7 @@ from shannon.services.verification import (
     _sealed,
 )
 from tests.fakes.board_links import NoBoardLinks
+from tests.fakes.tiers import FakeTiers
 from tests.support.credentials import BOARD_KEY
 from tests.support.round_trip import (
     BROWSER,
@@ -139,6 +140,7 @@ async def verifying(
             links or RecordingLinks(),
             BoardCredentials(sessionmaker, keys=BOARD_KEY),
             board_links=NoBoardLinks(),
+            tiers=FakeTiers(),
             client_id="Iv23liAbC",
             client_secret=client_secret,
             oauth_url="https://github.com",

@@ -34,6 +34,7 @@ from shannon.services.verification import (
     Verified,
 )
 from tests.fakes.board_links import NoBoardLinks
+from tests.fakes.tiers import FakeTiers
 
 # The bot's own Discord application, which every test that builds the real service itself gives
 # it - except a test about a deployment without one, which passes `NO_APPLICATION` instead, as
@@ -63,6 +64,7 @@ def without_discord(
         UserLinkingService(sessionmaker),
         BoardCredentials(sessionmaker, keys=""),
         board_links=NoBoardLinks(),
+        tiers=FakeTiers(),
         discord=NO_APPLICATION,
         client_id="Iv23liAbC",
         client_secret="shh",

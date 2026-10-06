@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from shannon.config import Settings
 from shannon.container import build_container
+from shannon.discord_bot.permissions import MemberTiers
 from shannon.services.verification import OAuthClient
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -329,6 +330,25 @@ class TestSayingWhenDiscordSignInIsMissing:
 
         assert "SHANNON_DISCORD_CLIENT_ID" in caplog.text
         assert self.SECRET not in caplog.text
+
+
+class TestTheBoardLinksSecondQuestion:
+    """Found reviewing #201. Following a board link asks Discord, through the gateway the bot
+    already holds, whether the member still holds the tier the command was gated on."""
+
+    def test_it_is_asked_of_the_gateway(self) -> None:
+        threads = FakeThreadGateway()
+        container = build_container(
+            threads=threads,
+            settings=Settings(github_webhook_secret="x"),
+            engine=DisposableEngine(),
+            github=FakeGitHubClient(),
+        )
+
+        assert container.verification is not None
+        tiers = container.verification._tiers
+        assert isinstance(tiers, MemberTiers)
+        assert tiers._members is threads
 
 
 class TestWhatTurningOffCardWritesTurnsOff:

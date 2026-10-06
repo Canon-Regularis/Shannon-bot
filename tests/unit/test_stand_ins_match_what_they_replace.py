@@ -35,10 +35,11 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.client import CapturesMessages, ShannonBot
-from shannon.discord_bot.permissions import RoleNames
+from shannon.discord_bot.permissions import MemberTiers, RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
     DiscordThreadGateway,
+    FindsMembers,
     FindsThreads,
     OpensThreads,
     PostsToThread,
@@ -121,6 +122,7 @@ from shannon.services.unregistration import (
 from shannon.services.verification import (
     BindsProvedAccounts,
     GitHubIdentityVerification,
+    HoldsTiers,
     KeepsBoardAuthorisations,
 )
 from shannon.services.workflow import ItemWorkflow, LabelsItems
@@ -130,6 +132,7 @@ from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
 from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.fakes.threads import FakeThreadGateway
+from tests.fakes.tiers import FakeTiers
 
 # Both halves matter. The fakes are what the tests run against, and the real implementations are
 # what production runs against, and neither is checked by anything else.
@@ -206,6 +209,13 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # service, each declared where it is consumed, so each is a separate place to drift.
     (ProvesBeforeRegistering, GitHubIdentityVerification),
     (AuthorisesBoards, GitHubIdentityVerification),
+    # Found reviewing #201: a board link asks Discord again, when it is followed, whether the
+    # member still holds the tier. Both sides of each, because every test that follows a board
+    # link runs against the fakes.
+    (HoldsTiers, MemberTiers),
+    (HoldsTiers, FakeTiers),
+    (FindsMembers, DiscordThreadGateway),
+    (FindsMembers, FakeThreadGateway),
     (LinksTeams, TeamLinkingService),
     (ResolvesMentions, UserLinkStore),
     (ResolvesMentions, TeamLinkStore),

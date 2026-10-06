@@ -7672,3 +7672,30 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **What a forwarded link already recorded is not undone by this.** Rows written before it in
   `verified_identities`, `user_links` and `board_authorizations` are worth a look for a login that
   does not belong to the member it sits under.
+
+## A board link asks Discord for the role again when it is followed
+
+- **The role was checked once, when the command ran.** A board link does something the moment it
+  is followed - it keeps an authorisation that acts as the member, and `/board link` points the
+  server at a board - and it can be followed up to ten minutes later. A role taken away in between
+  went unnoticed. Found reviewing #201.
+- **The tier the command was gated on rides on the row** (migration `0034`): `/board link` writes
+  the tiers that link, `/board authorise` the tiers that authorise. Following the link asks Discord
+  for the member as they are now, puts them through the same gate the command used, and refuses
+  before the code is exchanged - so a refusal keeps nothing, links nothing and spends the link.
+- **Fetched, not remembered.** With the members intent off, discord.py keeps no current record of
+  anybody's roles, so the member is fetched over REST, which needs no intent. A browser waits five
+  seconds at most - and the request itself is never cancelled, because cancelling discord.py while
+  it sleeps out a global rate limit would leave every later request waiting for good.
+- **A server Discord has listed and not yet filled in counts as unreachable.** After a fresh
+  identify every server is a stub with no roles until its own event arrives, while the client still
+  reports itself ready; a member fetched against one would read as having lost the role.
+- **Failing closed.** Discord not answering, a server the bot cannot see, or a refusal to look the
+  member up is a refusal too, with its own page: "could not check" is not "allowed". A tier name
+  this code no longer knows is dropped rather than guessed at, which narrows the question towards
+  administrators; a board link handed out before this is asked about as administrators only.
+- **Identity links never ask.** A `/register` or `/unregister` link records a proof and nothing
+  more, and running the command again asks for the role again; a `/link` link binds the account,
+  but linking yourself takes no role.
+- **One gate.** The container builds the permission gate once, for the commands and for this
+  second question, so both read the tiers the same way.
