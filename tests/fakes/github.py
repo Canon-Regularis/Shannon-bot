@@ -15,6 +15,7 @@ from shannon.domain.models import (
     Label,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewCommentSnapshot,
     ReviewSnapshot,
 )
 from shannon.github.errors import GitHubNotFoundError
@@ -148,6 +149,15 @@ class FakeGitHubClient:
         # key: that one is a test that forgot to stock the fake, and it comes back empty.
         self.reviews: dict[tuple[str, int], Sequence[ReviewSnapshot] | None] = {}
         self.review_calls: list[tuple[str, int]] = []
+        # Inline comments on a pull request, keyed the same way and read the same way. Issue
+        # #231. A missing key answers empty rather than raising, because every reply delivered
+        # through the default stack asks, and a fake that raised for a test that never meant to
+        # stock it would park the delivery and fail the drain behind it.
+        self.review_comments: dict[tuple[str, int], Sequence[ReviewCommentSnapshot] | None] = {}
+        self.review_comment_calls: list[tuple[str, int]] = []
+        # Raised by this read alone. `error` fails every call, including the rebuild a note can
+        # ask for, which is no use for showing what a reply does when only this one question fails.
+        self.review_comment_error: Exception | None = None
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -291,6 +301,17 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return self.reviews.get(key, [])
+
+    async def list_review_comments(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewCommentSnapshot] | None:
+        key = (repository.full_name.lower(), number)
+        self.review_comment_calls.append(key)
+        if self.review_comment_error is not None:
+            raise self.review_comment_error
+        if self.error is not None:
+            raise self.error
+        return self.review_comments.get(key, [])
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None:
         # Refused before it is recorded, unlike the label writes below. `comments` is read as

@@ -2076,6 +2076,125 @@ class TestEveryReviewOnAPullRequest:
             assert await client.list_reviews(self._repository(), 7) == []
 
 
+class TestEveryInlineCommentOnAPullRequest:
+    """Issue #231. Read so a reply can find whoever it answers, which its webhook never says.
+
+    GitHub has no endpoint for one thread, so the whole list is read and the caller picks the
+    thread out by the comment that opened it.
+    """
+
+    def _repository(self) -> RepositorySnapshot:
+        return RepositorySnapshot(
+            github_repo_id=1,
+            owner="Canon-Regularis",
+            name="Shannon-bot",
+            html_url="https://github.com/Canon-Regularis/Shannon-bot",
+        )
+
+    def _row(
+        self, comment_id: int, login: str = "beedware", in_reply_to_id: int | None = None
+    ) -> dict[str, object]:
+        """A row as the list endpoint sends it, which is the object a webhook carries as its
+        `comment`. A comment that opens a thread has no `in_reply_to_id` key at all."""
+        row: dict[str, object] = {
+            "id": comment_id,
+            "path": "src/river.tex",
+            "line": 246,
+            "user": {"login": login, "id": 3001},
+            "body": "Elongate the river",
+            "html_url": f"https://github.com/x/y/pull/7#discussion_r{comment_id}",
+            "created_at": "2026-10-06T15:13:49Z",
+        }
+        if in_reply_to_id is not None:
+            row["in_reply_to_id"] = in_reply_to_id
+        return row
+
+    async def test_it_asks_the_comments_endpoint_for_that_pull_request(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_review_comments(self._repository(), 7)
+
+        assert seen == ["/repos/Canon-Regularis/Shannon-bot/pulls/7/comments"]
+
+    async def test_a_page_of_rows_becomes_snapshots(self) -> None:
+        """Who wrote each one, and which thread it sits in, are the two things a caller reads."""
+        handler = responds(200, [self._row(10), self._row(11, login="mkutay", in_reply_to_id=10)])
+
+        async with client_with(handler) as client:
+            found = await client.list_review_comments(self._repository(), 7)
+
+        assert found is not None
+        assert [comment.comment_id for comment in found] == [10, 11]
+        assert [comment.in_reply_to_id for comment in found] == [None, 10]
+        assert [comment.author.login for comment in found if comment.author] == [
+            "beedware",
+            "mkutay",
+        ]
+        assert {comment.item_number for comment in found} == {7}
+
+    async def test_it_follows_the_link_header(self) -> None:
+        """A review argued over for a week runs past one page, and a half-read list is how the
+        person being answered goes unrung with nothing saying so."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            index = calls["n"]
+            calls["n"] += 1
+            headers = (
+                {"Link": '<https://api.github.com/next?after=cursor>; rel="next"'}
+                if index == 0
+                else {}
+            )
+            return httpx.Response(200, content=json.dumps([self._row(index + 1)]), headers=headers)
+
+        async with client_with(handler) as client:
+            found = await client.list_review_comments(self._repository(), 7)
+
+        assert found is not None
+        assert [comment.comment_id for comment in found] == [1, 2]
+
+    async def test_a_body_that_is_not_a_list_is_read_as_nothing(self) -> None:
+        async with client_with(responds(200, {})) as client:
+            assert await client.list_review_comments(self._repository(), 7) == []
+
+    async def test_a_row_without_an_id_is_dropped_and_the_rest_kept(self) -> None:
+        handler = responds(200, [{"body": "no id"}, self._row(2)])
+
+        async with client_with(handler) as client:
+            found = await client.list_review_comments(self._repository(), 7)
+
+        assert found is not None
+        assert [comment.comment_id for comment in found] == [2]
+
+    async def test_a_pull_request_github_does_not_have_answers_none(self) -> None:
+        """Distinct from the empty list, which is a pull request nobody has commented on inline.
+        A 404 is final, so retrying the delivery for two hours would spend every attempt on it."""
+        async with client_with(responds(404, {"message": "Not Found"})) as client:
+            assert await client.list_review_comments(self._repository(), 7) is None
+
+    async def test_a_pull_request_with_no_inline_comments_answers_an_empty_list(self) -> None:
+        async with client_with(responds(200, [])) as client:
+            assert await client.list_review_comments(self._repository(), 7) == []
+
+    @pytest.mark.parametrize(
+        ("status", "raised"),
+        [(503, GitHubUnavailableError), (401, GitHubAuthError)],
+    )
+    async def test_anything_worse_than_a_404_is_raised_for_the_caller_to_judge(
+        self, status: int, raised: type[GitHubError]
+    ) -> None:
+        """Only a 404 is answered here. Whether a reply waits for GitHub or goes out without the
+        people it answers is the caller's decision, and it decides on which of these it was."""
+        async with client_with(responds(status, {"message": "nope"})) as client:
+            with pytest.raises(raised):
+                await client.list_review_comments(self._repository(), 7)
+
+
 class TestWhichKindOfAccountAnOwnerIs:
     """What `/link_team` asks before it writes a mapping.
 
