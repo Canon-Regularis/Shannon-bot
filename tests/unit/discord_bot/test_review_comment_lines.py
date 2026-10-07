@@ -83,6 +83,52 @@ class TestWhoLeftIt:
         assert said(COMMENT).startswith("**monalisa**")
 
 
+BEEDWARE = Actor("beedware", 3001)
+NEMETH = Actor("nemeth06", 3002)
+REPLY = replace(COMMENT, in_reply_to_id=98765, replying_to=(BEEDWARE,))
+
+
+class TestWhoItAnswers:
+    """Issue #231. A reply names whoever wrote in its thread before it, which is who it rings."""
+
+    def test_a_reply_names_whoever_it_answers(self) -> None:
+        assert said(REPLY).startswith(
+            "**monalisa** replied to beedware on `shannon/services/notes.py` L205"
+        )
+
+    def test_somebody_linked_is_a_mention(self) -> None:
+        """The mention is what rings them. The allow-list beside it only permits that."""
+        assert "replied to <@3030> on" in said(REPLY, mentions={"beedware": 3030})
+
+    def test_everybody_it_answers_is_named_in_the_order_given(self) -> None:
+        line = said(replace(REPLY, replying_to=(BEEDWARE, NEMETH)), mentions={"nemeth06": 3131})
+
+        assert "replied to beedware, <@3131> on" in line
+
+    def test_a_name_it_answers_is_escaped_like_the_authors(self) -> None:
+        """A login is GitHub-authored text, wherever in the heading it goes."""
+        assert "replied to foo\\_bar on" in said(replace(REPLY, replying_to=(Actor("foo_bar"),)))
+
+    def test_a_comment_that_opens_a_thread_names_nobody_whatever_it_carries(self) -> None:
+        """`in_reply_to_id` is asked first, so nothing but a reply can name anybody."""
+        assert said(replace(REPLY, in_reply_to_id=None)).startswith("**monalisa** commented on")
+
+    def test_a_reply_with_no_path_still_names_them(self) -> None:
+        assert said(replace(REPLY, path="")) == "**monalisa** replied to beedware <t:1786444200:f>"
+
+    def test_ten_long_names_still_leave_room_for_the_body_and_the_link(self) -> None:
+        """The heading is the first block and a panel over budget drops from the end, so the
+        names it answers must not be able to push the comment out of its own message."""
+        crowd = tuple(Actor(f"{index:02d}" + "x" * 37) for index in range(10))
+        rendered = format_review_comment(
+            replace(REPLY, replying_to=crowd, path="a/" * 2000 + "module.py")
+        )
+
+        assert rendered.length() <= PANEL_BUDGET
+        assert rendered.blocks[1].text == "This claim wants giving back on cancellation too."
+        assert rendered.blocks[-1].text.endswith("#discussion_r1>")
+
+
 class TestWhatItCarries:
     def test_the_body_is_a_block_of_its_own_with_nothing_on_the_front_of_it(self) -> None:
         """Unquoted since issue #113. The rule above it is what separates somebody else's
