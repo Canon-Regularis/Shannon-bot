@@ -19,16 +19,23 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   keeps its words and gains the host it really goes to, so `click here` cannot be
   somewhere else. Headings are dropped, because a card built out of labels has one voice
   already.
-- **Comments and reviews.** Posted into the item's thread with a link back. An inline review
-  comment gets a message of its own naming the file and the line it sits on, and a reply says that
-  it is one. A review carrying nothing but inline notes posts no message of its own: GitHub wraps
-  every note on a diff in a review, so mirroring that wrapper says "left a review" with nothing
-  underneath it, once for every reply. Edits and deletions are not mirrored, so a thread records
-  what was said at the time.
+- **Comments and reviews.** Posted into the item's thread with a link back. Whoever wrote one is
+  named as a mention and not rung by it: they know what they wrote. An inline review comment gets
+  a message of its own naming the file and the line it sits on. A reply to one names whom it
+  answers - everybody who wrote in its thread before it, the opener first, apart from whoever is
+  replying, at most ten - and rings them where they are linked, so answering a review reaches the
+  reviewer and answering that answer reaches the author. GitHub is asked who they are when the
+  reply arrives, because the webhook names only the comment it was left under, so threads opened
+  before this work too. If GitHub cannot be reached, a reply waits up to half an hour after it was
+  written and then goes out without them; one GitHub refuses to answer for goes out at once. A
+  review carrying nothing but inline notes posts no message of its own: GitHub wraps every note on
+  a diff in a review, so mirroring that wrapper says "left a review" with nothing underneath it,
+  once for every reply. An edit rewrites the message it went out as and rings nobody; a deletion
+  is not mirrored.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
-  Anybody unlinked is still named in plain text. At most ten per comment are mentioned, because
-  without a limit one comment could ping every linked member of the server.
+  Anybody unlinked is still named in plain text. At most ten tags per comment are mentioned,
+  because without a limit one comment could ping every linked member of the server.
 - **Pings.** Reviewers and assignees are told once each, as mentions where the account is linked.
   The claim is taken before the message goes out and handed back if it fails. When a thread is
   first opened the metadata block carries those mentions and is a real message, so it is the
@@ -49,8 +56,9 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   passed, links the logs of the ones that did not, and rings the people who put the code there:
   the author, the assignees, and anybody with a commit on the pull request. Both outcomes reach
   the same people, because a green run is as much news as a red one to whoever pushed — including
-  you, for your own push, which is deliberate and is the one place this bot rings somebody for
-  their own action. A requested reviewer is not rung by CI; they are asked for a review instead.
+  you, for your own push, which is deliberate: nobody knows what CI makes of a push until it has,
+  while a comment or review you wrote tells you nothing new, so its message names you without
+  ringing you. A requested reviewer is not rung by CI; they are asked for a review instead.
   A merge commit names nobody, since its account is whoever pressed "Update branch" rather than
   whoever wrote anything. Said once per set of runs, so two CI apps on one commit produce one
   message, and not said at all until every job has stopped. A draft posts its results and rings
