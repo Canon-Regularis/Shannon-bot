@@ -7828,3 +7828,53 @@ feature end to end rather than assuming a predecessor the file never recorded.
   drop across the assignee list. Two tests about other things now have somebody else press the
   button, so they still check what they were for. Three comments that compared their own rules to
   this one are back to their pre-#161 words.
+
+## A reply on a diff rings whoever it answers
+
+- **Answering somebody's review reached nobody** (#231). On orthant-kcpc/kcpc-workshops#77
+  beedware asked for a change on a line and mkutay answered "done" in the thread. The mirrored
+  answer rang the names typed in it, which were none, and mkutay himself as its author - while
+  beedware, the one person it was for, heard nothing.
+- **Who a reply answers is asked of GitHub.** Its webhook names the comment the thread opened with
+  and nothing about who wrote it, and nothing here keeps a note's author, so the pull request's
+  inline comments are read when the reply arrives: everybody who wrote in the thread before it,
+  the opener first, once each, at most ten. No migration and no new permission - `Pull requests:
+  Read` is already granted - and threads opened before this work too.
+- **Named in the heading, where it rings.** ``**mkutay** replied to beedware on `W2.tex` L246``,
+  each linked person a mention and on the allow-list beside it. A member who ran `/mentions off`
+  is named and not rung.
+- **Both ways.** When beedware answers "done", the person being answered is mkutay, so he is the
+  one rung. A rule that rang only whoever opened the thread would have rung the person replying.
+- **Whoever is replying is left out**, which is #230's rule: they know what they wrote.
+- **Nobody is rung by their own note.** Comments, reviews and inline comments all put their author
+  on the allow-list as well as in the heading, so writing anything rang you. The author is still a
+  mention and is left off the allow-list by their Discord account, so naming yourself in the body
+  does not ring you either.
+- **An edit keeps it.** The thread is read again and the heading drawn again, and an edit rings
+  nobody, as before.
+- **When GitHub will not say.** A pull request it no longer has: the reply goes out at once,
+  naming nobody it answers. Unreachable or rate limited: a reply under half an hour old waits - the
+  delivery fails before anything is claimed and comes round again - and an older one goes out
+  without them, so a long outage costs the ping and never the reply. A refusal: the reply goes out
+  at once without them.
+- **A read that does not answer in time is an outage too.** A delivery has a deadline of its own,
+  sixty seconds by default, and a read that ran into it failed every attempt without ever being
+  asked how old the reply was - so a pull request with a long enough review could lose a reply
+  outright. The read now has half the deadline, and running out of it counts as GitHub being
+  unreachable. Found reviewing this change.
+- **GitHub being down while a token is minted is an outage, not a refusal.** A server error or a
+  429 from the token endpoint was raised as GitHub refusing the App's key, which every caller that
+  tells the two apart read as final: a young reply went out at once, ringing nobody, whenever its
+  token fell due during the outage; a command blamed the token; and the board poller wrote off a
+  card move it could have made on the next pass. Each is raised as what it is now. Also found
+  reviewing this change, and its own commit, since it is older than it.
+- **What it costs.** One paged read per reply and per edit of one. A comment that opens a thread,
+  an item nobody tracks and a thread not built yet ask GitHub nothing, and no database connection
+  is held during the read: finding the thread and resolving who to ring are now two sessions with
+  the read between them.
+- **Tests.** The test that pinned a comment's author on the allow-list is inverted, and the one
+  beside it now uses a third person, since the author can no longer carry it. New files cover who
+  a reply answers, where the read sits, and the whole path through the worker.
+- **The README** no longer says CI is "the one place this bot rings somebody for their own
+  action", which was already untrue - the opening block still rings its author, and assigning
+  yourself still rings you - or that edits are not mirrored, which stopped being true with #165.
