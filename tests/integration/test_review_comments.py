@@ -122,6 +122,28 @@ class TestWhatReachesTheThread:
 
         assert "<@606>" in inline_posts(threads)[-1]
 
+    async def test_whoever_left_it_is_named_and_not_rung(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """Issue #231, for the third of the three note kinds: the author of an inline comment
+        is a mention in its heading and is not rung by it."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=606
+        )
+        await db_session.commit()
+
+        await deliver(
+            tracked,
+            "pull_request_review_comment",
+            payloads.pull_request_review_comment_event(),
+            delivery="rc1",
+        )
+
+        kind, _, content, notify = threads.allowed[-1]
+        assert kind == "post" and "commented on" in content
+        assert content.startswith("**<@606>** commented on")
+        assert notify == ()
+
 
 class TestAnEditedInlineComment:
     async def test_it_rewrites_its_message_rather_than_posting_another(

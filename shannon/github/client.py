@@ -26,6 +26,7 @@ from shannon.domain.models import (
     IssueSnapshot,
     PullRequestSnapshot,
     RepositorySnapshot,
+    ReviewCommentSnapshot,
     ReviewSnapshot,
 )
 from shannon.github import mapping
@@ -168,11 +169,27 @@ class ReadsReviews(Protocol):
     ) -> Sequence[ReviewSnapshot] | None: ...
 
 
+class ReadsReviewComments(Protocol):
+    """Every inline comment on one pull request, which is how a reply finds whoever it answers.
+
+    Issue #231. A reply's webhook names the comment it was left under and nothing about who wrote
+    that, or who else has answered it since, and nothing here keeps a note's author - so GitHub is
+    asked, which also reaches the threads that were already open before anybody asked this.
+
+    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
+    """
+
+    async def list_review_comments(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewCommentSnapshot] | None: ...
+
+
 class GitHubClient(
     ListsOpenItems,
     LooksUpUsers,
     ReadsChecks,
     ReadsCommits,
+    ReadsReviewComments,
     ReadsReviews,
     ReadsWhoWroteIt,
     Protocol,
@@ -719,6 +736,35 @@ class HttpGitHubClient:
             # A pull request that is gone is gone, so retrying the delivery sixteen times over two
             # hours would spend them all on the same answer. Distinct from the empty list, which
             # is a pull request nobody has reviewed yet.
+            return None
+        return found
+
+    async def list_review_comments(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewCommentSnapshot] | None:
+        """Every inline comment on one pull request, oldest first as GitHub sends them. Issue #231.
+
+        The whole list rather than one thread of it, because GitHub has no endpoint for a thread:
+        a reply carries the id of the comment that opened its thread, and the caller picks that
+        thread out of everything here by it.
+
+        Paged, because a long review runs past one page and a half-read list is the shape in
+        which somebody being answered goes unrung with nothing saying so.
+
+        Each row is the same object a `pull_request_review_comment` delivery carries as its
+        `comment`, so `mapping.review_comment` reads both and the two cannot drift apart.
+        """
+        found: list[ReviewCommentSnapshot] = []
+        path = f"{_repository(repository.owner, repository.name)}/pulls/{number}/comments"
+        try:
+            async for body in self.get_pages(path, owner=repository.owner, per_page=LIST_PAGE_SIZE):
+                for row in body if is_json_list(body) else []:
+                    comment = mapping.review_comment(row, repository, item_number=number)
+                    if comment is not None:
+                        found.append(comment)
+        except GitHubNotFoundError:
+            # Final, for the reason `list_reviews` gives. Distinct from the empty list, which is a
+            # pull request with no inline comment on it at all.
             return None
         return found
 

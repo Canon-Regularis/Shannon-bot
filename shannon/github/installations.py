@@ -21,7 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.installations import InstallationStore
 from shannon.domain.json import is_json_list, is_json_object
 from shannon.github.app_auth import app_jwt
-from shannon.github.errors import GitHubAuthError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubRateLimitError,
+    GitHubUnavailableError,
+)
 from shannon.github.mapping import parse_timestamp
 from shannon.github.responses import json_object
 
@@ -390,6 +394,11 @@ class InstallationTokens:
         A 404 means the installation was removed between the directory read and this call, which
         is permanent and the same outcome as never having been installed. Everything else raises:
         a 401 is a key GitHub will not accept, and calling that "no installation" misdirects.
+
+        Raised as what it is, which a server error and a 429 are not: neither is GitHub refusing
+        the key. Filed as a refusal they read as final to every caller that tells the two apart -
+        a reply on a diff that waits out an unreachable GitHub went out at once instead, ringing
+        nobody, whenever its token happened to fall due during the outage (found reviewing #231).
         """
         response = await self._http.post(
             f"/app/installations/{installation}/access_tokens",
@@ -405,6 +414,16 @@ class InstallationTokens:
             # reinstall's new id is exactly the sort of answer discovery can now find.
             await self._directory.forget(installation)
             return ""
+        if response.status_code == 429:
+            delay = response.headers.get("retry-after", "")
+            raise GitHubRateLimitError(
+                f"GitHub is rate limiting installation tokens for {owner}",
+                retry_after=int(delay) if delay.isdigit() else None,
+            )
+        if response.status_code >= 500:
+            raise GitHubUnavailableError(
+                f"GitHub could not mint an installation token for {owner} ({response.status_code})"
+            )
         if response.status_code >= 400:
             raise GitHubAuthError(
                 f"GitHub refused an installation token for {owner} "

@@ -769,11 +769,30 @@ def format_review_comment(
     The diff hunk is left out on purpose. It is untrusted repository content several lines long,
     and `fit` drops lines from the end, so a hunk would be the first thing cut and would take the
     link back to GitHub down with it.
+
+    A reply names whoever it answers, in the heading, as mentions resolved off the same map as the
+    author's (issue #231). That is what rings them: an allow-list only permits a notification and
+    the `<@id>` text is what delivers one, and the heading is the one block a panel over budget
+    never drops.
     """
     assert isinstance(snapshot, ReviewCommentSnapshot)
-    verb = "replied" if snapshot.in_reply_to_id is not None else "commented"
+    verb = _replied(snapshot, mentions)
     where = _where(snapshot)
     return _note(snapshot, f"{verb} on {where}" if where else verb, mentions, roles)
+
+
+def _replied(snapshot: ReviewCommentSnapshot, mentions: Mapping[str, int] | None) -> str:
+    """Whether this opened a thread or answered one, and whom it answered. Issue #231.
+
+    `in_reply_to_id` is asked first, so only a reply can ever name anybody. A reply whose thread
+    could not be read, or that answers nobody but its own writer, says that it is one and stops
+    there - which is everything it said before anybody could be found.
+    """
+    if snapshot.in_reply_to_id is None:
+        return "commented"
+    if not snapshot.replying_to:
+        return "replied"
+    return f"replied to {_people(snapshot.replying_to, mentions)}"
 
 
 def _where(snapshot: ReviewCommentSnapshot) -> str:
@@ -932,9 +951,9 @@ def _note(
     to nobody and reads as broken rather than as an error.
 
     The names in the body are swapped in the quoted text and nowhere else. The line above it
-    carries a mention this bot built itself, live and never defused, and a GitHub login may be
-    all digits, so handing the assembled message to the swap would let `<@7>` be read as a name
-    and rewritten into somebody else.
+    carries mentions this bot built itself - the author, and on a reply whoever it answers - live
+    and never defused, and a GitHub login may be all digits, so handing the assembled message to
+    the swap would let `<@7>` be read as a name and rewritten into somebody else.
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 

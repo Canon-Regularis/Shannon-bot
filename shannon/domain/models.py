@@ -224,6 +224,12 @@ class CommentSnapshot:
     def note_key(self) -> str:
         return f"comment:{self.comment_id}"
 
+    @property
+    def replying_to(self) -> tuple[Actor, ...]:
+        """Nobody: GitHub threads nothing on the conversation tab, so a comment there answers
+        no comment in particular."""
+        return ()
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewSnapshot:
@@ -249,6 +255,11 @@ class ReviewSnapshot:
         return f"review:{self.review_id}"
 
     @property
+    def replying_to(self) -> tuple[Actor, ...]:
+        """Nobody: a review answers the pull request, not a comment on it."""
+        return ()
+
+    @property
     def verdict(self) -> str:
         return (self.state or "").lower()
 
@@ -270,10 +281,17 @@ class ReviewCommentSnapshot:
     line: int | None = None
     start_line: int | None = None
     original_line: int | None = None
-    # Set on a reply into an existing thread and absent on the comment that opened it.
+    # Set on a reply into an existing thread and absent on the comment that opened it. GitHub
+    # documents it as that opening comment, whichever comment in the thread the reply was typed
+    # under, because it keeps a review thread flat.
     in_reply_to_id: int | None = None
     author: Actor | None = None
     created_at: datetime | None = None
+    # Everybody who wrote in this reply's thread before it, apart from whoever is replying (issue
+    # #231). Never on the webhook, which names only the comment the thread opened with: the mirror
+    # fills it in from GitHub's own list of the thread, so a snapshot fresh off a payload carries
+    # nobody.
+    replying_to: tuple[Actor, ...] = ()
 
     # Fixed rather than passed in: the rebuild that mends a deleted thread branches on this field,
     # and its other arm reads the pull request as an issue, which GitHub serves happily and which
@@ -438,6 +456,14 @@ class ItemNote(Protocol):
     def html_url(self) -> str: ...
     @property
     def created_at(self) -> datetime | None: ...
+
+    @property
+    def replying_to(self) -> tuple[Actor, ...]:
+        """Whoever this note answers, which only a reply on a diff ever names. Issue #231.
+
+        Empty on the other two kinds, and on a reply nobody has read the thread of yet: no
+        webhook says, and the mirror fills it in before it resolves anybody."""
+        ...
 
     @property
     def note_key(self) -> str:

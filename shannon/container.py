@@ -83,6 +83,7 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.people import ItemPeople
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.review_threads import ReviewThreads
 from shannon.services.reviews import (
     EveryoneApprovedLine,
     ReviewRequestLedger,
@@ -368,6 +369,8 @@ def _event_router(
     github: GitHubClient,
     pr_sync: ItemSyncService,
     issue_sync: ItemSyncService,
+    *,
+    thread_read_within: timedelta,
 ) -> EventRouter:
     """Which GitHub events reach which handler.
 
@@ -384,10 +387,12 @@ def _event_router(
         the deletion is lost, and so is every one after it until an unrelated item event happens
         to arrive.
 
-        The only call to GitHub anywhere on the note path. It fires when a thread has actually
-        gone rather than on every comment, though a review round now gives it more chances to:
-        every inline comment on an item whose thread is missing arrives here, and only the first
-        of them spends a call, because the ones behind it find the thread that one built.
+        The rarest of the note path's calls to GitHub. It fires when a thread has actually gone
+        rather than on every comment, though a review round gives it more chances to: every
+        inline comment on an item whose thread is missing arrives here, and only the first of them
+        spends a call, because the ones behind it find the thread that one built. The other two
+        are deliberate and ordinary: a reply on a diff asks who it answers before it is posted
+        (issue #231), and an approval asks whether everybody has approved after it is (#155).
         """
         owner, _, name = note.repository.full_name.partition("/")
         if note.object_type is ObjectType.PR:
@@ -424,10 +429,16 @@ def _event_router(
         # GitHub manufactured.
         worth_posting=is_worth_a_message,
     )
-    # Its own mirror rather than a branch inside the comments one, because the renderer is the
-    # only thing that differs and the renderer is what this class takes injected.
+    # Its own mirror rather than a branch inside the comments one, because what differs is what
+    # this class takes injected: the renderer, and the read of who a reply answers (issue #231),
+    # which only a note on a diff can need and no other note may pay for.
     review_comments = ItemNoteMirror(
-        sessionmaker, threads, render=format_review_comment, rebuild=rebuild, shut_again=shut_again
+        sessionmaker,
+        threads,
+        render=format_review_comment,
+        rebuild=rebuild,
+        shut_again=shut_again,
+        answering=ReviewThreads(github, read_within=thread_read_within).answering,
     )
 
     router = EventRouter()
@@ -919,7 +930,16 @@ def build_container(
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
     queue = WebhookDeliveryQueue(sessionmaker)
-    event_router = _event_router(sessionmaker, threads, github, pr_sync, issue_sync)
+    event_router = _event_router(
+        sessionmaker,
+        threads,
+        github,
+        pr_sync,
+        issue_sync,
+        # Half of what a delivery is given, so a slow read of a reply's thread leaves the claim
+        # and the post their room, and lowering the deadline cannot leave the read outlasting it.
+        thread_read_within=timedelta(seconds=settings.worker_delivery_timeout_seconds / 2),
+    )
     # Built here rather than inside `_commands`, because three things hold it: the two commands,
     # the gateway listener that fills it with what people say, and the process that has to load
     # its set before the gateway connects.

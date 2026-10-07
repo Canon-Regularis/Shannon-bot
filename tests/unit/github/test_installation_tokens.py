@@ -23,7 +23,11 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from shannon.github.errors import GitHubAuthError
+from shannon.github.errors import (
+    GitHubAuthError,
+    GitHubRateLimitError,
+    GitHubUnavailableError,
+)
 from shannon.github.installations import (
     MAX_INSTALLATION_PAGES,
     REFRESH_MARGIN,
@@ -959,12 +963,47 @@ class TestWhenThereIsNothingToMintAgainst:
             with pytest.raises(GitHubAuthError, match="id and private key"):
                 await tokens.token_for("octocat")
 
-    async def test_github_being_down_raises_rather_than_reading_as_uninstalled(self) -> None:
+    @pytest.mark.parametrize("status", [500, 502, 503])
+    async def test_github_being_down_is_an_outage_rather_than_a_refusal(self, status: int) -> None:
+        """Raised, so it does not read as uninstalled, and raised as GitHub being unreachable
+        rather than as a refused key: a caller that waits out an outage has to be able to tell.
+        Found reviewing #231, where a reply holding out for GitHub went out at once instead."""
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(500)
+            return httpx.Response(status)
 
         async with minting(handler) as tokens:
-            with pytest.raises(GitHubAuthError):
+            with pytest.raises(GitHubUnavailableError, match=str(status)):
+                await tokens.token_for("octocat")
+
+    async def test_a_rate_limited_mint_says_when_to_come_back(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, headers={"retry-after": "30"})
+
+        async with minting(handler) as tokens:
+            with pytest.raises(GitHubRateLimitError) as raised:
+                await tokens.token_for("octocat")
+
+        assert raised.value.retry_after == 30
+
+    async def test_a_rate_limited_mint_with_no_wait_given_is_still_a_rate_limit(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429)
+
+        async with minting(handler) as tokens:
+            with pytest.raises(GitHubRateLimitError) as raised:
+                await tokens.token_for("octocat")
+
+        assert raised.value.retry_after is None
+
+    async def test_a_forbidden_mint_is_still_a_refusal(self) -> None:
+        """Only the server errors and the 429 moved. A 403 is GitHub turning the key away."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, content=json.dumps({"message": "Forbidden"}))
+
+        async with minting(handler) as tokens:
+            with pytest.raises(GitHubAuthError, match="id and private key"):
                 await tokens.token_for("octocat")
 
 

@@ -22,7 +22,7 @@ from shannon.domain.json import JsonObject
 from shannon.domain.models import ItemNote
 from shannon.github.mentions import names_a_note_writes
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
-from shannon.services.locating import in_its_thread
+from shannon.services.locating import ItemInThread, in_its_thread
 from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,14 @@ Renderer = Callable[[ItemNote, Mapping[str, int], Mapping[str, int]], Panel]
 # Rebuilding reads the item from GitHub and puts it through the ordinary sync.
 Rebuild = Callable[[ItemNote], Awaitable[None]]
 NoteParser = Callable[[str, JsonObject], ItemNote | None]
-# Optional: only one of the three mirrors carries a note that can arrive meaning nothing.
+# Optional: two of the three mirrors decline some notes - a review wrapping nothing but inline
+# comments, and a transcript this bot published itself.
 WorthPosting = Callable[[ItemNote], bool]
 Follow = Callable[[ItemNote], Awaitable[None]]
+# Optional, and given to one mirror alone: only a reply on a diff answers anybody in particular,
+# and finding out who is a read from GitHub the other two must never pay for (issue #231). Handed
+# the note and answering with it filled in, so the renderer keeps the three arguments it takes.
+Answering = Callable[[ItemNote], Awaitable[ItemNote]]
 
 
 class MirrorsNotes(Protocol):
@@ -70,6 +75,7 @@ class ItemNoteMirror:
         rebuild: Rebuild | None = None,
         shut_again: KeepsThreadsShut,
         worth_posting: WorthPosting | None = None,
+        answering: Answering | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._threads = threads
@@ -77,6 +83,7 @@ class ItemNoteMirror:
         self._rebuild = rebuild
         self._shut_again = shut_again
         self._worth_posting = worth_posting
+        self._answering = answering
 
     async def mirror(self, snapshot: ItemNote, *, edited: bool = False) -> bool:
         """Post the note, returning whether it belonged to anything mirrored here.
@@ -91,8 +98,8 @@ class ItemNoteMirror:
         the comment is.
         """
         try:
-            target = await self._find_thread(snapshot)
-            if target is None:
+            found = await self._locate(snapshot)
+            if found is None:
                 return False
             if self._worth_posting is not None and not self._worth_posting(snapshot):
                 logger.info(
@@ -103,6 +110,14 @@ class ItemNoteMirror:
                 # No claim is taken, so a later decision to post these would replay them all
                 # rather than find them recorded as mirrored.
                 return True
+            if self._answering is not None:
+                # Between the two sessions rather than inside either, so no connection is held
+                # while GitHub is read (issue #231). After the thread is found, so a note on an
+                # item nobody tracks costs no call; before the claim, so anything it raises sends
+                # the delivery round again with nothing taken. On an edit as well, because the
+                # heading is drawn again and would otherwise stop saying whom it answered.
+                snapshot = await self._answering(snapshot)
+            target = await self._audience(snapshot, found)
             return await self._post(snapshot, target, edited=edited)
         except ItemNotReadyError:
             # Both ways of having nowhere to post arrive here: a thread never built, and one
@@ -112,52 +127,66 @@ class ItemNoteMirror:
             await self._ask_for_a_rebuild(snapshot)
             raise
 
-    async def _find_thread(self, snapshot: ItemNote) -> _NoteTarget | None:
+    async def _locate(self, snapshot: ItemNote) -> ItemInThread | None:
         """Find where a note should be posted, or `None` to end the delivery for good.
 
         A tracked item with no thread yet raises `ItemNotReadyError`, so the delivery is retried.
         """
         async with self._sessionmaker() as session:
-            found = await in_its_thread(
+            return await in_its_thread(
                 session,
                 repository=snapshot.repository,
                 number=snapshot.item_number,
                 object_type=snapshot.object_type,
                 about="a note",
             )
-            if found is None:
-                return None
 
-            # Read from the very string the renderer swaps names in, and through the very same
-            # function. The preview is cut mid-word, so the raw body would name `monalisa` where
-            # the renderer is handed `mona` - and since issue #166 the two differ by more than the
-            # escaping, because the rich conversion strips HTML comments and image markup before it
-            # cuts, so the window lands somewhere else entirely.
-            #
-            # One function for the text, and one for how to read it. A name that one of these
-            # sees and the other does not renders exactly as an unlinked name renders, and nothing
-            # anywhere reports a mention that was owed and never made - so neither the string nor
-            # the rule for reading it is spelled out twice. `names_a_note_writes` is paired with
-            # the `rewrite_a_note` the renderer calls.
-            named = names_a_note_writes(as_note_text(snapshot.body))
+    async def _audience(self, snapshot: ItemNote, found: ItemInThread) -> _NoteTarget:
+        """Who the note names, and which of them it may ring.
 
-            # The author last: `resolve_many` lowercases into a fresh mapping, so the last entry
-            # for a name wins and the author's is the one carrying a GitHub id. That id is what
-            # the changed-hands check runs on, so a self-mention must not take the unverified one.
-            people: dict[str, int | None] = dict.fromkeys(named.people, None)
-            if snapshot.author:
-                people[snapshot.author.login] = snapshot.author.github_user_id
+        Its own session rather than the one that found the thread, because what an inline reply
+        answers is read from GitHub in between, and no connection is held across that.
+        """
+        # Read from the very string the renderer swaps names in, and through the very same
+        # function. The preview is cut mid-word, so the raw body would name `monalisa` where the
+        # renderer is handed `mona` - and since issue #166 the two differ by more than the
+        # escaping, because the rich conversion strips HTML comments and image markup before it
+        # cuts, so the window lands somewhere else entirely.
+        #
+        # One function for the text, and one for how to read it. A name that one of these sees
+        # and the other does not renders exactly as an unlinked name renders, and nothing anywhere
+        # reports a mention that was owed and never made - so neither the string nor the rule for
+        # reading it is spelled out twice. `names_a_note_writes` is paired with the
+        # `rewrite_a_note` the renderer calls.
+        named = names_a_note_writes(as_note_text(snapshot.body))
 
+        # Three sources, in an order that is load-bearing: `resolve_many` lowercases into a fresh
+        # mapping, so the last entry for a name wins, and the changed-hands check runs on the
+        # GitHub id that entry carries. A name the body writes has none, so it goes first and is
+        # overwritten by anything that does: whoever an inline reply answers, with the ids GitHub
+        # listed them under (issue #231), and then the author, last, so a self-mention cannot
+        # take the unverified entry either.
+        people: dict[str, int | None] = dict.fromkeys(named.people, None)
+        people.update({person.login: person.github_user_id for person in snapshot.replying_to})
+        if snapshot.author:
+            people[snapshot.author.login] = snapshot.author.github_user_id
+
+        async with self._sessionmaker() as session:
             links = UserLinkStore(session)
             mentions = await links.resolve_many(guild_id=found.guild_id, people=people)
             # No empty-mapping guard: both stores answer one without asking the database.
             roles = await TeamLinkStore(session).resolve_many(
                 guild_id=found.guild_id, people=dict.fromkeys(named.teams, None)
             )
-            # The same map the renderer swaps names in, so the allow-list covers both halves of
-            # a note: the author in the header line and every `@login` in the quoted body.
+            # The same map the renderer swaps names in, so one allow-list covers both halves of a
+            # note - the header line and every `@login` in the body - and leaves out one account
+            # on purpose. Whoever wrote the note is named in it and not rung by it (issue #231):
+            # they know what they wrote. By the Discord account rather than the login, so naming
+            # yourself in your own comment does not ring you either.
+            wrote_it = mentions.get(snapshot.author.login.lower()) if snapshot.author else None
             notify = await MutedMemberStore(session).may_be_pinged(
-                guild_id=found.guild_id, ids=mentions.values()
+                guild_id=found.guild_id,
+                ids=(account for account in mentions.values() if account != wrote_it),
             )
             return _NoteTarget(
                 tracked_item_id=found.tracked_item_id,
@@ -247,9 +276,11 @@ class ItemNoteMirror:
     async def _revise(self, snapshot: ItemNote, target: _NoteTarget) -> bool:
         """Rewrite the message this note already went out as. Issue #165.
 
-        Rendered from the CURRENT maps, which `_find_thread` built from the body this delivery
+        Rendered from the CURRENT maps, which `_audience` built from the body this delivery
         carries - so a name that has been linked to a Discord account since the original post
-        resolves now, and the edited comment shows the tag the original could not.
+        resolves now, and the edited comment shows the tag the original could not. A reply on a
+        diff has its thread read again for the same reason, so the heading keeps saying whom it
+        answered (issue #231).
 
         Nobody is pinged, and nothing here chooses that: Discord sends no notification for an edit
         whatever the content says. It is the whole reason this is an edit rather than a replacement
@@ -375,9 +406,12 @@ def build_note_handler(
     it is rather than by convenience.
 
     `then` runs before. A submitted review is the only note that means something beyond its own
-    text: it closes the request that asked for it. Database work only — the mirror's post is the
-    one thing here that does not need GitHub, and a hook that reached for it would make a GitHub
-    outage cost the review line itself.
+    text: it closes the request that asked for it. Database work only — a review line needs
+    nothing from GitHub to be posted, and a hook that reached for it would make a GitHub outage
+    cost the line itself. The one mirror that does read GitHub before it posts is the inline one,
+    for who a reply answers (issue #231), and that read is the mirror's own rather than a hook's:
+    made after the thread is found and before the claim, it holds back one young reply for a
+    GitHub that is briefly down, and nothing beside it.
 
     `after` runs once the note is in the thread, so anything it says lands underneath the note
     rather than above it. Issue #155: a round-up saying every review has come back approving is

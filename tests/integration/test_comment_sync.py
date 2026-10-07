@@ -490,6 +490,31 @@ class TestReviewMirroring:
 
         assert "<@606>" in threads.posts[-1][1]
 
+    async def test_a_reviewer_is_named_and_not_rung_by_their_own_review(
+        self, tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+    ) -> None:
+        """Issue #231, for the second of the three note kinds. Asking for changes rather than
+        approving, so the round-up an approval can post is not there to be read instead."""
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="monalisa", github_user_id=200, discord_user_id=606
+        )
+        await db_session.commit()
+
+        await deliver(
+            tracked,
+            "pull_request_review",
+            payloads.pull_request_review_event(state="changes_requested"),
+            delivery="r1",
+        )
+
+        [(content, notify)] = [
+            (content, notify)
+            for kind, _, content, notify in threads.allowed
+            if kind == "post" and "requested changes" in content
+        ]
+        assert "<@606>" in content
+        assert notify == ()
+
     async def test_a_review_on_an_untracked_pull_request_is_ignored(
         self, tracked: AsyncClient, threads: FakeThreadGateway
     ) -> None:

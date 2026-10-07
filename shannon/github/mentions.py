@@ -21,7 +21,9 @@ Render = Callable[[str], str | None]
 # How many distinct names in one body are worth answering, in either direction. Without a limit
 # anyone who can comment on the repository reaches every linked member of the server: a message
 # trimmed to Discord's limit carried eighty-two live pings when it was measured. Names beyond the
-# limit are still shown as written; what they lose is the notification.
+# limit are still shown as written; what they lose is the notification. It also caps how many
+# people a reply on a diff is said to answer (issue #231), for the same reason from the other end:
+# a thread long enough would otherwise ring everybody who ever wrote in it.
 MENTION_LIMIT = 10
 
 # GitHub's own rule, narrower than "letters, digits and hyphens": a login may not begin or end
