@@ -30,6 +30,7 @@ pytestmark = pytest.mark.integration
 
 ALICE = 909
 BOB = 808
+CAROL = 707
 ROLE = 777000
 
 
@@ -91,11 +92,13 @@ async def test_a_name_typed_in_a_comment_is_a_mention_that_does_not_notify(
     assert notify == ()
 
 
-async def test_the_author_of_a_comment_is_on_the_list_unless_they_muted(
+async def test_the_author_of_a_comment_is_named_and_not_rung(
     tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
-    """The header line mentions whoever wrote the comment, off the same map as the body, so both
-    halves of a note are covered by one allow-list or neither is."""
+    """Issue #231. The header line mentions whoever wrote the comment, off the same map as the
+    body, and the allow-list leaves them out: they know what they wrote. Still a mention, so the
+    thread shows who said it and clicking the name finds them - the treatment `/mentions off`
+    gives a member who asked for it, given to every author for their own words."""
     await link(db_session, "monalisa", account=200, discord=BOB)
 
     await deliver(
@@ -104,27 +107,52 @@ async def test_the_author_of_a_comment_is_on_the_list_unless_they_muted(
 
     content, notify = last_note(threads)
     assert f"<@{BOB}>" in content
-    assert notify == (BOB,)
+    assert notify == ()
+
+
+async def test_an_author_naming_themselves_is_not_rung_either(
+    tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
+) -> None:
+    """Left out by the Discord account rather than by where the mention sits, so `@monalisa`
+    typed by monalisa reaches the same account through the body and is refused there too."""
+    await link(db_session, "monalisa", account=200, discord=BOB)
+
+    await deliver(
+        tracked,
+        "issue_comment",
+        payloads.issue_comment_event(body="as @monalisa said last week"),
+        delivery="c1",
+    )
+
+    content, notify = last_note(threads)
+    assert content.count(f"<@{BOB}>") == 2, "the header and the body should both name her"
+    assert notify == ()
 
 
 async def test_somebody_else_named_in_the_same_comment_is_unaffected(
     tracked: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:
-    """One person going quiet must not take the other's ping with them."""
+    """One person going quiet must not take the other's ping with them.
+
+    Three people in one message, one of each kind: `hubot` muted, `monalisa` the author, and
+    `octocat` neither. Only the last is rung. The second used to carry this test, and since issue
+    #231 an author is never rung by their own comment, so on their own they would prove nothing.
+    """
     await link(db_session, "hubot", account=100, discord=ALICE)
     await link(db_session, "monalisa", account=200, discord=BOB)
+    await link(db_session, "octocat", account=583231, discord=CAROL)
     await mute(db_session, ALICE)
 
     await deliver(
         tracked,
         "issue_comment",
-        payloads.issue_comment_event(body="@hubot and I looked at this"),
+        payloads.issue_comment_event(body="@hubot and @octocat looked at this"),
         delivery="c1",
     )
 
     content, notify = last_note(threads)
-    assert f"<@{ALICE}>" in content and f"<@{BOB}>" in content
-    assert notify == (BOB,)
+    assert all(f"<@{account}>" in content for account in (ALICE, BOB, CAROL))
+    assert notify == (CAROL,)
 
 
 async def test_a_team_named_in_a_comment_still_pings_the_role(
