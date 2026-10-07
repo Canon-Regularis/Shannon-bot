@@ -33,7 +33,8 @@ class MutedMemberStore:
         Deduped although `user_links` is unique on the Discord account within a guild, so one
         item's mentions cannot repeat one; sorted so a test can assert on a literal. No cap here:
         Discord refuses more than a hundred entries, and GitHub bounds most callers well under,
-        allowing ten assignees and fifteen requested reviewers while a comment mentions ten.
+        allowing ten assignees and fifteen requested reviewers while a comment mentions ten - and
+        a reply on a diff at most ten more it answers (issue #231).
 
         One caller is NOT bounded by GitHub, and caps itself instead. A CI result rings everybody
         with a commit on the pull request (issue #164), and a long-lived branch can carry work
