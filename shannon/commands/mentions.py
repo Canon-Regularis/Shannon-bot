@@ -32,11 +32,16 @@ _OFF = (
     "that tags you, as a mention this bot will not ring."
 )
 
-# Said wherever mentions are off: `<@&id>` reaches everybody holding the role, and Discord
-# offers no way to leave one person out of one.
-_ROLES_STILL_REACH_YOU = (
-    " One thing this cannot turn off: a review asked of a GitHub team is a ping of the whole "
-    "Discord role, and Discord gives nobody a way to leave one person out of one."
+# Said wherever mentions are off, and each thing it lists rings whatever this says. `<@&id>` reaches
+# everybody holding the role, and Discord offers no way to leave one person out of one. The other
+# two are somebody asking for you by name, not this bot reporting on an item. Counted since issue
+# #229, so a fourth goes in here or the count is wrong.
+_STILL_REACHES_YOU = (
+    " Three things still reach you. A GitHub team linked to a Discord role pings the whole role "
+    "when it is asked for a review or tagged in a comment, and Discord gives nobody a way to leave "
+    "one person out of one. Somebody running /link @you pings you to ask you to link your GitHub "
+    "account. And a reminder set for you with /remind rings you when it goes off, because ringing "
+    "you is what it was set for."
 )
 
 
@@ -77,7 +82,7 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
                 wanted=wanted,
             )
 
-        said = _ON if wanted else _OFF + _ROLES_STILL_REACH_YOU
+        said = _ON if wanted else _OFF + _STILL_REACHES_YOU
         # Reading the setting carries no mark. The three of them say what became of a change
         # and this made none; a tick on an answer to a question would be claiming one.
         await reply(interaction, Panel.of_text(said) if state is None else done(said))

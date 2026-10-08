@@ -66,6 +66,22 @@ class TestTurningThemOff:
 
         assert "Discord role" in interaction.reply
 
+    async def test_the_reply_says_a_reminder_still_rings_them(self) -> None:
+        """A reminder is somebody asking for them by name, so it rings whatever they chose here,
+        and finding that out from a ping after asking for quiet is worse. Issue #229."""
+        interaction = await run(StubPreferences(), "off")
+
+        assert "a reminder set for you with /remind rings you" in interaction.reply
+
+    async def test_the_reply_counts_everything_that_still_rings_them(self) -> None:
+        """Found reviewing #229. The count is a promise: `/link @you` rings them as well, and a
+        reply that said two would have them pinged by a third thing they were told was not
+        coming."""
+        interaction = await run(StubPreferences(), "off")
+
+        assert "Three things still reach you." in interaction.reply
+        assert "Somebody running /link @you pings you" in interaction.reply
+
 
 class TestTurningThemOn:
     async def test_it_records_the_choice(self) -> None:
