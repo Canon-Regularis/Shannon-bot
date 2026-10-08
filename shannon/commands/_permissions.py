@@ -29,6 +29,10 @@ WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 # be described by a list of names, so this stays a list of commands anybody may run whatever they
 # type, and `/link`'s own tests hold the tier.
 #
+# `/remind` has `/link`'s shape since issue #229, for `/link`'s reason: reminding yourself needs no
+# role, and reminding somebody else has this bot ping them in public on your say-so. Its own tests
+# hold the tier.
+#
 # `/board` is the same shape since issue #201: four of its halves are gated and `withdraw` is not,
 # because deleting a credential that is yours must not depend on a role you may since have lost.
 # So it keeps its gate too, and its own tests hold the tiers. `/authorise_board` used to sit in

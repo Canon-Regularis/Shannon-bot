@@ -29,6 +29,7 @@ from shannon.github.errors import (
 )
 from shannon.services.boards import BoardNotLinkedError, BoardUnreadableError
 from shannon.services.linking import InvalidGitHubTeamError
+from shannon.services.reminders.book import TooManyRemindersError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.sync.one_at_a_time import ItemBusyError
 from shannon.services.transcripts.log import (
@@ -103,6 +104,8 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (AlreadyLoggingError, "{message}"),
     (NotLoggingError, "{message}"),
     (CannotLogError, "{message}"),
+    # Says how many may wait and what makes room for another. Issue #229.
+    (TooManyRemindersError, "{message}"),
 )
 
 # Said when nothing above matches. Vague on purpose: what went wrong is a bug or an outage.
@@ -128,6 +131,8 @@ _COMES_RIGHT: tuple[type[ShannonError], ...] = (
     GitHubRateLimitError,
     ItemNotReadyError,
     ItemBusyError,
+    # A reminder going off makes room for the next one.
+    TooManyRemindersError,
 )
 
 
