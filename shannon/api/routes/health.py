@@ -24,6 +24,8 @@ class Liveness(Protocol):
 
     def flusher_running(self) -> bool: ...
 
+    def reminders_running(self) -> bool: ...
+
 
 class HealthResponse(BaseModel):
     healthy: bool
@@ -32,6 +34,7 @@ class HealthResponse(BaseModel):
     bot: bool
     poller: bool
     flusher: bool
+    reminders: bool
     # Which commit is answering: a change that was merged and never pulled reads from outside
     # exactly like a change that does not work.
     version: str
@@ -59,6 +62,7 @@ async def health(request: Request, response: Response) -> HealthResponse:
             bot=True,
             poller=True,
             flusher=True,
+            reminders=True,
             version=build,
         )
 
@@ -67,10 +71,12 @@ async def health(request: Request, response: Response) -> HealthResponse:
     bot = liveness.bot_connected()
     poller = liveness.poller_running()
     flusher = liveness.flusher_running()
+    reminders = liveness.reminders_running()
 
-    # The board is reported without being counted: webhooks still arrive and threads are still
-    # written without it, so failing the check would have an orchestrator restart a working
-    # process. The poller is the only task with nothing wired to halt the process when it dies.
+    # The board, the flusher and the reminder sender are reported without being counted: webhooks
+    # still arrive and threads are still written without them, so failing the check would have an
+    # orchestrator restart a working process. None of the three has anything wired to halt the
+    # process when it dies, which is why each is reported at all.
     healthy = database and worker and bot
 
     if not healthy:
@@ -79,12 +85,14 @@ async def health(request: Request, response: Response) -> HealthResponse:
     elif not poller:
         logger.warning("the board is no longer being read, though everything else is working")
 
-    # Its own line, so the log says which of the two uncounted tasks went.
+    # Each its own line, so the log says which of the uncounted tasks went.
     if healthy and not flusher:
         logger.warning(
             "captured conversations are no longer being published, though everything else "
             "is working"
         )
+    if healthy and not reminders:
+        logger.warning("reminders are no longer being sent, though everything else is working")
 
     return HealthResponse(
         healthy=healthy,
@@ -93,5 +101,6 @@ async def health(request: Request, response: Response) -> HealthResponse:
         bot=bot,
         poller=poller,
         flusher=flusher,
+        reminders=reminders,
         version=build,
     )

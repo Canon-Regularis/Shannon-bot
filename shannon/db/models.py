@@ -42,6 +42,9 @@ COLUMN_WIDTH = 128
 TRANSCRIPT_LINE_WIDTH = 4000
 # A Discord global name and a per-server nickname are 32 characters each; the rest is slack.
 DISPLAY_NAME_WIDTH = 128
+# What `/remind` takes as its message. The command's own option is held to this by Discord, so
+# the column cuts nothing a command could carry (issue #229).
+REMINDER_MESSAGE_WIDTH = 500
 
 
 class Repository(TimestampMixin, Base):
@@ -652,3 +655,52 @@ class LoggedMessage(TimestampMixin, Base):
     # measured against it, so a flush held up by an outage does not read as a thread that went
     # quiet and publish the moment the outage ends.
     said_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Reminder(TimestampMixin, Base):
+    """One ping somebody asked for, waiting for its time to come. Issue #229.
+
+    A row rather than a task sleeping in memory, because the request has to outlive the process
+    that was asked it: a reminder can be a year away, and a deploy, a crash or a restart in between
+    would otherwise lose every one set before it, with nothing to say so.
+
+    Deleted once it has gone out, or been given up on, so the table is the queue and nothing else:
+    what is in it is what is still owed. `logged_messages` is emptied the same way and for the same
+    reason - a row that has done its job is only a copy of somebody's words.
+
+    The claim is a lease. `claimed_at` says when a sender took the reminder, and one older than the
+    retry window belongs to a sender that stopped before finishing it. So a reminder goes out at
+    least once rather than at most once: a process dying between Discord taking the post and the
+    row being deleted sends it again, which is visible and harmless, where a lost reminder is
+    neither.
+
+    No foreign keys. The server, the channel and both people are Discord's, and nothing here owns
+    them.
+    """
+
+    __tablename__ = "reminders"
+    __table_args__ = (
+        # The sender's one question, asked every tick: what is due, earliest first.
+        Index("ix_reminders_due_at", "due_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discord_guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Where /remind was run, which is where it goes off: a channel, or a thread in one.
+    discord_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Who is rung.
+    discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Who asked for it: the same person, for a reminder somebody set for themselves.
+    set_by_discord_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Null for a reminder set with nothing to say.
+    message: Mapped[str | None] = mapped_column(String(REMINDER_MESSAGE_WIDTH), nullable=True)
+    # The application's clock rather than the database's, as `LoggedConversation.started_at` is,
+    # so a test can move it.
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The send in flight. Null while nothing holds it.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Sends Discord would not take, to bound one it never will.
+    failed_attempts: Mapped[int] = mapped_column(
+        nullable=False, server_default=text("0"), default=0
+    )

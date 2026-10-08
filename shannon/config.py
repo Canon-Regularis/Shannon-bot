@@ -186,6 +186,9 @@ class Settings(BaseSettings):
     conversation_quiet_seconds: float = Field(default=60.0, gt=0)
     # How often the flusher looks; most passes are one grouped query that finds nothing.
     conversation_flush_tick_seconds: float = Field(default=5.0, gt=0)
+    # How often the reminder sender looks for one that has fallen due. Reminders are set to the
+    # minute, so anything well under sixty sends each on time. Issue #229.
+    reminder_tick_seconds: float = Field(default=5.0, gt=0)
 
     @field_validator("log_level")
     @classmethod

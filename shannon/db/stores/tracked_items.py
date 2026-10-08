@@ -123,9 +123,10 @@ class TrackedItemStore:
     async def get_by_thread(self, discord_thread_id: int) -> TrackedItem | None:
         """Find the item a Discord thread belongs to.
 
-        For the workflow commands, which take no argument and act on the thread they are run in.
-        Nothing else looks an item up this way, so the column carries no index: one row per
-        thread and a handful of commands a day.
+        For the workflow commands, which take no argument and act on the thread they are run in,
+        for letting go of a thread somebody deleted, and for a reminder going off in a thread that
+        is an item's (issue #229). Indexed since `0024`, because `/label` asks it on every keystroke
+        inside the three seconds Discord allows an autocomplete.
         """
         found: TrackedItem | None = await self._session.scalar(
             select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)

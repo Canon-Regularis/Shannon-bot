@@ -34,6 +34,7 @@ from shannon.discord_bot.formatting import (
     format_comment,
     format_issue,
     format_pull_request,
+    format_reminder,
     thread_name,
 )
 from shannon.discord_bot.panels import PANEL_BUDGET, BlockKind
@@ -757,3 +758,43 @@ class TestNothingTypedBecomesAMention:
         published = one_message(said)
 
         assert not re.search(r"(?<![\w/])@[A-Za-z0-9]", published)
+
+
+class TestNothingInAReminderRingsAnybodyElse:
+    """Issue #229. A reminder is posted for the whole channel and carries somebody's own words, so
+    the only live mentions it may hold are the two this bot wrote: the person it is for, and
+    whoever asked for it.
+
+    Every draw holds a hazard, spliced in by construction and joined on newlines for the reason
+    `said_by_anybody` gives - including the two ids that ARE allowed live, typed into the message,
+    which the body block must defuse like any other.
+    """
+
+    _HAZARDS = st.sampled_from(
+        ("<@7>", "<@!7>", "<@&7>", "<#7>", "@everyone", "@here", "<@20>", "<@10>")
+    )
+    messages = st.builds(
+        lambda one, rest: "\n".join([*rest[::2], one, *rest[1::2]])[:500],
+        _HAZARDS,
+        st.lists(text, max_size=4),
+    )
+
+    @given(messages, st.booleans())
+    @settings(max_examples=200)
+    def test_the_only_live_mentions_are_the_ones_this_bot_wrote(
+        self, message: str, somebody_else_asked: bool
+    ) -> None:
+        set_by = 10 if somebody_else_asked else 20
+        when = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
+
+        card = format_reminder(
+            member_id=20, set_by=set_by, set_at=when, due_at=when, message=message, late=True
+        )
+        body = next((block.text for block in card.blocks if block.kind is BlockKind.BODY), "")
+
+        assert set(re.findall(r"<@!?(\d+)>", card.text)) <= {"20", str(set_by)}
+        assert not re.search(r"<@!?\d+>", body), "a mention typed into the message is live"
+        assert not re.search(r"<@&\d+>", card.text), "a role mention is live"
+        assert not re.search(r"<#\d+>", card.text), "a channel mention is live"
+        assert "@everyone" not in card.text
+        assert "@here" not in card.text

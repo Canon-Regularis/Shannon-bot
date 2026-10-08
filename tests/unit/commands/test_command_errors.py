@@ -24,6 +24,7 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
+from shannon.services.reminders.book import TooManyRemindersError
 from tests.fakes.discord_objects import FakeInteraction
 
 
@@ -143,6 +144,7 @@ class TestTheColourOfARefusal:
         [
             GitHubRateLimitError("slow down", retry_after=60),
             ItemNotReadyError("still being set up"),
+            TooManyRemindersError("One has to go off before you can set another."),
         ],
     )
     def test_one_that_comes_right_on_its_own_is_amber(self, error: Exception) -> None:

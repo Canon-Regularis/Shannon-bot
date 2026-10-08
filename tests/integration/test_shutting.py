@@ -129,3 +129,57 @@ async def test_a_thread_that_is_gone_is_the_same_answer(
     await KeepsThreadsShut(db_sessionmaker, threads).again(
         tracked_item_id=result.tracked_item_id, thread_id=result.thread_id
     )
+
+
+class TestAfterAPostThatKnowsOnlyWhereItWent:
+    """Issue #229. A reminder goes off wherever it was asked for and carries only the id, which
+    may be an item's thread or a plain channel."""
+
+    async def test_a_shut_items_thread_is_shut_again(
+        self,
+        registered: Repository,
+        issue_service: ItemSyncService,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        """Asked for in the thread while the item was open; gone off after it closed."""
+        result = await issue_service.sync(issue_event("opened"))
+        await issue_service.sync(issue_event("closed", **CLOSED))
+        threads.threads[result.thread_id].archived = False
+        asked = len(threads.shut_calls)
+
+        await KeepsThreadsShut(db_sessionmaker, threads).after_posting_in(
+            channel_id=result.thread_id
+        )
+
+        assert threads.shut_calls[asked:] == [(result.thread_id, True)]
+        assert threads.threads[result.thread_id].archived is True
+
+    async def test_an_open_items_thread_is_left_alone(
+        self,
+        registered: Repository,
+        issue_service: ItemSyncService,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        issue_event,
+    ) -> None:
+        result = await issue_service.sync(issue_event("opened"))
+        asked = len(threads.shut_calls)
+
+        await KeepsThreadsShut(db_sessionmaker, threads).after_posting_in(
+            channel_id=result.thread_id
+        )
+
+        assert threads.shut_calls[asked:] == []
+
+    async def test_a_plain_channel_costs_no_call(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """No item has it as its thread, so there is nothing to put back."""
+        await KeepsThreadsShut(db_sessionmaker, threads).after_posting_in(channel_id=424242)
+
+        assert threads.shut_calls == []

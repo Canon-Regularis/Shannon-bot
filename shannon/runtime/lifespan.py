@@ -55,6 +55,8 @@ class ProcessParts(Protocol):
     @property
     def flusher(self) -> FlushesTranscripts: ...
     @property
+    def reminders(self) -> SendsReminders: ...
+    @property
     def verification(self) -> GitHubIdentityVerification | None: ...
 
     async def aclose(self) -> None: ...
@@ -97,6 +99,18 @@ class FlushesTranscripts(Protocol):
     """
 
     async def run_forever(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class SendsReminders(Protocol):
+    """The reminder sender as the lifespan sees it. Issue #229.
+
+    Handed the gateway's readiness the way the worker is: a reminder goes to Discord and nowhere
+    else, so there is nothing for it to do before the connection is up.
+    """
+
+    async def run_forever(self, wait_for_ready: ReadyCheck) -> None: ...
 
     def stop(self) -> None: ...
 
@@ -170,6 +184,7 @@ class _Running:
     bot_task: asyncio.Task[None] | None
     poller_task: asyncio.Task[None] | None = None
     flusher_task: asyncio.Task[None] | None = None
+    reminders_task: asyncio.Task[None] | None = None
 
 
 async def _start(
@@ -184,9 +199,9 @@ async def _start(
     The worker waits for the gateway rather than racing it: acting on a delivery before Discord
     is connected only wastes an attempt.
 
-    Only the bot and the worker pass `halt`. A process whose poller or flusher died still mirrors
-    everything the webhooks bring it, and what the flusher has not published waits in the table
-    until a process with a working one picks it up.
+    Only the bot and the worker pass `halt`. A process whose poller, flusher or reminder sender
+    died still mirrors everything the webhooks bring it, and what the flusher has not published or
+    the sender not sent waits in its table until a process with a working one picks it up.
     """
     shutdown = Shutdown()
     bot_task: asyncio.Task[None] | None = None
@@ -221,12 +236,20 @@ async def _start(
         poller_task = asyncio.create_task(container.poller.run_forever())
         poller_task.add_done_callback(report_exit("project poller", shutdown))
 
+    # Only where there is a gateway: without one a sender would wait for a connection that never
+    # comes, and a reminder has nowhere else to go.
+    reminders_task: asyncio.Task[None] | None = None
+    if ready is not None:
+        reminders_task = asyncio.create_task(container.reminders.run_forever(ready))
+        reminders_task.add_done_callback(report_exit("reminder sender", shutdown))
+
     # /health reads these: a dead worker leaves the endpoint answering 200 to deliveries nothing
     # will act on.
     liveness.worker_task = worker_task
     liveness.bot_task = bot_task
     liveness.poller_task = poller_task
     liveness.flusher_task = flusher_task
+    liveness.reminders_task = reminders_task
     # Safe at any point in a client's life: it reads a flag the client keeps from its own connect
     # and disconnect events, and `is_ready` behind it checks the sentinel before the event.
     liveness.gateway_is_ready = bot.gateway_is_up if bot_task is not None else None
@@ -236,6 +259,7 @@ async def _start(
         bot_task=bot_task,
         poller_task=poller_task,
         flusher_task=flusher_task,
+        reminders_task=reminders_task,
     )
 
 
@@ -251,6 +275,7 @@ async def _close(
     container.worker.stop()
     container.poller.stop()
     container.flusher.stop()
+    container.reminders.stop()
     await safely(
         "stop the worker",
         stop(running.worker_task, grace=settings.worker_shutdown_grace_seconds),
@@ -264,6 +289,12 @@ async def _close(
     await safely(
         "stop the transcript flusher",
         stop(running.flusher_task, grace=settings.worker_shutdown_grace_seconds),
+    )
+    # Asked rather than cancelled, and before the gateway closes: a reminder cut off between
+    # Discord taking it and its row going is sent a second time once the claim lapses.
+    await safely(
+        "stop the reminder sender",
+        stop(running.reminders_task, grace=settings.worker_shutdown_grace_seconds),
     )
     if running.bot_task is not None:
         await safely("close the Discord client", bot.close())

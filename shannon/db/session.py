@@ -12,13 +12,13 @@ from sqlalchemy.pool import NullPool
 # What the background work holds when all of it is busy: `LETTING_GO_AT_ONCE` thread deletions
 # and `TRANSCRIBING_AT_ONCE` transcriptions in `discord_bot.client`, then the delivery worker and
 # the project poller at two apiece - `ItemLock.held` keeps a connection for the length of the
-# block and the sync inside it opens its own - and the transcript flusher, which takes no lock,
-# at one. Stated here as a literal because `db` is below `discord_bot` and may not read it;
-# `test_the_pool_covers_what_holds_it` is what holds the two in step.
+# block and the sync inside it opens its own - and the transcript flusher and the reminder sender,
+# which take no lock, at one apiece. Stated here as a literal because `db` is below `discord_bot`
+# and may not read it; `test_the_pool_covers_what_holds_it` is what holds the two in step.
 #
 # Anyone raising a limit there has to raise this with it. Left unchanged, what runs out is the
 # webhook endpoint, which is the one caller GitHub will not wait for.
-BACKGROUND_CONNECTIONS = 2 + 8 + 2 + 2 + 1
+BACKGROUND_CONNECTIONS = 2 + 8 + 2 + 2 + 1 + 1
 
 # Slash commands and webhook deliveries on top of that, neither bounded by anything here. A
 # command that syncs takes two as well.

@@ -7878,3 +7878,46 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **The README** no longer says CI is "the one place this bot rings somebody for their own
   action", which was already untrue - the opening block still rings its author, and assigning
   yourself still rings you - or that edits are not mirrored, which stopped being true with #165.
+
+## A reminder, once, wherever it was asked for
+
+- **`/remind`** (#229). `/remind <member> [days] [hours] [minutes] [message]` pings somebody once,
+  in the channel or thread it was run in, after the time given: up to 365 days, 23 hours and 59
+  minutes, added together, and at least one of them above zero. The message is optional and up to
+  500 characters. Nothing recurs, and nothing lists or takes back a reminder once it is set.
+- **Yourself without a role, anybody else with one.** Reminding somebody else has this bot ping
+  them in public on your say-so, which is `/link @someone`'s shape and takes its tier: Admin or
+  Project Manager. Naming yourself is reminding yourself.
+- **Refused while somebody can still be told.** A reminder goes off later with nobody there to say
+  it could not, so it is refused up front: for a bot, for somebody who cannot see the channel,
+  where whoever sets it cannot post - which also keeps it from posting into a read-only channel -
+  and where this bot cannot, naming the permission it lacks. In a locked thread that includes
+  Manage Threads: nobody can post there to keep it from archiving, and only Manage Threads
+  reopens a locked thread once it has. Found reviewing this change.
+- **It always rings.** `/mentions off` covers what this bot says about items. A reminder is
+  somebody asking for you by name, so it rings anyway. `/mentions off` now says so, and says that
+  `/link @you` does too, which it never had. Whoever set somebody else's is named and not rung,
+  and the message rings nobody: a mention in it shows as text, and so does `@everyone`.
+- **Late, and says so.** One that falls due while the bot is down goes out once it is back, with a
+  line saying when it was due. In an item's thread that had been shut, the thread is shut again
+  after it.
+- **Sent at least once.** A sender beside the worker looks every `SHANNON_REMINDER_TICK_SECONDS`
+  (5) and takes what is due one at a time, on a claim. A process stopped between Discord taking a
+  reminder and the row going sends it again five minutes later: a duplicate can be seen, a lost
+  reminder cannot. A channel gone or a permission taken away drops it with a warning; anything else
+  Discord refuses is tried every five minutes for two hours, then dropped with an error. The
+  sender never logs the message.
+- **Twenty-five waiting** per person per server, whoever they are for. The twenty-sixth is told to
+  wait for one to go off, in amber, because that comes right on its own.
+- **For whoever deploys it.** Migration `0037` adds `reminders`, which is the queue: a row goes
+  once it is sent or given up on. `stop_grace_period` is 50 seconds in both compose files, up from
+  30. Shutdown waits up to five seconds for each of four loops now, and ten more for each of the
+  two that open threads - the worker and the board poller - when one is stopped part way through
+  opening one: forty at worst. It was already thirty-five before this change, against thirty.
+  The test that holds the budget counted two loops, the worker and the poller, had missed the
+  transcript flusher, and counted the ten seconds once. It reads the loops off the lifespan now,
+  counts both waits and checks both compose files. `/health` gains `reminders`, reported and not
+  counted, like `flusher`, which the README had never listed. No new permission: posting where a
+  command was run takes what posting in a thread already does.
+- **Tests.** New files for the command, its words, the queue, setting one and sending one, and the
+  gateway posting outside a thread.

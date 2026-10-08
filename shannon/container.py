@@ -26,6 +26,7 @@ from shannon.commands.people import (
 from shannon.commands.refresh import build_refresh_command
 from shannon.commands.regenerate import build_regenerate_command
 from shannon.commands.register import build_register_command
+from shannon.commands.remind import build_remind_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.commands.unregister import build_unregister_command
@@ -83,6 +84,8 @@ from shannon.services.notes import ItemNoteMirror, build_note_handler
 from shannon.services.people import ItemPeople
 from shannon.services.projects import ProjectPoller
 from shannon.services.registration import RepositoryRegistrationService
+from shannon.services.reminders.book import ReminderBook
+from shannon.services.reminders.send import ReminderSender
 from shannon.services.review_threads import ReviewThreads
 from shannon.services.reviews import (
     EveryoneApprovedLine,
@@ -158,6 +161,8 @@ class Container:
     # and stop the task that publishes what it holds. Issue #103.
     conversations: ConversationLog
     flusher: TranscriptFlusher
+    # Held so the process can start it once the gateway is up, and stop it. Issue #229.
+    reminders: ReminderSender
     commands: tuple[Installable, ...]
     # Opened in `build_container` and reachable from nowhere else, so this is the only
     # thing that can close them: the App's own HTTP client, and the board's write client,
@@ -742,6 +747,9 @@ def _commands(
         # The only one with no gate at all, which is visible at a glance and is the point.
         # See `_permissions.UNGATED`.
         build_mentions_command(MentionPreferences(sessionmaker)),
+        # Gated on one of its halves, as `/link` is: reminding yourself takes no role, reminding
+        # somebody else does.
+        build_remind_command(ReminderBook(sessionmaker), gate),
         # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
         # service, which decides from the thread whether that means a reviewer or an assignee.
         build_assign_command(people, gate, access),
@@ -993,6 +1001,14 @@ def build_container(
             threads,
             quiet_gap=timedelta(seconds=settings.conversation_quiet_seconds),
             tick=timedelta(seconds=settings.conversation_flush_tick_seconds),
+        ),
+        # Through the gateway the bot holds, which shuts an item's thread again after a reminder
+        # goes off in one that had been shut.
+        reminders=ReminderSender(
+            sessionmaker,
+            threads,
+            KeepsThreadsShut(sessionmaker, threads),
+            tick=timedelta(seconds=settings.reminder_tick_seconds),
         ),
         commands=_commands(
             sessionmaker,

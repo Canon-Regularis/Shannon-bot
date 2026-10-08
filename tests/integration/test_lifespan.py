@@ -433,3 +433,94 @@ class TestTheProjectPoller:
         assert not poller.ran.is_set(), "a board nobody configured was polled anyway"
         # Still told to stop: the flag costs nothing and means shutdown has one path, not two.
         assert poller.stopped is True
+
+
+class FakeSender:
+    """A reminder sender with the shape the lifespan uses. Issue #229."""
+
+    def __init__(self, *, dies: bool = False) -> None:
+        self.dies = dies
+        self.stopped = False
+        self.ran = asyncio.Event()
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    async def run_forever(self, wait_for_ready: ReadyCheck) -> None:
+        await wait_for_ready()
+        self.ran.set()
+        if self.dies:
+            raise RuntimeError("the reminder sender fell over")
+        while not self.stopped:
+            await asyncio.sleep(0.01)
+
+
+def container_sending(engine: AsyncEngine, sender: FakeSender) -> tuple[Container, FakeWorker]:
+    worker = FakeWorker()
+    container = container_for(engine, worker, ClosingGitHub())
+    container.reminders = sender  # type: ignore[assignment]
+    return container, worker
+
+
+class TestTheReminderSender:
+    """Started only where there is a gateway, only once it is up, and halting nothing. Issue #229.
+
+    A reminder goes to Discord and nowhere else, so a sender started without a gateway would wait
+    for a connection that never comes and be reported as running all the while.
+    """
+
+    async def test_with_a_token_it_runs_once_the_gateway_is_up(self, migrated: AsyncEngine) -> None:
+        sender = FakeSender()
+        container, _ = container_sending(migrated, sender)
+
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with("a-token"))
+        async with lifespan:
+            await asyncio.wait_for(sender.ran.wait(), timeout=5)
+            assert app.state.liveness.reminders_running() is True
+
+        assert sender.stopped is True
+
+    async def test_it_waits_for_a_gateway_still_connecting(self, migrated: AsyncEngine) -> None:
+        sender = FakeSender()
+        container, _ = container_sending(migrated, sender)
+
+        _, lifespan = await runbuild_lifespan(
+            FakeBot(reaches_the_gateway=False), container, settings_with("a-token")
+        )
+        async with lifespan:
+            await asyncio.sleep(0.1)
+            assert not sender.ran.is_set(), "reminders went out before Discord was there"
+
+        assert sender.stopped is True
+
+    async def test_without_a_token_there_is_no_task_at_all(self, migrated: AsyncEngine) -> None:
+        sender = FakeSender()
+        container, worker = container_sending(migrated, sender)
+
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+        async with lifespan:
+            await asyncio.wait_for(worker.ran.wait(), timeout=5)
+            # No task at all, rather than one waiting for a gateway that never comes: the second
+            # would read as running here too, which is the very thing this guards against.
+            assert app.state.liveness.reminders_task is None
+            assert app.state.liveness.reminders_running() is True
+
+        assert not sender.ran.is_set(), "a sender ran with no gateway to send to"
+        # Still told to stop, like a poller with no board: shutdown has one path, not two.
+        assert sender.stopped is True
+
+    async def test_one_that_dies_leaves_the_process_alone(self, migrated: AsyncEngine) -> None:
+        """Everything else still works, and what it had not sent waits for the next process."""
+        halt = Halts()
+        sender = FakeSender(dies=True)
+        container, _ = container_sending(migrated, sender)
+
+        app, lifespan = await runbuild_lifespan(
+            FakeBot(), container, settings_with("a-token"), halt
+        )
+        async with lifespan:
+            await asyncio.wait_for(sender.ran.wait(), timeout=5)
+            await asyncio.sleep(0.05)
+            assert app.state.liveness.reminders_running() is False
+
+        assert halt.asked == 0

@@ -65,6 +65,7 @@ def test_migrations_apply_to_an_empty_database(migration_url: str) -> None:
         "logged_messages",
         "mirrored_notes",
         "muted_members",
+        "reminders",
         "repositories",
         "team_links",
         "tracked_items",

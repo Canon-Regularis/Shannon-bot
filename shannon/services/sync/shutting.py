@@ -38,7 +38,24 @@ class KeepsThreadsShut:
         """
         if not await self._should_be_shut(tracked_item_id):
             return
+        await self._shut(tracked_item_id, thread_id)
 
+    async def after_posting_in(self, *, channel_id: int) -> None:
+        """Called after a post that knows only where it went, never before one. Issue #229.
+
+        A reminder goes off wherever it was asked for, which may be an item's thread and may be a
+        plain channel, and all it carries is the id. So the item is found by its thread, and an id
+        that is not one finds nothing and costs nothing more. A thread that is found is put back
+        the way `again` puts one back, for the same reason: "remind me in two days", asked in a pull
+        request's thread, can go off after the pull request has merged and its thread been shut.
+        """
+        async with self._sessionmaker() as session:
+            item = await TrackedItemStore(session).get_by_thread(channel_id)
+        if item is None or item.discord_thread_locked is not True:
+            return
+        await self._shut(item.id, channel_id)
+
+    async def _shut(self, tracked_item_id: int, thread_id: int) -> None:
         try:
             await self._threads.set_shut(thread_id=thread_id, shut=True)
         except DiscordGatewayError as refusal:

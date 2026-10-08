@@ -105,6 +105,11 @@ class FakeMember:
     guild_permissions: FakeGuildPermissions = field(default_factory=FakeGuildPermissions)
     global_name: str | None = None
     nick: str | None = None
+    # Both read by `/remind` off the member it names. Issue #229.
+    bot: bool = False
+    # What Discord resolved for a member named in a command, in the channel it was run in. None
+    # where it sent nothing, which is what a real `Member` says outside an interaction too.
+    resolved_permissions: discord.Permissions | None = None
 
     def __str__(self) -> str:
         return self.name
@@ -212,6 +217,7 @@ class FakeInteraction:
         channel_id: int | None = 10,
         user: FakeMember | None = None,
         channel: object | None = None,
+        permissions: discord.Permissions | None = None,
         app_permissions: discord.Permissions | None = None,
         command: app_commands.Command[Any, ..., Any] | app_commands.ContextMenu | None = None,
         **options: object,
@@ -223,6 +229,17 @@ class FakeInteraction:
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.user = user or FakeMember()
+        # What whoever ran the command may do in the channel it was run in: read and post, which
+        # somebody who could type a command there almost always may. Compared with None rather
+        # than tested for truth, because an empty `Permissions` is falsy and a test asking for
+        # none at all would be handed these instead. Issue #229.
+        self.permissions = (
+            permissions
+            if permissions is not None
+            else discord.Permissions(
+                view_channel=True, send_messages=True, send_messages_in_threads=True
+            )
+        )
         # What this bot may do in the channel the command was run in. Defaults to the permission
         # list the README asks for, which grants nothing beyond reading and writing threads, so a
         # command that depends on more finds that out here rather than in front of a user.
