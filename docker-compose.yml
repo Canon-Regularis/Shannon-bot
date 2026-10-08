@@ -59,14 +59,18 @@ services:
     # (5s) waits for the delivery in hand; cancelling the worker then unwinds into
     # `ItemThreads._open`, which waits up to `CLAIM_GRACE_SECONDS` (10s) for a thread Discord
     # has been asked for and not yet answered about. Measured end to end at just over fifteen
-    # seconds when discord.py is sitting out a rate limit.
+    # seconds when discord.py is sitting out a rate limit. The first is waited out once for each
+    # loop shutdown stops - the worker, the board poller, the transcript flusher and the reminder
+    # sender - and the second once for each that opens threads, the worker and the poller, so the
+    # worst case is forty seconds. Fifty leaves the Discord client and the pool room to close, and
+    # a test holds this above whatever the code adds up to.
     #
     # Killed before that finishes, the worker never hands back the rest of its leased batch, so
     # up to nine other deliveries sit PROCESSING until their fifteen minute lease lapses. The
     # replacement process polls a queue that looks empty and those items get no thread for a
     # quarter of an hour, with nothing in either log saying why. Docker Desktop is worse than
     # the documented default: it stops containers after about one and a half seconds.
-    stop_grace_period: 30s
+    stop_grace_period: 50s
 
 volumes:
   shannon-pgdata:
