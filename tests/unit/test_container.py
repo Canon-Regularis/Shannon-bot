@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from pydantic import SecretStr
 from shannon.config import Settings
 from shannon.container import build_container
 from shannon.discord_bot.permissions import MemberTiers
+from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.verification import OAuthClient
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -120,6 +122,7 @@ class TestWhatItWiresUp:
             "refresh",
             "regenerate",
             "register",
+            "remind",
             "request_review",
             "set_channel",
             "status",
@@ -349,6 +352,34 @@ class TestTheBoardLinksSecondQuestion:
         tiers = container.verification._tiers
         assert isinstance(tiers, MemberTiers)
         assert tiers._members is threads
+
+
+class TestTheReminderSender:
+    """Issue #229. Built here and started by the lifespan, so this is the one place its wiring
+    can be seen whole."""
+
+    def test_it_posts_and_shuts_through_the_gateway_the_bot_holds(self) -> None:
+        threads = FakeThreadGateway()
+        container = build_container(
+            threads=threads,
+            settings=Settings(github_webhook_secret="x"),
+            engine=DisposableEngine(),
+            github=FakeGitHubClient(),
+        )
+
+        assert container.reminders._channels is threads
+        shut_again = container.reminders._shut_again
+        assert isinstance(shut_again, KeepsThreadsShut)
+        assert shut_again._threads is threads
+
+    def test_it_looks_as_often_as_the_setting_says(self) -> None:
+        container = container_with(
+            DisposableEngine(),
+            FakeGitHubClient(),
+            Settings(github_webhook_secret="x", reminder_tick_seconds=7.5),
+        )
+
+        assert container.reminders._tick == timedelta(seconds=7.5)
 
 
 class TestWhatTurningOffCardWritesTurnsOff:
