@@ -98,6 +98,15 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   who linked their GitHub account after `/refresh` opened a thread is named in plain text in it
   until something redraws it. Nobody is pinged, which is the point: everybody on the item is named
   as a real mention and Discord is told to ring none of them.
+- **Reminders.** `/remind` pings somebody once, after the days, hours and minutes you give, in
+  the channel or thread it was run in, with up to 500 characters of your own words under it.
+  Anybody may remind themselves; reminding somebody else takes Admin or Project Manager. It
+  always rings, `/mentions off` or not, because somebody asked for exactly that, and the words
+  ring nobody else: a mention in them shows as text, and so does `@everyone`. One that falls
+  due while the bot is down goes out once it is back, and says it is late; one caught by a
+  restart at the wrong moment can go out twice, which is the side this errs on. Nothing
+  recurs, nothing lists or takes back a reminder once it is set, and one person may have
+  twenty-five waiting in a server.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
   mark per item stops an old delivery undoing a newer one.
 
@@ -449,6 +458,7 @@ at the door.
 | `SHANNON_CAPTURE_DISCORD_MESSAGES` | `false` | Whether `/log_conversation` works. Needs the message content intent ticked in the Developer Portal first; see below |
 | `SHANNON_CONVERSATION_QUIET_SECONDS` | `60.0` | How long a logged thread goes quiet before what was said in it is published |
 | `SHANNON_CONVERSATION_FLUSH_TICK_SECONDS` | `5.0` | How often the publisher looks for a conversation that is ready |
+| `SHANNON_REMINDER_TICK_SECONDS` | `5.0` | How often the reminder sender looks for a reminder that has fallen due |
 
 A project board is read on a timer rather than delivered. GitHub sends `projects_v2` webhooks
 for organisation projects only and none at all for a personal account's, and the `project_card`
@@ -548,7 +558,8 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
-| `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you`, which is a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
+| `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you` or a reminder set for you with `/remind`, which are a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
+| `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin or Project Manager to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. Twenty-five may be waiting per person per server |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
@@ -564,17 +575,18 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 
 The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, which is **on**, because a board somebody linked is a board they want kept. The card is moved as whoever set the status, so they need to have authorised: `/status` and `/priority` refuse up front for somebody who has not, because that is the one board failure they can put right themselves. Turning it off stops the write and nothing else: the board's own column order is still read, and a move that skips a column is still refused.
 
-Guild only, and replies are ephemeral with one exception: `/link @member` posts its note where that person can see it, because it is addressed to them and they are not the one watching for a reply. Role names are configured strings, matched case
+Guild only, and replies are ephemeral with two exceptions, both addressed to somebody who is not watching for a reply: `/link @member` posts its note where that person can see it, and a reminder goes off in public in the channel it was set in. Setting one is private. Role names are configured strings, matched case
 insensitively, so renaming a Discord role revokes the tier until the setting catches up. Holding
 several roles grants the union of what each allows, and a guild administrator passes every gate
 whatever the configuration says.
 
-`/mentions` is the one command with no role behind it; `/link` for your own account and `/board
-withdraw` are the halves of commands that take none. Every other one decides something about
-the server; `/mentions` decides whether your own name notifies you, and asking a project manager to
-turn off your own pings is a request nobody makes twice. It reaches everything this bot writes
-except a role: `@org/team` pings the whole Discord role and Discord gives nobody a way to leave
-one person out of one.
+`/mentions` is the one command with no role behind it; `/link` for your own account, `/remind` for
+yourself and `/board withdraw` are the halves of commands that take none. Every other one decides
+something about the server; `/mentions` decides whether your own name notifies you, and asking a
+project manager to turn off your own pings is a request nobody makes twice. It reaches everything
+this bot writes about items except a role: `@org/team` pings the whole Discord role and Discord
+gives nobody a way to leave one person out of one. A reminder is not about an item, and always
+rings.
 
 Connecting your own GitHub account needs no role. It used to, on the reasoning that a login
 nobody checked is a claim anybody could make — which was true while somebody typed one: GitHub was
@@ -587,6 +599,9 @@ member in public and a bot that will ping anybody on anybody's say-so is a spam 
 no link: a link is only ever issued for whoever ran the command, so the member is asked to run
 `/link` and get their own. Discord refuses anybody else who follows a link, before GitHub is asked
 anything.
+
+Reminding somebody else takes the same tier for the same reason: it has this bot ping them in
+public on your say-so. Reminding yourself takes none.
 
 The eight workflow commands take no argument and act on the thread they are run in, which is the
 item you are looking at. Status and priority live as labels on the repository, and each is single
@@ -637,6 +652,7 @@ shannon/
   services/     sync/      one item into its thread: policies, staleness, threads,
                            notifications, and the same job driven by a command
                 delivery/  the queue and the worker that drains it
+                reminders/ writing a reminder down, and sending it when it falls due
                 notes, reviews, channels, linking, registration
   api/          FastAPI app, webhook and health routes
   commands/     the slash commands, which drive services the way the routes do
@@ -652,9 +668,10 @@ which makes it a delivery mechanism and not an adapter. The bot is handed its er
 instead of importing one, which is what keeps the adapter layer from reaching upward.
 
 Bot and API share a process. The worker waits for the gateway before its first batch, since a
-delivery attempted before Discord connects only burns an attempt. Shutdown stops the worker, hands
-its unstarted batch back, closes the gateway and disposes the pool, reporting any step that fails
-rather than abandoning the rest.
+delivery attempted before Discord connects only burns an attempt. The reminder sender waits for it
+too, and runs only where there is a gateway at all. Shutdown stops the worker, hands its unstarted
+batch back, lets the reminder in hand finish, closes the gateway and disposes the pool, reporting
+any step that fails rather than abandoning the rest.
 
 ## Data model
 
@@ -675,17 +692,18 @@ rather than abandoning the rest.
 | `board_authorizations` | The GitHub authorisation one person granted so one server could reach their project board, with the token **encrypted**. The only encrypted column in the schema, and the first credential this project stores: everything else it keeps about somebody describes them, where this one acts as them. One row per person per server, which is how both readers reach it — a card move by whoever ran the command, a poll by the member named in `repositories.project_linked_by` |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
 | `logged_messages` | What has been said in a logged thread and not yet reached GitHub. Deleted as soon as the comment carrying it lands, because these rows hold what people said |
+| `reminders` | What `/remind` still owes: where it goes off, who it rings, who asked, the message, when it is due, and the claim of the sender taking it. Deleted once it has gone out or been given up on, so the table is the queue |
 
 Enums are `VARCHAR`, not native PostgreSQL types, so adding a status needs no `ALTER TYPE`. Worth
 knowing that they are unconstrained in the database: the mapping asks for a `CHECK` and SQLAlchemy
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0036`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0037`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
-`logged_messages` is emptied by publishing, and `webhook_events` and `identity_verifications` are pruned. `mirrored_notes` grows by one row per
+`logged_messages` is emptied by publishing and `reminders` by sending, and `webhook_events` and `identity_verifications` are pruned. `mirrored_notes` grows by one row per
 comment and review and has no cleanup path, and `github_installations` holds one row per account
 for as long as the App is installed on it.
 
@@ -694,7 +712,7 @@ for as long as the App is installed on it.
 | Route | Answers |
 | --- | --- |
 | `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing header or unusable body, 401 for a bad signature, 413 past the 25MB cap, 500 if the secret is unset |
-| `GET /health` | `database`, `worker`, `bot` and `poller` as booleans, `version` as the commit answering, 503 if any of the first three is false |
+| `GET /health` | `database`, `worker`, `bot`, `poller`, `flusher` and `reminders` as booleans, `version` as the commit answering, 503 if any of the first three is false |
 | `GET /oauth/start` | Where a one-time link opens. 303 to Discord, leaving the `__Host-shannon_round_trip` cookie that holds the round trip to this browser, and writing nothing. 400 for a link that has expired, been used or never existed |
 | `GET /oauth/discord/callback` | 303 on to GitHub once Discord names the member the link was issued for, in the browser that opened it. 400 for anybody else, another browser, or a cancelled sign-in |
 | `GET /oauth/github/callback` | A plain-text page saying who signed in and what happens next, for that browser alone. 400 otherwise. All three answer 500 where Discord sign-in is not configured |
@@ -710,12 +728,15 @@ dropped gateway leaves the endpoint accepting deliveries nothing will act on, wh
 restart. The database probe is cached for a few seconds so the public endpoint cannot exhaust the
 pool the worker runs on.
 
-`poller` is reported without being counted, and it is the only one that is. This process still
-does its job without a board: webhooks arrive, threads are written, and only board movement stops,
-so failing the check would restart a working process and throw away whatever the worker had in
-hand. It is reported because the poller is the one task with nothing wired to stop the process
-when it dies, so without this it goes with a line in the log and everything after that answers
-that all is well. It is true where no board is configured, which is the default.
+`poller`, `flusher` and `reminders` are reported without being counted. This process still does
+its job without any of them: webhooks arrive, threads are written, and what stops is board
+movement, publishing a logged conversation or sending a reminder, so failing the check would
+restart a working process and throw away whatever the worker had in hand. They are reported
+because each is a task with nothing wired to stop the process when it dies, so without this it
+goes with a line in the log and everything after that answers that all is well. What the
+flusher and the sender have not done waits in the database for a process that can. `poller` is
+true where no board is configured, which is the default, and `reminders` where there is no
+Discord token.
 
 `/docs`, `/redoc` and `/openapi.json` are served unconditionally, `/health` is unauthenticated,
 and there is no middleware of any kind.
