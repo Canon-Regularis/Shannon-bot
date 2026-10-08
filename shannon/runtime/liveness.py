@@ -27,6 +27,8 @@ class ProcessLiveness:
     # None means no board was configured, the default; a finished task means it is not read.
     poller_task: asyncio.Task[None] | None = None
     flusher_task: asyncio.Task[None] | None = None
+    # None means no token was configured, so there is nowhere to send a reminder. Issue #229.
+    reminders_task: asyncio.Task[None] | None = None
     # Whether the client has reached the gateway, which the task being alive does not say.
     gateway_is_ready: Callable[[], bool] | None = None
     # How long a probe is reused. The route is public, and a connection per request would let a
@@ -72,8 +74,9 @@ class ProcessLiveness:
     def poller_running(self) -> bool:
         """Whether a configured board is still being read.
 
-        Reported without counting towards the verdict: the poller is the only task with no halt
-        wired to it, so it dies quietly, but the process works on. True where there is no board.
+        Reported without counting towards the verdict: the poller has no halt wired to it, like the
+        flusher and the reminder sender, so it dies quietly, but the process works on. True where
+        there is no board.
         """
         return self.poller_task is None or not self.poller_task.done()
 
@@ -84,6 +87,15 @@ class ProcessLiveness:
         when this dies, so captured words pile up in the table until a working flusher runs.
         """
         return self.flusher_task is None or not self.flusher_task.done()
+
+    def reminders_running(self) -> bool:
+        """Whether reminders are still being sent. Issue #229.
+
+        Reported without counting towards the verdict, like the flusher: nothing halts the process
+        when this dies, and a reminder not sent waits in the table until a working sender runs.
+        True where there is no gateway to send one to.
+        """
+        return self.reminders_task is None or not self.reminders_task.done()
 
     def bot_connected(self) -> bool:
         """Whether the gateway is still there, if this deployment has one at all.

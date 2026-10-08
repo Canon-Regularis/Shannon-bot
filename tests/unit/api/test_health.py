@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from shannon.api.app import create_app
@@ -31,6 +34,7 @@ async def test_a_working_process_reports_healthy() -> None:
         "bot": True,
         "poller": True,
         "flusher": True,
+        "reminders": True,
         "version": "unknown",
     }
 
@@ -82,6 +86,38 @@ async def test_an_unhealthy_process_does_not_also_complain_about_the_flusher() -
 
     assert response.status_code == 503
     assert response.json()["flusher"] is False
+
+
+async def test_a_dead_reminder_sender_is_reported_without_failing_the_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The third thing said without being counted, for the flusher's reasons. Issue #229.
+
+    Webhooks still arrive and threads are still written, and a reminder not sent waits in its table
+    for the next process with a working sender, so restarting over it would throw away a working
+    worker's batch. Said at all, and in a line of its own, because nothing halts the process when
+    the sender dies and a reminder that never arrives says nothing to anybody.
+    """
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(reminders=False)) as client:
+            response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["healthy"] is True, "a dead sender restarted a working process"
+    assert response.json()["reminders"] is False, "a dead sender was not reported at all"
+    assert "reminders are no longer being sent" in caplog.text
+
+
+async def test_an_unhealthy_process_does_not_also_complain_about_reminders(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(worker=False, reminders=False)) as client:
+            response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["reminders"] is False
+    assert "reminders are no longer being sent" not in caplog.text
 
 
 async def test_a_dead_worker_makes_the_process_unhealthy() -> None:

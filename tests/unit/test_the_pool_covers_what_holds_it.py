@@ -29,9 +29,11 @@ URL = "postgresql+asyncpg://user:password@localhost:5432/shannon"
 GITHUB_ALLOWS_SECONDS = 10.0
 
 # The delivery worker and the project poller each hold the item lock and open a second session
-# inside it; the transcript flusher takes no lock.
+# inside it; the transcript flusher and the reminder sender take no lock, and open one session at
+# a time.
 LOCKED_WORK = 2 + 2
 FLUSHER = 1
+REMINDERS = 1
 
 
 def the_pool() -> QueuePool:
@@ -48,7 +50,7 @@ def test_the_stated_ceiling_counts_every_limit_there_is() -> None:
     endpoint back to drawing from nothing, and it fails here rather than in production.
     """
     assert BACKGROUND_CONNECTIONS == (
-        LETTING_GO_AT_ONCE + TRANSCRIBING_AT_ONCE + LOCKED_WORK + FLUSHER
+        LETTING_GO_AT_ONCE + TRANSCRIBING_AT_ONCE + LOCKED_WORK + FLUSHER + REMINDERS
     )
 
 
