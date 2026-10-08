@@ -26,6 +26,7 @@ from shannon.commands.people import PutsSomebodyOnAnItem
 from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.register import VerifiesIdentity as ProvesBeforeRegistering
+from shannon.commands.remind import SetsReminders
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
@@ -42,6 +43,7 @@ from shannon.discord_bot.threads import (
     FindsMembers,
     FindsThreads,
     OpensThreads,
+    PostsInChannels,
     PostsToThread,
     ShutsThread,
     ThreadGateway,
@@ -71,6 +73,7 @@ from shannon.runtime.lifespan import (
     ProcessParts,
     ReloadsConversations,
     RunsDeliveries,
+    SendsReminders,
 )
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.board_credentials import BoardCredentials
@@ -87,6 +90,8 @@ from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.people import ItemPeople, PutsPeopleOnItems
 from shannon.services.projects import ReadsBoardsAndCards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
+from shannon.services.reminders.book import ReminderBook
+from shannon.services.reminders.send import ReminderSender, ShutsWhereItPosted
 from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.draft_cards import ReadsBoards
 from shannon.services.sync.draft_lines import DraftSwitchLine
@@ -112,6 +117,7 @@ from shannon.services.sync.policies import (
 )
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
+from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
 from shannon.services.transcripts.flush import TranscriptFlusher
@@ -143,6 +149,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ThreadGateway, DiscordThreadGateway),
     (OpensThreads, DiscordThreadGateway),
     (PostsToThread, DiscordThreadGateway),
+    (PostsInChannels, DiscordThreadGateway),
+    (PostsInChannels, FakeThreadGateway),
     (ShutsThread, DiscordThreadGateway),
     (FindsThreads, DiscordThreadGateway),
     (FindsThreads, FakeThreadGateway),
@@ -250,6 +258,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (AnnouncesInThread, LabelLine),
     (AnnouncesInThread, StateLine),
     (AnnouncesInThread, DraftSwitchLine),
+    # Issue #229. A reminder knows only the channel it went off in, which may be an item's thread.
+    (ShutsWhereItPosted, KeepsThreadsShut),
+    (SetsReminders, ReminderBook),
+    (SendsReminders, ReminderSender),
 ]
 
 
