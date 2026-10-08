@@ -401,6 +401,132 @@ async def test_a_discord_failure_surfaces_as_a_gateway_error() -> None:
         await gateway.post(thread_id=500, panel=Panel.of_text("x"))
 
 
+def a_channel_taking(kind: type) -> NonCallableMagicMock:
+    """Somewhere a message can be sent, answering with message 900."""
+    stub = stub_for(kind)
+    stub.send.return_value = _id_only(900)
+    return stub
+
+
+class TestPostingWhereACommandWasRun:
+    """Issue #229. A reminder goes off where it was asked for, which is anywhere a slash command can
+    be run: a text channel, the text chat of a voice or stage channel, or a thread."""
+
+    async def test_a_text_channel_takes_the_message_and_its_allow_list(self) -> None:
+        channel = a_channel_taking(discord.TextChannel)
+        gateway = DiscordThreadGateway(client_with(channel))
+
+        message_id = await gateway.post_in_channel(
+            channel_id=10, panel=Panel.of_text("<@1> time to look"), notify=(1,)
+        )
+
+        sent = channel.send.await_args.kwargs
+        assert sent["content"] == "<@1> time to look"
+        assert [user.id for user in sent["allowed_mentions"].users] == [1]
+        assert message_id == 900
+
+    async def test_a_card_goes_as_components_rather_than_text(self) -> None:
+        channel = a_channel_taking(discord.TextChannel)
+
+        await DiscordThreadGateway(client_with(channel)).post_in_channel(
+            channel_id=10, panel=a_card()
+        )
+
+        sent = channel.send.await_args.kwargs
+        assert "content" not in sent, "components and content together are refused by Discord"
+        assert isinstance(sent["view"], ui.LayoutView)
+
+    @pytest.mark.parametrize("kind", [discord.VoiceChannel, discord.StageChannel])
+    async def test_a_voice_or_stage_channel_has_a_chat_of_its_own(self, kind: type) -> None:
+        channel = a_channel_taking(kind)
+
+        posted = await DiscordThreadGateway(client_with(channel)).post_in_channel(
+            channel_id=10, panel=Panel.of_text("x")
+        )
+
+        assert posted == 900
+
+    async def test_an_archived_thread_is_woken_first(self) -> None:
+        """Discord refuses a message into an archived thread, and a reminder can be days away."""
+        existing = thread(archived=True)
+
+        await DiscordThreadGateway(client_with(existing)).post_in_channel(
+            channel_id=500, panel=Panel.of_text("x")
+        )
+
+        existing.edit.assert_awaited_once_with(archived=False)
+        existing.send.assert_awaited_once_with(content="x")
+
+    async def test_an_open_thread_is_not_edited_just_to_post_in_it(self) -> None:
+        existing = thread()
+
+        await DiscordThreadGateway(client_with(existing)).post_in_channel(
+            channel_id=500, panel=Panel.of_text("x")
+        )
+
+        existing.edit.assert_not_awaited()
+
+    @pytest.mark.parametrize("kind", [discord.ForumChannel, discord.CategoryChannel])
+    async def test_somewhere_with_no_message_box_is_the_end_of_it(self, kind: type) -> None:
+        gateway = DiscordThreadGateway(client_with(stub_for(kind)))
+
+        with pytest.raises(ChannelNotFoundError, match="cannot take a message") as caught:
+            await gateway.post_in_channel(channel_id=10, panel=Panel.of_text("x"))
+
+        assert isinstance(caught.value, PermanentError)
+
+    async def test_a_channel_that_has_gone_is_the_end_of_it(self) -> None:
+        """Permanent, where `post` answers a missing thread with an error its callers rebuild on:
+        somewhere a reminder was asked for has nothing to rebuild."""
+        client = client_with(None)
+        client.fetch_channel.side_effect = discord.NotFound(MagicMock(status=404), "missing")
+
+        with pytest.raises(ChannelNotFoundError) as caught:
+            await DiscordThreadGateway(client).post_in_channel(
+                channel_id=10, panel=Panel.of_text("x")
+            )
+
+        assert isinstance(caught.value, PermanentError)
+
+    async def test_a_channel_this_bot_may_not_see_is_refused_rather_than_gone(self) -> None:
+        client = client_with(None)
+        client.fetch_channel.side_effect = discord.Forbidden(MagicMock(status=403), "no access")
+
+        with pytest.raises(DiscordPermissionError):
+            await DiscordThreadGateway(client).post_in_channel(
+                channel_id=10, panel=Panel.of_text("x")
+            )
+
+    async def test_being_refused_the_message_is_a_permission_error(self) -> None:
+        channel = a_channel_taking(discord.TextChannel)
+        channel.send.side_effect = discord.Forbidden(MagicMock(status=403), "missing access")
+
+        with pytest.raises(DiscordPermissionError):
+            await DiscordThreadGateway(client_with(channel)).post_in_channel(
+                channel_id=10, panel=Panel.of_text("x")
+            )
+
+    async def test_discord_failing_on_the_message_is_worth_trying_again(self) -> None:
+        channel = a_channel_taking(discord.TextChannel)
+        channel.send.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
+
+        with pytest.raises(DiscordGatewayError) as caught:
+            await DiscordThreadGateway(client_with(channel)).post_in_channel(
+                channel_id=10, panel=Panel.of_text("x")
+            )
+
+        assert not isinstance(caught.value, PermanentError)
+
+    async def test_a_channel_not_in_the_cache_is_asked_for(self) -> None:
+        channel = a_channel_taking(discord.TextChannel)
+        client = client_with(channel)
+        client.get_channel.return_value = None
+
+        await DiscordThreadGateway(client).post_in_channel(channel_id=10, panel=Panel.of_text("x"))
+
+        client.fetch_channel.assert_awaited_once_with(10)
+
+
 class TestRewritingOneMessage:
     """Issue #165. Editing the message a comment was mirrored as, rather than posting its new text
     underneath the old.
@@ -893,6 +1019,10 @@ class TestBeforeTheGatewayIsConnected:
                 lambda g: g.update(thread_id=1, message_id=2, name="n", panel=Panel.of_text("c")),
             ),
             ("post", lambda g: g.post(thread_id=1, panel=Panel.of_text("c"))),
+            (
+                "post_in_channel",
+                lambda g: g.post_in_channel(channel_id=10, panel=Panel.of_text("c")),
+            ),
             ("set_shut", lambda g: g.set_shut(thread_id=1, shut=True)),
             ("channel_of", lambda g: g.channel_of(thread_id=1)),
         ],

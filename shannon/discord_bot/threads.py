@@ -34,6 +34,10 @@ THREAD_NAME_LIMIT = 100
 # The only channel types Discord will open a thread in.
 THREADABLE = (discord.TextChannel, discord.ForumChannel)
 
+# Everywhere a slash command can be run from, which is everywhere `post_in_channel` is asked to
+# post (issue #229). A forum and a category have no message box of their own to run one in.
+POSTABLE = (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread)
+
 # How long a browser waits on Discord to say who one member is, before that counts as no answer.
 # The one caller is a board link being followed. It ends the WAIT and nothing else: discord.py's
 # request runs on to its own end, for the reason `DiscordThreadGateway.member` gives. Found
@@ -74,7 +78,10 @@ def _may_notify(notify: Notify) -> _Notified:
 
 
 async def _post(
-    thread: discord.Thread, content: str | None, view: ui.LayoutView | None, notify: Notify
+    where: discord.abc.Messageable,
+    content: str | None,
+    view: ui.LayoutView | None,
+    notify: Notify,
 ) -> discord.Message:
     """One message, carrying components or text and never both.
 
@@ -82,10 +89,13 @@ async def _post(
     with one or the other. Written as a branch rather than a keyword dict because that is what
     lets discord.py's overloads be checked: the `LayoutView` overloads take no content, and
     nothing that hands over a dict can show it is not passing one.
+
+    Anywhere that takes a message, not only a thread, since `post_in_channel` posts into channels
+    as well (issue #229).
     """
     if view is None:
-        return await thread.send(content=content, **_may_notify(notify))
-    return await thread.send(view=view, **_may_notify(notify))
+        return await where.send(content=content, **_may_notify(notify))
+    return await where.send(view=view, **_may_notify(notify))
 
 
 def why_threads_will_not_open(channel: object) -> str | None:
@@ -180,6 +190,19 @@ class PostsToThread(Protocol):
     async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None: ...
 
 
+class PostsInChannels(Protocol):
+    """Posting wherever a command was run, which may be a channel rather than a thread.
+
+    Issue #229. A reminder goes off where it was asked for, and a slash command can be run in any
+    channel. Its own role rather than a widening of `post`, whose callers rebuild a thread when it
+    answers that one has gone: somewhere a reminder was asked for has nothing to rebuild.
+    """
+
+    async def post_in_channel(
+        self, *, channel_id: int, panel: Panel, notify: Notify = None
+    ) -> int: ...
+
+
 class RevisesMessages(Protocol):
     """Rewriting one message already in a thread, in place.
 
@@ -220,6 +243,7 @@ class FindsMembers(Protocol):
 class ThreadGateway(
     OpensThreads,
     PostsToThread,
+    PostsInChannels,
     RevisesMessages,
     ShutsThread,
     FindsThreads,
@@ -227,7 +251,7 @@ class ThreadGateway(
     FindsMembers,
     Protocol,
 ):
-    """Everything this project does to Discord threads, in one object.
+    """Everything this project does to Discord threads and channels, in one object.
 
     One Discord client is all there is; callers name the roles they actually use.
     """
@@ -341,6 +365,30 @@ class DiscordThreadGateway:
         with _translated("post to the thread"):
             await self._wake(thread)
             message = await _post(thread, content, view, notify)
+        return message.id
+
+    async def post_in_channel(self, *, channel_id: int, panel: Panel, notify: Notify = None) -> int:
+        """Post wherever a command was run: a channel, or a thread in one. Issue #229.
+
+        Somewhere that has gone is `ChannelNotFoundError`, which is permanent, where `post` answers
+        a missing thread with an error its callers rebuild on: a reminder has no thread of its own
+        to rebuild, so a channel deleted since it was asked for is the end of it. So is anywhere
+        that cannot take a message at all, which a command run in a channel never names but an id
+        written down for later can come to.
+
+        A thread is woken first, for the reason `_wake` gives. Shutting it again is the caller's,
+        because only the item's row knows whether it was meant to be shut.
+        """
+        content, view = as_message(panel)
+        channel = await self._channel(channel_id)
+        if not isinstance(channel, POSTABLE):
+            raise ChannelNotFoundError(
+                f"Channel {channel_id} is a {type(channel).__name__}, which cannot take a message"
+            )
+        with _translated("post in the channel"):
+            if isinstance(channel, discord.Thread):
+                await self._wake(channel)
+            message = await _post(channel, content, view, notify)
         return message.id
 
     async def revise(self, *, thread_id: int, message_id: int, panel: Panel) -> bool:
@@ -534,7 +582,9 @@ class DiscordThreadGateway:
                 "the Discord gateway is not connected, so nothing can be read or written yet"
             )
 
-    async def _channel(self, channel_id: int) -> discord.abc.GuildChannel:
+    async def _channel(
+        self, channel_id: int
+    ) -> discord.abc.GuildChannel | discord.Thread | discord.abc.PrivateChannel:
         self._require_a_connection()
         channel = self._client.get_channel(channel_id)
         if channel is None:
@@ -550,7 +600,8 @@ class DiscordThreadGateway:
                 raise DiscordGatewayError(
                     f"Discord refused to look up channel {channel_id}: {exc}"
                 ) from exc
-        return channel  # type: ignore[return-value]
+        # Whatever Discord has under the id, which each caller narrows to what it can use.
+        return channel
 
     async def _thread(self, thread_id: int) -> discord.Thread:
         """The thread behind an id, keeping a refusal, an outage and a missing thread apart.

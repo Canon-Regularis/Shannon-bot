@@ -124,6 +124,12 @@ class FakeThreadGateway:
         # permissions, so the second can be refused on its own. The thread is real by then, and
         # the real gateway hands its id back with the failure so the row can point at it.
         self.fail_next_first_message = False
+        # Issue #229. Messages posted wherever a command was run, which may be a plain channel
+        # rather than a thread, as (channel, content). Kept apart from `posts`, which fifty tests
+        # read as messages INTO threads.
+        self.channel_posts: list[tuple[int, str]] = []
+        # Raised instead of posting, for somewhere that has gone or will not take the message.
+        self.channel_post_error: Exception | None = None
         self._next_id = 1000
 
     def _drawn(self, panel: Panel) -> str:
@@ -276,6 +282,22 @@ class FakeThreadGateway:
         thread.messages[message_id] = content
         self.posts.append((thread_id, content))
         self.allowed.append(("post", thread_id, content, notify))
+        return message_id
+
+    async def post_in_channel(self, *, channel_id: int, panel: Panel, notify: Notify = None) -> int:
+        """A message wherever a command was run: a channel, or a thread in one. Issue #229.
+
+        A thread this fake knows is woken first and keeps the message, the way `post` does it. Any
+        other id is taken to be a channel, which this fake does not otherwise model.
+        """
+        content = self._drawn(panel)
+        if self.channel_post_error is not None:
+            raise self.channel_post_error
+        message_id = self._allocate()
+        if channel_id in self.threads:
+            self._wake(channel_id).messages[message_id] = content
+        self.channel_posts.append((channel_id, content))
+        self.allowed.append(("post_in_channel", channel_id, content, notify))
         return message_id
 
     async def revise(self, *, thread_id: int, message_id: int, panel: Panel) -> bool:

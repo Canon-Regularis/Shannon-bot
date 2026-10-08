@@ -67,7 +67,7 @@ def _a_message_that_names_somebody_says_who_it_may_notify(
     reports the fake as having lost every parameter it has.
     """
     seen: list[tuple[str, str]] = []
-    for name in ("create", "update", "post"):
+    for name in ("create", "update", "post", "post_in_channel"):
         original = getattr(FakeThreadGateway, name)
 
         @functools.wraps(original)
