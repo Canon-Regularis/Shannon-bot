@@ -1056,6 +1056,66 @@ def as_timestamp(value: datetime | None) -> str:
     return f"<t:{int(as_utc(value).timestamp())}:f>"
 
 
+def as_relative_time(value: datetime) -> str:
+    """When, counted from whoever is reading: "in 3 hours", "2 days ago". Issue #229.
+
+    Discord keeps it current while somebody looks, so a reminder read a week after it went off
+    still says how long ago it was asked for, where a time of day would leave the reader to work
+    it out.
+    """
+    return f"<t:{int(as_utc(value).timestamp())}:R>"
+
+
+# Issue #229. A heading, like every other line this bot says on its own account, so a reminder can
+# be found by scrolling a channel for it. An alarm clock because that is what this is, and nothing
+# else here uses one.
+_REMINDER_HEADING = "### ⏰ Reminder"
+
+
+def format_reminder(
+    *,
+    member_id: int,
+    set_by: int,
+    set_at: datetime,
+    due_at: datetime,
+    message: str | None,
+    late: bool,
+) -> Panel:
+    """A reminder going off, naming who it is for and who asked for it. Issue #229.
+
+    The person it is for leads the block under the heading, as a mention, because the mention is
+    what rings them and those two blocks are the ones a panel over budget never drops. Whoever set
+    it is a mention as well, so the line says plainly who asked - but the caller allows only the
+    person it is for to be notified, so naming the one who asked rings nobody.
+
+    The message is somebody's own words, and goes through `as_plain_text`. No mention of a person,
+    a role, a channel or everyone survives it to ring anybody, and no markup in it can dress it up
+    as something this bot said: a reminder is posted for the whole channel, and nothing in it may
+    reach further than the one person it was set for.
+
+    Said to be late where it is, because it can be. A reminder that fell due while this process was
+    down goes out once it is back, and whoever reads it is owed knowing it was not meant for now.
+    The sender decides that; this holds no clock.
+    """
+    when = as_relative_time(set_at)
+    said = (
+        f"<@{member_id}> — you asked for this {when}."
+        if set_by == member_id
+        else f"<@{member_id}> — <@{set_by}> asked for this {when}."
+    )
+    blocks = [Block(BlockKind.HEADING, _REMINDER_HEADING), Block(BlockKind.SUBHEADING, said)]
+    if message:
+        blocks.append(Block(BlockKind.BODY, as_plain_text(message)))
+    if late:
+        blocks.append(
+            Block(
+                BlockKind.FOOTNOTE,
+                f"-# This was due {as_relative_time(due_at)}, and could not be sent until now.",
+            )
+        )
+    return Panel(blocks=tuple(blocks), accent=Accent.SAID)
+
+
 _COMMIT_MARK = "📝"
 _FORCE_PUSH_MARK = "🔁"
 
