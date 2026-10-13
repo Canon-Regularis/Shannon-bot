@@ -17,10 +17,25 @@ Issue #147 took the string away. `reply` accepts a `Panel` and nothing else, so 
 no outcome mark is not a thing that can be written rather than a thing nobody happens to write,
 and both type checkers hold it. A panel with no accent still goes out as content, which is the
 one path a command takes when it reports rather than acts.
+
+Issue #240 added an answer that goes away: `reply_then_delete` deletes it once its moment has
+passed, which is how `/remind` keeps a countdown from running on past zero. Plain `reply` is
+pinned never to delete anything, on every path, and a delete that fails is pinned to say
+nothing.
 """
 
 from __future__ import annotations
 
+import gc
+import logging
+from datetime import timedelta
+from unittest.mock import MagicMock
+
+import aiohttp
+import discord
+import pytest
+
+from shannon.discord_bot import responses
 from shannon.discord_bot.panels import Accent, Panel
 from shannon.discord_bot.responses import (
     OWED,
@@ -31,9 +46,11 @@ from shannon.discord_bot.responses import (
     owed,
     refused,
     reply,
+    reply_then_delete,
 )
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from tests.fakes.discord_objects import FakeInteraction
+from tests.unit.conftest import Deletes
 
 
 async def test_deferring_twice_does_not_answer_twice() -> None:
@@ -165,6 +182,111 @@ class TestNobodyElseSeesAReply:
         await defer(interaction)
 
         assert interaction.response.deferred_ephemerally is True
+
+    async def test_a_reply_that_goes_away_is_private_on_both_paths(self) -> None:
+        """Issue #240 routes a countdown's answer through `reply_then_delete`, and gave the followup
+        `wait=True`, which is another way into the same two calls in which to drop the keyword
+        that matters."""
+        immediate = FakeInteraction()
+        deferred = FakeInteraction()
+        await defer(deferred)
+
+        await reply_then_delete(immediate, done("Set."), after=timedelta(minutes=5))
+        await reply_then_delete(deferred, done("Set."), after=timedelta(minutes=5))
+
+        assert immediate.ephemerally == [True]
+        assert deferred.ephemerally == [True]
+
+
+class TestAReplyThatGoesAway:
+    """Issue #240. An answer deleted once its moment has passed, after a wait, in the background."""
+
+    async def test_a_card_after_a_defer_is_deleted_after_the_wait(self, deletes: Deletes) -> None:
+        """The path `/remind` takes: it defers before writing the reminder down."""
+        interaction = FakeInteraction()
+        await defer(interaction)
+
+        await reply_then_delete(interaction, done("Set."), after=timedelta(minutes=5))
+        await deletes.settle()
+
+        assert interaction.followup.messages == [f"{SUCCEEDED} Set."]
+        assert (deletes.waits, interaction.deleted) == ([300.0], [True])
+
+    async def test_a_card_sent_first_is_deleted_after_the_wait(self, deletes: Deletes) -> None:
+        """Through the first response, which is what it is."""
+        interaction = FakeInteraction()
+
+        await reply_then_delete(interaction, done("Set."), after=timedelta(minutes=5))
+        await deletes.settle()
+
+        assert interaction.response.messages == [f"{SUCCEEDED} Set."]
+        assert (deletes.waits, interaction.deleted) == ([300.0], [True])
+
+    @pytest.mark.parametrize("deferred", [False, True], ids=["first", "after a defer"])
+    async def test_plain_text_is_deleted_after_the_wait_too(
+        self, deletes: Deletes, deferred: bool
+    ) -> None:
+        interaction = FakeInteraction()
+        if deferred:
+            await defer(interaction)
+
+        await reply_then_delete(interaction, Panel.of_text("Set."), after=timedelta(seconds=90))
+        await deletes.settle()
+
+        assert interaction.replies == ["Set."]
+        assert (deletes.waits, interaction.deleted) == ([90.0], [True])
+
+    async def test_nothing_goes_before_the_wait_is_over(self) -> None:
+        """Without the stand-in, the delete is still asleep when the answer has been sent."""
+        interaction = FakeInteraction()
+        await defer(interaction)
+
+        await reply_then_delete(interaction, done("Set."), after=timedelta(minutes=5))
+
+        assert interaction.deleted == [False]
+
+    @pytest.mark.parametrize("deferred", [False, True], ids=["first", "after a defer"])
+    @pytest.mark.parametrize("message", [done("Set."), Panel.of_text("Set.")], ids=["card", "text"])
+    async def test_an_ordinary_reply_is_never_deleted(
+        self, deletes: Deletes, deferred: bool, message: Panel
+    ) -> None:
+        """Every answer but a countdown's stays, on every path a reply can take."""
+        interaction = FakeInteraction()
+        if deferred:
+            await defer(interaction)
+
+        await reply(interaction, message)
+        await deletes.settle()
+
+        assert (deletes.waits, interaction.deleted) == ([], [False])
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            discord.NotFound(MagicMock(status=404), "Unknown Message"),
+            aiohttp.ServerDisconnectedError(),
+            RuntimeError("Session is closed"),
+        ],
+        ids=["dismissed first", "connection dropped", "shutting down"],
+    )
+    async def test_a_delete_that_fails_says_nothing(
+        self, deletes: Deletes, failure: BaseException, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Found reviewing #240. discord.py's own delayed delete let everything but an HTTP error
+        out of its task, for asyncio to report at ERROR as an exception nobody retrieved. The
+        answer only stays, as every answer did before, which is nobody's problem."""
+        interaction = FakeInteraction()
+        interaction.followup.delete_fails = failure
+        await defer(interaction)
+
+        with caplog.at_level(logging.ERROR, logger="asyncio"):
+            await reply_then_delete(interaction, done("Set."), after=timedelta(minutes=5))
+            await deletes.settle()
+            gc.collect()
+
+        assert interaction.deleted == [False]
+        assert "never retrieved" not in caplog.text
+        assert not responses._DELETES, "a finished delete was held on to"
 
 
 class TestTheThreeOutcomesAReplyCanHave:
