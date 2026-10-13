@@ -13,6 +13,12 @@ cannot. So everything that would stop it arriving is refused now, while there is
 a bot to remind, a person who cannot see the channel, a caller who could not post there themselves
 - which is also what keeps this from posting somebody's words into a read-only channel - and a bot
 that has not been given what posting there takes.
+
+The private answer says when. A Discord countdown does not stop at zero, and left alone the answer
+would go on to read "2 minutes ago" once the reminder had gone off. So a wait short enough is
+counted down and the answer deleted as it reaches zero, and a longer one, which Discord no longer
+lets this bot reach by then, gives the time and how long after setting it that is, and nothing in
+it counts. Issue #240.
 """
 
 from __future__ import annotations
@@ -29,9 +35,15 @@ from shannon.commands._replies import reply_for
 from shannon.db.models import REMINDER_MESSAGE_WIDTH
 from shannon.discord_bot.formatting import as_relative_time, as_timestamp
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, refused, reply
+from shannon.discord_bot.responses import defer, done, refused, reply, reply_then_delete
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
+
+# The longest wait whose answer counts down and is deleted at zero. Issue #240. A bot may delete its
+# answer to a command only while the command's token lives, fifteen minutes from when it was run,
+# and the defer, the write and the send spend some of that before the countdown starts, so a minute
+# is left for them. Waits are whole minutes: this is days and hours at nought and up to 14 minutes.
+LONGEST_COUNTDOWN = timedelta(minutes=14)
 
 A_BOT = "A bot cannot be reminded of anything. Pick a person."
 NO_TIME = "Say when: at least one of days, hours and minutes has to be more than zero."
@@ -128,11 +140,12 @@ def build_remind_command(reminders: SetsReminders, gate: PermissionGate) -> Slas
         if missing := _cannot_post(
             interaction.app_permissions, in_a_thread=in_a_thread, locked=locked
         ):
+            lacking = _listed(missing, last="or")
             await reply(
                 interaction,
                 refused(
                     "This bot cannot post in this channel, so the reminder would never go off. "
-                    f"It has not been given {_either(missing)} here."
+                    f"It has not been given {lacking} here."
                 ),
             )
             return
@@ -152,11 +165,23 @@ def build_remind_command(reminders: SetsReminders, gate: PermissionGate) -> Slas
             await reply(interaction, reply_for(error))
             return
 
-        when = f"{as_relative_time(due)}, on {as_timestamp(due)}"
-        if for_somebody_else:
-            await reply(interaction, done(f"This bot will remind <@{member.id}> here {when}."))
-        else:
-            await reply(interaction, done(f"This bot will remind you here {when}."))
+        who = f"<@{member.id}>" if for_somebody_else else "you"
+        if after <= LONGEST_COUNTDOWN:
+            # Counted down live, and deleted as it reaches zero, while Discord still lets this bot
+            # reach the answer then.
+            countdown = f"{as_relative_time(due)}, on {as_timestamp(due)}"
+            await reply_then_delete(
+                interaction, done(f"This bot will remind {who} here {countdown}."), after=after
+            )
+            return
+        # Further off, nothing could stop a countdown at zero, so there is none to stop.
+        took = _how_long(days=days, hours=hours, minutes=minutes)
+        await reply(
+            interaction,
+            done(
+                f"This bot will remind {who} here on {as_timestamp(due)}, {took} after you set it."
+            ),
+        )
 
     # `app_commands.command()` leaves the command's binding type unknown; one line here rather
     # than a suppression over the whole file.
@@ -185,8 +210,22 @@ def _cannot_post(permissions: discord.Permissions, *, in_a_thread: bool, locked:
     return [name for name, held in wanted if not held]
 
 
-def _either(names: list[str]) -> str:
-    """`A`, `A or B`, `A, B or C`: what is missing, read as a sentence."""
+def _how_long(*, days: int, hours: int, minutes: int) -> str:
+    """The wait as it was typed: `1 day`, `2 hours and 30 minutes`, `2 days, 3 hours and 1 minute`.
+
+    A count of nought is left out rather than read back as "0 hours". All three at nought is a wait
+    of nothing, which was refused before anything was written down. Issue #240.
+    """
+    counted = [
+        f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+        for count, unit in ((days, "day"), (hours, "hour"), (minutes, "minute"))
+        if count
+    ]
+    return _listed(counted, last="and")
+
+
+def _listed(names: list[str], *, last: str) -> str:
+    """`A`, `A or B`, `A, B or C`, joined with `last`: a list read as a sentence."""
     if len(names) < 3:
-        return " or ".join(names)
-    return f"{', '.join(names[:-1])} or {names[-1]}"
+        return f" {last} ".join(names)
+    return f"{', '.join(names[:-1])} {last} {names[-1]}"

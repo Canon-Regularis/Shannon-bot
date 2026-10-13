@@ -4,6 +4,9 @@ What is worth pinning is who may remind whom, and everything refused before a re
 down: a reminder goes off later, where it was asked for, with nobody there to tell if it cannot.
 Writing one down and sending it are tested against the database; this stands a fake in for the
 writing and watches what the command decides.
+
+Since issue #240 that includes what the answer says about when, and how long it stays: a short wait
+is counted down and the answer deleted at zero, and a longer one is given as a fixed time.
 """
 
 from __future__ import annotations
@@ -25,13 +28,16 @@ from shannon.domain.errors import ShannonError
 from shannon.services.reminders.book import TooManyRemindersError
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.unit.conftest import Deletes
 
 pytestmark = pytest.mark.unit
 
 ALICE = 555
 BOB = 777
 DUE = datetime(2026, 10, 8, 15, 30, tzinfo=UTC)
+# A short wait's answer counts down to the reminder; a longer one gives it as a fixed time.
 WHEN = f"<t:{int(DUE.timestamp())}:R>, on <t:{int(DUE.timestamp())}:f>"
+ON = f"on <t:{int(DUE.timestamp())}:f>"
 
 
 class FakeReminders:
@@ -120,14 +126,16 @@ def a_thread(*, locked: bool = False) -> MagicMock:
 
 
 class TestRemindingYourself:
-    async def test_anybody_may_with_no_role_at_all(self) -> None:
+    async def test_anybody_may_with_no_role_at_all(self, deletes: Deletes) -> None:
         remind, reminders = command()
         interaction = ran_by(FakeMember())
 
         await fire(remind, interaction, person(ALICE), hours=3, message="look at the river")
+        await deletes.settle()
 
         assert interaction.mark == SUCCEEDED
-        assert interaction.said == f"This bot will remind you here {WHEN}."
+        assert interaction.said == f"This bot will remind you here {ON}, 3 hours after you set it."
+        assert (deletes.waits, interaction.deleted) == ([], [False])
         assert reminders.added == [
             {
                 "guild_id": 1,
@@ -196,7 +204,9 @@ class TestRemindingSomebodyElse:
         await fire(remind, interaction, person(BOB), hours=1)
 
         assert interaction.mark == SUCCEEDED
-        assert interaction.said == f"This bot will remind <@{BOB}> here {WHEN}."
+        assert interaction.said == (
+            f"This bot will remind <@{BOB}> here {ON}, 1 hour after you set it."
+        )
         assert (reminders.added[0]["member_id"], reminders.added[0]["set_by"]) == (BOB, ALICE)
 
 
@@ -442,15 +452,144 @@ class TestHowItAnswers:
         assert reminders.answered_before_writing == [True]
         assert interaction.response.deferred_ephemerally is True
 
-    @pytest.mark.parametrize("minutes", [0, 1], ids=["refused", "set"])
-    async def test_every_answer_is_private(self, minutes: int) -> None:
-        """The reminder itself is public when it goes off. Setting one tells nobody else."""
+    @pytest.mark.parametrize(
+        ("hours", "minutes"),
+        [(0, 0), (0, 1), (1, 0)],
+        ids=["refused", "counted down", "a fixed time"],
+    )
+    async def test_every_answer_is_private(self, hours: int, minutes: int) -> None:
+        """The reminder itself is public when it goes off. Setting one tells nobody else, whichever
+        of its two answers it gets."""
+        remind, _ = command()
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE), hours=hours, minutes=minutes)
+
+        assert interaction.ephemerally == [True]
+
+
+class TestTheCountdown:
+    """Issue #240. A Discord countdown does not stop at zero, so the answer is deleted there.
+
+    It can be only while the command's token lives, fifteen minutes from when it was run, so a
+    wait of fourteen minutes or less counts down and goes, and anything longer is given as a fixed
+    time with nothing in it counting.
+    """
+
+    async def test_a_wait_of_minutes_counts_down_and_goes_at_zero(self, deletes: Deletes) -> None:
+        remind, _ = command()
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE), minutes=10)
+        await deletes.settle()
+
+        assert interaction.said == f"This bot will remind you here {WHEN}."
+        assert (deletes.waits, interaction.deleted) == ([600.0], [True])
+
+    async def test_somebody_elses_counts_down_the_same_way(self, deletes: Deletes) -> None:
+        remind, _ = command()
+        interaction = ran_by(project_manager())
+
+        await fire(remind, interaction, person(BOB), minutes=5)
+        await deletes.settle()
+
+        assert interaction.said == f"This bot will remind <@{BOB}> here {WHEN}."
+        assert (deletes.waits, interaction.deleted) == ([300.0], [True])
+
+    @pytest.mark.parametrize(
+        ("minutes", "counted_down"), [(1, True), (14, True), (15, False), (59, False)]
+    )
+    async def test_fourteen_minutes_is_the_last_to_count_down(
+        self, deletes: Deletes, minutes: int, counted_down: bool
+    ) -> None:
+        """A minute short of Discord's fifteen, which the defer, the write and the send spend some
+        of before the countdown has even started."""
         remind, _ = command()
         interaction = ran_by()
 
         await fire(remind, interaction, person(ALICE), minutes=minutes)
+        await deletes.settle()
 
-        assert interaction.ephemerally == [True]
+        assert (":R>" in interaction.said) is counted_down
+        assert deletes.waits == ([minutes * 60.0] if counted_down else [])
+        assert interaction.deleted == [counted_down]
+
+    @pytest.mark.parametrize(
+        ("days", "hours", "minutes"), [(0, 1, 0), (1, 0, 0), (0, 1, 5), (1, 0, 5)]
+    )
+    async def test_an_hour_or_a_day_never_counts_down(
+        self, deletes: Deletes, days: int, hours: int, minutes: int
+    ) -> None:
+        """However few the minutes beside them: it is the whole wait that decides."""
+        remind, _ = command()
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE), days=days, hours=hours, minutes=minutes)
+        await deletes.settle()
+
+        assert ":R>" not in interaction.said
+        assert (deletes.waits, interaction.deleted) == ([], [False])
+
+    @pytest.mark.parametrize(
+        ("days", "hours", "minutes", "spelled"),
+        [
+            (1, 0, 0, "1 day"),
+            (2, 0, 0, "2 days"),
+            (0, 1, 0, "1 hour"),
+            (0, 2, 0, "2 hours"),
+            (0, 0, 15, "15 minutes"),
+            (1, 2, 0, "1 day and 2 hours"),
+            (0, 1, 1, "1 hour and 1 minute"),
+            (1, 0, 30, "1 day and 30 minutes"),
+            (2, 3, 1, "2 days, 3 hours and 1 minute"),
+            (365, 23, 59, "365 days, 23 hours and 59 minutes"),
+        ],
+    )
+    async def test_the_wait_is_read_back_as_it_was_typed(
+        self, days: int, hours: int, minutes: int, spelled: str
+    ) -> None:
+        """Beside the time, so a wait typed in the wrong box is plain before it goes off."""
+        remind, _ = command()
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE), days=days, hours=hours, minutes=minutes)
+
+        assert (
+            interaction.said == f"This bot will remind you here {ON}, {spelled} after you set it."
+        )
+
+    async def test_somebody_elses_further_off_names_them_and_the_wait(self) -> None:
+        remind, _ = command()
+        interaction = ran_by(project_manager())
+
+        await fire(remind, interaction, person(BOB), days=2, hours=3, minutes=1)
+
+        assert interaction.said == (
+            f"This bot will remind <@{BOB}> here {ON}, 2 days, 3 hours and 1 minute after you set "
+            "it."
+        )
+
+    async def test_a_refusal_is_never_deleted(self, deletes: Deletes) -> None:
+        """It says what to put right, and nothing about it stops being true at a moment."""
+        remind, _ = command()
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE))
+        await deletes.settle()
+
+        assert interaction.said == NO_TIME
+        assert (deletes.waits, interaction.deleted) == ([], [False])
+
+    async def test_a_full_book_is_never_deleted_however_near(self, deletes: Deletes) -> None:
+        full = TooManyRemindersError("You already have 25 reminders waiting in this server.")
+        remind, _ = command(FakeReminders(refusing=full))
+        interaction = ran_by()
+
+        await fire(remind, interaction, person(ALICE), minutes=5)
+        await deletes.settle()
+
+        assert interaction.mark == OWED
+        assert (deletes.waits, interaction.deleted) == ([], [False])
 
 
 class TestWhatDiscordIsTold:
