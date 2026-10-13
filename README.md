@@ -100,13 +100,16 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   as a real mention and Discord is told to ring none of them.
 - **Reminders.** `/remind` pings somebody once, after the days, hours and minutes you give, in
   the channel or thread it was run in, with up to 500 characters of your own words under it.
-  Anybody may remind themselves; reminding somebody else takes Admin or Project Manager. It
-  always rings, `/mentions off` or not, because somebody asked for exactly that, and the words
-  ring nobody else: a mention in them shows as text, and so does `@everyone`. One that falls
-  due while the bot is down goes out once it is back, and says it is late; one caught by a
-  restart at the wrong moment can go out twice, which is the side this errs on. Nothing
-  recurs, nothing lists or takes back a reminder once it is set, and one person may have
-  twenty-five waiting in a server.
+  Anybody may remind themselves; reminding somebody else takes Admin or Project Manager. The
+  private answer counts down to a reminder fourteen minutes away or less and disappears as it
+  goes off; further away, it gives the time and how long after setting it that is, because a
+  Discord countdown runs on past zero and Discord lets a bot take its answer back only for
+  fifteen minutes. The reminder always rings, `/mentions off` or not, because somebody asked for
+  exactly that, and the words ring nobody else: a mention in them shows as text, and so does
+  `@everyone`. One that falls due while the bot is down goes out once it is back, and says it
+  is late; one caught by a restart at the wrong moment can go out twice, which is the side this
+  errs on. Nothing recurs, nothing lists or takes back a reminder once it is set, and one person
+  may have twenty-five waiting in a server.
 - **Late deliveries.** GitHub does not guarantee order and retries land whenever. A high water
   mark per item stops an old delivery undoing a newer one.
 
@@ -559,7 +562,7 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
 | `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you` or a reminder set for you with `/remind`, which are a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
-| `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin or Project Manager to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. Twenty-five may be waiting per person per server |
+| `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin or Project Manager to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. The private answer counts down to a reminder fourteen minutes away or less and disappears at zero; for anything further it gives the time and how long after setting it that is. Twenty-five may be waiting per person per server |
 | `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |

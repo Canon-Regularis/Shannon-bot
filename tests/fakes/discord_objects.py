@@ -64,10 +64,37 @@ class FakeResponse:
         self.ephemerally.append(ephemeral)
 
 
+class FakeWebhookMessage:
+    """What a followup hands back, which is what a reply deletes itself through. Issue #240.
+
+    `fails` is what deleting it raises, for a delete that does not happen: Discord refusing it, or
+    the connection going under it.
+    """
+
+    def __init__(self, *, fails: BaseException | None = None) -> None:
+        self.fails = fails
+        self.deleted = False
+
+    async def delete(self) -> None:
+        if self.fails is not None:
+            raise self.fails
+        self.deleted = True
+
+
 class FakeFollowup:
+    """Everything sent after the first answer, and the message each send handed back.
+
+    A message comes back whatever `wait` says, which is why `wait` is left in `**_`: discord.py
+    forces it for an interaction's followups, because those go through an application webhook, so
+    the real one always returns the message it sent. Issue #240.
+    """
+
     def __init__(self) -> None:
         self.messages: list[str] = []
         self.ephemerally: list[bool] = []
+        self.sent: list[FakeWebhookMessage] = []
+        # What deleting each message sent from here on raises, for a test of a delete that fails.
+        self.delete_fails: BaseException | None = None
 
     async def send(
         self,
@@ -76,9 +103,12 @@ class FakeFollowup:
         view: object = None,
         ephemeral: bool = False,
         **_: Any,
-    ) -> None:
+    ) -> FakeWebhookMessage:
         self.messages.append(_said(content, view))
         self.ephemerally.append(ephemeral)
+        sent = FakeWebhookMessage(fails=self.delete_fails)
+        self.sent.append(sent)
+        return sent
 
 
 # The three an outcome can carry, so a reply with none is told from one with an unexpected
@@ -260,6 +290,11 @@ class FakeInteraction:
         self.namespace = SimpleNamespace(**options)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
+        self.original_deleted = False
+
+    async def delete_original_response(self) -> None:
+        """The first answer deleted, which is how one sent before any defer goes. Issue #240."""
+        self.original_deleted = True
 
     @property
     def replies(self) -> list[str]:
@@ -275,6 +310,16 @@ class FakeInteraction:
         have passed the whole suite without a murmur.
         """
         return self.response.ephemerally + self.followup.ephemerally
+
+    @property
+    def deleted(self) -> list[bool]:
+        """Whether each reply has been deleted, in the order `replies` gives them. Issue #240.
+
+        A reply that has gone is still in `replies`, because going away later is not the same as
+        never having been sent. How long each waited first is the `deletes` fixture's to say.
+        """
+        first = [self.original_deleted for _ in self.response.messages]
+        return first + [sent.deleted for sent in self.followup.sent]
 
     @property
     def reply(self) -> str:

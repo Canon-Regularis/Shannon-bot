@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+
 import discord
 from discord import ui
 
@@ -25,6 +30,14 @@ SUCCEEDED = "✅"
 OWED = "⚠️"
 REFUSED = "❌"
 
+# The deletes still waiting to happen, held so none is collected part way through its wait.
+# Issue #240.
+_DELETES: set[asyncio.Task[None]] = set()
+
+# How a delete waits. A name of this module's own, so a test can stand in for the clock without
+# touching asyncio for everything else that is running.
+_wait: Callable[[float], Awaitable[None]] = asyncio.sleep
+
 
 async def reply(interaction: discord.Interaction, message: Panel) -> None:
     """Answer an interaction whether or not it was already deferred.
@@ -33,12 +46,43 @@ async def reply(interaction: discord.Interaction, message: Panel) -> None:
     express: `done`, `owed` and `refused` are the only ways to build one and both type checkers
     hold it, which is a stronger promise than a test could make. A panel with no accent still
     goes out as ordinary text — `/mentions` reporting what it reads is the one that does.
+
+    It stays where it was sent; `reply_then_delete` is the one that goes.
     """
+    await _send(interaction, message, delete_after=None)
+
+
+async def reply_then_delete(
+    interaction: discord.Interaction, message: Panel, *, after: timedelta
+) -> None:
+    """Answer an interaction, and delete the answer once `after` has passed. Issue #240.
+
+    For an answer that stops being true at a known moment. `/remind` counts down to a reminder with
+    a Discord relative time, and Discord does not stop one at zero: left alone, the answer goes on
+    to read "2 minutes ago" once the reminder it was counting down to has gone off.
+
+    Only for a wait well inside fifteen minutes. A bot may delete its answer to a command only
+    while the command's token lives, which is fifteen minutes from when it was run; after that
+    Discord refuses, and the answer stays as every other answer does. The caller picks the margin,
+    because only the caller knows how much of the fifteen it spent before answering.
+
+    The waiting happens in the background, in a task of this module's own, and a delete that does
+    not happen - an answer somebody dismissed first, a token that ran out, a dropped connection, a
+    bot shutting down - leaves things as they were and says nothing. What it deletes is the message
+    this sent: through the interaction's first response when that is what this sent, and through
+    the followup itself otherwise, which is not the first response when anything came before it.
+    """
+    await _send(interaction, message, delete_after=after.total_seconds())
+
+
+async def _send(
+    interaction: discord.Interaction, message: Panel, *, delete_after: float | None
+) -> None:
     content, view = as_message(message)
     if view is not None:
-        await _as_components(interaction, view)
+        await _as_components(interaction, view, delete_after=delete_after)
     else:
-        await _as_text(interaction, content or "")
+        await _as_text(interaction, content or "", delete_after=delete_after)
 
 
 async def in_the_channel(interaction: discord.Interaction, message: str) -> None:
@@ -98,28 +142,67 @@ def _fitted(message: str) -> str:
     return message[: MESSAGE_LIMIT - 1] + "…" if len(message) > MESSAGE_LIMIT else message
 
 
-async def _as_text(interaction: discord.Interaction, content: str) -> None:
+async def _as_text(
+    interaction: discord.Interaction, content: str, *, delete_after: float | None
+) -> None:
     # Cut again, because a panel with no accent reaches here without having been: `Panel.trimmed`
     # measures against the four thousand a view may carry and this goes out as content, which may
     # carry two. Idempotent for everything the constructors above built.
     content = _fitted(content)
     if interaction.response.is_done():
-        await interaction.followup.send(content, ephemeral=EPHEMERAL)
+        # `wait=True` asks Discord for nothing more: discord.py forces it for an interaction's
+        # followups anyway. Said here so the call is typed as handing back the message it sent.
+        sent = await interaction.followup.send(content, ephemeral=EPHEMERAL, wait=True)
+        _delete_later(sent.delete, delete_after)
     else:
         await interaction.response.send_message(content, ephemeral=EPHEMERAL)
+        _delete_later(interaction.delete_original_response, delete_after)
 
 
-async def _as_components(interaction: discord.Interaction, view: ui.LayoutView) -> None:
+async def _as_components(
+    interaction: discord.Interaction, view: ui.LayoutView, *, delete_after: float | None
+) -> None:
     """The reply as a card, which carries no content at all.
 
     Its own call rather than a keyword on the one above: discord.py types content and components
     as separate overloads, and the absence of `content` is what selects this one, so passing
-    `None` is not the same thing.
+    `None` is not the same thing. `wait=True` is there for the reason `_as_text` gives.
     """
     if interaction.response.is_done():
-        await interaction.followup.send(view=view, ephemeral=EPHEMERAL)
+        sent = await interaction.followup.send(view=view, ephemeral=EPHEMERAL, wait=True)
+        _delete_later(sent.delete, delete_after)
     else:
         await interaction.response.send_message(view=view, ephemeral=EPHEMERAL)
+        _delete_later(interaction.delete_original_response, delete_after)
+
+
+def _delete_later(delete: Callable[[], Awaitable[None]], seconds: float | None) -> None:
+    """Delete a reply once `seconds` have passed, in the background, or leave it for None.
+
+    A task of this module's own rather than discord.py's `delay=` and `delete_after=`, which let
+    anything but an HTTP error out of their task for asyncio to report at ERROR as an exception
+    nobody retrieved: a dropped connection, a timeout, a delete that comes due while the bot is
+    shutting down. None of those is anybody's problem, since the answer only stays as every answer
+    did before, so `_gone` reads how each ended, as `threads._settled` does for member lookups.
+    Issue #240.
+    """
+    if seconds is None:
+        return
+    deleting = asyncio.create_task(_delete_after(delete, seconds))
+    _DELETES.add(deleting)
+    deleting.add_done_callback(_gone)
+
+
+async def _delete_after(delete: Callable[[], Awaitable[None]], seconds: float) -> None:
+    await _wait(seconds)
+    await delete()
+
+
+def _gone(deleting: asyncio.Task[None]) -> None:
+    """Let go of a finished delete, and read how it ended, so a failure is nobody's exception."""
+    _DELETES.discard(deleting)
+    with contextlib.suppress(asyncio.CancelledError):
+        deleting.exception()
 
 
 async def defer(interaction: discord.Interaction) -> None:

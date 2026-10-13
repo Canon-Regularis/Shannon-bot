@@ -7921,3 +7921,34 @@ feature end to end rather than assuming a predecessor the file never recorded.
   command was run takes what posting in a thread already does.
 - **Tests.** New files for the command, its words, the queue, setting one and sending one, and the
   gateway posting outside a thread.
+
+## A reminder's countdown stops when the reminder goes off
+
+- **The answer to `/remind` counted on past zero** (#240). It said when the reminder would go off
+  as a live Discord countdown, and Discord does not stop one at zero: once the reminder had gone
+  off, the private answer above it went on to read "2 minutes ago".
+- **Fourteen minutes away or less, it counts down and goes.** The countdown stays, and the answer
+  is deleted as it reaches zero, which is when the reminder goes off in the channel.
+- **Further away, it says when and stops there.** Discord lets a bot delete its answer to a
+  command only for fifteen minutes after it was run, so a longer wait's answer cannot be tidied
+  away, and it no longer counts at all. It gives the time, and how long after setting it that is,
+  read back as it was typed: `3 hours`, `1 day and 2 hours`, `2 days, 3 hours and 1 minute`.
+- **Fourteen rather than fifteen.** The fifteen minutes start when the command is run, and the
+  answer is sent only once the reminder has been written down, so a minute is left for that.
+- **A delete that does not happen changes nothing.** An answer dismissed first is gone already,
+  and a restart in between leaves it counting on, as every answer did before this. Nothing is
+  logged for it either.
+- **The wait is this project's own.** discord.py can delete a message after a delay, but its task
+  lets anything other than an HTTP error escape - a dropped connection, a timeout, a delete that
+  comes due while the bot is shutting down - for asyncio to report at ERROR as an exception nobody
+  retrieved. So the wait runs in a task of the reply module's own, held until it finishes and
+  read when it does, the way member lookups already are. Found reviewing this change.
+- **Unchanged:** the reminder itself, which says how long ago it was asked for, counted from
+  whoever reads it. No migration, setting or permission: an answer is deleted with the command's
+  own token.
+- **Tests.** The two `/remind` tests that pinned a countdown for a wait of hours, three and one,
+  now pin the fixed time. New ones hold fourteen minutes against fifteen, read the waits back,
+  cover somebody else's reminder both ways, show that a refusal or a full book is never deleted,
+  and that a delete that fails says nothing. The stand-ins hand back the message a followup
+  sends, as discord.py does, and record each delete; a fixture stands in for the wait, so nothing
+  sleeps.
