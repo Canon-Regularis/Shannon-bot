@@ -204,6 +204,25 @@ class TrackedItemStore:
         )
         return {row[0]: (row[1], row[2]) for row in rows.all()}
 
+    async def last_written(
+        self, *, repository_id: int, object_type: ObjectType
+    ) -> dict[int, datetime]:
+        """When each item of one kind that has a thread last had its row written. Issue #185.
+
+        The row's own clock rather than GitHub's, which is what `mirrored_state` answers with: a
+        redraw rewrites the row and never moves `github_updated_at`. So ordering by this puts the
+        threads `/refresh` redrew last at the back, and a run that stops early leaves the next one
+        over the same kinds starting with the ones it did not reach.
+        """
+        rows = await self._session.execute(
+            select(TrackedItem.github_object_id, TrackedItem.updated_at).where(
+                TrackedItem.repository_id == repository_id,
+                TrackedItem.github_object_type == object_type,
+                TrackedItem.discord_thread_id.is_not(None),
+            )
+        )
+        return {row[0]: row[1] for row in rows.all()}
+
     async def board_state(self, *, repository_id: int) -> dict[tuple[ObjectType, int], BoardRow]:
         """What the poller needs of every item a board card could wrap, in one query.
 
