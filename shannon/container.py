@@ -29,6 +29,7 @@ from shannon.commands.register import build_register_command
 from shannon.commands.remind import build_remind_command
 from shannon.commands.set_channel import build_set_channel_command
 from shannon.commands.sync_link import build_issue_command, build_pr_command
+from shannon.commands.track import build_track_command
 from shannon.commands.unregister import build_unregister_command
 from shannon.commands.workflow import build_workflow_commands
 from shannon.config import Settings, get_settings
@@ -116,6 +117,7 @@ from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
+from shannon.services.tracking import ThreadTracking
 from shannon.services.transcripts.flush import TranscriptFlusher
 from shannon.services.transcripts.lines import not_a_transcript
 from shannon.services.transcripts.log import ConversationLog
@@ -254,7 +256,13 @@ class _Notifiers:
     notifiers: tuple[Notifier, ...]
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
+        self,
+        *,
+        tracked_item_id: int,
+        thread_id: int,
+        guild_id: int,
+        the_block_pinged: bool,
+        the_thread_wants_them: bool,
     ) -> tuple[str, ...]:
         told: list[str] = []
         for notifier in self.notifiers:
@@ -264,6 +272,7 @@ class _Notifiers:
                     thread_id=thread_id,
                     guild_id=guild_id,
                     the_block_pinged=the_block_pinged,
+                    the_thread_wants_them=the_thread_wants_them,
                 )
             )
         return tuple(told)
@@ -742,6 +751,8 @@ def _commands(
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
         build_refresh_command(refresh, gate),
         build_regenerate_command(regenerate, gate),
+        # Which kinds of line the thread it is run in gets. Issue #163.
+        build_track_command(ThreadTracking(sessionmaker), gate),
         build_link_command(verification, gate),
         build_link_team_command(TeamLinkingService(sessionmaker, github), gate),
         # The only one with no gate at all, which is visible at a glance and is the point.

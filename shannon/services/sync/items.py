@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
@@ -23,6 +23,7 @@ from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, TrackedSnapshot
+from shannon.domain.tracking import TrackedEvent, Tracking
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.sync.announcements import AnnouncesInThread, Arrival
 from shannon.services.sync.one_at_a_time import ItemLock
@@ -61,6 +62,9 @@ class SyncResult:
     # The thread this sync moved the item off, for a caller with something to say in it. Only ever
     # set by a binding built to relocate, which is the one behind `/set_channel`.
     displaced: int | None = None
+    # Which lines the item's thread asked for, read off the row this sync already held, so what is
+    # said about the delivery afterwards obeys it without asking the database again. Issue #163.
+    tracking: Tracking = field(default_factory=Tracking)
 
     @property
     def synced(self) -> bool:
@@ -117,7 +121,13 @@ class Notifier(Protocol):
     """
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
+        self,
+        *,
+        tracked_item_id: int,
+        thread_id: int,
+        guild_id: int,
+        the_block_pinged: bool,
+        the_thread_wants_them: bool,
     ) -> tuple[str, ...]: ...
 
 
@@ -333,6 +343,8 @@ class ItemSyncService:
                 # is a thread being opened for the first time. An edit notifies nobody, and a
                 # thread opened to replace one carries the plain block on purpose.
                 the_block_pinged=written.created and state.thread_id is None,
+                # Issue #163. A thread that turned these off has them spent rather than said.
+                the_thread_wants_them=state.tracking.wants(TrackedEvent.PEOPLE),
             )
 
         # Two reasons to shut it, kept apart because they are answered by different things.
@@ -398,6 +410,7 @@ class ItemSyncService:
             notified=notified,
             shut_refused=shut_refused,
             displaced=written.displaced,
+            tracking=state.tracking,
         )
 
     async def _reopen_new_requests(self, tracked_item_id: int, snapshot: TrackedSnapshot) -> None:
@@ -646,6 +659,9 @@ class ItemSyncService:
                 tracked_item_id=item.id,
                 thread_id=item.discord_thread_id,
                 message_id=item.discord_message_id,
+                # A superseded delivery is still announced - a tag line says what happened, not
+                # what is - so it carries the thread's choice as much as a current one does.
+                tracking=Tracking.of(item.tracking),
             )
 
         return _Placement(
@@ -714,6 +730,7 @@ class ItemSyncService:
                     tracked_item_id=item.id,
                     thread_id=item.discord_thread_id,
                     message_id=item.discord_message_id,
+                    tracking=Tracking.of(item.tracking),
                 )
 
         # Only once the delivery is known to be current. Every payload carries the repository's
@@ -867,6 +884,7 @@ class ItemSyncService:
             thread_channel_id=item.discord_channel_id,
             labels=tuple(shown.label_names),
             notify=notify,
+            tracking=Tracking.of(item.tracking),
         )
 
     def _apply(self, items: TrackedItemStore, item: TrackedItem, snapshot: TrackedSnapshot) -> None:
@@ -1007,6 +1025,7 @@ def build_item_handler(
                     thread_id=result.thread_id,
                     arrived=arrived,
                     shut_refused=result.shut_refused,
+                    tracking=result.tracking,
                 )
             )
 
@@ -1068,6 +1087,8 @@ class _SyncState:
     # Which of the people the block names this bot may notify. Empty where it names nobody, which
     # is never the same answer as having no opinion. See `Notify`.
     notify: tuple[int, ...]
+    # Which lines the thread asked for, off the row this sync holds locked. Issue #163.
+    tracking: Tracking
 
     @property
     def target(self) -> ThreadTarget:
