@@ -2,18 +2,31 @@
 
 The counts are the whole reply, so the wording is asserted rather than sampled: the difference
 between "done" and "run it again" is one clause, and somebody acts on it.
+
+Issue #185 added the redraws to the reply, which is `TestWhatItSaysAboutRedrawing`, and a minute
+between runs in a server, which is `TestHowSoonItMayRunAgain`.
 """
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import discord
 import pytest
 from discord import app_commands
 
-from shannon.commands.refresh import _KINDS, _MISSED, build_refresh_command
+from shannon.commands._cooldowns import Cooldown
+from shannon.commands.refresh import (
+    _KINDS,
+    _MISSED,
+    REFRESH_SPACING_SECONDS,
+    build_refresh_command,
+)
+from shannon.discord_bot.responses import OWED, REFUSED
 from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubRateLimitError
 from shannon.services.sync.refresh import MissedTickets, RefreshOutcome, RefreshScope
-from tests.fakes.discord_objects import FakeInteraction, FakeMember
+from tests.fakes.discord_objects import FakeInteraction, FakeMember, FakeResponse
 from tests.unit.commands.conftest import administrator, default_gate, developer, member_with
 
 pytestmark = pytest.mark.unit
@@ -177,7 +190,7 @@ class TestWhatItSays:
 
         interaction = await run(service)
 
-        assert interaction.said.startswith(f"Mirrored 1 open item from {FULL_NAME},")
+        assert interaction.said.startswith(f"Mirrored 1 open item from {FULL_NAME}.")
 
     async def test_one_that_failed_agrees_with_its_verb(self) -> None:
         """`/set_channel` computed this and `/refresh` hardcoded "are", so a single failure read
@@ -189,13 +202,13 @@ class TestWhatItSays:
         assert "1 could not be mirrored just now and is among those" in interaction.said
 
     async def test_a_clean_run_counts_both_halves_and_says_nobody_was_pinged(self) -> None:
-        service = StubRefresh(outcome=an_outcome(mirrored=7, already=31))
+        service = StubRefresh(outcome=an_outcome(mirrored=7, already=31, redrawn=31))
 
         interaction = await run(service)
 
         assert interaction.said == (
-            f"Mirrored 7 open items from {FULL_NAME}, and left alone the 31 that already had a "
-            "thread. Nobody was pinged."
+            f"Mirrored 7 open items from {FULL_NAME}. Redrew 31 open items from GitHub. Nobody "
+            "was pinged."
         )
 
     async def test_a_run_that_left_some_says_to_run_it_again(self) -> None:
@@ -232,6 +245,323 @@ class TestWhatItSays:
         interaction = await run(service)
 
         assert "Nobody was pinged" not in interaction.reply
+
+
+class TestWhatItSaysAboutRedrawing:
+    """Issue #185. Every open pull request and issue with a thread is redrawn now, and the reply
+    says what became of them. Each part appears only when its count is above nought."""
+
+    async def test_a_repository_with_nothing_to_open_still_has_its_threads_redrawn(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=12, redrawn=12))
+
+        interaction = await run(service)
+
+        assert interaction.said == (
+            f"Nothing to mirror. All 12 open items on {FULL_NAME} already have a thread. Redrew "
+            "12 open items from GitHub. Nobody was pinged."
+        )
+
+    async def test_one_redrawn_reads_as_one(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=1, redrawn=1))
+
+        interaction = await run(service)
+
+        assert interaction.said == (
+            f"Nothing to mirror. The one open item on {FULL_NAME} already has a thread. Redrew 1 "
+            "open item from GitHub. Nobody was pinged."
+        )
+
+    async def test_a_run_short_of_time_says_what_is_left_of_both_halves(self) -> None:
+        service = StubRefresh(
+            outcome=an_outcome(mirrored=25, left=18, already=27, redrawn=20, unreached=7)
+        )
+
+        interaction = await run(service)
+
+        assert interaction.said == (
+            f"Mirrored 25 open items from {FULL_NAME}. 18 are still untracked, so run /refresh "
+            "again to carry on. Redrew 20 open items from GitHub. 7 open items are still to be "
+            "redrawn; the next /refresh with the same scope starts with them. Nobody was pinged."
+        )
+
+    async def test_one_not_reached_reads_as_one(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=3, redrawn=2, unreached=1))
+
+        interaction = await run(service)
+
+        assert (
+            " 1 open item is still to be redrawn; the next /refresh with the same scope starts "
+            "with it." in interaction.said
+        )
+
+    async def test_a_thread_that_had_gone_is_said_to_have_a_new_one(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=2, redrawn=1, rebuilt=1))
+
+        interaction = await run(service)
+
+        assert " 1 open item had lost its thread, so it has a new one." in interaction.said
+
+    async def test_several_that_had_gone_agree_with_their_verb(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=3, rebuilt=3))
+
+        interaction = await run(service)
+
+        assert " 3 open items had lost their threads, so they have new ones." in interaction.said
+
+    async def test_a_run_that_only_rebuilt_still_says_nobody_was_pinged(self) -> None:
+        """A new thread is a posted block, which is exactly where pinging is the risk."""
+        service = StubRefresh(outcome=an_outcome(already=1, rebuilt=1))
+
+        interaction = await run(service)
+
+        assert interaction.said.endswith("Nobody was pinged.")
+
+    async def test_redraws_that_failed_are_counted(self) -> None:
+        one = await run(StubRefresh(outcome=an_outcome(already=2, redrawn=1, redraws_failed=1)))
+        two = await run(StubRefresh(outcome=an_outcome(already=3, redrawn=1, redraws_failed=2)))
+
+        assert " 1 open item could not be redrawn just now; the log says why." in one.said
+        assert " 2 open items could not be redrawn just now; the log says why." in two.said
+
+    async def test_a_run_where_every_redraw_failed_says_nothing_about_pinging(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=2, redraws_failed=2))
+
+        interaction = await run(service)
+
+        assert "Nobody was pinged" not in interaction.said
+
+    async def test_the_kind_asked_for_names_what_was_redrawn(self) -> None:
+        service = StubRefresh(outcome=an_outcome(already=2, redrawn=2))
+
+        interaction = await run(service, scope=RefreshScope.PULL_REQUESTS)
+
+        assert " Redrew 2 open pull requests from GitHub." in interaction.said
+
+    async def test_tickets_that_already_have_a_thread_are_said_to_be_the_boards(self) -> None:
+        """No number, so the same words read right under `all` and under `tickets`."""
+        service = StubRefresh(outcome=an_outcome(already=3, left_to_the_board=3))
+
+        interaction = await run(service, scope=RefreshScope.TICKETS)
+
+        assert interaction.said == (
+            f"Nothing to mirror. All 3 tickets on {FULL_NAME} already have a thread. Tickets that "
+            "already have a thread are left alone, because the board keeps those up to date "
+            "itself."
+        )
+
+    async def test_the_note_about_tickets_still_comes_last(self) -> None:
+        service = StubRefresh(
+            outcome=an_outcome(already=2, redrawn=2, tickets_missed=MissedTickets.NO_BOARD)
+        )
+
+        interaction = await run(service)
+
+        assert interaction.said.endswith(
+            f"Redrew 2 open items from GitHub. Nobody was pinged. {_MISSED[MissedTickets.NO_BOARD]}"
+        )
+
+
+class Clock:
+    """A monotonic clock a test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _Busy(StubRefresh):
+    """Takes the clock forward while it runs, the way a long run does."""
+
+    def __init__(self, clock: Clock, *, takes: float) -> None:
+        super().__init__()
+        self._clock = clock
+        self._takes = takes
+
+    async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome:
+        self._clock.now += self._takes
+        return await super().refresh(guild_id=guild_id, scope=scope)
+
+
+class _TooLate(FakeResponse):
+    """An interaction Discord has already dropped, as a defer that came too late finds it."""
+
+    async def defer(self, *, ephemeral: bool = False, **_: object) -> None:
+        raise discord.NotFound(MagicMock(status=404), "Unknown interaction")
+
+
+class TestHowSoonItMayRunAgain:
+    """Issue #185. One run per server at a time, and the next a minute after the last finished."""
+
+    def taking_turns(self, service: StubRefresh, clock: Clock) -> app_commands.Command:
+        return build_refresh_command(
+            service, default_gate(), cooldown=Cooldown(REFRESH_SPACING_SECONDS, clock=clock)
+        )
+
+    async def fire(
+        self,
+        command: app_commands.Command,
+        member: FakeMember | None = None,
+        *,
+        guild_id: int = 1,
+    ) -> FakeInteraction:
+        interaction = FakeInteraction(
+            guild_id=guild_id, channel_id=99, user=member if member is not None else developer()
+        )
+        await command.callback(interaction, None)
+        return interaction
+
+    async def test_a_second_run_inside_the_minute_is_told_how_long_is_left(self) -> None:
+        clock = Clock()
+        service = StubRefresh()
+        command = self.taking_turns(service, clock)
+        await self.fire(command)
+        clock.now = 15.0
+
+        interaction = await self.fire(command)
+
+        assert interaction.said == (
+            "/refresh ran in this server less than a minute ago. Try again in 45 seconds."
+        )
+        assert interaction.mark == OWED
+        assert interaction.response.deferred is False
+        assert len(service.calls) == 1
+
+    async def test_half_a_second_left_is_one_second_rather_than_none(self) -> None:
+        clock = Clock()
+        command = self.taking_turns(StubRefresh(), clock)
+        await self.fire(command)
+        clock.now = 59.5
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.endswith("Try again in 1 second.")
+
+    async def test_a_minute_after_it_runs_again(self) -> None:
+        clock = Clock()
+        service = StubRefresh()
+        command = self.taking_turns(service, clock)
+        await self.fire(command)
+        clock.now = 60.0
+
+        await self.fire(command)
+
+        assert len(service.calls) == 2
+
+    async def test_the_minute_is_counted_from_when_the_run_finished(self) -> None:
+        """A run of five minutes, then ten seconds: fifty left, not none."""
+        clock = Clock()
+        command = self.taking_turns(_Busy(clock, takes=300.0), clock)
+        await self.fire(command)
+        clock.now += 10.0
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.endswith("Try again in 50 seconds.")
+
+    async def test_a_run_under_way_holds_the_next_ones_without_being_ended_by_them(self) -> None:
+        """Two asked for during the run, and both are held: the first refusal did not let go of
+        the run it was refused for, or the second would have been told to wait instead."""
+        clock = Clock()
+        heard: list[FakeInteraction] = []
+
+        class _Reentered(StubRefresh):
+            async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome:
+                heard.append(await TestHowSoonItMayRunAgain().fire(command))
+                heard.append(await TestHowSoonItMayRunAgain().fire(command))
+                return await super().refresh(guild_id=guild_id, scope=scope)
+
+        command = self.taking_turns(_Reentered(), clock)
+
+        await self.fire(command)
+
+        running = (
+            "/refresh is already running in this server. Try again a minute after it finishes."
+        )
+        assert [interaction.said for interaction in heard] == [running, running]
+        assert {interaction.mark for interaction in heard} == {OWED}
+
+    async def test_another_server_is_not_held_up(self) -> None:
+        clock = Clock()
+        service = StubRefresh()
+        command = self.taking_turns(service, clock)
+        await self.fire(command, guild_id=1)
+
+        await self.fire(command, guild_id=2)
+
+        assert [call["guild_id"] for call in service.calls] == [1, 2]
+
+    async def test_an_administrator_waits_too(self) -> None:
+        clock = Clock()
+        command = self.taking_turns(StubRefresh(), clock)
+        await self.fire(command, administrator())
+
+        interaction = await self.fire(command, administrator())
+
+        assert interaction.mark == OWED
+
+    async def test_somebody_refused_the_command_starts_no_wait(self) -> None:
+        clock = Clock()
+        service = StubRefresh()
+        command = self.taking_turns(service, clock)
+        refused = await self.fire(command, member_with("Reviewer"))
+
+        await self.fire(command)
+
+        assert refused.mark == REFUSED
+        assert len(service.calls) == 1
+
+    async def test_a_run_that_failed_starts_the_wait_all_the_same(self) -> None:
+        """What it spent is spent, and a refusal somebody fixes in seconds costs them a minute."""
+        clock = Clock()
+        command = self.taking_turns(
+            StubRefresh(error=NotRegisteredError("This server has no repository yet.")), clock
+        )
+        await self.fire(command)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/refresh ran in this server less than a minute ago.")
+
+    async def test_a_run_that_went_wrong_unexpectedly_still_lets_go_of_the_server(self) -> None:
+        """Otherwise one bug would hold the server until a restart."""
+        clock = Clock()
+        command = self.taking_turns(StubRefresh(error=RuntimeError("nobody predicted it")), clock)
+        with pytest.raises(RuntimeError):
+            await self.fire(command)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/refresh ran in this server less than a minute ago.")
+
+    async def test_a_defer_that_came_too_late_still_lets_go_of_the_server(self) -> None:
+        """Discord drops an interaction nobody answered within three seconds, so a bot that busy
+        can have its defer refused before any work starts. The run is let go of all the same, or
+        the server would be told one is running until a restart."""
+        clock = Clock()
+        service = StubRefresh()
+        command = self.taking_turns(service, clock)
+        dropped = FakeInteraction(guild_id=1, channel_id=99, user=developer())
+        dropped.response = _TooLate()
+        with pytest.raises(discord.NotFound):
+            await command.callback(dropped, None)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/refresh ran in this server less than a minute ago.")
+        assert service.calls == [], "the work ran after a defer that failed"
+
+    async def test_built_without_one_it_keeps_its_own(self) -> None:
+        command = a_command(StubRefresh())
+        await self.fire(command)
+
+        interaction = await self.fire(command)
+
+        assert interaction.mark == OWED
+
+    def test_the_wait_is_the_minute_the_words_promise(self) -> None:
+        assert REFRESH_SPACING_SECONDS == 60
 
 
 class TestWhatItAsksFor:
