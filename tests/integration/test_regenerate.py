@@ -5,10 +5,11 @@ Issue #65. Two things are being proved here and they are easy to conflate.
 The first is that a redraw reaches a thread nothing else can: closed, archived and locked, with no
 further delivery coming. That path already worked and is pinned so it keeps working.
 
-The second is the bug. A thread opened by `/refresh` renders everybody in plain text, and the only
-thing that ever converts them is a later sync, which for a quiet or closed item never happens. So
-the test that matters most below opens a thread exactly the way `/refresh` does, links somebody
-afterwards, and asserts the redraw puts the mention in without ringing anybody.
+The second is the bug. A thread opened with mentions off renders everybody in plain text - which
+is how `/refresh` opened every thread until issue #185, and how a replacement for a deleted thread
+is still opened - and the only thing that ever converts them is a later sync, which for a quiet or
+closed item never happens. So the test that matters most below opens a thread exactly that way,
+links somebody afterwards, and asserts the redraw puts the mention in without ringing anybody.
 """
 
 from __future__ import annotations
@@ -105,10 +106,10 @@ class TestTheBugThisExistsFor:
     ) -> None:
         """The whole issue in one test.
 
-        The thread is opened the way `/refresh` opens one, with mentions off, so the block names
-        `monalisa` in plain text. Then she links. Nothing in the project re-reads that mapping for
-        this item ever again: `/refresh` skips anything already threaded, `/link` writes a row and
-        touches no thread, and a quiet item sends no webhook.
+        The thread is opened with mentions off, the way `/refresh` opened one before issue #185,
+        so the block names `monalisa` in plain text. Then she links. For a closed item nothing in
+        the project re-reads that mapping ever again: `/refresh` only redraws open ones, `/link`
+        writes a row and touches no thread, and a closed item sends no webhook.
         """
         threads = FakeThreadGateway()
         opened = pr_event("opened")
@@ -175,8 +176,8 @@ class TestTheWiringTheContainerActuallyBuilds:
     """The tests above build the service the way the container does. This one builds it THROUGH
     the container, so the two cannot drift apart without something going red.
 
-    Without it, `_regenerate` could be changed to `mentions=False` - which is the natural typo,
-    since the neighbouring `_refresh` says exactly that - and every test above would go on passing
+    Without it, `_regenerate` could be changed to `mentions=False` - the switch beside the one it
+    uses, and the one `_refresh` used before issue #185 - and every test above would go on passing
     while the feature quietly stopped working.
     """
 

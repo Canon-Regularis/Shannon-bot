@@ -97,7 +97,8 @@ async def test_a_block_with_nobody_to_mention_says_nobody_may_be_notified(
     db_session: AsyncSession,
     pr_event,
 ) -> None:
-    """The `/refresh` wiring, which renders people in plain text so a backlog is not news.
+    """A sync built with mentions off, which renders people in plain text so a backlog is not
+    news. `/refresh` was built this way until issue #185 moved it to `notifies` off.
 
     An empty list rather than no list at all, which are different answers: no list leaves the
     client's own rule in force and would notify anybody the content happened to name. So the
