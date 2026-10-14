@@ -221,6 +221,19 @@ class ShutsThread(Protocol):
     async def set_shut(self, *, thread_id: int, shut: bool) -> None: ...
 
 
+class ArchivesThreads(Protocol):
+    """Whether a thread is archived, and archiving one without touching its lock. Issue #185.
+
+    Apart from `ShutsThread`, which locks and archives together and is for an item that has
+    finished. This is for putting a quiet thread back the way Discord left it after something wrote
+    to it: archived out of the channel, and still open to anybody who replies.
+    """
+
+    async def is_archived(self, *, thread_id: int) -> bool: ...
+
+    async def archive(self, *, thread_id: int) -> None: ...
+
+
 class FindsThreads(Protocol):
     """Which channel a thread is in.
 
@@ -246,6 +259,7 @@ class ThreadGateway(
     PostsInChannels,
     RevisesMessages,
     ShutsThread,
+    ArchivesThreads,
     FindsThreads,
     KnowsItsServers,
     FindsMembers,
@@ -456,6 +470,34 @@ class DiscordThreadGateway:
         except ThreadNotFoundError:
             return None
         return thread.parent_id
+
+    async def is_archived(self, *, thread_id: int) -> bool:
+        """Whether Discord has archived a thread, answering no for one that is not there.
+
+        Gone is not archived: the write that follows rebuilds it, and a new thread starts awake. A
+        refusal or an outage still raises, the way `channel_of` does. An active thread is in the
+        cache, so asking about one costs no call.
+        """
+        try:
+            thread = await self._thread(thread_id)
+        except ThreadNotFoundError:
+            return False
+        return thread.archived
+
+    async def archive(self, *, thread_id: int) -> None:
+        """Archive a thread and leave its lock as it is. Issue #185.
+
+        Not `set_shut`, which locks as it archives: right for an item that has finished, and wrong
+        for one that has only gone quiet, whose thread has to take a reply from anybody.
+        """
+        thread = await self._thread(thread_id)
+        if thread.archived:
+            return
+        with _translated("archive the thread"):
+            logger.info(
+                "thread %s was archived before it was written to, archiving it again", thread.id
+            )
+            await thread.edit(archived=True)
 
     def is_in(self, guild_id: int) -> bool:
         """Asked when Discord has refused something as though a permission were missing.

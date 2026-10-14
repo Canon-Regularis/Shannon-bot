@@ -78,6 +78,16 @@ class FakeThreadGateway:
         # cost no Discord call" cannot use the one above: shutting a thread that is already shut
         # records nothing there, so the assertion passes whether the call was made or not.
         self.shut_calls: list[tuple[int, bool]] = []
+        # Issue #185. Every thread asked whether it is archived, every archive asked for, and every
+        # one that changed something - paired like `shut_calls` and `shuts`: a test saying "this
+        # cost no Discord call" wants the first two, and one saying "it ended archived" the last.
+        self.asked_if_archived: list[int] = []
+        self.archive_calls: list[int] = []
+        self.archived_again: list[int] = []
+        # Raised instead of archiving - a refusal, an outage, a thread deleted just after the
+        # write - for the path that logs whatever Discord answered and steps over it rather than
+        # failing a write that has already landed.
+        self.archive_error: Exception | None = None
         self.deleted: list[int] = []
         self.unarchived: list[int] = []
         # Set by a test that needs the next thread creation to fail the way a Discord outage
@@ -273,6 +283,25 @@ class FakeThreadGateway:
         thread = self.threads.get(thread_id)
         return None if thread is None else thread.channel_id
 
+    async def is_archived(self, *, thread_id: int) -> bool:
+        """Whether a thread is archived. One nobody has is not, the way the real gateway answers."""
+        self.asked_if_archived.append(thread_id)
+        thread = self.threads.get(thread_id)
+        return thread is not None and thread.archived
+
+    async def archive(self, *, thread_id: int) -> None:
+        """Archive a thread and leave its lock alone, the way the real gateway does."""
+        self.archive_calls.append(thread_id)
+        if self.archive_error is not None:
+            raise self.archive_error
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            raise ThreadNotFoundError(f"Thread {thread_id} is not reachable")
+        if thread.archived:
+            return
+        thread.archived = True
+        self.archived_again.append(thread_id)
+
     async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None:
         content = self._drawn(panel)
         if self.post_error is not None:
@@ -325,6 +354,11 @@ class FakeThreadGateway:
     def forget_message(self, thread_id: int, message_id: int) -> None:
         """Somebody deleted the message in Discord. A test helper, on no Protocol."""
         self.threads[thread_id].messages.pop(message_id, None)
+
+    def go_quiet(self, thread_id: int) -> None:
+        """What Discord does to a thread after a quiet week: archives it and leaves it unlocked. A
+        test helper, on no Protocol."""
+        self.threads[thread_id].archived = True
 
     async def delete(self, *, thread_id: int) -> None:
         thread = self.threads.pop(thread_id, None)

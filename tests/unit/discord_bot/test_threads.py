@@ -811,6 +811,80 @@ class TestWhereAThreadIs:
         client.fetch_channel.assert_not_awaited()
 
 
+class TestArchivingAQuietThreadAgain:
+    """Issue #185. A redraw has to wake a quiet thread to write in it, and `/refresh` puts it back
+    the way Discord had it: archived, and still open to a reply. Kept apart from `set_shut`, which
+    locks as it archives."""
+
+    async def test_it_says_a_thread_is_archived(self) -> None:
+        gateway = DiscordThreadGateway(client_with(thread(archived=True)))
+
+        assert await gateway.is_archived(thread_id=500) is True
+
+    async def test_and_that_an_awake_one_is_not(self) -> None:
+        gateway = DiscordThreadGateway(client_with(thread(archived=False)))
+
+        assert await gateway.is_archived(thread_id=500) is False
+
+    async def test_a_thread_that_is_gone_is_not_archived(self) -> None:
+        """The write that follows rebuilds it, and a new thread starts awake."""
+        client = client_with(None)
+        client.fetch_channel.side_effect = discord.NotFound(MagicMock(), "gone")
+
+        assert await DiscordThreadGateway(client).is_archived(thread_id=500) is False
+
+    async def test_a_refusal_is_not_read_as_an_answer(self) -> None:
+        client = client_with(None)
+        client.fetch_channel.side_effect = discord.Forbidden(MagicMock(), "no")
+
+        with pytest.raises(DiscordPermissionError):
+            await DiscordThreadGateway(client).is_archived(thread_id=500)
+
+    async def test_nor_is_an_outage(self) -> None:
+        client = client_with(None)
+        client.fetch_channel.side_effect = discord.HTTPException(MagicMock(), "503")
+
+        with pytest.raises(DiscordGatewayError):
+            await DiscordThreadGateway(client).is_archived(thread_id=500)
+
+    async def test_asking_about_an_awake_thread_costs_no_fetch(self) -> None:
+        """An awake thread is in the cache, which is what keeps asking about one free."""
+        client = client_with(thread(archived=False))
+
+        await DiscordThreadGateway(client).is_archived(thread_id=500)
+
+        client.fetch_channel.assert_not_awaited()
+
+    async def test_archiving_leaves_the_lock_alone(self) -> None:
+        """One field, so a thread anybody could reply in stays one anybody can reply in."""
+        existing = thread(archived=False, locked=False)
+
+        await DiscordThreadGateway(client_with(existing)).archive(thread_id=500)
+
+        existing.edit.assert_awaited_once_with(archived=True)
+
+    async def test_a_thread_already_archived_costs_no_call(self) -> None:
+        existing = thread(archived=True)
+
+        await DiscordThreadGateway(client_with(existing)).archive(thread_id=500)
+
+        existing.edit.assert_not_awaited()
+
+    async def test_a_refused_archive_is_a_permission_error(self) -> None:
+        existing = thread(archived=False)
+        existing.edit.side_effect = discord.Forbidden(MagicMock(), "no")
+
+        with pytest.raises(DiscordPermissionError):
+            await DiscordThreadGateway(client_with(existing)).archive(thread_id=500)
+
+    async def test_discord_failing_on_it_is_a_gateway_error(self) -> None:
+        existing = thread(archived=False)
+        existing.edit.side_effect = discord.HTTPException(MagicMock(), "503")
+
+        with pytest.raises(DiscordGatewayError):
+            await DiscordThreadGateway(client_with(existing)).archive(thread_id=500)
+
+
 class TestPartialCreation:
     """Opening a thread and writing in it are two calls and two separate permissions."""
 
