@@ -18,7 +18,13 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.panels import Panel
-from shannon.discord_bot.threads import KnowsItsServers, Notify, OpensThreads, ShutsThread
+from shannon.discord_bot.threads import (
+    ArchivesThreads,
+    KnowsItsServers,
+    Notify,
+    OpensThreads,
+    ShutsThread,
+)
 from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.json import JsonObject
@@ -105,11 +111,11 @@ class ShutsAndKnowsServers(ShutsThread, KnowsItsServers, Protocol):
     """
 
 
-class OpensAndShutsThreads(ShutsThread, OpensThreads, KnowsItsServers, Protocol):
+class OpensAndShutsThreads(ShutsThread, OpensThreads, ArchivesThreads, KnowsItsServers, Protocol):
     """Both thread roles, which only the wiring below needs.
 
     The service locks and the binding opens. Nothing holds this except the function that builds
-    one from the other.
+    one from the other. Archiving is here for the one caller that asks for it, issue #185.
     """
 
 
@@ -177,6 +183,7 @@ class ItemSyncService:
         *,
         mentions: bool = True,
         notifies: bool = True,
+        archives: ArchivesThreads | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -184,9 +191,9 @@ class ItemSyncService:
         self._binding = binding
         self._policy = policy
         self._notifier = notifier
-        # Whether the block may carry live mentions at all. Off for the paths that open threads
-        # in bulk, so a backlog mirror names people in plain text and notifies nobody. Built with
-        # it rather than told per call, the same as the notifier: there is nothing to turn on.
+        # Whether the block may carry live mentions at all. Off names everybody in plain text, so
+        # the block notifies nobody whatever it is posted as. Built with it rather than told per
+        # call, the same as the notifier: there is nothing to turn on.
         self._mentions = mentions
         # Whether anybody the block names may actually be RUNG. Its own switch because the two
         # used to be one, and one caller needs them apart: a redraw names somebody linked since
@@ -200,6 +207,13 @@ class ItemSyncService:
         # notifies nobody whatever it says. It is for the one path that POSTS the block instead:
         # a metadata message somebody deleted, which `_edit_or_post` replaces with a new message.
         self._notifies = notifies
+        # Issue #185. Whether a thread Discord archived for going quiet is put back that way once
+        # this has written to it - which needs waking it first, since Discord takes no edit into
+        # an archived thread. None, and nothing is asked, for every caller but `/refresh`: a
+        # delivery or a command in a thread is activity, and leaving its thread awake is right.
+        # A refresh is a sweep over every open item, and waking all of them would fill the
+        # channel's thread list with threads nobody has touched in a week.
+        self._archives = archives
 
     async def sync(
         self,
@@ -275,7 +289,34 @@ class ItemSyncService:
         lock, which is the last thing said to Discord and therefore the one decision that can
         have been overtaken while the calls above it were being made, so it looks at the row
         once more before it commits to shutting anything.
+
+        Issue #185. A sync built to put a quiet thread back asks first whether it is archived,
+        before anything can wake it - the unlock step does for any open item, and the write for
+        every other one - and archives it again on the way out whether or not the rest went
+        through. A write Discord refused has still woken the thread, and the next sync would find
+        it awake and leave it that way.
         """
+        archived_before = await self._archived_before(state)
+        woken = _Woken()
+        try:
+            return await self._say_it(state, snapshot, settles_the_lock, woken)
+        finally:
+            # Last, after the lock, so nothing above wakes it again. Not a thread this write opened,
+            # first or as a replacement: a new thread starts awake and was never quiet. Nor one the
+            # unlock step handed back because the item is open again, which is news, and which a
+            # delivery saying so would leave awake too.
+            if archived_before and not woken.created and not woken.given_back:
+                assert state.thread_id is not None, "only a thread that exists is asked about"
+                await self._archive_again(state.tracked_item_id, state.thread_id)
+
+    async def _say_it(
+        self,
+        state: _SyncState,
+        snapshot: TrackedSnapshot,
+        settles_the_lock: bool,
+        woken: _Woken,
+    ) -> SyncResult:
+        """The calls themselves, in order, noting what `_show_it` needs to put a thread back."""
         # Discord is called outside the transaction. Holding one open across a network call
         # would let a slow gateway block the database, and a rollback would throw away work
         # Discord had already done.
@@ -316,6 +357,9 @@ class ItemSyncService:
                     refusal,
                 )
             else:
+                # Noted before the row is told, because Discord has the thread back already. A row
+                # write that fails would otherwise have the way out archive it again.
+                woken.given_back = state.thread_locked is True
                 await self._note_the_lock(state.tracked_item_id, state.thread_id, locked=False)
 
         written = await self._binding.write(
@@ -325,6 +369,7 @@ class ItemSyncService:
             replacement=state.quiet_metadata,
             notify=state.notify,
         )
+        woken.created = written.created
         handle = written.handle
 
         if written.created:
@@ -412,6 +457,35 @@ class ItemSyncService:
             displaced=written.displaced,
             tracking=state.tracking,
         )
+
+    async def _archived_before(self, state: _SyncState) -> bool:
+        """Whether the thread was archived before this sync touched it. Issue #185.
+
+        Asks nothing of a sync not built to put it back, nor about a thread that does not exist
+        yet. A refusal or an outage raises like any other Discord call here: the write that
+        follows would meet the same one.
+        """
+        if self._archives is None or state.thread_id is None:
+            return False
+        return await self._archives.is_archived(thread_id=state.thread_id)
+
+    async def _archive_again(self, tracked_item_id: int, thread_id: int) -> None:
+        """Put a quiet thread back the way Discord had it, once the block is in. Issue #185.
+
+        Never fails the sync. The block has landed by now, and a thread left awake is one Discord
+        archives again after another quiet week, so a refusal costs a thread in the channel list
+        and nothing worse. Logged, so somebody can see why it is still there.
+        """
+        assert self._archives is not None, "only a sync built to archive asks to"
+        try:
+            await self._archives.archive(thread_id=thread_id)
+        except DiscordGatewayError as refusal:
+            logger.warning(
+                "could not archive the thread for tracked item %s again after writing to it, so "
+                "it is left awake: %s",
+                tracked_item_id,
+                refusal,
+            )
 
     async def _reopen_new_requests(self, tracked_item_id: int, snapshot: TrackedSnapshot) -> None:
         """Hand back the ping on a request this payload made, even where it is out of date.
@@ -803,10 +877,10 @@ class ItemSyncService:
             if role is not ActorRole.REVIEWER_TEAM
             for actor in actors
         }
-        # Off wholesale for `/refresh`, which opens threads for a whole backlog at once. Every
-        # one of those is a first open, so every one of them would be a real message full of
-        # live mentions, and a run over twenty-five items would notify everybody on all of them
-        # about nothing that happened.
+        # Off wholesale for a path built without them. Opening a thread posts the block as a real
+        # message, which notifies everybody it mentions, so a path that opens threads for a whole
+        # backlog needs this or `notifies` off: either keeps a run over twenty-five items from
+        # ringing everybody on all of them about nothing that happened.
         mentions: Mapping[str, int] = {}
         if self._mentions:
             mentions = await UserLinkStore(session).resolve_many(
@@ -844,10 +918,9 @@ class ItemSyncService:
         # where None would leave the client's own rule in force.
         #
         # It comes back empty two ways. A path built without mentions resolves nobody, so there
-        # is nothing to ask about, which is what makes a backlog mirror silent twice over off one
-        # switch rather than by the rendering alone. And a path built without `notifies` does not
-        # ask at all, which is how a block can name people as live mentions and still ring none
-        # of them.
+        # is nothing to ask about, which makes it silent twice over off one switch rather than by
+        # the rendering alone. And a path built without `notifies` does not ask at all, which is
+        # how a block can name people as live mentions and still ring none of them.
         notify: tuple[int, ...] = ()
         if self._notifies:
             notify = await MutedMemberStore(session).may_be_pinged(
@@ -949,6 +1022,7 @@ def build_item_sync(
     relocates: bool = False,
     mentions: bool = True,
     notifies: bool = True,
+    rearchives: bool = False,
 ) -> ItemSyncService:
     """Assemble a sync service and the thread binding it drives.
 
@@ -958,6 +1032,10 @@ def build_item_sync(
 
     `relocates` off means a thread in the wrong channel is written to where it is, which is what
     every delivery wants. Only the wiring behind `/set_channel` turns it on.
+
+    `rearchives` on puts a thread Discord archived for going quiet back that way after writing to
+    it, at the price of asking about it first. Only the wiring behind `/refresh` turns it on, issue
+    #185: everything else that writes is activity, and should leave the thread awake.
     """
     return ItemSyncService(
         sessionmaker,
@@ -967,6 +1045,7 @@ def build_item_sync(
         notifier,
         mentions=mentions,
         notifies=notifies,
+        archives=threads if rearchives else None,
     )
 
 
@@ -1032,6 +1111,20 @@ def build_item_handler(
         return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED
 
     return handle
+
+
+@dataclass(slots=True)
+class _Woken:
+    """What one sync did to its thread that decides whether it may be archived again. Issue #185.
+
+    Filled in as the calls go, rather than returned, because the answer is wanted on the way out
+    of a sync that raised as much as one that did not.
+    """
+
+    # The write opened a thread, first or as a replacement, which starts awake.
+    created: bool = False
+    # The unlock step handed back a thread this bot had shut, for an item that is open again.
+    given_back: bool = False
 
 
 @dataclass(frozen=True, slots=True)
