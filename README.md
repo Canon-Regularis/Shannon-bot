@@ -31,7 +31,7 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   review carrying nothing but inline notes posts no message of its own: GitHub wraps every note on
   a diff in a review, so mirroring that wrapper says "left a review" with nothing underneath it,
   once for every reply. An edit rewrites the message it went out as and rings nobody; a deletion
-  is not mirrored.
+  is not mirrored. `/track comments off` stops all of it in one thread.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
   Anybody unlinked is still named in plain text. At most ten tags per comment are mentioned,
@@ -41,17 +41,22 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   first opened the metadata block carries those mentions and is a real message, so it is the
   ping; the separate line is kept for people added later, when editing the block would reach
   nobody. Anybody who has run `/mentions off` is still named in all of it, as a mention Discord
-  renders and does not ring.
+  renders and does not ring. `/track people off` stops the separate line in one thread, and
+  nobody added while it is off is rung for it later.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
   statuses told apart from ordinary labels. A tag the opening block already listed says nothing:
   GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening
   posts a header saying what became of the thread, and a finished item's thread is shut: locked
   and archived out of the channel, and opened again if the item is. A draft card's thread follows
   its card off the board the same way: shut when the card is archived, opened again when it is
-  restored - followed by the usual line for anything that changed meanwhile - and shut for good
-  when the card is deleted. Both exist because a Discord
+  restored - followed by the usual line for anything that changed meanwhile, where the thread
+  asked for it - and shut for good when the card is deleted. Both exist because a Discord
   edit is silent: it posts no message, notifies nobody, and does not bump the thread, so a change
-  that only moves the block looks from the channel like nothing happening.
+  that only moves the block looks from the channel like nothing happening. Tag lines, and a
+  card's line for its fields, are off until a thread asks with `/track labels on`. The headers
+  are on until it says `/track state off`, which drops the header and still shuts and reopens
+  the thread. A close this bot was not allowed to lock is said anyway, because the header is the
+  only place that refusal shows, and somebody has to grant the permission.
 - **What CI made of a commit.** When every job on a commit has finished, its thread says how many
   passed, links the logs of the ones that did not, and rings the people who put the code there:
   the author, the assignees, and anybody with a commit on the pull request. Both outcomes reach
@@ -62,7 +67,8 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   A merge commit names nobody, since its account is whoever pressed "Update branch" rather than
   whoever wrote anything. Said once per set of runs, so two CI apps on one commit produce one
   message, and not said at all until every job has stopped. A draft posts its results and rings
-  nobody. `/mentions off` opts you out.
+  nobody. `/mentions off` opts you out. `/track checks off` stops them in one thread, before
+  GitHub is asked anything.
 - **Every review in, and approving.** When the last person a pull request was waiting on approves
   it, its thread says so and rings the author and the assignees, who are who it waits on next. Read
   from GitHub at the moment it is asked rather than tallied from what has arrived: a review is
@@ -73,6 +79,7 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   anybody asked has still to answer — including a team, since no payload says who is in one.
   Withdrawing the last outstanding request says it too: at that moment everybody remaining has
   approved and no further review is coming, so nothing else would ever notice.
+  `/track approvals off` stops it in one thread.
 - **The draft switch.** A draft rings nobody on purpose: GitHub runs CI on one like any other
   pull request, but a draft is the state in which this bot asks nothing of anybody, and the card
   is grey rather than green to say so. Both moments that changes now post a header naming whoever pressed the button, and both
@@ -82,13 +89,26 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   to answer it rather than leaving them to find out by opening it. A review asked of a team is a
   role mention on the way out and the team's plain name on the way back, since Discord rings
   everybody holding a role and gives nobody a way to leave one person out of one: worth it to ask,
-  not worth it to stand down.
+  not worth it to stand down. `/track draft off` stops both in one thread.
 - **Commits.** A push to an open pull request posts a message per commit: who wrote it, its
   subject, its message capped at 250 characters, and the additions, deletions and files changed.
   Ten per push, newest first, with a footnote counting anything left over. Merge commits and
   commits somebody else wrote are skipped, so pulling main in says nothing. A force push says it
   was force-pushed instead, once, because every commit on a rewritten branch has a new hash and
-  would otherwise read as work nobody had just done. None of it pings anybody.
+  would otherwise read as work nobody had just done. None of it pings anybody. Off until a thread
+  asks with `/track commits on`, and nothing is asked of GitHub about a push until one has.
+- **Choosing what a thread is told.** `/track`, run in an item's thread, picks which kinds of line
+  that thread gets on top of the block, which always keeps up: `comments`, `labels`, `commits`,
+  `checks`, `approvals`, `draft`, `people` and `state`. Labels and commits start off, because an
+  item can be tagged a dozen times in a minute and a branch pushed to all afternoon; the rest
+  start on. An issue's thread offers comments, labels, people and state, and a board card's
+  labels and state. Off stops the line and nothing else: a closed item's thread is still shut,
+  and a review still closes the request for it. Turning a kind back on replays nothing that was
+  skipped; only something that happens again is said, so a comment edited afterwards is posted as
+  new, and another approval on the same commit still brings the round-up. The choice belongs to
+  the item, so a thread rebuilt or moved keeps it, and a kind nobody chose follows the default,
+  including a default changed later. A thread moving channel, logging starting or stopping,
+  reminders, and a close this bot was not allowed to lock are always said.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
   missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly, or
   one kind of item if you pick one. It never revisits an item that already has a thread.
@@ -555,9 +575,10 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
 | `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
 | `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
+| `/track [event] [state]` | Developer, Project Manager | Run inside an item's thread. Which kinds of line that thread is told besides its block: `comments`, `labels`, `commits`, `checks`, `approvals`, `draft`, `people` and `state`. Pick one and `on` or `off` to change it, leave the state out to see one, or leave both out to see every kind the item can get. Labels and commits start off and the rest on. A kind an issue or a board card never gets is refused, and says which ones it does. The answer is private and nothing is posted in the thread |
 | `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
-| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once |
+| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once, unless the thread ran `/track people off` |
 | `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
 | `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
@@ -682,7 +703,7 @@ any step that fails rather than abandoning the rest.
 | --- | --- |
 | `repositories` | One per registered repository. Unique on guild and on GitHub id, so a webhook resolves to exactly one server |
 | `channel_mappings` | Which channel a kind of item threads into |
-| `tracked_items` | One per mirrored PR, issue or draft card: thread, message, state - a card's is where it stands on the board, open, archived or deleted - and the high water mark that orders deliveries |
+| `tracked_items` | One per mirrored PR, issue or draft card: thread, message, state - a card's is where it stands on the board, open, archived or deleted - and the high water mark that orders deliveries. `tracking` holds what `/track` was told in its thread, and only that: a kind nobody chose is not written, so it follows the default |
 | `item_assignments` | Who is on an item and in what capacity. `notified_at` is the ping claim, `fulfilled_at` closes a review request |
 | `mirrored_notes` | Comments and reviews already posted, claimed before posting so a retry cannot repeat one |
 | `webhook_events` | The queue: payload, status, attempts, backoff, lease, last error |
@@ -702,7 +723,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0037`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0038`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
@@ -773,10 +794,11 @@ fixed later.
 **A status label moved on GitHub, against a status the block still shows.** The five statuses live
 as labels on the repository, but nothing on the webhook path reads one back onto the item: only
 the slash commands and the board write that column. So labelling an item `BACKLOG` in GitHub posts
-a line saying so while the block above goes on reading `IN_REVIEW`, and both are true of different
-things. The line reports what somebody did to the labels, which is what every line in a thread
-reports. Making a GitHub label move the stored status is a decision about which of GitHub and
-Discord wins, and it is a bigger question than the line that made it visible.
+a line saying so, in a thread that asked for tag lines, while the block above goes on reading
+`IN_REVIEW`, and both are true of different things. The line reports what somebody did to the
+labels, which is what every line in a thread reports. Making a GitHub label move the stored status
+is a decision about which of GitHub and Discord wins, and it is a bigger question than the line
+that made it visible.
 
 **A tag resolved from a comment body cannot be checked against the account that wrote it.** Every
 other mention the bot builds is checked against the GitHub id the payload carries, so a login
@@ -785,12 +807,12 @@ of a comment body carries no id at all, so that check cannot run and the name al
 follows the rule the link table already states for a payload with no id: no evidence is not
 evidence, and refusing on it would take away mentions that work.
 
-**The same commit announced in two threads.** A commit is announced where it lands, and merging
-a branch that carries your own earlier work lands it again somewhere else. Suppressing it needs a
-call per commit asking whether the default branch already has it, which triples what a push costs
-in order to hide something that is true. A rebase is a separate case and is handled: every commit
-on a rewritten branch has a new hash, so the thread says the branch was force-pushed rather than
-announcing them all again.
+**The same commit announced in two threads.** A commit is announced where it lands, in a thread
+that asked for commit lines, and merging a branch that carries your own earlier work lands it again
+somewhere else. Suppressing it needs a call per commit asking whether the default branch already
+has it, which triples what a push costs in order to hide something that is true. A rebase is a
+separate case and is handled: every commit on a rewritten branch has a new hash, so the thread
+says the branch was force-pushed rather than announcing them all again.
 
 **A link opened on a phone.** A one-time link goes through Discord before GitHub, and a phone
 with the Discord app installed can open Discord's page in the app rather than in the browser the

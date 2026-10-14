@@ -12,6 +12,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import LabelMove
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.webhooks.labels import parse_label_move
 from shannon.services.sync.announcements import Arrival, ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
@@ -52,6 +53,23 @@ class LabelLine:
         if move is None:
             return
 
+        if not arrival.tracking.wants(TrackedEvent.LABELS):
+            # Issue #163, and off unless the thread asked: an item can be tagged a dozen times
+            # in a minute. Before the claim, so nothing records a line that was never said.
+            #
+            # A label coming off still leaves the shown set. The set is there to keep quiet about
+            # a label the block has just shown, and one that has come off since is not that any
+            # more: left in, it going back on once the thread asks for tag lines would be taken
+            # for the block's own and go unsaid. One going on is not added, since nobody saw it.
+            if not move.added:
+                await self._note_shown(arrival, move)
+            logger.info(
+                "the thread of tracked item %s has labels off, so %r goes unsaid",
+                arrival.tracked_item_id,
+                move.name,
+            )
+            return
+
         if move.added and await self._already_shown(arrival.tracked_item_id, move.name):
             # GitHub fires `opened` and a `labeled` for each label an item was opened with,
             # and the block posted a moment ago already listed every one. Read after the sync,
@@ -71,6 +89,9 @@ class LabelLine:
         )
         # Only once the line has landed: a refused post hands its claim back, and the retry
         # has to be able to say the same thing.
+        await self._note_shown(arrival, move)
+
+    async def _note_shown(self, arrival: Arrival, move: LabelMove) -> None:
         async with self._sessionmaker() as session, session.begin():
             await ThreadPointerStore(session).note_label_announced(
                 arrival.tracked_item_id,

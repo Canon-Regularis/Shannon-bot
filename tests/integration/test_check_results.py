@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.muted_members import MutedMemberStore
@@ -31,11 +31,12 @@ from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.threads import Notify
 from shannon.domain.enums import ObjectType
 from shannon.domain.models import Actor, CheckRun, CommitRef
+from shannon.domain.tracking import TrackedEvent
 from shannon.github import mapping
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import register_repository
+from tests.support.db import register_repository, track
 from tests.support.stack import DeliveryClient, build_http_client, build_stack, deliver
 
 pytestmark = pytest.mark.integration
@@ -725,12 +726,20 @@ class TestTheAllowListTheLineCarries:
         assert allow_list(threads) is not None
 
     async def test_the_lines_that_never_ring_anybody_still_say_nothing_about_it(
-        self, tracked: tuple[DeliveryClient, FakeGitHubClient], threads: FakeThreadGateway
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """Every other claimed line passes no allow-list at all, and this feature must not have
         changed that: the tag and state lines build no mentions, so the client's own rule is the
-        right one for them."""
+        right one for them.
+
+        Tag lines are off until a thread asks for them, issue #163, so this one asks first."""
         client, _ = tracked
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, on=(TrackedEvent.LABELS,)
+        )
         # The payload helper builds the inner pull request, so the top-level `label` that makes
         # this a label move rather than an ordinary edit is added here, as the tag-line tests do.
         body = payloads.pull_request_event("labeled", labels=[{"name": "bug"}])

@@ -114,6 +114,7 @@ from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.domain.time import as_utc
+from shannon.domain.tracking import TrackedEvent, Tracking
 from shannon.github.errors import GitHubAuthError, GitHubRateLimitError
 from shannon.github.projects import UNREADABLE, BoardItem
 from shannon.services.sync.draft_cards import (
@@ -518,6 +519,7 @@ class ProjectPoller:
             format_card_archived(shut=done),
             shut=done,
             failing=f"tell thread {row.thread_id} its card was archived",
+            wanted=row.tracking.wants(TrackedEvent.STATE),
         )
         return True
 
@@ -555,6 +557,7 @@ class ProjectPoller:
             format_card_restored(reopened=done),
             shut=False,
             failing=f"tell thread {row.thread_id} its card is back on the board",
+            wanted=row.tracking.wants(TrackedEvent.STATE),
         )
         return True
 
@@ -598,6 +601,7 @@ class ProjectPoller:
             format_card_deleted(shut=shut),
             shut=shut,
             failing=f"tell thread {row.thread_id} its card was deleted",
+            wanted=row.tracking.wants(TrackedEvent.STATE),
         )
 
     async def _try_to_shut(self, thread_id: int, *, shut: bool) -> _Shut:
@@ -780,7 +784,7 @@ class ProjectPoller:
                 # recording is what the FIRST poll is for, and skipping it would leave the baseline
                 # unwritten and slip every announcement by one poll. `thread_id` is the one from
                 # before this sync, so None says the card had no thread a moment ago.
-                await self._say_what_moved(board, item, thread_id)
+                await self._say_what_moved(board, item, thread_id, result.tracking)
                 continue
 
             # The check stays explicit and the branch coverage floor is told not to look for
@@ -1098,9 +1102,13 @@ class ProjectPoller:
                 item.item_id,
                 item.html_url,
             )
-            await self._say_it_moved(ghost.thread_id, item.html_url)
+            await self._say_it_moved(
+                ghost.thread_id, item.html_url, wanted=ghost.tracking.wants(TrackedEvent.STATE)
+            )
 
-    async def _say_what_moved(self, board: _Board, item: BoardItem, thread_id: int | None) -> None:
+    async def _say_what_moved(
+        self, board: _Board, item: BoardItem, thread_id: int | None, tracking: Tracking
+    ) -> None:
         """Say what changed on a card, in one line, and write down what a reader has now seen.
 
         Issue #182. Record FIRST and say second, which is the order `_hand_over_converted` uses and
@@ -1135,6 +1143,15 @@ class ProjectPoller:
         if not moved:
             return
 
+        if not tracking.wants(TrackedEvent.LABELS):
+            # Issue #163: a card's fields are its labels, and off unless the thread asked. After
+            # the record rather than before it, so turning them on says what moves from then on
+            # rather than everything that moved while they were off.
+            logger.info(
+                "the thread of the card %r has labels off, so what moved goes unsaid", item.title
+            )
+            return
+
         try:
             await self._threads.post(thread_id=thread_id, panel=format_card_changed(moved))
         except DiscordGatewayError as refusal:
@@ -1156,7 +1173,7 @@ class ProjectPoller:
                 repository_id=repository_id, card_id=card_id, fields=fields
             )
 
-    async def _say_it_moved(self, thread_id: int, html_url: str) -> None:
+    async def _say_it_moved(self, thread_id: int, html_url: str, *, wanted: bool) -> None:
         """Point the old thread at the issue, and shut it.
 
         Shut FIRST, then post, then shut again - the opposite order to the relocation path this
@@ -1186,6 +1203,7 @@ class ProjectPoller:
             format_card_converted(html_url, shut=shut),
             shut=shut,
             failing=f"hand thread {thread_id} over to {html_url}",
+            wanted=wanted,
         )
 
     async def _shut_before_saying(self, thread_id: int, *, before: str) -> bool:
@@ -1203,14 +1221,21 @@ class ProjectPoller:
         return True
 
     async def _say_and_shut_again(
-        self, thread_id: int, panel: Panel, *, shut: bool, failing: str
+        self, thread_id: int, panel: Panel, *, shut: bool, failing: str, wanted: bool
     ) -> None:
         """Post one line in a thread, and shut it again where it was shut: posting reopens it.
 
         The second half of `_say_it_moved`'s order, one handler around both for the reason its
         docstring gives, shared by every line the poller leaves in a thread it has just shut or
         reopened. `failing` finishes the sentence "could not ..." for the log.
+
+        `wanted` is whether the thread asked for lines like this one, issue #163. Every caller
+        has shut or reopened the thread before asking, and that stands either way: only the line
+        is left out, and the second shut with it, since all that shut undoes is the post.
         """
+        if not wanted:
+            logger.info("thread %s has state off, so this did not %s", thread_id, failing)
+            return
         try:
             await self._threads.post(thread_id=thread_id, panel=panel)
             if shut:

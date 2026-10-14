@@ -26,6 +26,7 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.safe_text import CARD_FIELD_LIMIT
 from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.models import Actor
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
@@ -53,7 +54,7 @@ from tests.fakes.boards import PROJECT, FakeBoard, card, filled, wraps
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import link_board, map_channel, register_repository
+from tests.support.db import link_board, map_channel, register_repository, track
 from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
@@ -2102,6 +2103,9 @@ class TestSayingWhatMovedOnACard:
     One line listing every field rather than a line each, which is the shape a poll gives it: a
     board read sees a card's fields together, so somebody dragging a card and setting its points in
     the same minute did one thing and hears about it once.
+
+    A card's fields are its labels, so since issue #163 the line is only said in a thread that
+    asked for them, and every test here about what it says asks first.
     """
 
     CARD = 505
@@ -2110,9 +2114,22 @@ class TestSayingWhatMovedOnACard:
         """Every change line posted, which is every post that is not a metadata block."""
         return [said for _, said in threads.posts if "Ticket updated" in said]
 
-    async def first_seen(self, poller_for, threads: FakeThreadGateway) -> int:
-        """A card already mirrored, with its fields recorded. Answers its thread id."""
+    async def asking(
+        self, sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
+    ) -> None:
+        """What `/track labels on` leaves behind in the card's thread, once it has one."""
+        await track(sessionmaker, thread_id=threads.created[0].thread_id, on=(TrackedEvent.LABELS,))
+
+    async def first_seen(
+        self,
+        poller_for,
+        threads: FakeThreadGateway,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> int:
+        """A card already mirrored, with its fields recorded and its thread asking for the line.
+        Answers its thread id."""
         await poller_for(FakeBoard(filled())).run_once()
+        await self.asking(sessionmaker, threads)
         return threads.created[0].thread_id
 
     async def test_a_card_seen_for_the_first_time_says_nothing(
@@ -2130,7 +2147,12 @@ class TestSayingWhatMovedOnACard:
         assert self.lines(threads) == []
 
     async def test_a_card_that_already_had_a_thread_and_no_record_says_nothing(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """Every card on every board, the minute this ships - and the case the test above cannot
         reach.
@@ -2142,9 +2164,11 @@ class TestSayingWhatMovedOnACard:
         has, all at once, the first time the poller runs after a deploy.
 
         A mutation that dropped the guard and read a missing record as an empty one passed every
-        other test in this class. This is the one that fails.
+        other test in this class. This is the one that fails - in a thread that asked for the
+        line, or it would fail to say anything for the thread's reason instead.
         """
         await poller_for(FakeBoard(filled())).run_once()
+        await self.asking(db_sessionmaker, threads)
         # Put the row back the way a deploy finds it: mirrored, with a thread, and never recorded.
         await db_session.execute(
             update(TrackedItem)
@@ -2160,11 +2184,17 @@ class TestSayingWhatMovedOnACard:
         assert self.lines(threads) == [], "a deploy announced a card nobody had touched"
 
     async def test_and_the_poll_after_that_one_does_say_what_moved(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway, db_session: AsyncSession
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """The other half, so the test above is a baseline being written rather than a card going
         permanently quiet. Recorded once, silent once, ordinary from then on."""
         await poller_for(FakeBoard(filled())).run_once()
+        await self.asking(db_sessionmaker, threads)
         await db_session.execute(
             update(TrackedItem)
             .where(TrackedItem.github_object_type == ObjectType.TICKET)
@@ -2182,9 +2212,13 @@ class TestSayingWhatMovedOnACard:
         assert "Priority: LOW → MEDIUM" in self.lines(threads)[0]
 
     async def test_a_changed_field_says_one_line(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         moved = replace(filled(), priority_name="LOW", updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
@@ -2197,10 +2231,14 @@ class TestSayingWhatMovedOnACard:
         assert "Updated: <t:" in said[0]
 
     async def test_three_changed_fields_still_say_one_line(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """Not three. A single drag that also set two fields is one action and one notification."""
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         moved = replace(
             filled(),
@@ -2218,21 +2256,29 @@ class TestSayingWhatMovedOnACard:
         assert "Story Point: 05 → 13" in said[0]
 
     async def test_a_card_nobody_touched_never_reaches_the_comparison(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """The guard, and that this is not once a minute. A board is read whole every poll, so a
         card nobody touched is offered again for ever - and stopped before any of this by the
         timestamp not having moved. That gate is what makes the rest cheap: a quiet board asks the
         database nothing and says nothing.
         """
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         await poller_for(FakeBoard(filled())).run_once()
 
         assert self.lines(threads) == []
 
     async def test_a_re_stamp_with_nothing_else_says_only_that(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """A newer timestamp and not one other field different, which is GitHub re-stamping a card.
 
@@ -2242,7 +2288,7 @@ class TestSayingWhatMovedOnACard:
         anything else here now name themselves, so a line carrying ONLY a timestamp means what it
         says instead of hiding a change the reader cannot see.
         """
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         await poller_for(FakeBoard(replace(filled(), updated_at=LATER))).run_once()
 
@@ -2252,7 +2298,11 @@ class TestSayingWhatMovedOnACard:
         assert "Updated: <t:" in said[0]
 
     async def test_a_card_with_no_timestamp_is_compared_every_poll_and_stays_quiet(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """The one card the timestamp gate does not stop, and the reason the comparison keeps its
         own guard.
@@ -2266,13 +2316,18 @@ class TestSayingWhatMovedOnACard:
         """
         timeless = replace(filled(), updated_at=None)
         await poller_for(FakeBoard(timeless)).run_once()
+        await self.asking(db_sessionmaker, threads)
 
         await poller_for(FakeBoard(timeless)).run_once()
 
         assert self.lines(threads) == []
 
     async def test_a_creator_changing_is_never_named(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """ "Updates to all aside from creator", which is the issue's own words. A card's creator
         does not change in practice, and being told who made something is not news about it
@@ -2282,7 +2337,7 @@ class TestSayingWhatMovedOnACard:
         reported. What this pins is the one field left out of the comparison: the creator is
         nowhere in it, under either name.
         """
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         moved = replace(filled(), creator=Actor("somebody-else"), updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
@@ -2292,12 +2347,16 @@ class TestSayingWhatMovedOnACard:
         assert "somebody-else" not in said
 
     async def test_a_renamed_card_names_its_title(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """Watched BECAUSE `Updated` is. A title edit moves the timestamp and nothing else here,
         so without this the line would report that a card changed without saying what - and after
         its column, the title is the commonest thing about a card to change."""
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         moved = replace(filled(), title="Write the poller properly", updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
@@ -2305,13 +2364,17 @@ class TestSayingWhatMovedOnACard:
         assert "Ticket Name: Write the poller → Write the poller properly" in self.lines(threads)[0]
 
     async def test_a_rewritten_description_names_itself_and_is_cut(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """The other edit that moves a timestamp on its own, and the one that would break the
         message if it were not cut: a description runs to seven hundred characters, two values of
         one would be most of what Discord takes, and the block directly above carries it in full.
         """
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
 
         moved = replace(filled(), body="x" * 400, updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
@@ -2324,18 +2387,27 @@ class TestSayingWhatMovedOnACard:
         assert "…" in said
 
     async def test_a_field_set_for_the_first_time_reads_from_none(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """A board that gained a field, or a card somebody finally filled in. "None to General" is
         what setting it did, so that is what it says."""
         await poller_for(FakeBoard(replace(filled(), area=None))).run_once()
+        await self.asking(db_sessionmaker, threads)
 
         await poller_for(FakeBoard(replace(filled(), updated_at=LATER))).run_once()
 
         assert "Area: None → General" in self.lines(threads)[0]
 
     async def test_a_created_stamp_is_watched_like_the_rest(
-        self, board_channel: None, poller_for, threads: FakeThreadGateway
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """`Created` is in the watched set because issue #182's field list named it, and this is
         the test that says so.
@@ -2346,6 +2418,7 @@ class TestSayingWhatMovedOnACard:
         a field the issue asked for that nothing checks is the kind of gap nobody finds.
         """
         await poller_for(FakeBoard(replace(filled(), created_at=LATER))).run_once()
+        await self.asking(db_sessionmaker, threads)
 
         moved = replace(filled(), created_at=LATER_STILL, updated_at=LATER)
         await poller_for(FakeBoard(moved)).run_once()
@@ -2359,6 +2432,7 @@ class TestSayingWhatMovedOnACard:
         board_channel: None,
         poller_for,
         threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Recorded first, said second. A refusal before the write would say the same thing on
@@ -2366,7 +2440,7 @@ class TestSayingWhatMovedOnACard:
 
         Proved by the poll AFTER the refusal: the record landed, so there is nothing left to say.
         """
-        await self.first_seen(poller_for, threads)
+        await self.first_seen(poller_for, threads, db_sessionmaker)
         threads.post_error = DiscordGatewayError("Missing Access")
 
         with caplog.at_level("WARNING", logger="shannon.services.projects"):
@@ -2387,6 +2461,31 @@ class TestSayingWhatMovedOnACard:
         said = self.lines(threads)[0]
         assert "Priority" not in said, "it said the change it had already recorded"
         assert "Updated: <t:" in said
+
+    async def test_a_thread_that_never_asked_hears_nothing_and_its_record_still_moves(
+        self,
+        board_channel: None,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Off until somebody asks, issue #163. Recorded all the same, so a thread that asks later
+        hears what moves from then on rather than everything that moved while it was not asking.
+        """
+        await poller_for(FakeBoard(filled())).run_once()
+        await poller_for(
+            FakeBoard(replace(filled(), priority_name="LOW", updated_at=LATER))
+        ).run_once()
+        assert self.lines(threads) == []
+
+        await self.asking(db_sessionmaker, threads)
+        await poller_for(
+            FakeBoard(replace(filled(), priority_name="MEDIUM", updated_at=LATER_STILL))
+        ).run_once()
+
+        said = self.lines(threads)
+        assert len(said) == 1
+        assert "Priority: LOW → MEDIUM" in said[0], "it caught up on a move nobody asked to hear"
 
 
 # ---------------------------------------------------------------------------------------
@@ -3162,13 +3261,16 @@ class TestRestoringACard:
         poller_for,
         threads: FakeThreadGateway,
         db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """Restored first, then what moved - against the fields recorded before it was archived,
-        which an archived card is never synced over."""
+        which an archived card is never synced over. In a thread that asked for that line, which
+        is a card's labels, issue #163."""
         await poller_for(FakeBoard(filled())).run_once()
         row = await ticket(db_session)
         assert row is not None and row.discord_thread_id is not None
         thread_id = row.discord_thread_id
+        await track(db_sessionmaker, thread_id=thread_id, on=(TrackedEvent.LABELS,))
         edited = replace(filled(), priority_name="LOW", updated_at=LATER)
 
         await poller_for(FakeBoard(replace(edited, archived=True))).run_once()
@@ -3464,6 +3566,76 @@ class TestDeletingACard:
         assert row is not None
         assert (row.github_state, row.discord_thread_id) == ("deleted", None)
         assert f"could not follow card {CARD}" in caplog.text
+
+
+class TestAThreadThatTurnedStateOff:
+    """Issue #163. A card archived, restored, deleted or converted is the board's answer to
+    closed, reopened and merged, and a thread can turn those lines off the same way. Only the line
+    goes: the thread is shut or opened again exactly as it would have been, and the second shut
+    goes with the line, because all it ever put back was what posting the line undid."""
+
+    @pytest.fixture
+    async def quiet_thread(
+        self, draft_thread: int, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> int:
+        await track(db_sessionmaker, thread_id=draft_thread, off=(TrackedEvent.STATE,))
+        return draft_thread
+
+    async def test_an_archived_card_is_shut_once_and_says_nothing(
+        self, quiet_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        assert said_in(threads, quiet_thread) == []
+        thread = threads.threads[quiet_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+        assert threads.shut_calls == [(quiet_thread, True)]
+
+    async def test_a_restored_card_is_opened_again_and_says_nothing(
+        self, quiet_thread: int, poller_for, threads: FakeThreadGateway
+    ) -> None:
+        await poller_for(FakeBoard(card(item_id=CARD, archived=True))).run_once()
+
+        await poller_for(FakeBoard(card(item_id=CARD))).run_once()
+
+        assert said_in(threads, quiet_thread) == []
+        thread = threads.threads[quiet_thread]
+        assert (thread.locked, thread.archived) == (False, False)
+
+    async def test_a_deleted_card_is_let_go_of_and_says_nothing(
+        self,
+        quiet_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        poller = poller_for(FakeBoard(), clock=Hourly())
+        await poller.run_once()
+        await poller.run_once()
+
+        assert said_in(threads, quiet_thread) == []
+        row = await ticket(db_session)
+        assert row is not None
+        assert (row.github_state, row.discord_thread_id) == ("deleted", None)
+        thread = threads.threads[quiet_thread]
+        assert (thread.locked, thread.archived) == (True, True)
+
+    async def test_a_converted_card_is_handed_over_and_says_nothing(
+        self,
+        quiet_thread: int,
+        poller_for,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+    ) -> None:
+        await poller_for(
+            FakeBoard(wraps(ObjectType.ISSUE, ISSUE_BEHIND_IT, item_id=CARD))
+        ).run_once()
+
+        assert said_in(threads, quiet_thread) == []
+        row = await ticket(db_session)
+        assert row is not None and row.discord_thread_id is None
+        thread = threads.threads[quiet_thread]
+        assert (thread.locked, thread.archived) == (True, True)
 
 
 class TestACardTheReadMissed:

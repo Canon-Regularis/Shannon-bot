@@ -15,6 +15,7 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, Commit, CommitRange, CommitRef
+from shannon.domain.tracking import TrackedEvent
 from shannon.github import mapping
 from shannon.github.client import ReadsCommits
 from shannon.services.sync.announcements import Arrival, ClaimedLine
@@ -78,6 +79,16 @@ class CommitLine:
         cancelled on the worker's deadline keeps everything it got through.
         """
         if arrival.action != PUSHED:
+            return
+
+        if not arrival.tracking.wants(TrackedEvent.COMMITS):
+            # Issue #163, and off unless the thread asked: a branch pushed to all afternoon
+            # buries the conversation it belongs to. Before the first GitHub read, so a push
+            # nobody asked to hear about costs no calls at all.
+            logger.info(
+                "the thread of tracked item %s has commits off, so the push goes unsaid",
+                arrival.tracked_item_id,
+            )
             return
 
         ends = _ends(arrival.payload)

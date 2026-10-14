@@ -180,6 +180,14 @@ class TrackedItem(TimestampMixin, Base):
     # Every card on a board would otherwise look like nine fields changing at once. An empty object
     # is a different answer and means seen with nothing set.
     shown_fields: Mapped[JsonObject | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Issue #163. Which kinds of line this item's thread asked for with `/track`, as {kind: on}.
+    # Only what somebody chose is written: a kind with no key follows `domain.tracking.DEFAULTS`
+    # as they stand when a line is decided, so a changed default reaches every thread that never
+    # said. On the item rather than its thread pointer, so the choice outlives a thread that is
+    # rebuilt or moved. JSON for `shown_fields`' reason: a kind added later needs no migration.
+    tracking: Mapped[JsonObject] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
     # The lock this bot last set on the thread it points at. Null means it has not set one, and
     # it is cleared when the pointer moves, because a replacement thread starts open. Asking
     # Discord on every delivery instead would retry a refused permission for ever. A ticket's is

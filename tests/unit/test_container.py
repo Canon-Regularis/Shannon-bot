@@ -127,6 +127,7 @@ class TestWhatItWiresUp:
             "set_channel",
             "status",
             "stop_conversation",
+            "track",
             "unassign",
             "unlabel",
             "unregister",

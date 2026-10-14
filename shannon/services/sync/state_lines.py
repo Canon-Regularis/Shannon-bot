@@ -12,6 +12,7 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.enums import StateChange
 from shannon.domain.state_changes import state_change_of
+from shannon.domain.tracking import TrackedEvent
 from shannon.services.sync.announcements import Arrival, ClaimedLine
 from shannon.services.sync.shutting import KeepsThreadsShut
 
@@ -63,6 +64,17 @@ class StateLine:
         if change is None:
             return
 
+        told = arrival.tracking.wants(TrackedEvent.STATE)
+        if not told and not arrival.shut_refused:
+            # Issue #163. Only the header goes: the sync has shut or reopened the thread by now,
+            # and that follows the item whatever its thread asked to be told.
+            logger.info(
+                "the thread of tracked item %s has state off, so %s goes unsaid",
+                arrival.tracked_item_id,
+                change,
+            )
+            return
+
         async with self._sessionmaker() as session:
             item = await TrackedItemStore(session).get_by_id(arrival.tracked_item_id)
 
@@ -77,13 +89,22 @@ class StateLine:
             )
             return
 
+        shut = item.discord_thread_locked is True
+        if not told and (shut or change is StateChange.REOPENED):
+            # Told anyway only to say that Discord would not let this bot shut the thread. This
+            # header is the only place that shows, and a closed item's thread left open needs
+            # somebody to grant a permission, which is not news a thread can turn off. A reopen,
+            # or a thread the row already calls shut, shows no refusal, so it would be news.
+            logger.info(
+                "the thread of tracked item %s has state off, so %s goes unsaid",
+                arrival.tracked_item_id,
+                change,
+            )
+            return
+
         await self._line.say_once(
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,
             note_key=f"state:{arrival.arrived}",
-            panel=self._render(
-                change,
-                shut=item.discord_thread_locked is True,
-                refused=arrival.shut_refused,
-            ),
+            panel=self._render(change, shut=shut, refused=arrival.shut_refused),
         )

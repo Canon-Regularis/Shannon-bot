@@ -75,12 +75,21 @@ class ActorNotifier:
         self._the_block_pings_them = the_block_pings_them
 
     async def notify(
-        self, *, tracked_item_id: int, thread_id: int, guild_id: int, the_block_pinged: bool
+        self,
+        *,
+        tracked_item_id: int,
+        thread_id: int,
+        guild_id: int,
+        the_block_pinged: bool,
+        the_thread_wants_them: bool,
     ) -> tuple[str, ...]:
         """Ping whoever has not been pinged yet, returning the logins that were.
 
         The claim lands before the message: a /pr overlapping an event, or a retried delivery,
         would ping twice. `the_block_pinged` means the block already carried their mentions.
+        `the_thread_wants_them` is the thread's own choice, issue #163: off, and the ping is spent
+        unsaid, so turning it back on rings whoever is asked next rather than everybody asked
+        while it was off.
         """
         # Deliberately not shielded: shielding lets the claim commit while the await raises, so
         # `logins` is never bound and the ping is owed to nobody for ever. Unshielded, a
@@ -96,6 +105,18 @@ class ActorNotifier:
             # `labeled` delivery arriving in the same second from posting the line anyway.
             logger.info(
                 "the block named %s %s on tracked item %s, so nothing is said beside it",
+                self._role,
+                logins,
+                tracked_item_id,
+            )
+            return ()
+
+        if not the_thread_wants_them:
+            # Spent the same way, for the thread's reason rather than the block's. Saving it
+            # instead would ring everybody put on the item in the meantime, all at once, the
+            # moment somebody turned this back on.
+            logger.info(
+                "the thread asked not to be told about %s, so %s on tracked item %s go unrung",
                 self._role,
                 logins,
                 tracked_item_id,

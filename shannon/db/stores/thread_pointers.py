@@ -134,7 +134,9 @@ class ThreadPointerStore:
         each other, and so a repeated name is idempotent: delivery is at-least-once.
 
         The remove runs whichever way the line went, which is what lets a label come off and go
-        back on and be announced both times.
+        back on and be announced both times. It runs for a label that came off unsaid as well,
+        in a thread that has tag lines off (issue #163): nothing is added for one going on, so
+        nothing records a line that was never said.
         """
         without = func.array_remove(func.coalesce(TrackedItem.shown_labels, _NOTHING), name)
         await self._session.execute(

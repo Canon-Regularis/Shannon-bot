@@ -8,6 +8,9 @@ Driven end to end rather than against the announcer directly, because half of wh
 work is outside it. `synchronize` has to survive the endpoint's own filter, reach the queue, come
 back out of it with a delivery number, and find a thread already open. A test that called
 `CommitLine.say` with a hand-built arrival would prove none of that.
+
+Only in a thread that asked for them, since issue #163, so every thread below asks first unless
+the test is about one that did not.
 """
 
 from __future__ import annotations
@@ -15,13 +18,15 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository
+from shannon.db.models import Repository, TrackedItem
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_commit, format_commits_left, format_force_push
 from shannon.discord_bot.panels import Panel
 from shannon.domain.models import Actor, CommitRange, CommitRef, CommitStats
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.sync.commit_lines import COMMITS_PER_PUSH, CommitLine
 from shannon.services.sync.items import build_item_handler, build_item_sync
@@ -30,6 +35,7 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import track
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
 
@@ -72,14 +78,25 @@ async def pushed(client, container, *, delivery: str = "push-1", **overrides) ->
     await container.worker.run_once()
 
 
-async def with_a_thread(client, container) -> None:
-    """The pull request opened first, because a line needs a thread to be a line in.
+async def asking_for_commit_lines(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """What `/track commits on` leaves behind in the one thread a test opened. Issue #163."""
+    async with sessionmaker() as session:
+        thread_id = await session.scalar(select(TrackedItem.discord_thread_id))
+    assert thread_id is not None, "there is no thread to ask in yet"
+    await track(sessionmaker, thread_id=thread_id, on=(TrackedEvent.COMMITS,))
+
+
+async def with_a_thread(client, container, *, asking: bool = True) -> None:
+    """The pull request opened first, because a line needs a thread to be a line in, and that
+    thread asking for commit lines unless told otherwise.
 
     Everything here would otherwise be the first thing said about the item, which is the block,
     and the block is not what these tests are about.
     """
     await post(client, "pull_request", payloads.pull_request_event("opened"), delivery="pr-1")
     await container.worker.run_once()
+    if asking:
+        await asking_for_commit_lines(container.sessionmaker)
 
 
 class TestWhatAPushSays:
@@ -169,6 +186,30 @@ class TestWhatAPushSays:
             if record.name == "shannon.services.sync.commit_lines"
         ]
         assert from_the_announcer == [], "an ordinary delivery complained about not being a push"
+
+    async def test_a_thread_that_never_asked_for_commit_lines_hears_none(
+        self, registered: Repository, db_engine: AsyncEngine
+    ) -> None:
+        """Off until somebody asks, issue #163: a branch pushed to all afternoon buries the
+        conversation it belongs to.
+
+        And GitHub is not asked either. A push nobody wants told about is up to eleven calls
+        against the installation's rate limit for nothing.
+        """
+        threads = FakeThreadGateway()
+        one = ref("a" * 40)
+        github = stocked(ahead(one), one)
+        container = build_stack(db_engine, threads=threads, github=github)
+
+        async with build_http_client(container) as client:
+            await with_a_thread(client, container, asking=False)
+            await pushed(client, container)
+
+            assert await client.outcome_of("push-1") == "processed", "the delivery never ran"
+
+        assert said(threads) == []
+        assert github.compare_calls == []
+        assert github.stats_calls == []
 
 
 class TestWhatIsLeftOut:
@@ -385,6 +426,7 @@ class TestABranchThatWasRewritten:
         )
         handle = handler_for(db_sessionmaker, threads, github)
         await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        await asking_for_commit_lines(db_sessionmaker)
         push = payloads.push_event()
 
         await handle("synchronize", push, 900_002)
@@ -483,6 +525,7 @@ class TestADeliveryThatDidNotFinish:
         commits = [ref(f"{number:040d}", message=f"Commit {number}") for number in range(5)]
         handle = handler_for(db_sessionmaker, threads, stocked(ahead(*commits), *commits))
         await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        await asking_for_commit_lines(db_sessionmaker)
         push = payloads.push_event()
 
         with pytest.raises(DiscordGatewayError):
@@ -503,6 +546,7 @@ class TestADeliveryThatDidNotFinish:
         commits = [ref(f"{number:040d}", message=f"Commit {number}") for number in range(5)]
         handle = handler_for(db_sessionmaker, threads, stocked(ahead(*commits), *commits))
         await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        await asking_for_commit_lines(db_sessionmaker)
         push = payloads.push_event()
         with pytest.raises(DiscordGatewayError):
             await handle("synchronize", push, 900_002)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.domain.enums import CardState, ObjectType, Priority, Status
 from shannon.domain.json import JsonObject
 from shannon.domain.time import as_utc
+from shannon.domain.tracking import TrackedEvent, Tracking
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,8 @@ class BoardRow:
     column: str | None
     # The board card this item is wrapped by, or None until a poll has paired them.
     card_id: int | None = None
+    # Which lines its thread asked for, so a converted card's last line can be held back. #163.
+    tracking: Tracking = field(default_factory=Tracking)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +45,9 @@ class TicketThread:
     thread_id: int
     state: str
     board_url: str
+    # Which lines its thread asked for, so archiving, restoring or deleting the card can happen
+    # without a line saying so. Issue #163.
+    tracking: Tracking = field(default_factory=Tracking)
 
     @property
     def archived(self) -> bool:
@@ -120,18 +127,41 @@ class TrackedItemStore:
         """
         item.github_updated_at = func.greatest(TrackedItem.github_updated_at, as_utc(incoming))
 
-    async def get_by_thread(self, discord_thread_id: int) -> TrackedItem | None:
-        """Find the item a Discord thread belongs to.
+    async def get_by_thread(
+        self, discord_thread_id: int, *, lock: bool = False
+    ) -> TrackedItem | None:
+        """Find the item a Discord thread belongs to, optionally holding it.
 
         For the workflow commands, which take no argument and act on the thread they are run in,
         for letting go of a thread somebody deleted, and for a reminder going off in a thread that
         is an item's (issue #229). Indexed since `0024`, because `/label` asks it on every keystroke
-        inside the three seconds Discord allows an autocomplete.
+        inside the three seconds Discord allows an autocomplete. `lock` is for choosing which lines
+        the thread is told (issue #163), so whether a kind was already on is read against what is
+        about to be written.
         """
+        statement = select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)
         found: TrackedItem | None = await self._session.scalar(
-            select(TrackedItem).where(TrackedItem.discord_thread_id == discord_thread_id)
+            statement.with_for_update() if lock else statement
         )
         return found
+
+    async def remember_tracking(
+        self, tracked_item_id: int, *, event: TrackedEvent, wanted: bool
+    ) -> JsonObject | None:
+        """Write down one choice of which lines this item's thread is told, answering them all.
+
+        Issue #163. One statement that merges the key into what is there, rather than a read and
+        a write, so two people choosing different kinds at once both land. A key this release does
+        not know is carried through untouched. None for an item that has gone.
+        """
+        chosen: JsonObject | None = await self._session.scalar(
+            update(TrackedItem)
+            .where(TrackedItem.id == tracked_item_id)
+            .values(tracking=TrackedItem.tracking.op("||")(literal({event.value: wanted}, JSONB)))
+            .returning(TrackedItem.tracking)
+            .execution_options(synchronize_session=False)
+        )
+        return chosen
 
     async def get_by_number(
         self, *, repository_id: int, number: int, object_type: ObjectType
@@ -189,10 +219,14 @@ class TrackedItemStore:
                 TrackedItem.status,
                 TrackedItem.project_column,
                 TrackedItem.project_item_id,
+                TrackedItem.tracking,
             ).where(TrackedItem.repository_id == repository_id)
         )
         return {
-            (row[0], row[1]): BoardRow(row[2], row[3], row[4], row[5], row[6]) for row in rows.all()
+            (row[0], row[1]): BoardRow(
+                row[2], row[3], row[4], row[5], row[6], tracking=Tracking.of(row[7])
+            )
+            for row in rows.all()
         }
 
     async def ticket_threads(self, *, repository_id: int) -> list[TicketThread]:
@@ -209,6 +243,7 @@ class TrackedItemStore:
                 TrackedItem.discord_thread_id,
                 TrackedItem.github_state,
                 TrackedItem.github_url,
+                TrackedItem.tracking,
             )
             .where(
                 TrackedItem.repository_id == repository_id,
@@ -218,7 +253,7 @@ class TrackedItemStore:
             .order_by(TrackedItem.id)
         )
         return [
-            TicketThread(row[0], row[1], thread_id, row[3], row[4])
+            TicketThread(row[0], row[1], thread_id, row[3], row[4], tracking=Tracking.of(row[5]))
             for row in rows.all()
             # Narrowed per row rather than trusted from the WHERE clause, which filters in SQL and
             # tells the type checker nothing.

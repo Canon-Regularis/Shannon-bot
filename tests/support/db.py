@@ -6,7 +6,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
+from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ObjectType
+from shannon.domain.tracking import TrackedEvent
 from tests.fakes.boards import PROJECT
 from tests.support import github_payloads as payloads
 
@@ -49,6 +51,28 @@ async def register_repository(
     )
     await session.commit()
     return repository
+
+
+async def track(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    thread_id: int,
+    on: tuple[TrackedEvent, ...] = (),
+    off: tuple[TrackedEvent, ...] = (),
+) -> None:
+    """The state `/track` leaves behind in one thread, without going through Discord. Issue #163.
+
+    Labels and commits start off, so a test about a tag line or a commit line turns its kind on
+    first, the way somebody in that thread would.
+    """
+    async with sessionmaker() as session, session.begin():
+        store = TrackedItemStore(session)
+        item = await store.get_by_thread(thread_id)
+        assert item is not None, f"no item has thread {thread_id}"
+        for event in on:
+            await store.remember_tracking(item.id, event=event, wanted=True)
+        for event in off:
+            await store.remember_tracking(item.id, event=event, wanted=False)
 
 
 async def map_channel(

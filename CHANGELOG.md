@@ -7952,3 +7952,43 @@ feature end to end rather than assuming a predecessor the file never recorded.
   and that a delete that fails says nothing. The stand-ins hand back the message a followup
   sends, as discord.py does, and record each delete; a fixture stands in for the wait, so nothing
   sleeps.
+
+## A thread chooses which lines it is told
+
+- **`/track`** (#163), run in an item's thread, picks which kinds of line that thread gets beside
+  its block: `comments`, `labels`, `commits`, `checks`, `approvals`, `draft`, `people` and `state`.
+  `/track labels on` changes one, `/track labels` reads one, and `/track` alone lists every kind
+  the item can get. Developer or Project Manager. The answer is private and nothing is posted in
+  the thread.
+- **Quiet by default where it was loudest.** Tag, status and priority lines, a card's line for
+  its fields, and commit lines are off until a thread asks. Comments and reviews, CI results, the
+  approval round-up, the draft switch, pings and the closing headers stay on.
+- **Off stops the line and nothing else.** The block keeps up either way. A closed item's thread
+  is still shut and a reopened one opened, and a card's thread still follows its card off the
+  board and back. A review still closes the request for it, and the round-up under an approval
+  answers to `approvals`, not `comments`. CI results, commits and the round-up ask GitHub nothing
+  for a thread that turned them off. A label coming off while tag lines are off is still dropped
+  from what the thread has been shown, so it going back on once they are turned on is said rather
+  than taken for the opening block's own.
+- **No catch-up.** Turning a kind back on replays nothing that was skipped. A ping not sent is
+  spent rather than saved, so turning `people` back on does not ring everybody added in the
+  meantime. Only something that happens again is said: a comment edited after `comments` is back
+  on is posted as new, because its first version never reached the thread, and another approval on
+  the same commit still brings the round-up.
+- **Kept with the item.** The choice is stored on the item rather than the thread, so a rebuilt
+  or moved thread keeps it. Only what somebody chose is stored: a kind nobody touched follows the
+  default, including a default changed later.
+- **Always said:** a thread moving channel, logging starting and stopping, a transcript given up
+  on, reminders, the note asking somebody to `/link`, and a close this bot was not allowed to lock:
+  the header is the only place that refusal shows, so it is posted with `state` off too.
+- **Only what the item can get.** An issue offers comments, labels, people and state, and a board
+  card labels and state. Asking for any other kind is refused, and the reply lists the kinds that
+  item offers.
+- **For whoever deploys it.** Migration `0038` adds `tracked_items.tracking`, an empty JSON object
+  by default. Tag lines, a card's line for its fields, and commit lines go quiet in every existing
+  thread until somebody there runs `/track labels on` or `/track commits on`. No new setting or
+  permission.
+- **Tests.** New files for the kinds and their defaults, the column, the service, the command,
+  the choice reaching every delivery, and threads with pings, comments and CI turned off. Tests
+  about tag, commit and card field lines turn their kind on first. Each line that stays on gains
+  an off test.

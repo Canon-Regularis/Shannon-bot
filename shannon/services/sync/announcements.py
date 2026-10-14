@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +19,7 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import Notify, PostsToThread
 from shannon.domain.json import JsonObject
 from shannon.domain.models import TrackedSnapshot
+from shannon.domain.tracking import Tracking
 from shannon.services.sync.shutting import KeepsThreadsShut
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,10 @@ class Arrival:
     # cannot say it: a thread nobody asked to shut and one Discord would not let this bot shut
     # both leave the column reading open.
     shut_refused: bool = False
+    # Which kinds of line the thread asked for, off the row the sync held. Each line decides from
+    # this before it asks GitHub anything or claims anything, so one the thread did not ask for
+    # costs nothing and is not recorded as said. Issue #163.
+    tracking: Tracking = field(default_factory=Tracking)
 
 
 class AnnouncesInThread(Protocol):

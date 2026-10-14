@@ -20,6 +20,7 @@ from shannon.domain.models import (
     RepositorySnapshot,
     ReviewSnapshot,
 )
+from shannon.domain.tracking import TrackedEvent
 from shannon.services.audience import author_and_assignees, reachable
 from shannon.services.locating import in_its_thread
 from shannon.services.sync.announcements import Arrival, ClaimedLine
@@ -268,6 +269,16 @@ class EveryoneApprovedLine:
                 about=about,
             )
         if found is None:
+            return
+        if not found.tracking.wants(TrackedEvent.APPROVALS):
+            # Issue #163. Here rather than in either trigger, so both obey it, and before the two
+            # GitHub reads, so a round-up nobody asked for costs no calls.
+            logger.info(
+                "the thread of tracked item %s has approvals off, so %s#%s goes unsaid",
+                found.tracked_item_id,
+                repository.full_name,
+                number,
+            )
             return
 
         item = await self._github.get_pull_request(repository.owner, repository.name, number)

@@ -29,6 +29,7 @@ from shannon.commands.register import VerifiesIdentity as ProvesBeforeRegisterin
 from shannon.commands.remind import SetsReminders
 from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
+from shannon.commands.track import ChoosesWhatAThreadIsTold
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
 from shannon.commands.workflow import MovesItems
 from shannon.container import Container
@@ -120,6 +121,7 @@ from shannon.services.sync.relocation import MovesThreadsBetweenChannels, Thread
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
+from shannon.services.tracking import ThreadTracking
 from shannon.services.transcripts.flush import TranscriptFlusher
 from shannon.services.transcripts.log import ConversationLog
 from shannon.services.transcripts.publish import SaysThings
@@ -262,6 +264,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ShutsWhereItPosted, KeepsThreadsShut),
     (SetsReminders, ReminderBook),
     (SendsReminders, ReminderSender),
+    # Issue #163.
+    (ChoosesWhatAThreadIsTold, ThreadTracking),
 ]
 
 
