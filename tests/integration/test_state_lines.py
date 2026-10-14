@@ -19,14 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from shannon.db.models import MirroredNote, Repository, TrackedItem
 from shannon.discord_bot.errors import DiscordPermissionError
 from shannon.discord_bot.formatting import format_state_change
+from shannon.domain.tracking import TrackedEvent, Tracking
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
+from shannon.services.sync.announcements import Arrival
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import track
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
 
@@ -40,6 +43,7 @@ SHUT = (
 )
 MERGED_SHUT = "### 🟣 Merged\n-# This thread is locked and archived."
 REOPENED = "### 🔓 Reopened"
+WOULD_NOT_SHUT = "### 🔒 Closed\n-# This thread could not be closed: the bot needs Manage Threads."
 
 
 def markers(threads: FakeThreadGateway) -> list[str]:
@@ -90,6 +94,46 @@ async def move_the_item_on(
         assert item is not None
         item.github_state = state
         item.github_updated_at = at
+
+
+async def handed_over_with_state_off(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    threads: FakeThreadGateway,
+    *,
+    action: str,
+    payload: dict,
+    arrived: int,
+    refused: bool = True,
+) -> None:
+    """One delivery handed to the header in a thread that turned `state` off, saying whether its
+    sync found Discord would not let this bot shut the thread.
+
+    Handed over directly rather than synced, because the syncs that carry a refusal on anything
+    but a close need a pull request still marked Done and a permission taken away mid-flight,
+    and what is under test is only what the header does with what it is handed.
+    """
+    snapshot = parse_issue_event(action, payload)
+    assert snapshot is not None
+    async with sessionmaker() as session:
+        item_id = await session.scalar(select(TrackedItem.id))
+    assert item_id is not None
+    await StateLine(
+        sessionmaker,
+        threads,
+        render=format_state_change,
+        shut_again=KeepsThreadsShut(sessionmaker, threads),
+    ).say(
+        Arrival(
+            action=action,
+            snapshot=snapshot,
+            payload=payload,
+            tracked_item_id=item_id,
+            thread_id=threads.created[0].thread_id,
+            arrived=arrived,
+            shut_refused=refused,
+            tracking=Tracking(off=frozenset({TrackedEvent.STATE})),
+        )
+    )
 
 
 class _RefusesToGiveTheThreadBack(FakeThreadGateway):
@@ -302,6 +346,149 @@ class TestAnItemThatHasMovedOnSince:
             "it told people a thread they still cannot post in is open again"
         )
         assert threads.threads[threads.created[0].thread_id].locked is True
+
+
+class TestAThreadThatTurnedStateOff:
+    """Issue #163. The header is a line like any other and the thread can turn it off. What it
+    cannot turn off is the item: a closed item's thread is shut and a reopened one's is opened
+    again, because that is what the item is rather than something said about it."""
+
+    async def test_closing_still_shuts_the_thread_and_says_nothing(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+    ) -> None:
+        threads = FakeThreadGateway()
+        handle = issue_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        thread_id = threads.created[0].thread_id
+        await track(db_sessionmaker, thread_id=thread_id, off=(TrackedEvent.STATE,))
+
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        assert markers(threads) == []
+        assert threads.threads[thread_id].locked is True
+        assert threads.threads[thread_id].archived is True
+        held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
+        assert held == 0, "a header that was never said was recorded as said"
+
+    async def test_reopening_still_opens_the_thread_and_says_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        threads = FakeThreadGateway()
+        handle = issue_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        thread_id = threads.created[0].thread_id
+        await track(db_sessionmaker, thread_id=thread_id, off=(TrackedEvent.STATE,))
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        await handle(
+            "reopened",
+            payloads.issue_event("reopened", updated_at="2026-08-11T13:00:00Z"),
+            900_003,
+        )
+
+        assert markers(threads) == []
+        assert threads.threads[thread_id].locked is False
+        assert threads.threads[thread_id].archived is False
+
+    async def test_a_close_the_bot_was_not_allowed_to_lock_is_still_said(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The header is the only place a refused shut is ever shown, and a closed item's thread
+        left open needs somebody to grant the permission: that is not news to be turned off.
+        Found reviewing this change."""
+        threads = FakeThreadGateway()
+        threads.refuses_every_shut = True
+        handle = issue_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        thread_id = threads.created[0].thread_id
+        await track(db_sessionmaker, thread_id=thread_id, off=(TrackedEvent.STATE,))
+
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        assert markers(threads) == [WOULD_NOT_SHUT]
+
+    async def test_a_close_that_carries_no_refusal_says_nothing_in_a_thread_left_open(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A superseded close, say, which does not ask for the shut itself, arriving at a thread a
+        refusal left open. Only a refusal is owed with state off, and this one brings none: its
+        header would be a bare 'Closed', which is news."""
+        threads = FakeThreadGateway()
+        threads.refuses_every_shut = True
+        handle = issue_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, off=(TrackedEvent.STATE,)
+        )
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        await handed_over_with_state_off(
+            db_sessionmaker,
+            threads,
+            action="closed",
+            payload=payloads.issue_event("closed", **CLOSED),
+            arrived=900_003,
+            refused=False,
+        )
+
+        assert markers(threads) == [WOULD_NOT_SHUT], "a header with no refusal was said"
+
+    async def test_a_reopen_that_brings_a_refusal_with_it_still_says_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A pull request still marked Done is shut again on a reopen, and that can be refused
+        too. A reopen's header shows no refusal, though, so it would only be news."""
+        threads = FakeThreadGateway()
+        await issue_handler(db_sessionmaker, threads)(
+            "opened", payloads.issue_event("opened"), 900_001
+        )
+
+        await handed_over_with_state_off(
+            db_sessionmaker,
+            threads,
+            action="reopened",
+            payload=payloads.issue_event("reopened"),
+            arrived=900_002,
+        )
+
+        assert markers(threads) == []
+
+    async def test_a_refusal_in_a_thread_the_row_already_calls_shut_still_says_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Its header would claim the lock the row records rather than show the refusal, so it
+        would only be news, which the thread turned off."""
+        threads = FakeThreadGateway()
+        handle = issue_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.issue_event("opened"), 900_001)
+        await handle("closed", payloads.issue_event("closed", **CLOSED), 900_002)
+
+        await handed_over_with_state_off(
+            db_sessionmaker,
+            threads,
+            action="closed",
+            payload=payloads.issue_event("closed", **CLOSED),
+            arrived=900_003,
+        )
+
+        assert markers(threads) == [SHUT], "a second header was said with state off"
+
+    async def test_a_merge_still_shuts_the_thread_and_says_nothing(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        threads = FakeThreadGateway()
+        handle = pull_request_handler(db_sessionmaker, threads)
+        await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        thread_id = threads.created[0].thread_id
+        await track(db_sessionmaker, thread_id=thread_id, off=(TrackedEvent.STATE,))
+
+        await handle("closed", payloads.pull_request_event("closed", **MERGED), 900_002)
+
+        assert markers(threads) == []
+        assert threads.threads[thread_id].archived is True
 
 
 async def test_the_block_is_still_written_on_the_same_delivery(
