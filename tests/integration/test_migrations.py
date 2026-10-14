@@ -137,6 +137,21 @@ def test_the_thread_lookups_have_an_index_to_use(migration_url: str) -> None:
         assert definition.endswith(shape), definition
 
 
+def test_every_item_starts_with_no_choice_of_lines_made(migration_url: str) -> None:
+    """0038's default, read out of the database: Alembic's comparison ignores server defaults.
+
+    Issue #163. The empty object is the decision that every existing thread follows the defaults
+    from the moment this ships - tag and commit lines going quiet everywhere - and a default that
+    stopped being `{}` would quietly backfill a choice nobody made.
+    """
+    command.upgrade(alembic_config(migration_url), "head")
+
+    nullable, default = asyncio.run(_column(migration_url, "tracked_items", "tracking"))
+
+    assert nullable == "NO"
+    assert default == "'{}'::jsonb"
+
+
 def test_migrations_roll_back(migration_url: str) -> None:
     config = alembic_config(migration_url)
     command.upgrade(config, "head")
@@ -173,6 +188,23 @@ async def _index_definition(url: str, name: str) -> str | None:
         )
     await engine.dispose()
     return found
+
+
+async def _column(url: str, table: str, column: str) -> tuple[str, str]:
+    """Whether a column may be null, and its default, as PostgreSQL holds them."""
+    engine = create_async_engine(url, poolclass=NullPool)
+    async with engine.connect() as connection:
+        found = (
+            await connection.execute(
+                text(
+                    "SELECT is_nullable, column_default FROM information_schema.columns "
+                    "WHERE table_name = :table AND column_name = :column"
+                ),
+                {"table": table, "column": column},
+            )
+        ).one()
+    await engine.dispose()
+    return found[0], found[1]
 
 
 async def _recreate(admin_url: str, name: str) -> None:
