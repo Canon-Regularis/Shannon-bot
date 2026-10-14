@@ -4,6 +4,9 @@ The metadata block already lists every label and is rewritten on every delivery,
 never wrong. What was missing is that a Discord edit is silent: it posts no message, notifies
 nobody and does not bump the thread, so tagging an item looked from the channel exactly like
 nothing happening. Reported as issue #62 after watching it happen in a real server.
+
+Only in a thread that asked for them, since issue #163, so every test below about a line that IS
+said asks first.
 """
 
 from __future__ import annotations
@@ -14,10 +17,12 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import MirroredNote, Repository
+from shannon.db.models import MirroredNote, Repository, TrackedItem
 from shannon.discord_bot import formatting
 from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.formatting import format_label_change
+from shannon.domain.tracking import TrackedEvent
+from shannon.github.webhooks.events import WebhookOutcome
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.label_lines import LabelLine
@@ -25,6 +30,7 @@ from shannon.services.sync.policies import IssuePolicy
 from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import track
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
 
@@ -63,9 +69,18 @@ def labelled(action: str, name: str) -> dict:
     return payload
 
 
-async def with_a_thread(client, container) -> None:
+async def asking_for_tag_lines(
+    sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway
+) -> None:
+    """What `/track labels on` leaves behind in the one thread a test opened. Issue #163."""
+    await track(sessionmaker, thread_id=threads.created[0].thread_id, on=(TrackedEvent.LABELS,))
+
+
+async def with_a_thread(client, container, threads: FakeThreadGateway) -> None:
+    """The issue's thread open, and asking for tag lines."""
     await post(client, "issues", payloads.issue_event("opened"), delivery="issue-1")
     await container.worker.run_once()
+    await asking_for_tag_lines(container.sessionmaker, threads)
 
 
 async def test_a_label_going_on_says_so(registered: Repository, db_engine: AsyncEngine) -> None:
@@ -74,7 +89,7 @@ async def test_a_label_going_on_says_so(registered: Repository, db_engine: Async
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("labeled", "high priority"), delivery="tag-1")
         await container.worker.run_once()
 
@@ -87,7 +102,7 @@ async def test_a_label_coming_off_says_so(registered: Repository, db_engine: Asy
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("unlabeled", "wontfix"), delivery="tag-1")
         await container.worker.run_once()
 
@@ -107,7 +122,7 @@ async def test_a_label_the_opening_block_already_showed_says_nothing(
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("labeled", "bug"), delivery="tag-1")
         await container.worker.run_once()
 
@@ -128,7 +143,7 @@ async def test_a_label_that_came_off_and_went_back_on_is_said_both_times(
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("unlabeled", "bug"), delivery="tag-1")
         await container.worker.run_once()
         await post(client, "issues", labelled("labeled", "bug"), delivery="tag-2")
@@ -165,6 +180,7 @@ async def test_the_same_delivery_handled_twice_says_it_once(
         announce=announcer,
     )
     await handle("opened", payloads.issue_event("opened"), 900_001)
+    await asking_for_tag_lines(db_sessionmaker, threads)
     payload = labelled("labeled", "needs design")
 
     await handle("labeled", payload, 900_002)
@@ -193,6 +209,7 @@ async def test_a_refused_post_gives_the_claim_back_so_the_retry_says_it(
         announce=announcer,
     )
     await handle("opened", payloads.issue_event("opened"), 900_001)
+    await asking_for_tag_lines(db_sessionmaker, threads)
     payload = labelled("labeled", "needs design")
 
     with pytest.raises(DiscordGatewayError):
@@ -224,6 +241,7 @@ async def test_a_claim_that_cannot_be_given_back_is_said_loudly(
         announce=announcer,
     )
     await handle("opened", payloads.issue_event("opened"), 900_001)
+    await asking_for_tag_lines(db_sessionmaker, threads)
 
     with caplog.at_level(logging.ERROR), pytest.raises(DiscordGatewayError):
         await handle("labeled", labelled("labeled", "needs design"), 900_002)
@@ -274,7 +292,7 @@ async def test_an_event_that_moves_no_label_says_nothing(
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(
             client,
             "issues",
@@ -303,7 +321,7 @@ async def test_the_block_is_still_written_on_the_same_delivery(
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("labeled", "needs design"), delivery="tag-1")
         await container.worker.run_once()
 
@@ -327,7 +345,7 @@ async def test_a_status_label_is_not_announced_as_an_ordinary_tag(
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("labeled", "IN_REVIEW"), delivery="tag-1")
         await container.worker.run_once()
 
@@ -346,8 +364,87 @@ async def test_a_priority_the_repository_spells_its_own_way_is_still_read_as_one
     client = build_http_client(container)
 
     async with client:
-        await with_a_thread(client, container)
+        await with_a_thread(client, container, threads)
         await post(client, "issues", labelled("unlabeled", "urgent"), delivery="tag-1")
         await container.worker.run_once()
 
     assert lines(threads) == ["⚪ **Priority cleared:** `urgent`"]
+
+
+async def test_a_thread_that_never_asked_for_tag_lines_hears_none(
+    registered: Repository, db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """Off until somebody asks, issue #163: an item can be tagged a dozen times in a minute, and
+    the block above already lists every label it has.
+
+    Nothing is claimed and nothing is recorded as shown, so a line that was never said cannot be
+    mistaken later for one that was.
+    """
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await post(client, "issues", payloads.issue_event("opened"), delivery="issue-1")
+        await container.worker.run_once()
+        await post(client, "issues", labelled("labeled", "needs design"), delivery="tag-1")
+        await container.worker.run_once()
+
+        assert await client.outcome_of("tag-1") == "processed", "the delivery never ran at all"
+
+    assert "needs design" in threads.metadata_of(threads.created[0].thread_id)
+    assert lines(threads) == []
+    assert await db_session.scalar(select(func.count()).select_from(MirroredNote)) == 0
+    assert await db_session.scalar(select(TrackedItem.shown_labels)) == ["bug"]
+
+
+async def test_a_label_that_came_off_unsaid_is_said_when_it_goes_back_on_later(
+    registered: Repository, db_engine: AsyncEngine
+) -> None:
+    """`bug` was in the opening block and came off before anybody asked for tag lines. Going back
+    on after they did is news, and must not be taken for the opening block's own `labeled`
+    delivery, which is all the shown set is there to catch. Found reviewing issue #163."""
+    threads = FakeThreadGateway()
+    container = build_stack(db_engine, threads=threads)
+    client = build_http_client(container)
+
+    async with client:
+        await post(client, "issues", payloads.issue_event("opened"), delivery="issue-1")
+        await container.worker.run_once()
+        await post(client, "issues", labelled("unlabeled", "bug"), delivery="tag-1")
+        await container.worker.run_once()
+        await asking_for_tag_lines(container.sessionmaker, threads)
+        await post(client, "issues", labelled("labeled", "bug"), delivery="tag-2")
+        await container.worker.run_once()
+
+    assert lines(threads) == ["🏷️ Tag `bug` added."]
+
+
+async def test_a_superseded_delivery_is_still_said_in_a_thread_that_asked(
+    registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A label going on is a fact about the delivery, so it is said even where the sync turned the
+    delivery away. Which means a superseded delivery has to know what the thread asked for as well
+    as a current one does, or the line would go unsaid in exactly the thread that wanted it.
+    """
+    threads = FakeThreadGateway()
+    handle = build_item_handler(
+        build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+        parse_issue_event,
+        announce=LabelLine(
+            db_sessionmaker,
+            threads,
+            render=format_label_change,
+            shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+        ),
+    )
+    await handle("opened", payloads.issue_event("opened"), 900_001)
+    await asking_for_tag_lines(db_sessionmaker, threads)
+    await handle(
+        "edited", payloads.issue_event("edited", updated_at="2026-08-11T11:00:00Z"), 900_003
+    )
+
+    outcome = await handle("labeled", labelled("labeled", "needs design"), 900_002)
+
+    assert outcome is WebhookOutcome.IGNORED, "the delivery was not superseded"
+    assert lines(threads) == ["🏷️ Tag `needs design` added."]

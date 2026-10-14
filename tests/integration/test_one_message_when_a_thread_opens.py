@@ -18,11 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from shannon.db.models import Repository
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.domain.enums import Status
+from shannon.domain.tracking import TrackedEvent
 from shannon.services.workflow import build_item_workflow
 from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import track
 from tests.support.signing import post
 from tests.support.stack import build_http_client, build_stack
 
@@ -84,6 +86,53 @@ async def test_a_status_line_is_still_said_after_the_command_that_set_it(
 
     `IN_REVIEW` rather than `DONE` because an issue is only done once it is closed on GitHub,
     and the workflow refuses to say otherwise. Every status goes down the same path.
+
+    In a thread that asked for tag lines, which a status line is one of. Issue #163.
+    """
+    github = FakeGitHubClient(issues={ISSUE_KEY: issue_event("opened")})
+    container = build_stack(db_engine, threads=threads, github=github)
+    client = build_http_client(container)
+    workflow = build_item_workflow(
+        container.sessionmaker,
+        github,
+        threads,
+        pr_sync=container.pr_sync,
+        issue_sync=container.issue_sync,
+        authorisations=FakeBoardCredentials(),
+    )
+
+    async with client:
+        await post(client, "issues", payloads.issue_event("opened"), delivery="i-1")
+        await client.drain()
+        await track(
+            container.sessionmaker,
+            thread_id=threads.created[0].thread_id,
+            on=(TrackedEvent.LABELS,),
+        )
+
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.IN_REVIEW)
+
+        await post(
+            client,
+            "issues",
+            labelled("IN_REVIEW", [{"name": "bug"}, {"name": "IN_REVIEW"}]),
+            delivery="i-2",
+        )
+        await client.drain()
+
+    assert [body for _, body in threads.posts] == ["📋 **Status set:** `IN_REVIEW`"]
+
+
+async def test_a_status_command_in_a_thread_that_never_asked_for_tag_lines_is_not_echoed(
+    registered: Repository,
+    db_engine: AsyncEngine,
+    threads: FakeThreadGateway,
+    issue_event,
+) -> None:
+    """The same command, in a thread nobody ran `/track labels on` in. Issue #163.
+
+    A status line is a tag line, and tag lines are off until a thread asks: the block above
+    already says what the status is, and the command's own answer told whoever ran it.
     """
     github = FakeGitHubClient(issues={ISSUE_KEY: issue_event("opened")})
     container = build_stack(db_engine, threads=threads, github=github)
@@ -111,4 +160,7 @@ async def test_a_status_line_is_still_said_after_the_command_that_set_it(
         )
         await client.drain()
 
-    assert [body for _, body in threads.posts] == ["📋 **Status set:** `IN_REVIEW`"]
+    # The positive half: the delivery ran and reached the block, so the silence is a choice.
+    assert await client.outcome_of("i-2") == "processed"
+    assert "IN_REVIEW" in threads.metadata_of(threads.created[0].thread_id)
+    assert threads.posts == []
