@@ -8,17 +8,28 @@ in a state it is not.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import discord
 import pytest
 
-from shannon.commands.regenerate import build_regenerate_command
+from shannon.commands._cooldowns import Cooldown
+from shannon.commands.regenerate import REGENERATE_SPACING_SECONDS, build_regenerate_command
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.responses import OWED, REFUSED
 from shannon.domain.errors import RepositoryMismatchError
 from shannon.github.errors import GitHubNotFoundError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.sync.regenerate import RegenerateOutcome
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
-from tests.fakes.discord_objects import FakeInteraction
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.fakes.discord_objects import FakeInteraction, FakeResponse
+from tests.unit.commands.conftest import (
+    administrator,
+    default_gate,
+    developer,
+    member_with,
+    project_manager,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -221,3 +232,170 @@ class TestWhatItRefuses:
 
         with pytest.raises(RuntimeError, match="a bug"):
             await command.callback(interaction)
+
+
+class Clock:
+    """A monotonic clock a test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _TooLate(FakeResponse):
+    """An interaction Discord has already dropped, as a defer that came too late finds it."""
+
+    async def defer(self, *, ephemeral: bool = False, **_: object) -> None:
+        raise discord.NotFound(MagicMock(status=404), "Unknown interaction")
+
+
+class TestHowSoonItMayRunAgainInAThread:
+    """Issue #185. One redraw per thread at a time, and the next five seconds after the last."""
+
+    def taking_turns(self, service: StubRegeneration, clock: Clock):
+        return build_regenerate_command(
+            service, default_gate(), cooldown=Cooldown(REGENERATE_SPACING_SECONDS, clock=clock)
+        )
+
+    async def fire(self, command, *, channel_id: int | None = THREAD, who=None) -> FakeInteraction:
+        interaction = FakeInteraction(user=who or developer(), channel_id=channel_id)
+        await command.callback(interaction)
+        return interaction
+
+    async def test_the_same_thread_within_five_seconds_is_told_how_long_is_left(self) -> None:
+        clock = Clock()
+        service = StubRegeneration()
+        command = self.taking_turns(service, clock)
+        await self.fire(command)
+        clock.now = 2.0
+
+        interaction = await self.fire(command)
+
+        assert interaction.said == (
+            "/regenerate ran in this thread a moment ago. Try again in 3 seconds."
+        )
+        assert interaction.mark == OWED
+        assert interaction.response.deferred is False
+        assert service.calls == [THREAD]
+
+    async def test_five_seconds_after_it_runs_again(self) -> None:
+        clock = Clock()
+        service = StubRegeneration()
+        command = self.taking_turns(service, clock)
+        await self.fire(command)
+        clock.now = REGENERATE_SPACING_SECONDS
+
+        await self.fire(command)
+
+        assert service.calls == [THREAD, THREAD]
+
+    async def test_the_wait_is_counted_from_when_the_redraw_finished(self) -> None:
+        clock = Clock()
+
+        class _Slow(StubRegeneration):
+            async def regenerate(self, *, thread_id: int) -> RegenerateOutcome:
+                clock.now += 30.0
+                return await super().regenerate(thread_id=thread_id)
+
+        command = self.taking_turns(_Slow(), clock)
+        await self.fire(command)
+        clock.now += 1.0
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.endswith("Try again in 4 seconds.")
+
+    async def test_another_thread_is_not_held_up(self) -> None:
+        clock = Clock()
+        service = StubRegeneration()
+        command = self.taking_turns(service, clock)
+        await self.fire(command, channel_id=THREAD)
+
+        await self.fire(command, channel_id=THREAD + 1)
+
+        assert service.calls == [THREAD, THREAD + 1]
+
+    async def test_a_redraw_under_way_holds_the_next_ones_without_being_ended_by_them(
+        self,
+    ) -> None:
+        clock = Clock()
+        heard: list[FakeInteraction] = []
+        outer = self
+
+        class _Reentered(StubRegeneration):
+            async def regenerate(self, *, thread_id: int) -> RegenerateOutcome:
+                heard.append(await outer.fire(command))
+                heard.append(await outer.fire(command))
+                return await super().regenerate(thread_id=thread_id)
+
+        command = self.taking_turns(_Reentered(), clock)
+
+        await self.fire(command)
+
+        running = (
+            "/regenerate is already redrawing this thread. Try again a few seconds after it "
+            "finishes."
+        )
+        assert [interaction.said for interaction in heard] == [running, running]
+
+    async def test_somebody_refused_the_command_starts_no_wait(self) -> None:
+        clock = Clock()
+        service = StubRegeneration()
+        command = self.taking_turns(service, clock)
+        refused = await self.fire(command, who=member_with("Reviewer"))
+
+        await self.fire(command)
+
+        assert refused.mark == REFUSED
+        assert service.calls == [THREAD]
+
+    async def test_a_redraw_that_failed_starts_the_wait_all_the_same(self) -> None:
+        clock = Clock()
+        failing = StubRegeneration(error=SyncFailedError("could not be redrawn just now"))
+        command = self.taking_turns(failing, clock)
+        await self.fire(command)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/regenerate ran in this thread a moment ago.")
+
+    async def test_a_redraw_that_went_wrong_unexpectedly_still_lets_go_of_the_thread(
+        self,
+    ) -> None:
+        clock = Clock()
+        command = self.taking_turns(StubRegeneration(error=RuntimeError("unpredicted")), clock)
+        with pytest.raises(RuntimeError):
+            await self.fire(command)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/regenerate ran in this thread a moment ago.")
+
+    async def test_a_defer_that_came_too_late_still_lets_go_of_the_thread(self) -> None:
+        """As `/refresh` does: a defer Discord refused still lets go of the thread."""
+        clock = Clock()
+        service = StubRegeneration()
+        command = self.taking_turns(service, clock)
+        dropped = FakeInteraction(user=developer(), channel_id=THREAD)
+        dropped.response = _TooLate()
+        with pytest.raises(discord.NotFound):
+            await command.callback(dropped)
+
+        interaction = await self.fire(command)
+
+        assert interaction.said.startswith("/regenerate ran in this thread a moment ago.")
+        assert service.calls == [], "the redraw ran after a defer that failed"
+
+    async def test_built_without_one_it_keeps_its_own(self) -> None:
+        command, first, _ = run_it()
+        await command.callback(first)
+        second = FakeInteraction(user=developer(), channel_id=THREAD)
+
+        await command.callback(second)
+
+        assert second.mark == OWED
+
+    def test_the_wait_is_five_seconds(self) -> None:
+        assert REGENERATE_SPACING_SECONDS == 5
