@@ -7992,3 +7992,43 @@ feature end to end rather than assuming a predecessor the file never recorded.
   the choice reaching every delivery, and threads with pings, comments and CI turned off. Tests
   about tag, commit and card field lines turn their kind on first. Each line that stays on gains
   an off test.
+
+## `/refresh` redraws the threads it used to leave alone
+
+- **A refresh is a full refresh** (#185). `/refresh` still opens a thread for every open item that
+  has none, and now also redraws every open pull request and issue that has one, from the same
+  listing: nothing more is asked of GitHub. A stale block no longer waits for somebody to run
+  `/regenerate` in that one thread.
+- **Not closed items, and not tickets.** Closed items are not listed, and stay `/regenerate`'s.
+  A ticket that already has a thread is left to the board poller, which redraws a card every time
+  it moves; the reply says so, once, with no number.
+- **A quiet thread stays quiet.** Discord takes no edit into an archived thread, so a redraw has
+  to wake one. A thread Discord archived for going quiet is archived again once its block is in,
+  still open to replies, so the channel looks the same afterwards. A thread this bot had shut for
+  an item that has since reopened is handed back awake, as a delivery would leave it. Only
+  `/refresh` does this: a delivery or a command in a thread is activity.
+- **Five minutes of redraws a run, after its openings.** Twenty-five new threads a run as before,
+  then redraws for up to five minutes, starting with the items whose row this bot changed longest
+  ago. A redraw changes it, and so does anything else that writes to that row, such as a delivery
+  about the item itself, `/status` or `/track`; a comment, a review or a CI result posted into its
+  thread does not. A run that runs out of time says how many are left, and the next `/refresh`
+  with the same scope starts with them, unless something writes to them first. A test holds the
+  worst case - every item's lock held by a delivery - inside the fifteen minutes Discord gives a
+  command.
+- **Real mentions, rung by nobody.** Threads `/refresh` opens or redraws name linked people as
+  real mentions, the way `/regenerate` does, with an empty allow-list so Discord rings none of
+  them. They used to be named in plain text until something redrew them. A thread deleted while
+  the bot was offline is rebuilt on a redraw and counted apart, and its new block names people in
+  plain text, as every replacement does. One deleted while the bot was running has already been
+  let go of, so it is opened again like any item with no thread.
+- **One at a time, and a wait after.** One `/refresh` per server at a time, and the next a minute
+  after the last one finished; one `/regenerate` per thread, and the next five seconds after.
+  Admins wait too. Asked too soon, the reply says how long is left, in amber. A run that failed
+  still starts its wait. The waits are kept in memory, so a restart clears them.
+- **For whoever deploys it.** No migration, setting or permission. The order of the redraws is
+  read off `tracked_items.updated_at`, which every write to an item's row moves, a redraw's too.
+- **Tests.** New files for the wait between runs, for archiving a quiet thread again, for when a
+  thread's row was last written, and for the fifteen-minute budget. The refresh tests cover what
+  is redrawn and what is not, the order across runs, and the time running out; the command tests
+  cover every new part of the reply and both waits. Tests that pinned a threaded item being left
+  alone, or named in plain text, now pin it being redrawn with real mentions.

@@ -110,14 +110,21 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   including a default changed later. A thread moving channel, logging starting or stopping,
   reminders, and a close this bot was not allowed to lock are always said.
 - **Manual sync.** `/pr` and `/issue` pull one item from the REST API, for whatever the webhooks
-  missed. `/refresh` does the whole backlog: every open item with no thread gets one, quietly, or
-  one kind of item if you pick one. It never revisits an item that already has a thread.
+  missed. `/refresh` does the whole repository, or one kind of item if you pick one: every open
+  item with no thread gets one, and every open pull request and issue that has one is redrawn from
+  the same listing, so nothing more is asked of GitHub. People are named as real mentions and
+  nobody is rung. A thread Discord archived for going quiet is archived again once it is redrawn,
+  so the channel looks the same afterwards, and cards are left to the board, which redraws its
+  own. Twenty-five new threads a run, then up to five minutes of redrawing, starting with the
+  items whose record this bot changed longest ago; a comment, review or CI result posted into a
+  thread does not change it. The reply says what is left, and the next `/refresh` with the same
+  scope starts there. One run per server at a time, and the next a minute after the last finished.
 - **Redrawing one that has gone quiet.** `/regenerate`, run in an item's own thread, reads it from
-  GitHub again and rewrites the block. It is for the threads nothing else reaches: a closed pull
-  request gains labels and assignees afterwards and no delivery ever comes to say so, and somebody
-  who linked their GitHub account after `/refresh` opened a thread is named in plain text in it
-  until something redraws it. Nobody is pinged, which is the point: everybody on the item is named
-  as a real mention and Discord is told to ring none of them.
+  GitHub again and rewrites the block. It is for the threads `/refresh` does not reach - a closed
+  pull request gains labels and assignees afterwards and no delivery ever comes to say so - and
+  for one thread right now. Nobody is pinged, which is the point: everybody on the item is named
+  as a real mention and Discord is told to ring none of them. One run per thread at a time, and
+  the next five seconds after the last finished.
 - **Reminders.** `/remind` pings somebody once, after the days, hours and minutes you give, in
   the channel or thread it was run in, with up to 500 characters of your own words under it.
   Anybody may remind themselves; reminding somebody else takes Admin or Project Manager. The
@@ -573,8 +580,8 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
 | `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
 | `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, leaving the ones that do alone. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: a backlog is not news. Twenty-five per run across all kinds together, and the reply says how many are left. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
-| `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened |
+| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, and redraws every open pull request and issue that has one, from the same listing. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: people are named as real mentions and Discord is told to ring none of them. A thread Discord archived for going quiet is archived again after its redraw. Closed items are left to `/regenerate`, and tickets that already have a thread to the board. Twenty-five new threads per run across all kinds together, then up to five minutes of redrawing, starting with the items whose record this bot changed longest ago, and the reply says how many of each are left. One run at a time per server, and the next a minute after the last one finished; admins wait too, and the reply says how long. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
+| `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived, which `/refresh` never redraws. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened. One run at a time per thread, and the next five seconds after the last one finished |
 | `/track [event] [state]` | Developer, Project Manager | Run inside an item's thread. Which kinds of line that thread is told besides its block: `comments`, `labels`, `commits`, `checks`, `approvals`, `draft`, `people` and `state`. Pick one and `on` or `off` to change it, leave the state out to see one, or leave both out to see every kind the item can get. Labels and commits start off and the rest on. A kind an issue or a board card never gets is refused, and says which ones it does. The answer is private and nothing is posted in the thread |
 | `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
 | `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |

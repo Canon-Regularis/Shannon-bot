@@ -113,9 +113,10 @@ async def test_mentions_off_still_means_plain_text_and_nobody(
     db_session: AsyncSession,
     pr_event,
 ) -> None:
-    """The existing switch, unchanged by the new one. `/refresh` depends on this: every thread it
-    opens is a first block and a first block is posted, so twenty-five of them would notify
-    everybody on all twenty-five about a backlog that has been sitting there."""
+    """The existing switch, unchanged by the new one. A path that opens threads in bulk needs one
+    of the two: every thread it opens is a first block and a first block is posted, so twenty-five
+    of them would notify everybody on all twenty-five about a backlog that has been sitting there.
+    `/refresh` used this one until issue #185 moved it to `notifies` off."""
     await link(db_session, "monalisa", 200, ALICE)
     threads = FakeThreadGateway()
     service = build_item_sync(db_sessionmaker, threads, PullRequestPolicy(), mentions=False)

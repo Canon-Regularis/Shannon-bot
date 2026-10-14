@@ -5,14 +5,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Protocol
 
 import discord
 
+from shannon.commands._cooldowns import Cooldown, NotYet
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import refused, reply
+from shannon.discord_bot.responses import owed, refused, reply
 from shannon.discord_bot.roles import CommandRole
 
 NOT_IN_A_SERVER = "Run this inside a server channel."
@@ -41,6 +42,26 @@ async def in_a_server(
         await reply(interaction, refused(gate.denial(command, roles)))
         return None
     return interaction.guild_id
+
+
+async def its_turn(
+    interaction: discord.Interaction,
+    cooldown: Cooldown,
+    key: int,
+    said: Callable[[NotYet], str],
+) -> bool:
+    """Whether a run may start now, having said why not where it may not. Issue #185.
+
+    After the role guard, so somebody without the role spends nobody's turn, and before `defer`:
+    the answer is held in memory, so the refusal can be the interaction's first response. Amber,
+    because it comes right on its own. True means the run has begun, and the caller owes
+    `cooldown.finish(key)` in a `finally` that starts straight after this.
+    """
+    not_yet = cooldown.begin(key)
+    if not_yet is None:
+        return True
+    await reply(interaction, owed(said(not_yet)))
+    return False
 
 
 async def in_a_thread(

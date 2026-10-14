@@ -575,12 +575,23 @@ def _refresh(
     threads: ThreadGateway,
     boards: ReadsBoards,
 ) -> RepositoryRefresh:
-    """The refresh path's own sync services, built with no notifier.
+    """The refresh path's own sync services: no notifier, no allow-list, and quiet threads put back.
 
     A refresh mirrors a backlog, and everybody on it was asked when their item was opened, often
     months ago. Built without a notifier rather than told not to ping: there is nothing to fire,
     so no later edit to the sync path can make one fire, and nothing about being silent is a rule
     somebody has to keep reading.
+
+    `notifies=False` rather than mentions off, since issue #185. Every thread this OPENS is a
+    first block, which is posted, and a posted block notifies everybody it mentions - so these
+    used to name people in plain text. Now the block names linked people as real mentions, the
+    way `/regenerate` does, and reaches Discord with an empty allow-list that rings none of them.
+    The invariant `_regenerate` describes holds here too: the block never builds a role mention.
+
+    `rearchives=True` because a refresh redraws every open item's thread, and writing to a thread
+    Discord archived for going quiet wakes it. Left awake, one run would fill the channel's thread
+    list with everything nobody has touched in a week, so each is archived again once its block is
+    in. Nothing else that writes does this: a delivery or a command in a thread is activity.
 
     Three more services is three more constructor calls. Each holds a sessionmaker, a stateless
     lock, the one thread gateway, a stateless binding and a stateless policy: no connection, no
@@ -594,15 +605,21 @@ def _refresh(
         sessionmaker,
         github,
         boards,
-        # Mentions off, because every thread this opens is a FIRST one and a first block is
-        # posted. Twenty-five of them in a run would notify everybody on all twenty-five about a
-        # backlog that has been sitting there.
-        pull_requests=build_item_sync(sessionmaker, threads, PullRequestPolicy(), mentions=False),
-        issues=build_item_sync(sessionmaker, threads, IssuePolicy(), mentions=False),
-        # Off for tickets too, though a draft card names nobody today so there is nothing to
-        # suppress. It is here so the three read alike, and so a card that one day carries an
+        # An empty allow-list, because every thread this opens is a FIRST one and a first block
+        # is posted. Twenty-five of them in a run would otherwise notify everybody on all
+        # twenty-five about a backlog that has been sitting there.
+        pull_requests=build_item_sync(
+            sessionmaker, threads, PullRequestPolicy(), notifies=False, rearchives=True
+        ),
+        issues=build_item_sync(
+            sessionmaker, threads, IssuePolicy(), notifies=False, rearchives=True
+        ),
+        # The same for tickets, though a draft card names nobody today and a refresh only ever
+        # opens one. It is here so the three read alike, and so a card that one day carries an
         # assignee cannot start notifying a backlog by inheriting a default.
-        tickets=build_item_sync(sessionmaker, threads, TicketPolicy(), mentions=False),
+        tickets=build_item_sync(
+            sessionmaker, threads, TicketPolicy(), notifies=False, rearchives=True
+        ),
     )
 
 
@@ -612,8 +629,9 @@ def _regenerate(
     """The redraw path's own sync services: no notifier, and no allow-list.
 
     Mentions ON, deliberately, and that is the fix rather than a detail. A thread opened by
-    `/refresh` was rendered without them and nothing ever revisits it, so somebody who linked
-    afterwards stays plain text for ever. This is what puts them back.
+    `/refresh` before issue #185 was rendered without them, and so is any thread opened to replace
+    one somebody deleted, so somebody who linked afterwards stays plain text until something
+    redraws it. This is what puts them back for a closed item, which `/refresh` never redraws.
 
     Silent twice over, by construction rather than by rule. No notifier, so there is nothing to
     fire. And `notifies=False`, so the block's live mentions reach Discord with an empty

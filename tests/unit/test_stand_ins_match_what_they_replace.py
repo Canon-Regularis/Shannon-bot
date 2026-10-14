@@ -40,6 +40,7 @@ from shannon.discord_bot.client import CapturesMessages, ShannonBot
 from shannon.discord_bot.permissions import MemberTiers, RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
+    ArchivesThreads,
     DiscordThreadGateway,
     FindsMembers,
     FindsThreads,
@@ -154,6 +155,9 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (PostsInChannels, DiscordThreadGateway),
     (PostsInChannels, FakeThreadGateway),
     (ShutsThread, DiscordThreadGateway),
+    # Issue #185.
+    (ArchivesThreads, DiscordThreadGateway),
+    (ArchivesThreads, FakeThreadGateway),
     (FindsThreads, DiscordThreadGateway),
     (FindsThreads, FakeThreadGateway),
     (MovesThreadsBetweenChannels, DiscordThreadGateway),

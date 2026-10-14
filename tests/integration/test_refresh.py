@@ -4,23 +4,29 @@ The headline is `test_nobody_is_pinged`. Everything else here is about counting 
 wrong count is a sentence somebody reads; a refresh that pings is forty people's notifications in
 one go, and it only happens once, because the claim on `item_assignments` makes every run after
 the first quiet. That is precisely why it cannot be left to be noticed.
+
+Since issue #185 a refresh also redraws every open pull request and issue that already has a
+thread, which is `TestRedrawingWhatAlreadyHasAThread` and `TestTheRedrawTime`. The blocks it writes
+name linked people as real mentions now, so "nobody is pinged" is read off the allow-list each
+write carries rather than off the words in the block.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.container import _refresh
-from shannon.db.models import ItemAssignment, Repository, TrackedItem
+from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.errors import DiscordPermissionError
-from shannon.domain.enums import ActorRole, ObjectType
+from shannon.domain.enums import ActorRole, ObjectType, Status
 from shannon.domain.errors import NotRegisteredError, RepositoryMismatchError
 from shannon.domain.models import (
     Actor,
@@ -116,13 +122,15 @@ def refresh_with(
     github: FakeGitHubClient,
     *,
     cap: int = 25,
+    redraw_seconds: float = 300.0,
+    clock=None,
     board: FakeBoard | None = None,
     pull_requests=None,
     issues=None,
     tickets=None,
 ) -> RepositoryRefresh:
-    """The service as the container builds it: all three sync services with no notifier, and
-    blocks that name people in plain text.
+    """The service as the container builds it: all three sync services with no notifier, an empty
+    allow-list on every write, and quiet threads archived again after a redraw.
 
     An empty `FakeBoard` by default, so a test that says nothing about tickets reads a board with
     no cards on it rather than failing to build. Whether the board is ever ASKED is decided by the
@@ -132,12 +140,17 @@ def refresh_with(
         sessionmaker,
         github,
         board if board is not None else FakeBoard(),
-        pull_requests=pull_requests
-        or build_item_sync(sessionmaker, threads, PullRequestPolicy(), mentions=False),
-        issues=issues or build_item_sync(sessionmaker, threads, IssuePolicy(), mentions=False),
-        tickets=tickets or build_item_sync(sessionmaker, threads, TicketPolicy(), mentions=False),
+        pull_requests=pull_requests or quiet(sessionmaker, threads, PullRequestPolicy()),
+        issues=issues or quiet(sessionmaker, threads, IssuePolicy()),
+        tickets=tickets or quiet(sessionmaker, threads, TicketPolicy()),
         cap=cap,
+        redraw_seconds=redraw_seconds,
+        **({} if clock is None else {"clock": clock}),
     )
+
+
+def quiet(sessionmaker: async_sessionmaker[AsyncSession], threads: FakeThreadGateway, policy):
+    return build_item_sync(sessionmaker, threads, policy, notifies=False, rearchives=True)
 
 
 @pytest_asyncio.fixture
@@ -173,6 +186,46 @@ def mentions_in_the_blocks(threads: FakeThreadGateway) -> list[str]:
         for thread in threads.created
         if "<@" in threads.metadata_of(thread.thread_id)
     ]
+
+
+def allow_lists(threads: FakeThreadGateway) -> list[object]:
+    """What every write told Discord it may ring. `()` is nobody; None would be the client's
+    own rule, which rings everybody a message mentions."""
+    return [notify for *_, notify in threads.allowed]
+
+
+class Clock:
+    """A monotonic clock a test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _SlowToRedraw(FakeThreadGateway):
+    """Every rewrite of a thread that exists moves the clock on, as a slow Discord would."""
+
+    def __init__(self, clock: Clock, *, seconds: float) -> None:
+        super().__init__()
+        self._clock = clock
+        self._seconds = seconds
+
+    async def update(self, **kwargs):
+        self._clock.now += self._seconds
+        return await super().update(**kwargs)
+
+
+async def thread_of(session: AsyncSession, github_object_id: int) -> int:
+    session.expire_all()
+    thread_id = await session.scalar(
+        select(TrackedItem.discord_thread_id).where(
+            TrackedItem.github_object_id == github_object_id
+        )
+    )
+    assert thread_id is not None, f"{github_object_id} has no thread"
+    return thread_id
 
 
 class TestMirroringTheBacklog:
@@ -215,7 +268,11 @@ class TestMirroringTheBacklog:
         )
 
         assert threads.posts == [], "a refresh said something in a thread"
-        assert mentions_in_the_blocks(threads) == [], "a refresh notified people through a block"
+        # Named as real mentions since issue #185, the way `/regenerate` names them, so the block
+        # is right the first time - and the allow-list is what keeps that from ringing anybody.
+        assert len(mentions_in_the_blocks(threads)) == 2, "linked people were named in plain text"
+        assert allow_lists(threads) != [], "nothing was written, so this proves nothing"
+        assert all(notify == () for notify in allow_lists(threads)), "a block may ring somebody"
         stamps = await db_session.scalars(select(ItemAssignment.notified_at))
         assert list(stamps) != [], "no assignment rows, so this proves nothing"
         assert all(stamp is None for stamp in stamps), "a refresh spent somebody's one ping"
@@ -250,26 +307,96 @@ class TestMirroringTheBacklog:
         assert len(threads.created) == 3, "it mirrored nothing, so this proves nothing"
         assert {thread.channel_id for thread in threads.created} == {99, 98, TICKETS}
         assert threads.posts == [], "the wiring gave /refresh a sync service that pings"
-        assert mentions_in_the_blocks(threads) == [], "the wiring gave it one that mentions"
+        assert len(mentions_in_the_blocks(threads)) == 2, "the wiring named people in plain text"
+        assert all(notify == () for notify in allow_lists(threads)), (
+            "the wiring gave it a block that may ring somebody"
+        )
         stamps = await db_session.scalars(select(ItemAssignment.notified_at))
         assert all(stamp is None for stamp in stamps)
 
-    async def test_an_item_that_already_has_a_thread_is_left_alone(
+    @pytest.mark.parametrize(
+        ("scope", "github_object_id"),
+        [
+            (RefreshScope.PULL_REQUESTS, a_pull_request(7).github_object_id),
+            (RefreshScope.ISSUES, an_issue(12).github_object_id),
+        ],
+        ids=["pull request", "issue"],
+    )
+    async def test_the_wiring_archives_a_quiet_thread_again_after_redrawing_it(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        scope: RefreshScope,
+        github_object_id: int,
+    ) -> None:
+        """Issue #185, and the half that lives in the container: each sync it is handed has to be
+        built to put a quiet thread back, or every run would fill the channel with them. GitHub
+        lists both items, and the scope picks the one whose sync is being checked."""
+        github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
+        service = _refresh(db_sessionmaker, github, threads, FakeBoard())
+        await service.refresh(guild_id=1, scope=scope)
+        thread_id = await thread_of(db_session, github_object_id)
+        threads.go_quiet(thread_id)
+
+        outcome = await service.refresh(guild_id=1, scope=scope)
+
+        assert outcome.redrawn == 1
+        assert threads.updates == [thread_id], "it never redrew the thread, so this proves nothing"
+        assert (threads.threads[thread_id].archived, threads.threads[thread_id].locked) == (
+            True,
+            False,
+        )
+
+    async def test_the_wiring_leaves_a_done_pull_requests_thread_locked_and_archived(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """`/status Done` shuts a pull request's thread before GitHub merges it, so it is still
+        open there and a refresh redraws it. Nothing in that sync asks the thread anything, and the
+        write wakes it on its own, so it is the wiring that has to put it back."""
+        github = github_with(pulls=[a_pull_request(7)])
+        service = _refresh(db_sessionmaker, github, threads, FakeBoard())
+        await service.refresh(guild_id=1, scope=RefreshScope.PULL_REQUESTS)
+        thread_id = await thread_of(db_session, a_pull_request(7).github_object_id)
+        await db_session.execute(
+            update(TrackedItem).values(status=Status.DONE, discord_thread_locked=True)
+        )
+        await db_session.commit()
+        threads.threads[thread_id].locked = True
+        threads.threads[thread_id].archived = True
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.PULL_REQUESTS)
+
+        assert outcome.redrawn == 1
+        assert threads.updates == [thread_id], "it never redrew the thread, so this proves nothing"
+        assert (threads.threads[thread_id].archived, threads.threads[thread_id].locked) == (
+            True,
+            True,
+        )
+
+    async def test_an_item_that_already_has_a_thread_is_redrawn_rather_than_opened_again(
         self,
         registered: Repository,
         db_sessionmaker: async_sessionmaker[AsyncSession],
         threads: FakeThreadGateway,
     ) -> None:
+        """Issue #185: it used to be left alone, which is why the command did not live up to its
+        name."""
         github = github_with(issues=[an_issue(12)])
         service = refresh_with(db_sessionmaker, threads, github)
         await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
-        written = list(threads.updates)
 
         outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
 
         assert (outcome.mirrored, outcome.already, outcome.left) == (0, 1, 0)
-        assert len(threads.created) == 1
-        assert threads.updates == written, "it rewrote a thread it was told to leave alone"
+        assert outcome.redrawn == 1
+        assert len(threads.created) == 1, "it opened a second thread for the same item"
+        assert threads.updates == [threads.created[0].thread_id]
 
     async def test_a_row_with_no_thread_counts_as_untracked(
         self,
@@ -456,6 +583,9 @@ class TestWhatTicketsAreCovered:
         assert (first.mirrored, first.already) == (1, 0)
         assert (second.mirrored, second.already, second.left) == (0, 1, 0)
         assert len(threads.created) == 1, "it opened a second thread for the same card"
+        # Issue #185: and it does not redraw one either. The poller does, every time it moves.
+        assert (second.redrawn, second.left_to_the_board) == (0, 1)
+        assert threads.updates == []
 
     async def test_a_card_wrapping_an_issue_is_never_mirrored_as_a_ticket(
         self,
@@ -784,6 +914,302 @@ class TestACardWhoseMirrorFailed:
             "a failing pull request put a CARD back, because they share a column and the "
             "compensation only ever means anything for one of them"
         )
+
+
+class TestRedrawingWhatAlreadyHasAThread:
+    """Issue #185. Every open pull request and issue with a thread is redrawn from the listing the
+    run has just read, so a redraw asks GitHub nothing more and says nothing in the thread."""
+
+    async def test_both_kinds_are_redrawn_from_the_listing_and_github_is_asked_nothing_more(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        github = github_with(pulls=[a_pull_request(7)], issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.EVERYTHING)
+        key = FULL_NAME.lower()
+        github.pull_requests[(key, 7)] = a_pull_request(7, title="Renamed pull request")
+        github.issues[(key, 12)] = an_issue(12, title="Renamed issue")
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.EVERYTHING)
+
+        assert (outcome.mirrored, outcome.already, outcome.redrawn) == (0, 2, 2)
+        blocks = [threads.metadata_of(thread.thread_id) for thread in threads.created]
+        assert any("Renamed pull request" in block for block in blocks)
+        assert any("Renamed issue" in block for block in blocks)
+        assert github.pull_request_calls == []
+        assert github.issue_calls == []
+        assert threads.posts == []
+
+    async def test_an_item_that_has_closed_since_is_not_reached_for(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """Closed items are not listed, and are `/regenerate`'s to redraw."""
+        github = github_with(issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        github.issues[(FULL_NAME.lower(), 12)] = an_issue(12, state="closed")
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (outcome.already, outcome.redrawn) == (0, 0)
+        assert threads.updates == []
+
+    async def test_somebody_linked_since_is_named_and_rung_by_nobody(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """What `/regenerate` was made for, now done for the whole repository at once."""
+        github = github_with(pulls=[a_pull_request(7)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.PULL_REQUESTS)
+        thread_id = threads.created[0].thread_id
+        assert "<@555>" not in threads.metadata_of(thread_id), "arranged wrong"
+        await link_everybody(db_session)
+
+        await service.refresh(guild_id=1, scope=RefreshScope.PULL_REQUESTS)
+
+        assert "<@555>" in threads.metadata_of(thread_id)
+        assert threads.allowed[-1][0] == "update"
+        assert threads.allowed[-1][3] == ()
+        assert threads.posts == []
+        stamps = await db_session.scalars(select(ItemAssignment.notified_at))
+        assert all(stamp is None for stamp in stamps)
+
+    async def test_a_quiet_thread_is_archived_again_and_left_open_to_replies(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        service = refresh_with(db_sessionmaker, threads, github_with(issues=[an_issue(12)]))
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        thread_id = await thread_of(db_session, an_issue(12).github_object_id)
+        threads.go_quiet(thread_id)
+
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        thread = threads.threads[thread_id]
+        assert (thread.archived, thread.locked) == (True, False)
+        assert threads.archived_again == [thread_id]
+
+    async def test_an_awake_thread_is_left_awake_at_no_extra_cost(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        service = refresh_with(db_sessionmaker, threads, github_with(issues=[an_issue(12)]))
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert threads.archive_calls == []
+        assert threads.threads[threads.created[0].thread_id].archived is False
+
+    async def test_a_thread_somebody_deleted_is_opened_again_and_counted_apart(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        service = refresh_with(db_sessionmaker, threads, github_with(issues=[an_issue(12)]))
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        threads.threads.pop(await thread_of(db_session, an_issue(12).github_object_id))
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (outcome.redrawn, outcome.rebuilt, outcome.mirrored) == (0, 1, 0)
+        assert len(threads.created) == 2
+
+    async def test_a_redraw_discord_refuses_is_counted_and_the_rest_carry_on(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        github = github_with(issues=[an_issue(12), an_issue(13)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        threads.fail_next_update = True
+
+        with caplog.at_level(logging.WARNING):
+            outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (outcome.redrawn, outcome.redraws_failed) == (1, 1)
+        assert "could not redraw" in caplog.text
+
+    async def test_a_surprise_while_redrawing_is_counted_rather_than_raised(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _Surprising(FakeThreadGateway):
+            async def update(self, **kwargs):
+                raise RuntimeError("something nobody predicted")
+
+        broken = _Surprising()
+        github = github_with(issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, broken, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        with caplog.at_level(logging.ERROR):
+            outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert outcome.redraws_failed == 1
+        assert "an unexpected failure trying to redraw" in caplog.text
+
+    async def test_a_redraw_a_newer_delivery_overtook_counts_as_redrawn(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """The delivery wrote a block at least as new as this one would have, so the thread is as
+        current as the redraw would have made it."""
+
+        class _Overtaken:
+            async def sync(self, snapshot, **_):
+                return SyncResult(outcome=SyncOutcome.STALE, tracked_item_id=1, thread_id=2)
+
+        github = github_with(issues=[an_issue(12)])
+        await refresh_with(db_sessionmaker, threads, github).refresh(
+            guild_id=1, scope=RefreshScope.ISSUES
+        )
+
+        outcome = await refresh_with(db_sessionmaker, threads, github, issues=_Overtaken()).refresh(
+            guild_id=1, scope=RefreshScope.ISSUES
+        )
+
+        assert (outcome.redrawn, outcome.redraws_failed) == (1, 0)
+
+    async def test_no_channel_left_to_redraw_into_ends_the_run(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """A refusal on the repository rather than the item, so every redraw after it would be
+        refused the same way."""
+        github = github_with(issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        await db_session.execute(delete(ChannelMapping))
+        await db_session.commit()
+
+        with pytest.raises(SyncFailedError, match="/set_channel"):
+            await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+    async def test_threads_are_opened_before_any_is_redrawn(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        """An item with no thread is missing from the channel; one with a stale block is only out
+        of date. A run short of time spends it on the first."""
+        github = github_with(issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, threads, github)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        github.issues[(FULL_NAME.lower(), 13)] = an_issue(13)
+        already = len(threads.allowed)
+
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert [kind for kind, *_ in threads.allowed[already:]] == ["create", "update"]
+
+
+class TestTheRedrawTime:
+    """A run redraws for as long as `REDRAW_SECONDS` allows, oldest row first, and the next run
+    starts with whatever it did not reach."""
+
+    async def test_it_stops_when_the_time_is_up_and_counts_what_it_did_not_reach(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        clock = Clock()
+        threads = _SlowToRedraw(clock, seconds=200.0)
+        github = github_with(issues=[an_issue(12), an_issue(13), an_issue(14)])
+        service = refresh_with(db_sessionmaker, threads, github, redraw_seconds=300.0, clock=clock)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (outcome.redrawn, outcome.unreached) == (2, 1)
+        assert outcome.already == 3
+        assert len(threads.updates) == 2
+
+    async def test_the_oldest_row_goes_first_and_the_next_run_starts_with_what_was_left(
+        self,
+        registered: Repository,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """By when each row was last written, not by the listing's order: 13 is the oldest here,
+        then 14, then 12, which is none of the orders GitHub or the fake would list them in."""
+        clock = Clock()
+        threads = _SlowToRedraw(clock, seconds=200.0)
+        issues = [an_issue(12), an_issue(13), an_issue(14)]
+        github = github_with(issues=issues)
+        service = refresh_with(db_sessionmaker, threads, github, redraw_seconds=300.0, clock=clock)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        for issue, day in ((issues[0], 3), (issues[1], 1), (issues[2], 2)):
+            await db_session.execute(
+                update(TrackedItem)
+                .where(TrackedItem.github_object_id == issue.github_object_id)
+                .values(updated_at=datetime(2026, 1, day, tzinfo=UTC))
+            )
+        await db_session.commit()
+        thread = {
+            issue.number: await thread_of(db_session, issue.github_object_id) for issue in issues
+        }
+
+        first = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        second = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (first.redrawn, first.unreached) == (2, 1)
+        assert threads.updates[:2] == [thread[13], thread[14]]
+        assert threads.updates[2] == thread[12], "the next run did not start with what was left"
+        assert (second.redrawn, second.unreached) == (2, 1)
+
+    async def test_openings_do_not_spend_the_redraw_time(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Openings are capped by count and come first; the time is measured from the first
+        redraw, so a run that opened twenty-five threads still has its five minutes after."""
+
+        class _SlowToOpen(FakeThreadGateway):
+            async def create(self, **kwargs):
+                clock.now += 1000.0
+                return await super().create(**kwargs)
+
+        clock = Clock()
+        threads = _SlowToOpen()
+        github = github_with(issues=[an_issue(12)])
+        service = refresh_with(db_sessionmaker, threads, github, redraw_seconds=300.0, clock=clock)
+        await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+        github.issues[(FULL_NAME.lower(), 13)] = an_issue(13)
+
+        outcome = await service.refresh(guild_id=1, scope=RefreshScope.ISSUES)
+
+        assert (outcome.mirrored, outcome.redrawn, outcome.unreached) == (1, 1, 0)
 
 
 class TestTheCap:

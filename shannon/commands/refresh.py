@@ -6,7 +6,8 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import in_a_server
+from shannon.commands._cooldowns import Cooldown, NotYet, seconds_in_words
+from shannon.commands._guards import in_a_server, its_turn
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -50,25 +51,40 @@ _CHOICES = [
     app_commands.Choice(name="tickets", value=RefreshScope.TICKETS.value),
 ]
 
-# True only because the sync services behind this write names in plain text: a block that is
-# posted notifies everybody it mentions.
+# True because the sync services behind this have no notifier, and every block they write
+# reaches Discord with an empty allow-list: it names linked people as real mentions, and a block
+# that is posted rings none of them. Issue #185 moved it off plain-text names.
 _QUIET = "Nobody was pinged."
+
+# One run per server at a time, and the next a minute after the last one finished. Issue #185:
+# a run sweeps the whole repository, so asking for one twice in a row costs everything twice.
+# The words below say "a minute", so a test holds this at sixty.
+REFRESH_SPACING_SECONDS = 60.0
 
 
 class RefreshesARepository(Protocol):
-    """Mirroring every open item that has no thread yet."""
+    """Mirroring every open item that has no thread yet, and redrawing the open pull requests and
+    issues that have one."""
 
     async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome: ...
 
 
-def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -> SlashCommand:
+def build_refresh_command(
+    service: RefreshesARepository, gate: PermissionGate, *, cooldown: Cooldown | None = None
+) -> SlashCommand:
+    # Built here unless a test hands one in, so the container builds the command once and gets one
+    # for the life of the process, which is what a wait between runs needs.
+    turns = cooldown if cooldown is not None else Cooldown(REFRESH_SPACING_SECONDS)
+
     @app_commands.command(
-        name="refresh", description="Open threads for any GitHub items that do not have one"
+        name="refresh",
+        description=(
+            "Open threads for items that lack one, and redraw open pull requests and issues"
+        ),
     )
     # Leaving `scope` optional is load-bearing: a stale registration that sends an option name
     # this signature no longer has falls back to the default, where a required option would raise
-    # `CommandSignatureMismatch`. "kinds of item" stops `all` being read as including the ones
-    # that already have a thread.
+    # `CommandSignatureMismatch`.
     @app_commands.describe(scope="Which kinds of item to cover; leaving it out is the same as all")
     @app_commands.choices(scope=_CHOICES)
     @app_commands.guild_only()
@@ -81,41 +97,61 @@ def build_refresh_command(service: RefreshesARepository, gate: PermissionGate) -
 
         wanted = RefreshScope.EVERYTHING if scope is None else RefreshScope(scope.value)
 
-        await defer(interaction)
+        if not await its_turn(interaction, turns, guild_id, _not_yet):
+            return
+        # Every way out finishes the run, a failure included, which starts the wait just the same.
+        # The work a failed run did is spent either way, and a run that never ended would hold
+        # the server until a restart.
         try:
-            outcome = await service.refresh(guild_id=guild_id, scope=wanted)
-        except ShannonError as error:
-            # `repository` rather than a kind: an item that fails is counted rather than
-            # raised, so what reaches here is about the repository or about GitHub.
-            logger.warning("/refresh could not finish: %s", error.message)
-            await reply(interaction, reply_for(error, noun="repository"))
-        else:
-            await reply(interaction, done(_said(outcome, _KINDS[wanted])))
+            await defer(interaction)
+            try:
+                outcome = await service.refresh(guild_id=guild_id, scope=wanted)
+            except ShannonError as error:
+                # `repository` rather than a kind: an item that fails is counted rather than
+                # raised, so what reaches here is about the repository or about GitHub.
+                logger.warning("/refresh could not finish: %s", error.message)
+                await reply(interaction, reply_for(error, noun="repository"))
+            else:
+                await reply(interaction, done(_said(outcome, _KINDS[wanted])))
+        finally:
+            turns.finish(guild_id)
 
     # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
     # says why `Any` is the only truthful thing to put in.
     return refresh  # pyright: ignore[reportUnknownVariableType]
 
 
+def _not_yet(wait: NotYet) -> str:
+    """Why a run may not start yet, for the amber answer `its_turn` gives."""
+    if wait.running:
+        return "/refresh is already running in this server. Try again a minute after it finishes."
+    return (
+        "/refresh ran in this server less than a minute ago. Try again in "
+        f"{seconds_in_words(wait.seconds)}."
+    )
+
+
 def _said(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
     """The counts, and what could not be reached, as one sentence somebody can act on.
 
-    A wrapper around `_counts` rather than another branch inside it, because `_counts` has four
-    exits and three of them are the nothing-to-do cases. `/refresh all` on a quiet repository
-    with no board takes one of those, and that is exactly the run where the note matters most: no
-    numbers moved, and the reason is the thing worth saying.
+    Assembled in parts rather than as branches inside one function, because the opening half has
+    four exits and three of them are the nothing-to-open cases, which since issue #185 can still
+    be followed by redraws. Every part after the first starts with its own space.
+
+    "Nobody was pinged." follows anything that wrote to a thread, and nothing else. The note about
+    tickets comes last, after it: `/refresh all` on a quiet repository with no board can have no
+    numbers moved at all, and then the reason is the thing worth saying.
     """
-    said = _counts(outcome, kinds)
-    if outcome.tickets_missed is None:
-        return said
-    # After "Nobody was pinged." on the did-work branch, which is deliberate. Threading it in
-    # before would mean repeating the zero-work condition in two places that have to agree, and
-    # two places that have to agree is how the singular-plural bug got in (#147).
-    return f"{said} {_MISSED[outcome.tickets_missed]}"
+    said = _opened(outcome, kinds) + _redrawn(outcome, kinds)
+    if outcome.mirrored or outcome.redrawn or outcome.rebuilt:
+        said += f" {_QUIET}"
+    if outcome.tickets_missed is not None:
+        said += f" {_MISSED[outcome.tickets_missed]}"
+    return said
 
 
-def _counts(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
-    """The numbers alone.
+def _opened(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
+    """The threads it opened, and the ones it has still to open.
 
     The failures are inside `left` rather than beside it, and are named separately only so nobody
     reads a shortfall as a miscount.
@@ -136,7 +172,7 @@ def _counts(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
 
     said = (
         f"Mirrored {outcome.mirrored} {one if outcome.mirrored == 1 else many} from "
-        f"{outcome.full_name}, and left alone the {outcome.already} that already had a thread."
+        f"{outcome.full_name}."
     )
     if outcome.left:
         is_are = "is" if outcome.left == 1 else "are"
@@ -147,4 +183,36 @@ def _counts(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
             f" {outcome.failed} could not be mirrored just now and {is_are} among those "
             "still untracked; the log says why."
         )
-    return f"{said} {_QUIET}"
+    return said
+
+
+def _redrawn(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
+    """What happened to the threads that already existed. Issue #185.
+
+    Each part only when its count is above nought, so an ordinary run says one short sentence. The
+    note about tickets carries no number, so it reads the same under `all` as under `tickets`.
+    """
+    one, many = kinds
+    said = ""
+    if outcome.redrawn:
+        noun = one if outcome.redrawn == 1 else many
+        said += f" Redrew {outcome.redrawn} {noun} from GitHub."
+    if outcome.rebuilt == 1:
+        said += f" 1 {one} had lost its thread, so it has a new one."
+    elif outcome.rebuilt:
+        said += f" {outcome.rebuilt} {many} had lost their threads, so they have new ones."
+    if outcome.unreached:
+        noun, is_are, them = (one, "is", "it") if outcome.unreached == 1 else (many, "are", "them")
+        said += (
+            f" {outcome.unreached} {noun} {is_are} still to be redrawn; the next /refresh with "
+            f"the same scope starts with {them}."
+        )
+    if outcome.redraws_failed:
+        noun = one if outcome.redraws_failed == 1 else many
+        said += f" {outcome.redraws_failed} {noun} could not be redrawn just now; the log says why."
+    if outcome.left_to_the_board:
+        said += (
+            " Tickets that already have a thread are left alone, because the board keeps those "
+            "up to date itself."
+        )
+    return said

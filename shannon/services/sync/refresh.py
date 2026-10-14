@@ -1,9 +1,15 @@
-"""Mirroring the open items that nothing ever opened a thread for.
+"""Mirroring the open items that nothing ever opened a thread for, and redrawing the rest.
 
 The bot learns about an issue or a pull request when a webhook arrives for it, so anything open
 before the repository was registered, or open through a gap in delivery, has no thread and never
-will. Nothing here pings: the sync services it is handed are built without a notifier, in
-`container._refresh`.
+will. Nothing here pings: the sync services it is handed are built without a notifier, and with
+`notifies` off, in `container._refresh`.
+
+Issue #185. A refresh used to stop there, which made the name a promise it did not keep: a thread
+whose block had gone stale stayed stale until somebody ran `/regenerate` in it, one at a time. So
+every open pull request and issue that already has a thread is redrawn as well, from the snapshot
+the listing has just read - a redraw asks GitHub nothing more. Closed items are not listed and are
+left to `/regenerate`. Cards are left to the board poller, which redraws one every time it moves.
 
 A draft card on a project board is the one kind no webhook EVER mentions. It exists only on the
 board, so the only way to learn about one is to go and look, and until this covered them the only
@@ -15,8 +21,10 @@ thing is ever seen at all.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -39,7 +47,7 @@ from shannon.services.sync.draft_cards import (
     once_each,
     snapshot_of,
 )
-from shannon.services.sync.items import SyncOutcome, SyncsItems
+from shannon.services.sync.items import SyncOutcome, SyncResult, SyncsItems
 from shannon.services.sync.manual import SyncFailedError
 
 logger = logging.getLogger(__name__)
@@ -47,8 +55,17 @@ logger = logging.getLogger(__name__)
 # How many items one run will mirror. Fixed by Discord, not by the deployment: a command has
 # fifteen minutes after it defers and each item costs two Discord calls, the thread and the
 # message in it, so a larger cap risks finishing the work after the token has expired and the
-# reply can no longer be delivered.
+# reply can no longer be delivered. The redraws after them spend the same fifteen minutes, which
+# is what `REDRAW_SECONDS` below is measured against.
 MIRRORED_PER_RUN = 25
+
+# How long one run spends redrawing threads that already exist, once its openings are done. Issue
+# #185. A span of time rather than a count. An awake thread's redraw is two or three Discord calls
+# and a quiet one's about six, so an ordinary repository's every open item fits in a fraction of
+# this; a count small enough to be safe in the worst case - every item's lock held by a delivery
+# for its whole fifteen seconds - would take an ordinary repository three runs instead of one.
+# `test_a_refresh_fits_its_fifteen_minutes` holds that worst case inside the token.
+REDRAW_SECONDS = 300.0
 
 
 class RefreshScope(StrEnum):
@@ -124,6 +141,11 @@ class RefreshOutcome:
     `tickets_missed` is the one field that is not a number, and it is only ever set on a run that
     asked about tickets and could not reach them. `None` means there is nothing to add - including
     on `/refresh pull requests`, which never asks.
+
+    `already` counts every listed item that had a thread, and since issue #185 each of them lands
+    in exactly one of the five after it: redrawn, given a new thread because its own had gone, not
+    redrawn because the attempt failed, not reached before the run's redraw time ran out, or a card
+    left to the board.
     """
 
     full_name: str
@@ -134,10 +156,26 @@ class RefreshOutcome:
     # Last, and defaulted, because the five above have no defaults and a dataclass cannot take a
     # defaulted field before them.
     tickets_missed: MissedTickets | None = None
+    redrawn: int = 0
+    rebuilt: int = 0
+    redraws_failed: int = 0
+    unreached: int = 0
+    left_to_the_board: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Redraws:
+    """What the redrawing half of a run came to."""
+
+    redrawn: int = 0
+    rebuilt: int = 0
+    failed: int = 0
+    unreached: int = 0
 
 
 class RepositoryRefresh:
-    """Mirror every open item on the registered repository that has no thread."""
+    """Mirror every open item on the registered repository that has no thread, and redraw the open
+    pull requests and issues that have one."""
 
     def __init__(
         self,
@@ -149,6 +187,8 @@ class RepositoryRefresh:
         issues: SyncsItems,
         tickets: SyncsItems,
         cap: int = MIRRORED_PER_RUN,
+        redraw_seconds: float = REDRAW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._github = github
@@ -162,9 +202,13 @@ class RepositoryRefresh:
             ObjectType.TICKET: tickets,
         }
         self._cap = cap
+        self._redraw_seconds = redraw_seconds
+        # Monotonic, as every span measured in this project is: a wall clock stepped back by an NTP
+        # correction would hand a run its redraw time over again.
+        self._clock = clock
 
     async def refresh(self, *, guild_id: int, scope: RefreshScope) -> RefreshOutcome:
-        """Read the backlog and mirror what is missing from it."""
+        """Read the backlog, mirror what is missing from it, and redraw what is not."""
         registered = await self._registered(guild_id)
         current = await self._github.get_repository(
             registered.snapshot.owner, registered.snapshot.name
@@ -181,7 +225,9 @@ class RepositoryRefresh:
         # last, which is partly the cap - a capped run should spend itself on reviews - and
         # partly that the board is the slowest of the three reads.
         work: list[TrackedSnapshot] = []
+        due: list[tuple[datetime, TrackedSnapshot]] = []
         already = 0
+        left_to_the_board = 0
         missed: MissedTickets | None = None
         for object_type in _kinds(scope):
             if object_type is ObjectType.TICKET:
@@ -200,14 +246,30 @@ class RepositoryRefresh:
                 repository_id=registered.repository_id, kind=object_type
             )
             for item in found:
-                if item.github_object_id in threaded:
-                    already += 1
-                else:
+                written = threaded.get(item.github_object_id)
+                if written is None:
                     work.append(item)
+                    continue
+                already += 1
+                if object_type is ObjectType.TICKET:
+                    # The board poller redraws a card every time it moves, and asks the board for
+                    # nothing to do it, so a refresh has nothing to add. Redrawing one here would
+                    # also move the timestamp the poller decides by, and swallow a change it had
+                    # yet to say anything about.
+                    left_to_the_board += 1
+                else:
+                    due.append((written, item))
 
+        # Openings first. An item with no thread is missing from the channel altogether, where one
+        # with a stale block is at worst out of date, so a run short of time spends it on those.
         mirrored, failed = await self._mirror(
             work[: self._cap], repository_id=registered.repository_id
         )
+        # Least recently written first, so the threads a run stops short of are the ones the next
+        # run over the same kinds starts with: every redraw rewrites its row and goes to the back.
+        # A thread a delivery has just rewritten goes to the back too, which is right, since it is
+        # current already. Another scope sorts other rows in among them, so the reply says which.
+        redraws = await self._redraw([item for _, item in sorted(due, key=lambda pair: pair[0])])
         return RefreshOutcome(
             full_name=current.full_name,
             mirrored=mirrored,
@@ -215,6 +277,11 @@ class RepositoryRefresh:
             failed=failed,
             left=len(work) - mirrored,
             tickets_missed=missed,
+            redrawn=redraws.redrawn,
+            rebuilt=redraws.rebuilt,
+            redraws_failed=redraws.failed,
+            unreached=redraws.unreached,
+            left_to_the_board=left_to_the_board,
         )
 
     async def _registered(self, guild_id: int) -> _Registered:
@@ -322,22 +389,18 @@ class RepositoryRefresh:
             return await self._github.list_open_pull_requests(repository)
         return await self._github.list_open_issues(repository)
 
-    async def _threaded(self, *, repository_id: int, kind: ObjectType) -> set[int]:
-        """The items of one kind that already have a thread, in one query.
+    async def _threaded(self, *, repository_id: int, kind: ObjectType) -> dict[int, datetime]:
+        """The items of one kind that already have a thread, and when each row was last written.
 
         Keyed on the thread, not the row: the row is committed before the Discord call that gives
         it one, so an item whose thread creation was refused is recorded here and invisible in
-        the channel, and nothing but a webhook ever comes back for it.
+        the channel, and nothing but a webhook ever comes back for it. The write time is what the
+        redraws are ordered by, issue #185.
         """
         async with self._sessionmaker() as session:
-            state = await TrackedItemStore(session).mirrored_state(
+            return await TrackedItemStore(session).last_written(
                 repository_id=repository_id, object_type=kind
             )
-        return {
-            github_object_id
-            for github_object_id, (_, thread_id) in state.items()
-            if thread_id is not None
-        }
 
     async def _mirror(
         self, work: Sequence[TrackedSnapshot], *, repository_id: int
@@ -351,38 +414,73 @@ class RepositoryRefresh:
         mirrored = 0
         failed = 0
         for snapshot in work:
-            try:
-                result = await self._syncs[snapshot.object_type].sync(snapshot)
-            except ShannonError as refusal:
-                # A single thread Discord refuses must not take every item after it down.
+            result = await self._attempt(snapshot, verb="mirror")
+            if result is None:
                 failed += 1
-                logger.warning(
-                    "could not mirror %s#%s on a refresh: %s",
-                    snapshot.repository.full_name,
-                    snapshot.number,
-                    refusal,
-                )
                 await self._let_it_be_found_again(snapshot, repository_id=repository_id)
-            except Exception:
-                # Letting an unexpected failure out would strand the command with no reply.
-                failed += 1
-                logger.exception(
-                    "an unexpected failure mirroring %s#%s on a refresh",
-                    snapshot.repository.full_name,
-                    snapshot.number,
-                )
-                await self._let_it_be_found_again(snapshot, repository_id=repository_id)
-            else:
-                if result.outcome is SyncOutcome.NOT_TRACKED:
-                    # A refusal on the repository or the channel, not on this item, so every
-                    # item after it would be refused identically.
-                    raise SyncFailedError(
-                        "The repository is registered but has no channel mapped for that. "
-                        "Run /set_channel first."
-                    )
-                if result.synced:
-                    mirrored += 1
+            elif result.synced:
+                mirrored += 1
         return mirrored, failed
+
+    async def _redraw(self, due: Sequence[TrackedSnapshot]) -> _Redraws:
+        """Redraw open items' threads in the order given, until the run's redraw time is up.
+
+        Issue #185. From the snapshot the listing already holds, through the same sync, so a
+        redraw asks GitHub nothing and says nothing: no notifier, and real mentions Discord is told
+        to ring none of. Sequential, for the reason `_mirror` gives.
+
+        A thread somebody deleted comes back as a new one, which is counted apart because the
+        reply says so. A superseded snapshot counts as redrawn: a delivery newer than the listing
+        has written the block since, so the thread is as current as this would have made it.
+        """
+        began = self._clock()
+        redrawn = rebuilt = failed = 0
+        for taken, snapshot in enumerate(due):
+            if self._clock() - began >= self._redraw_seconds:
+                return _Redraws(redrawn, rebuilt, failed, unreached=len(due) - taken)
+            result = await self._attempt(snapshot, verb="redraw")
+            if result is None:
+                failed += 1
+            elif result.created:
+                rebuilt += 1
+            else:
+                redrawn += 1
+        return _Redraws(redrawn, rebuilt, failed)
+
+    async def _attempt(self, snapshot: TrackedSnapshot, *, verb: str) -> SyncResult | None:
+        """One item through its sync, or None where that failed - which is logged here, once.
+
+        Shared by both halves of a run so the two cannot drift apart on what a failure is. A single
+        thread Discord refuses must not take every item after it down, so a failure is counted
+        rather than raised. Not having a channel is the exception: that is a refusal on the
+        repository rather than on this item, and every item after it would be refused the same way.
+        """
+        try:
+            result = await self._syncs[snapshot.object_type].sync(snapshot)
+        except ShannonError as refusal:
+            logger.warning(
+                "could not %s %s#%s on a refresh: %s",
+                verb,
+                snapshot.repository.full_name,
+                snapshot.number,
+                refusal,
+            )
+            return None
+        except Exception:
+            # Letting an unexpected failure out would strand the command with no reply.
+            logger.exception(
+                "an unexpected failure trying to %s %s#%s on a refresh",
+                verb,
+                snapshot.repository.full_name,
+                snapshot.number,
+            )
+            return None
+        if result.outcome is SyncOutcome.NOT_TRACKED:
+            raise SyncFailedError(
+                "The repository is registered but has no channel mapped for that. "
+                "Run /set_channel first."
+            )
+        return result
 
     async def _let_it_be_found_again(
         self, snapshot: TrackedSnapshot, *, repository_id: int
