@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from shannon.db.models import MirroredNote
 from shannon.discord_bot.formatting import format_everyone_approved, format_review
 from shannon.domain.models import Actor, ReviewSnapshot
+from shannon.domain.tracking import TrackedEvent
 from shannon.github import mapping
 from shannon.github.webhooks.reviews import parse_review_event
 from shannon.services.notes import ItemNoteMirror, build_note_handler
@@ -35,7 +36,7 @@ from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
-from tests.support.db import register_repository
+from tests.support.db import register_repository, track
 from tests.support.stack import DeliveryClient, build_http_client, build_stack, deliver
 
 pytestmark = pytest.mark.integration
@@ -427,6 +428,58 @@ class TestWhereItCannotFindTheItem:
         await line_over(db_sessionmaker, threads, github).after_a_review(snapshot)
 
         assert len(threads.posts) == posted
+
+
+class TestAThreadThatTurnedApprovalsOff:
+    """Issue #163. One switch, read where the two moments meet, so neither can get past it, and
+    read before GitHub is asked anything, so a round-up nobody wants costs nothing."""
+
+    async def test_the_last_approval_says_nothing_and_asks_github_nothing(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        _, github = tracked
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, off=(TrackedEvent.APPROVALS,)
+        )
+
+        await handler_over(db_sessionmaker, threads, github)(
+            "submitted", payloads.pull_request_review_event()
+        )
+
+        assert not any(HEADING in body for body in said(threads))
+        assert any("monalisa" in body for body in said(threads)), "the review itself went unsaid"
+        assert github.pull_request_calls == []
+        assert github.review_calls == []
+
+    async def test_withdrawing_the_last_request_says_nothing_either(
+        self,
+        tracked: tuple[DeliveryClient, FakeGitHubClient],
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        threads: FakeThreadGateway,
+    ) -> None:
+        _, github = tracked
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, off=(TrackedEvent.APPROVALS,)
+        )
+        snapshot = github.pull_requests[(REPO_FULL, 7)]
+
+        await line_over(db_sessionmaker, threads, github).say(
+            Arrival(
+                action="review_request_removed",
+                snapshot=snapshot,
+                payload=payloads.pull_request_event("review_request_removed"),
+                tracked_item_id=1,
+                thread_id=1,
+                arrived=1,
+            )
+        )
+
+        assert not any(HEADING in body for body in said(threads))
+        assert github.pull_request_calls == []
+        assert github.review_calls == []
 
 
 class TestTheOtherMomentItBecomesTrue:
