@@ -22,6 +22,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import ItemNotReadyError
 from shannon.domain.models import RepositorySnapshot
+from shannon.domain.tracking import Tracking
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class ItemInThread:
     tracked_item_id: int
     thread_id: int
     guild_id: int
+    # Which lines that somewhere asked for, issue #163. Read off the row already in hand, so every
+    # caller can obey its thread without a query of its own.
+    tracking: Tracking
 
 
 async def in_its_thread(
@@ -84,4 +88,5 @@ async def in_its_thread(
         tracked_item_id=item.id,
         thread_id=item.discord_thread_id,
         guild_id=found.discord_guild_id,
+        tracking=Tracking.of(item.tracking),
     )

@@ -20,6 +20,7 @@ from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, RevisesM
 from shannon.domain.errors import ItemNotReadyError, PermanentError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import ItemNote
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.mentions import names_a_note_writes
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.locating import ItemInThread, in_its_thread
@@ -101,6 +102,20 @@ class ItemNoteMirror:
             found = await self._locate(snapshot)
             if found is None:
                 return False
+            if not found.tracking.wants(TrackedEvent.COMMENTS):
+                # Issue #163. True, because the note did belong to something mirrored here: the
+                # hooks either side of the post still run, and the round-up under an approval has
+                # a switch of its own. Before the GitHub read and the claim, so nothing records a
+                # note as said - an edit to it after comments are back on is posted fresh, the
+                # same gap repair as for any note that never made it into the thread.
+                logger.info(
+                    "the thread of tracked item %s has comments off, so a note on %s#%s goes "
+                    "unsaid",
+                    found.tracked_item_id,
+                    snapshot.repository.full_name,
+                    snapshot.item_number,
+                )
+                return True
             if self._worth_posting is not None and not self._worth_posting(snapshot):
                 logger.info(
                     "a note on %s#%s has earned no message of its own, so none is posted",
