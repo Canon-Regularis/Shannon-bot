@@ -31,6 +31,7 @@ from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.models import Actor, PullRequestSnapshot
+from shannon.domain.tracking import TrackedEvent
 from shannon.github import mapping
 from shannon.services.audience import reachable
 from shannon.services.sync.announcements import Arrival, ClaimedLine
@@ -107,6 +108,16 @@ class DraftSwitchLine:
         """
         snapshot = _thrown(arrival, self._half)
         if snapshot is None:
+            return
+
+        if not arrival.tracking.wants(TrackedEvent.DRAFT):
+            # Issue #163, one switch for both halves: a thread that does not want to hear the
+            # pull request is ready does not want to hear it went back either.
+            logger.info(
+                "the thread of tracked item %s has draft off, so its %s goes unsaid",
+                arrival.tracked_item_id,
+                self._half.action,
+            )
             return
 
         async with self._sessionmaker() as session:

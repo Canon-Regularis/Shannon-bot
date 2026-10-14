@@ -25,18 +25,20 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot import formatting
-from shannon.discord_bot.formatting import format_ready_for_review
+from shannon.discord_bot.formatting import format_back_to_draft, format_ready_for_review
 from shannon.discord_bot.panels import Accent, Panel
 from shannon.discord_bot.threads import Notify
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.sync.announcements import Arrival
-from shannon.services.sync.draft_lines import READY, DraftSwitchLine
+from shannon.services.sync.draft_lines import DRAFTED, READY, DraftSwitchLine
 from shannon.services.sync.items import build_item_handler, build_item_sync
 from shannon.services.sync.policies import PullRequestPolicy
 from shannon.services.sync.shutting import KeepsThreadsShut
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
+from tests.support.db import track
 from tests.support.stack import DeliveryClient, deliver, registered_stack
 
 pytestmark = pytest.mark.integration
@@ -649,6 +651,58 @@ class TestWhenItIsSaid:
         await handle("ready_for_review", ready(), 900_002)
 
         assert said(threads) == []
+
+
+class TestAThreadThatTurnedDraftOff:
+    """Issue #163. One switch for both halves, so a thread that said it does not want to hear a
+    pull request is ready does not hear it went back either."""
+
+    async def test_marked_ready_rings_nobody(
+        self,
+        registered: Repository,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+    ) -> None:
+        threads = FakeThreadGateway()
+        handle = handler(db_sessionmaker, threads)
+        await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, off=(TrackedEvent.DRAFT,)
+        )
+
+        await handle("ready_for_review", ready(), 900_002)
+
+        assert said(threads) == []
+        held = await db_session.scalar(select(func.count()).select_from(MirroredNote))
+        assert held == 0, "a line that was never said was recorded as said"
+
+    async def test_back_to_draft_says_nothing_either(
+        self, registered: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        threads = FakeThreadGateway()
+        handle = build_item_handler(
+            build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
+            parse_pull_request_event,
+            announce=DraftSwitchLine(
+                db_sessionmaker,
+                threads,
+                half=DRAFTED,
+                render=format_back_to_draft,
+                shut_again=KeepsThreadsShut(db_sessionmaker, threads),
+            ),
+        )
+        await handle("opened", payloads.pull_request_event("opened"), 900_001)
+        await track(
+            db_sessionmaker, thread_id=threads.created[0].thread_id, off=(TrackedEvent.DRAFT,)
+        )
+
+        await handle(
+            "converted_to_draft",
+            payloads.pull_request_event("converted_to_draft", draft=True, updated_at=DRAFTED_AT),
+            900_002,
+        )
+
+        assert threads.posts == []
 
 
 class TestWhatItIsNotFor:
