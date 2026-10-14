@@ -25,6 +25,7 @@ from shannon.domain.models import (
     CommitRef,
     PullRequestSnapshot,
 )
+from shannon.domain.tracking import TrackedEvent
 from shannon.github.webhooks.checks import CheckSuiteEvent
 from shannon.github.webhooks.events import EventHandler, WebhookOutcome
 from shannon.services.audience import everyone_who_worked_on_it, reachable
@@ -125,6 +126,17 @@ class CheckSuiteAnnouncer:
         owner, name = event.repository.owner, event.repository.name
         found = await self._locate(event, number)
         if found is None:
+            return False
+
+        if not found.tracking.wants(TrackedEvent.CHECKS):
+            # Issue #163. Before the first GitHub read, so a result nobody asked to hear about
+            # costs no calls, and nothing is claimed: it counts as not said, which it was not.
+            logger.info(
+                "the thread of tracked item %s has checks off, so %s#%s goes unsaid",
+                found.tracked_item_id,
+                event.repository.full_name,
+                number,
+            )
             return False
 
         item = await self._github.get_pull_request(owner, name, number)
