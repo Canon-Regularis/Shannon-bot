@@ -20,19 +20,55 @@ import pytest
 
 from shannon.discord_bot import formatting
 from shannon.discord_bot.panels import PANEL_BUDGET, Accent
+from shannon.discord_bot.rich_text import COMMIT_LINK_LIMIT
 from shannon.discord_bot.safe_text import COMMIT_MESSAGE_LIMIT, COMMIT_TITLE_LIMIT
-from shannon.domain.models import Actor, Commit, CommitStats
+from shannon.domain.models import Actor, Commit, CommitStats, ForcePush, RepositorySnapshot
 
 OCTOCAT = Actor(login="octocat", github_user_id=583231)
 SHA = "abc1234def5678901234567890123456789012ab"
 
+REPO = RepositorySnapshot(
+    github_repo_id=1,
+    owner="Canon-Regularis",
+    name="Shannon-bot",
+    html_url="https://github.com/Canon-Regularis/Shannon-bot",
+)
+COMMITS = "https://github.com/Canon-Regularis/Shannon-bot/commit"
+
+# The footnote every line here ends on since issue #186: the commit, linked, then the numbers.
+LINKED = f"-# [abc1234]({COMMITS}/{SHA}) · "
+
+# A name GitHub would never issue, so no address can be built into it.
+BROKEN = RepositorySnapshot(
+    github_repo_id=3, owner="o", name="..", html_url="https://github.com/o/.."
+)
+
 _ACCOUNT_MENTION = re.compile(r"<@!?\d+>")
 
 
-def commit(message: str, *, author: Actor | None = OCTOCAT, **stats: int) -> Commit:
+def commit(
+    message: str,
+    *,
+    author: Actor | None = OCTOCAT,
+    sha: str = SHA,
+    repository: RepositorySnapshot = REPO,
+    **stats: int,
+) -> Commit:
     numbers = {"additions": 42, "deletions": 7, "changed_files": 3}
     numbers.update(stats)
-    return Commit(sha=SHA, message=message, author=author, stats=CommitStats(**numbers))
+    return Commit(
+        repository=repository,
+        sha=sha,
+        message=message,
+        author=author,
+        stats=CommitStats(**numbers),
+    )
+
+
+def pushed(
+    pusher: Actor | None = OCTOCAT, *, before: str = "1" * 40, after: str = "2" * 40
+) -> ForcePush:
+    return ForcePush(repository=REPO, pusher=pusher, before=before, after=after)
 
 
 class TestWhatOneCommitLineSays:
@@ -44,7 +80,7 @@ class TestWhatOneCommitLineSays:
         assert said == (
             "📝 **octocat** has committed Add the webhook endpoint\n"
             "Answers the signature check.\n"
-            "-# With changes: +42, -7, 3 files changed"
+            f"{LINKED}With changes: +42, -7, 3 files changed"
         )
 
     def test_a_commit_with_no_body_leaves_the_line_out_rather_than_rendering_it_blank(self) -> None:
@@ -56,7 +92,7 @@ class TestWhatOneCommitLineSays:
 
         assert said == (
             "📝 **octocat** has committed Fix the flaky reviewer test\n"
-            "-# With changes: +3, -3, 1 file changed"
+            f"{LINKED}With changes: +3, -3, 1 file changed"
         )
 
     def test_a_body_of_nothing_but_whitespace_is_no_body(self) -> None:
@@ -64,7 +100,7 @@ class TestWhatOneCommitLineSays:
 
         assert said.splitlines() == [
             "📝 **octocat** has committed Tidy up",
-            "-# With changes: +42, -7, 3 files changed",
+            f"{LINKED}With changes: +42, -7, 3 files changed",
         ]
 
     def test_a_commit_whose_account_github_does_not_know_is_still_announced(self) -> None:
@@ -77,7 +113,7 @@ class TestWhatOneCommitLineSays:
 
         assert said == (
             "📝 **Unknown** has committed Drop the unused import\n"
-            "-# With changes: +0, -1, 1 file changed"
+            f"{LINKED}With changes: +0, -1, 1 file changed"
         )
 
     def test_a_commit_with_no_message_at_all_falls_back_to_its_short_sha(self) -> None:
@@ -145,7 +181,7 @@ class TestTheNumbersUnderIt:
             commit("Delete the dead module", additions=0, deletions=30, changed_files=2)
         ).text
 
-        assert said.endswith("-# With changes: +0, -30, 2 files changed")
+        assert said.endswith(" · With changes: +0, -30, 2 files changed")
 
 
 class TestNobodyIsPinged:
@@ -211,32 +247,98 @@ class TestWhenSomebodyWritesTooMuch:
         """Against the literal 3900 rather than the constant, which is the point: asserting
         against `PANEL_BUDGET` compares the output to the very number that decided it.
 
-        Every character is one that escaping doubles, both fields are one over their limits, and
-        the numbers are wider than any real repository would produce.
+        Every character in the subject is one that escaping doubles, both fields are one over
+        their limits, and the numbers are wider than any real repository would produce. Since
+        issue #186 the body opens on as many hashes as are linked, into a repository with the
+        longest names GitHub allows, which is where each link costs the most.
         """
+        longest = RepositorySnapshot(
+            github_repo_id=2,
+            owner="o" * 39,
+            name="n" * 100,
+            html_url=f"https://github.com/{'o' * 39}/{'n' * 100}",
+        )
+        body = "abc1234 " * COMMIT_LINK_LIMIT + "_" * (COMMIT_MESSAGE_LIMIT + 1)
         worst = Commit(
+            repository=longest,
             sha="f" * 40,
-            message="*" * (COMMIT_TITLE_LIMIT + 1) + "\n\n" + "_" * (COMMIT_MESSAGE_LIMIT + 1),
+            message="*" * (COMMIT_TITLE_LIMIT + 1) + "\n\n" + body,
             author=Actor(login="_" * 39, github_user_id=1),
             stats=CommitStats(additions=9_999_999, deletions=9_999_999, changed_files=9_999_999),
         )
 
-        assert formatting.format_commit(worst).length() < 3900
-        assert formatting.format_commit(worst).length() <= PANEL_BUDGET
+        drawn = formatting.format_commit(worst)
+
+        assert drawn.text.count("](") == COMMIT_LINK_LIMIT + 1, "the hashes were not linked"
+        assert drawn.length() < 3900
+        assert drawn.length() <= PANEL_BUDGET
+
+
+class TestWhichCommitItIs:
+    """Issue #186. A line leads to its commit, and so does every hash its message names."""
+
+    def test_the_footnote_opens_on_the_commit_linked(self) -> None:
+        said = formatting.format_commit(commit("Tidy")).text
+
+        assert said.splitlines()[-1] == f"{LINKED}With changes: +42, -7, 3 files changed"
+
+    def test_its_own_hash_is_linked_whatever_its_shape(self) -> None:
+        """GitHub said this one is a commit, so a hash of nothing but digits is as much one as any
+        other - unlike a hash somebody typed, which is judged by its shape."""
+        digits = "1234567890" * 4
+
+        said = formatting.format_commit(commit("Tidy", sha=digits)).text
+
+        assert said.splitlines()[-1].startswith(f"-# [1234567]({COMMITS}/{digits}) · ")
+
+    def test_a_repository_no_address_can_be_built_into_quotes_the_hash(self) -> None:
+        said = formatting.format_commit(commit("Tidy", repository=BROKEN)).text
+
+        assert said.splitlines()[-1] == "-# `abc1234` · With changes: +42, -7, 3 files changed"
+
+    def test_the_heading_is_left_as_it_was(self) -> None:
+        said = formatting.format_commit(commit("Tidy")).text
+
+        assert said.splitlines()[0] == "📝 **octocat** has committed Tidy"
+
+    def test_a_hash_the_message_names_links_to_its_commit(self) -> None:
+        said = formatting.format_commit(
+            commit("Revert the poller\n\nThis reverts commit 0123abc.")
+        ).text
+
+        assert said.splitlines()[1] == f"This reverts commit [0123abc]({COMMITS}/0123abc)."
+
+    def test_a_hash_in_the_subject_stays_as_written(self) -> None:
+        """Escaped like everything else in the subject, which sits inside a `**`-matched line."""
+        said = formatting.format_commit(commit("Revert 0123abc")).text
+
+        assert said.splitlines()[0] == "📝 **octocat** has committed Revert 0123abc"
 
 
 class TestABranchThatWasRewritten:
-    def test_it_names_who_did_it_and_says_why_nothing_else_follows(self) -> None:
-        said = formatting.format_force_push(OCTOCAT).text
+    def test_it_names_who_did_it_both_heads_and_why_nothing_else_follows(self) -> None:
+        """Issue #186: from the head it replaced to the one it is now, each linked, the way
+        GitHub's own timeline names a force push."""
+        said = formatting.format_force_push(pushed()).text
 
         assert said == (
-            "🔁 **octocat** force-pushed this branch, so the commits it replaced are not announced."
+            f"🔁 **octocat** force-pushed this branch from [1111111]({COMMITS}/{'1' * 40}) to "
+            f"[2222222]({COMMITS}/{'2' * 40}), so the commits it replaced are not announced."
         )
 
     def test_a_pusher_github_does_not_know_is_still_reported(self) -> None:
-        said = formatting.format_force_push(None).text
+        said = formatting.format_force_push(pushed(None)).text
 
         assert said.startswith("🔁 **Unknown** force-pushed")
+
+    def test_a_head_no_address_can_be_built_from_is_quoted_rather_than_linked(self) -> None:
+        """A payload is somebody else's text. What cannot be a commit's address is shown in a code
+        span, and anything mention-shaped in it is defused before it gets there."""
+        said = formatting.format_force_push(pushed(before="<@1234>", after="main")).text
+
+        assert "](" not in said
+        assert "`main`" in said
+        assert not _ACCOUNT_MENTION.search(said)
 
 
 class TestTheRestOfThePush:

@@ -172,8 +172,9 @@ class ItemNoteMirror:
         # and the other does not renders exactly as an unlinked name renders, and nothing anywhere
         # reports a mention that was owed and never made - so neither the string nor the rule for
         # reading it is spelled out twice. `names_a_note_writes` is paired with the
-        # `rewrite_a_note` the renderer calls.
-        named = names_a_note_writes(as_note_text(snapshot.body))
+        # `rewrite_a_note` the renderer calls. The repository too, since issue #186: the renderer
+        # links the commits the body names, and this has to read the string that renderer shows.
+        named = names_a_note_writes(as_note_text(snapshot.body, repository=snapshot.repository))
 
         # Three sources, in an order that is load-bearing: `resolve_many` lowercases into a fresh
         # mapping, so the last entry for a name wins, and the changed-hands check runs on the

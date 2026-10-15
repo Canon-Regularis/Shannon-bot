@@ -14,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import PostsToThread
 from shannon.domain.json import JsonObject
-from shannon.domain.models import Actor, Commit, CommitRange, CommitRef
+from shannon.domain.models import (
+    Actor,
+    Commit,
+    CommitRange,
+    CommitRef,
+    ForcePush,
+    RepositorySnapshot,
+)
 from shannon.domain.tracking import TrackedEvent
 from shannon.github import mapping
 from shannon.github.client import ReadsCommits
@@ -42,7 +49,7 @@ AHEAD = "ahead"
 _NOTHING = "0" * 40
 
 Renderer = Callable[[Commit], Panel]
-PushRenderer = Callable[[Actor | None], Panel]
+PushRenderer = Callable[[ForcePush], Panel]
 CountRenderer = Callable[[int], Panel]
 
 
@@ -111,12 +118,15 @@ class CommitLine:
         if compared.status in REWRITTEN:
             # Once, about the rewrite rather than its commits: every commit on a rebased branch
             # has a new SHA and would otherwise be announced as new work. Keyed on the delivery,
-            # so two force pushes in a row say two things.
+            # so two force pushes in a row say two things. Named by both heads since issue #186,
+            # the way GitHub's own timeline names a force push.
+            before, after = ends
+            pushed = ForcePush(repository=repository, pusher=pushed_by, before=before, after=after)
             await self._line.say_once(
                 tracked_item_id=arrival.tracked_item_id,
                 thread_id=arrival.thread_id,
                 note_key=f"force-push:{arrival.arrived}",
-                panel=self._rewritten(pushed_by),
+                panel=self._rewritten(pushed),
             )
             return
 
@@ -137,24 +147,32 @@ class CommitLine:
 
         said = 0
         for commit in wanted:
-            if await self._say_one(arrival, repository.owner, repository.name, commit):
+            if await self._say_one(arrival, repository, commit):
                 said += 1
 
         await self._say_what_was_left(arrival, compared, kept=len(theirs), said=said)
 
-    async def _say_one(self, arrival: Arrival, owner: str, name: str, ref: CommitRef) -> bool:
+    async def _say_one(
+        self, arrival: Arrival, repository: RepositorySnapshot, ref: CommitRef
+    ) -> bool:
         """One commit, read and posted, or False for one GitHub could not be read.
 
         The numbers are a call each because the commit rows inside a compare carry no `stats`
         block. A commit that has gone between the compare and this read was rewritten away, and
         is skipped rather than failing the whole delivery.
         """
-        stats = await self._github.commit_stats(owner, name, ref.sha)
+        stats = await self._github.commit_stats(repository.owner, repository.name, ref.sha)
         if stats is None:
             logger.info("GitHub had no numbers for %s, so it is not announced", ref.sha)
             return False
 
-        commit = Commit(sha=ref.sha, message=ref.message, author=ref.author, stats=stats)
+        commit = Commit(
+            repository=repository,
+            sha=ref.sha,
+            message=ref.message,
+            author=ref.author,
+            stats=stats,
+        )
         await self._line.say_once(
             tracked_item_id=arrival.tracked_item_id,
             thread_id=arrival.thread_id,

@@ -18,8 +18,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from shannon.discord_bot.rich_text import (
-    _LINK,
     ALT_LIMIT,
+    COMMIT_LINK_LIMIT,
     IMAGES_SHOWN,
     Images,
     _host_of,
@@ -32,15 +32,38 @@ from shannon.discord_bot.safe_text import (
     DESCRIPTION_PREVIEW_LIMIT,
     MESSAGE_LIMIT,
 )
+from shannon.domain.models import RepositorySnapshot
+from shannon.domain.text import LINK
 
 pytestmark = pytest.mark.unit
 
 ZWSP = "​"
 SHOT = "https://user-images.githubusercontent.com/1/a.png"
 
+REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
+
+# The longest names GitHub allows, which is where a commit link costs the most.
+LONGEST = RepositorySnapshot(
+    github_repo_id=2,
+    owner="o" * 39,
+    name="n" * 100,
+    html_url=f"https://github.com/{'o' * 39}/{'n' * 100}",
+)
+
+# A name GitHub would never issue, so no address can be built into it.
+BROKEN = RepositorySnapshot(
+    github_repo_id=3, owner="o", name="..", html_url="https://github.com/o/.."
+)
+
+FULL = "a1b2c3d4" * 5
+
 
 def said(body: str) -> str:
     return as_rich_text(body).text
+
+
+def linked(body: str, *, repository: RepositorySnapshot = REPO) -> str:
+    return as_rich_text(body, repository=repository).text
 
 
 class TestWhatIsKeptNow:
@@ -210,9 +233,8 @@ class TestWhereALinkGoes:
 class TestWhereThePicturesAreNotLifted:
     """Issue #166. The same conversion for a body that gets no gallery under it.
 
-    A note and a commit message take this policy. A gallery under every screenshot-heavy comment
-    is noise, and a commit carries no repository at all, so the private-repo gate a card's
-    pictures go through would have nothing to read.
+    A note and a commit message take this policy. A gallery under every screenshot-heavy comment,
+    or under every commit of a push, is noise.
     """
 
     def links(self, body: str) -> str:
@@ -247,7 +269,7 @@ class TestANoteBody:
     """`as_note_text`, which the renderer and the service are both handed. Issue #166."""
 
     def test_markup_survives(self) -> None:
-        said_it = as_note_text("## Repro\n- run `make test`")
+        said_it = as_note_text("## Repro\n- run `make test`", repository=REPO)
 
         assert "- run `make test`" in said_it
         assert "\\" not in said_it, "the markup this keeps was escaped"
@@ -255,7 +277,7 @@ class TestANoteBody:
     def test_it_is_cut_to_the_comment_limit(self) -> None:
         """Not the description's, though the two share a value today. A note that borrowed the
         wrong name would follow it the day they stop agreeing."""
-        assert as_note_text("y" * (COMMENT_PREVIEW_LIMIT + 400)).count("y") == (
+        assert as_note_text("y" * (COMMENT_PREVIEW_LIMIT + 400), repository=REPO).count("y") == (
             COMMENT_PREVIEW_LIMIT
         )
 
@@ -263,16 +285,122 @@ class TestANoteBody:
         """GitHub reads `+` as a bullet and Discord does not. A comment used to arrive as a
         paragraph of plus signs - neither escaped nor converted, which was a defect rather than
         formatting lost on purpose."""
-        assert as_note_text("+ one\n+ two").startswith("- one")
+        assert as_note_text("+ one\n+ two", repository=REPO).startswith("- one")
 
     def test_bot_subtext_cannot_be_forged(self) -> None:
         """`-#` is Discord's subtext and every footnote this bot writes uses it, so a body able to
         produce one could put words in the bot's mouth. It was dead by accident before - the `-`
         happened to be escaped - and is broken deliberately now."""
-        assert not as_note_text("-# posted by the maintainers").startswith("-#")
+        assert not as_note_text("-# posted by the maintainers", repository=REPO).startswith("-#")
 
     def test_an_image_keeps_its_address(self) -> None:
-        assert SHOT in as_note_text(f"![shot]({SHOT})")
+        assert SHOT in as_note_text(f"![shot]({SHOT})", repository=REPO)
+
+    def test_a_hash_in_a_note_links_to_its_commit(self) -> None:
+        """Issue #186: the repository every note is handed is the one its hashes link into."""
+        assert as_note_text("Fixed in abc1234.", repository=REPO) == (
+            "Fixed in [abc1234](https://github.com/o/n/commit/abc1234)."
+        )
+
+
+class TestTheCommitsABodyNames:
+    """Issue #186. A hash GitHub would link is linked here too, into the body's own repository."""
+
+    def test_a_hash_links_to_its_commit(self) -> None:
+        assert linked("Fixed in abc1234.") == (
+            "Fixed in [abc1234](https://github.com/o/n/commit/abc1234)."
+        )
+
+    def test_a_whole_hash_is_labelled_short_and_addressed_whole(self) -> None:
+        """As GitHub shows one, and the address is every character that was written."""
+        assert linked(f"This reverts commit {FULL}.") == (
+            f"This reverts commit [a1b2c3d](https://github.com/o/n/commit/{FULL})."
+        )
+
+    def test_another_repositorys_commit_links_there_and_says_so(self) -> None:
+        assert linked("see other/repo@abc1234") == (
+            "see [other/repo@abc1234](https://github.com/other/repo/commit/abc1234)"
+        )
+
+    def test_another_repositorys_whole_hash_is_labelled_short_too(self) -> None:
+        """The cherry-pick a commit message names, where a whole hash is what `git` writes."""
+        assert linked(f"cherry picked from octo/lib@{FULL}") == (
+            f"cherry picked from [octo/lib@a1b2c3d](https://github.com/octo/lib/commit/{FULL})"
+        )
+
+    def test_without_a_repository_nothing_is_linked(self) -> None:
+        """A draft card's body: it belongs to no repository for a bare hash to belong to."""
+        assert said("Fixed in abc1234.") == "Fixed in abc1234."
+
+    def test_one_with_no_address_is_left_as_written_and_the_next_still_linked(self) -> None:
+        """Into a repository GitHub could not have issued, so the bare hash goes nowhere - and
+        the one naming its own repository after it is still read."""
+        assert linked("abc1234 and o/r@def5678", repository=BROKEN) == (
+            "abc1234 and [o/r@def5678](https://github.com/o/r/commit/def5678)"
+        )
+
+    def test_five_at_most(self) -> None:
+        hashes = [f"{n}abcdef" for n in range(1, COMMIT_LINK_LIMIT + 2)]
+
+        out = linked(" ".join(hashes))
+
+        assert out.count("](") == COMMIT_LINK_LIMIT
+        assert out.endswith(f" {hashes[-1]}"), "the one past the limit was not left as written"
+
+    def test_five_is_the_number_the_ceiling_was_worked_out_for(self) -> None:
+        """Each link is up to 178 characters the cut no longer counts, and the ceiling in
+        `as_rich_text`'s docstring is five of those. A larger number would still pass every test
+        above, which read the constant, and quietly break the arithmetic."""
+        assert COMMIT_LINK_LIMIT == 5
+
+    def test_a_hash_written_twice_counts_twice(self) -> None:
+        """Each link is characters the cut has stopped counting, whichever commit it names."""
+        assert linked("abc1234 " * (COMMIT_LINK_LIMIT + 1)).count("](") == COMMIT_LINK_LIMIT
+
+    def test_a_link_costs_the_preview_none_of_its_words(self) -> None:
+        """Linked after the cut, so the limit goes on counting what a reader sees."""
+        body = "abc1234 " + "w" * (DESCRIPTION_PREVIEW_LIMIT - 8)
+
+        assert linked(body).count("w") == DESCRIPTION_PREVIEW_LIMIT - 8
+
+    def test_a_hash_the_cut_ran_into_is_left_as_written(self) -> None:
+        """What is left is a prefix the cut chose rather than the writer."""
+        body = "w" * (DESCRIPTION_PREVIEW_LIMIT - 10) + " abc1234def5678"
+
+        out = linked(body)
+
+        assert "](" not in out
+        assert out.endswith("abc1234de…")
+
+    def test_a_fence_the_cut_left_open_links_nothing_inside_it(self) -> None:
+        out = linked("```\n" + "abc1234 " * 100)
+
+        assert "](" not in out
+        assert out.count("```") == 2, "the fence was not closed"
+
+    def test_a_hash_in_a_link_to_elsewhere_stays_inside_it(self) -> None:
+        """Linked before the author's own links are judged, so this one is still whole: run after,
+        it would be a GitHub link standing beside a host it does not go to."""
+        assert linked("[fixed in abc1234](https://evil.example/x)") == (
+            "fixed in abc1234 (evil.example)"
+        )
+
+    def test_a_hash_written_as_a_links_address_is_not_followed(self) -> None:
+        out = linked("[x](abc1234)")
+
+        assert "](" not in out
+        assert "github.com" not in out
+
+    def test_a_hash_in_code_is_left_as_code(self) -> None:
+        assert linked("run `git show abc1234`") == "run `git show abc1234`"
+
+    def test_bold_closes_around_a_link(self) -> None:
+        assert linked("**abc1234") == "**[abc1234](https://github.com/o/n/commit/abc1234)**"
+
+    def test_subtext_stays_broken_in_front_of_one(self) -> None:
+        assert linked("-# abc1234") == (
+            f"-{ZWSP}# [abc1234](https://github.com/o/n/commit/abc1234)"
+        )
 
 
 class TestThePictures:
@@ -384,8 +512,8 @@ def test_nothing_typed_can_reach_out_of_the_card(body: str) -> None:
     """
     described = as_rich_text(body)
 
-    assert described.text.count("](") == len(_LINK.findall(described.text))
-    for link in _LINK.finditer(described.text):
+    assert described.text.count("](") == len(LINK.findall(described.text))
+    for link in LINK.finditer(described.text):
         host = _host_of(link.group(2))
         assert host is not None and _is_github(host), link.group(2)
 
@@ -401,3 +529,96 @@ def test_nothing_typed_can_reach_out_of_the_card(body: str) -> None:
     for image in described.images:
         assert image.url.startswith("https://")
         assert _is_github(_host_of(image.url) or "")
+
+
+# Hashes spliced into everything that could go wrong around one: code, links, addresses, names,
+# escapes, the cut mark. No GitHub host, so the only GitHub links that can come out are the ones
+# the commit step wrote - and none of the label-less GitHub link that grows on its own, a gap that
+# predates issue #186 and is not what this asserts about.
+_AROUND_A_HASH = [
+    "abc1234",
+    "0123abc",
+    FULL,
+    "o/r@def5678",
+    "other/repo@abc1234",
+    " ",
+    "\n",
+    "x",
+    "1",
+    "`",
+    "``",
+    "```",
+    "[",
+    "]",
+    "(",
+    ")",
+    "](",
+    "https://",
+    "http://e.x/",
+    "evil.example",
+    "@",
+    "#",
+    ".",
+    "..",
+    ":",
+    "-",
+    "_",
+    "*",
+    "**",
+    "~~",
+    "||",
+    "!",
+    "\\",
+    "<",
+    ">",
+    "<@123>",
+    "…",
+]
+
+
+@given(
+    st.lists(st.sampled_from(_AROUND_A_HASH), max_size=300).map("".join),
+    st.sampled_from([REPO, LONGEST, BROKEN]),
+)
+@settings(max_examples=300)
+def test_nothing_typed_can_reach_out_of_the_card_naming_commits(
+    body: str, repository: RepositorySnapshot
+) -> None:
+    """Issue #186. The same claims as above with commits linked, and at most five links more.
+
+    Short draws, which is where hashes meet the hazards beside them; `BROKEN` is a repository no
+    address can be built into. The ceiling is the property after this one, which is built to reach
+    it.
+    """
+    shown = as_rich_text(body, repository=repository).text
+    plain = as_rich_text(body).text
+
+    assert shown.count("](") == len(LINK.findall(shown))
+    for link in LINK.finditer(shown):
+        host = _host_of(link.group(2))
+        assert host is not None and _is_github(host), link.group(2)
+
+    assert shown.count("**") % 2 == 0
+    assert shown.count("```") % 2 == 0
+    assert not re.search(r"<@[!&]?\d+>|<#\d+>", shown)
+    assert len(shown) < MESSAGE_LIMIT
+    assert 0 <= len(LINK.findall(shown)) - len(LINK.findall(plain)) <= COMMIT_LINK_LIMIT
+
+
+# Every link it may write, in front where the cut cannot reach them, and enough of the soup behind
+# that every draw is cut. Measured: 200/200 draws are cut and carry five links, and the longest
+# came out at 1612 characters.
+_FIVE_IN_FRONT = " ".join(["abc1234"] * COMMIT_LINK_LIMIT) + " "
+
+
+@given(st.lists(st.sampled_from(_AROUND_A_HASH), min_size=250, max_size=400).map("".join))
+@settings(max_examples=200)
+def test_five_links_into_the_longest_names_still_fit_a_message(soup: str) -> None:
+    """Issue #186. The ceiling in `as_rich_text`'s docstring, where it is tightest: a body cut at
+    the preview limit and carrying every link it may, into the repository whose names make each
+    link cost the most."""
+    shown = as_rich_text(_FIVE_IN_FRONT + soup, repository=LONGEST).text
+
+    assert "…" in shown, "the draw was never cut, so this measured nothing"
+    assert len(LINK.findall(shown)) == COMMIT_LINK_LIMIT
+    assert len(shown) < MESSAGE_LIMIT
