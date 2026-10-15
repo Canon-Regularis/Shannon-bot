@@ -10,9 +10,18 @@ from shannon.domain.text import code_span
 GITHUB_HOST = "github.com"
 
 # GitHub's own limits: owners are alphanumeric with single hyphens, repositories also allow
-# dots and underscores.
-_OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
-_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+# dots and underscores. Patterns as well as checks since issue #186, so the commit finder reads
+# the same shapes out of prose that these parsers accept out of a link.
+OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
+REPOSITORY = r"[A-Za-z0-9._-]{1,100}"
+
+# A commit the way GitHub links one: the whole forty characters, or a prefix of seven or more, in
+# the lowercase `git` prints.
+SHA = r"[0-9a-f]{7,40}"
+
+_OWNER = re.compile(rf"^{OWNER}$")
+_REPO = re.compile(rf"^{REPOSITORY}$")
+_SHA = re.compile(SHA)
 
 # Both pass _REPO and neither is a name GitHub will issue. The name goes straight into an API
 # path signed with the bot's token, and the HTTP client collapses `/repos/{owner}/../pulls/{n}`
@@ -24,6 +33,25 @@ _ISSUE_SEGMENT = "issues"
 
 # The article is carried along with the noun so the error messages read like English.
 _KINDS = {_PULL_SEGMENT: "a pull request", _ISSUE_SEGMENT: "an issue"}
+
+
+def commit_url(owner: str, name: str, sha: str) -> str | None:
+    """Where GitHub shows a commit, or None for parts GitHub could not have issued. Issue #186.
+
+    Built from the parts rather than from a repository's `html_url`, so the host is this module's
+    and never something a payload said. Each part is checked whole - `fullmatch`, because `$` also
+    matches before a trailing newline - since a hash naming another repository brings its owner
+    and name from text anybody typed, and this is all that stands between that text and an address.
+    None rather than an error: the caller leaves the hash as it was written.
+    """
+    if not (
+        _OWNER.fullmatch(owner)
+        and _REPO.fullmatch(name)
+        and name not in _NOT_REPOSITORIES
+        and _SHA.fullmatch(sha)
+    ):
+        return None
+    return f"https://{GITHUB_HOST}/{owner}/{name}/commit/{sha}"
 
 
 def parse_repository_url(link: str) -> RepositoryRef:

@@ -4,6 +4,7 @@ import pytest
 
 from shannon.domain.errors import UnparseableLinkError
 from shannon.github.urls import (
+    commit_url,
     parse_issue_url,
     parse_pull_request_url,
     parse_repository_url,
@@ -197,3 +198,71 @@ class TestRepositoryNamesThatAreReallyPathSegments:
         assert parse_pull_request_url("https://github.com/owner/my.repo.name/pull/7").name == (
             "my.repo.name"
         )
+
+
+class TestWhereACommitIsShown:
+    """Issue #186: the address a commit named in a thread links to."""
+
+    def test_a_commit_is_addressed_where_github_shows_it(self) -> None:
+        sha = "abc1234def5678abc1234def5678abc1234def56"
+
+        assert commit_url("Canon-Regularis", "Shannon-bot", sha) == (
+            f"https://github.com/Canon-Regularis/Shannon-bot/commit/{sha}"
+        )
+
+    def test_a_short_hash_is_addressed_as_written(self) -> None:
+        """GitHub finds the commit from a prefix it can tell apart, which is what people write."""
+        assert commit_url("o", "r", "abc1234") == "https://github.com/o/r/commit/abc1234"
+
+    def test_a_commit_address_reads_back_as_its_repository(self) -> None:
+        url = commit_url("some-owner", "my_repo.v2", "abc1234")
+
+        assert url is not None
+        ref = parse_repository_url(url)
+        assert (ref.owner, ref.name) == ("some-owner", "my_repo.v2")
+
+    @pytest.mark.parametrize(
+        ("owner", "name", "sha"),
+        [
+            ("", "r", "abc1234"),
+            ("-bad", "r", "abc1234"),
+            ("a" * 40, "r", "abc1234"),
+            ("o o", "r", "abc1234"),
+            ("o\n", "r", "abc1234"),
+            ("o", "", "abc1234"),
+            ("o", ".", "abc1234"),
+            ("o", "..", "abc1234"),
+            ("o", "a/b", "abc1234"),
+            ("o", "r" * 101, "abc1234"),
+            ("o", "r)", "abc1234"),
+            ("o", "r\n", "abc1234"),
+            ("o", "r", "abc123"),
+            ("o", "r", "a" * 41),
+            ("o", "r", "ABC1234"),
+            ("o", "r", "abc123g"),
+            ("o", "r", "abc1234\n"),
+        ],
+        ids=[
+            "no owner",
+            "an owner opening on a hyphen",
+            "an owner past thirty-nine characters",
+            "a space in the owner",
+            "a newline after the owner",
+            "no repository",
+            "a dot for a repository",
+            "two dots for a repository",
+            "a slash in the repository",
+            "a repository past a hundred characters",
+            "a parenthesis that would end the link",
+            "a newline after the repository",
+            "six characters of hash",
+            "forty-one characters of hash",
+            "an uppercase hash",
+            "a letter past f",
+            "a newline after the hash",
+        ],
+    )
+    def test_a_part_github_could_not_have_issued_builds_no_address(
+        self, owner: str, name: str, sha: str
+    ) -> None:
+        assert commit_url(owner, name, sha) is None
