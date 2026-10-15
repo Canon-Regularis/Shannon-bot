@@ -56,7 +56,15 @@ from shannon.github import mapping
 from shannon.github.mapping import parse_timestamp
 from shannon.github.mentions import names_in
 from shannon.github.safe_text import one_message
-from shannon.github.urls import parse_issue_url, parse_pull_request_url
+from shannon.github.urls import (
+    OWNER,
+    REPOSITORY,
+    SHA,
+    commit_url,
+    parse_issue_url,
+    parse_pull_request_url,
+    parse_repository_url,
+)
 from shannon.services.sync.staleness import is_superseded
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
@@ -194,6 +202,30 @@ class TestLinkParsing:
         for parse in (parse_pull_request_url, parse_issue_url):
             with contextlib.suppress(UnparseableLinkError):
                 parse(link)
+
+    # Issue #186. Drawn from the very patterns `commit_url` checks, less the names the parser
+    # cannot give back as written: `.` and `..`, for which no address is built, and a name ending
+    # `.git`, which the parser strips as the suffix a clone URL carries. Measured: 28/400 owners
+    # carry a hyphen, and 16/400, 16/400 and 19/400 names a dot, an underscore and a hyphen.
+    commit_owners = st.from_regex(OWNER, fullmatch=True)
+    commit_repositories = st.from_regex(REPOSITORY, fullmatch=True).filter(
+        lambda name: name not in {".", ".."} and not name.endswith(".git")
+    )
+    commit_hashes = st.from_regex(SHA, fullmatch=True)
+
+    @given(commit_owners, commit_repositories, commit_hashes)
+    @settings(max_examples=400)
+    def test_a_commit_address_reads_back_as_its_repository(
+        self, owner: str, name: str, sha: str
+    ) -> None:
+        """Whatever owner and repository a commit link is built into, a reader taking the address
+        apart finds the same two - so the link goes where its label says it does."""
+        url = commit_url(owner, name, sha)
+
+        assert url is not None
+        ref = parse_repository_url(url)
+        assert (ref.owner, ref.name) == (owner, name)
+        assert url == f"https://github.com/{owner}/{name}/commit/{sha}"
 
 
 class TestTimestamps:
@@ -399,8 +431,19 @@ class TestRendering:
     # strips to 700, is never cut, and carries no ellipsis - which fails the assertion below. The
     # bare `st.text(min_size=701)` passed 120 examples by luck; this one cannot draw that case,
     # because `strip()` leaves at least 702 characters whatever is between the padding.
+    #
+    # Issue #186. It opens on one to eight commit hashes, spliced in rather than hoped for, so the
+    # text the cut keeps names commits whose links are growth the cut no longer counts. Measured:
+    # 200/200 bodies come out with a link in them and 100/200 with five, the limit, and the longest
+    # body block drawn was 906 characters.
     long_bodies = st.builds(
-        lambda body: f"x{body}x", st.text(min_size=COMMENT_PREVIEW_LIMIT, max_size=2000)
+        lambda hashes, body: f"x {' '.join(hashes)} {body}x",
+        st.lists(
+            st.sampled_from(("abc1234", "0123abc", "a1b2c3d", "a1b2c3d4" * 5, "o/r@def5678")),
+            min_size=1,
+            max_size=8,
+        ),
+        st.text(min_size=COMMENT_PREVIEW_LIMIT, max_size=2000),
     )
 
     def a_comment(self, body: str, when: datetime | None = None) -> CommentSnapshot:
@@ -427,8 +470,26 @@ class TestRendering:
     # `@octocat` is the comment's own author as well, which is the case worth drawing: the heading
     # above the body carries a live mention this bot built, so a swap handed the assembled message
     # rather than the body alone could read it back as a name and rewrite it into somebody else.
+    # Since issue #186 the body is linked before the swap sees it, so hashes on either side of a
+    # name are drawn too, and the claims below have to hold with links in the text. What they
+    # cannot see is a link freeing a name: one the map answers for may be live, and one it does not
+    # stays text either way. That is pinned where it can be seen, by `abc1234@alice` in
+    # `test_commit_names.py` and by `TestACommitLinkMovesNoName` in `test_mentions.py`.
     _NAMEABLE = st.sampled_from(
-        ("@hubot", "@octocat", "@canon/backend", "@everyone", "@here", "<@7>", "@a-b", "@1")
+        (
+            "@hubot",
+            "@octocat",
+            "@canon/backend",
+            "@everyone",
+            "@here",
+            "<@7>",
+            "@a-b",
+            "@1",
+            "abc1234",
+            "o/r@abc1234",
+            "abc1234@hubot",
+            "@hubot-abc1234",
+        )
     )
     bodies_naming_people = st.builds(
         lambda pieces: "\n".join(pieces), st.lists(st.one_of(text, _NAMEABLE), max_size=10)
@@ -486,10 +547,11 @@ class TestRendering:
 
         What is left is a generous bound rather than an exact width, and deliberately so. The cut
         is what enforces the limit; everything after it can only add a bounded amount - a
-        zero-width space per construct, the markers `_balanced` closes, and a host named in place
-        of a link pointing off GitHub. Twice the limit is comfortably above all of that and still
-        far below the panel bound the property above it asserts, so a body cut to the wrong limit,
-        or not cut at all, still fails here.
+        zero-width space per construct, the markers `_balanced` closes, a host named in place of a
+        link pointing off GitHub, and since issue #186 a commit link in place of each of up to five
+        hashes, forty-one characters longer against `o/n`. Twice the limit is comfortably above all
+        of that and still far below the panel bound the property above it asserts, so a body cut
+        to the wrong limit, or not cut at all, still fails here.
         """
         quoted = next(
             block.text
