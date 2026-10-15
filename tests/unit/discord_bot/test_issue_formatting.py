@@ -262,6 +262,21 @@ class TestCommentFormatting:
         assert "**bold**" in message
         assert "`code`" in message
 
+    def test_a_hash_in_the_body_links_to_its_commit(self) -> None:
+        """Issue #186: into the repository the comment was written in."""
+        body = format_comment(replace(COMMENT, body="Fixed in 0123abc.")).blocks[1]
+
+        assert body.text == (
+            "Fixed in [0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
+        )
+
+    def test_a_linked_name_beside_a_hash_is_still_mentioned(self) -> None:
+        message = format_comment(
+            replace(COMMENT, body="@monalisa fixed it in 0123abc"), {"monalisa": 7}
+        ).text
+
+        assert "<@7> fixed it in [0123abc](https://github.com/" in message
+
 
 REVIEW = ReviewSnapshot(
     repository=REPO,
@@ -285,6 +300,15 @@ class TestReviewFormatting:
 
     def test_the_body_is_a_block_of_its_own(self) -> None:
         assert format_review(REVIEW).blocks[1].text == "Looks right, one nit inline."
+
+    def test_a_hash_in_the_body_links_to_its_commit(self) -> None:
+        """Issue #186, through the same renderer a comment goes through."""
+        body = format_review(replace(REVIEW, body="Approved as of 0123abc.")).blocks[1]
+
+        assert body.text == (
+            "Approved as of "
+            "[0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
+        )
 
     def test_changes_requested_reads_as_such(self) -> None:
         message = format_review(replace(REVIEW, state="changes_requested")).text
