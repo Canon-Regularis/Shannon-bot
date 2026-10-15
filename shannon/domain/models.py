@@ -346,6 +346,9 @@ class CommitRange:
 
 @dataclass(frozen=True, slots=True)
 class Commit:
+    # Where the commit lives, so its line can link to it and to the commits its message names.
+    # Issue #186; first, as on every snapshot that carries one.
+    repository: RepositorySnapshot
     sha: str
     message: str
     author: Actor | None
@@ -368,6 +371,21 @@ class Commit:
     def description(self) -> str:
         _, _, rest = self.message.partition("\n")
         return rest.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class ForcePush:
+    """A branch rewritten, named by the commit it pointed at before and the one it points at now.
+
+    Issue #186. A value rather than four arguments because two of them are hashes of one shape, and
+    a renderer that took them in order could swap the old head for the new without anything
+    noticing; named, a swap is a different word on a different line.
+    """
+
+    repository: RepositorySnapshot
+    pusher: Actor | None
+    before: str
+    after: str
 
 
 # Everything else GitHub can say is neither: `skipped`, `cancelled`, `neutral`, `stale`, and a run

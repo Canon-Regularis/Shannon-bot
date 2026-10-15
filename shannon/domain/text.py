@@ -12,6 +12,14 @@ import re
 # mention, a reference, a link join. Named because a mistyped one is invisible in a diff.
 ZERO_WIDTH_SPACE = "\u200b"
 
+# A masked link, which both dialects spell `[label](url)`. discord.py's own `[.+](.+)` is greedy and
+# runs to the last parenthesis on the line; neither class here crosses a bracket, parenthesis, space
+# or newline, so a match is one link, and `<` and `>` are out of the address, so no link matched
+# here can carry a mention. Here rather than in `discord_bot.rich_text`, which rewrites what it
+# matches, since issue #186: the commit finder in `github/` steps over the same links, and has no
+# business importing the gateway to do it.
+LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
+
 
 def lines_within(text: str, budget: int) -> list[str]:
     """The leading whole lines of `text` that fit in `budget`, newlines counted.

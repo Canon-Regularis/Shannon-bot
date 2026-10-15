@@ -13,9 +13,12 @@ comment body and a real ping.
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from shannon.discord_bot.rich_text import as_note_text
+from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
 from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
+from shannon.domain.models import RepositorySnapshot
 from shannon.github import mentions
 from shannon.github.mentions import (
     MENTION_LIMIT,
@@ -30,6 +33,9 @@ pytestmark = pytest.mark.unit
 
 PEOPLE = {"john": 111, "octo-cat": 222, "canon": 333}
 TEAMS = {"backend": 900, "back_end": 901}
+
+# Where a note's commits link into since issue #186. Every note is handed one.
+REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
 
 
 def previewed(body: str) -> str:
@@ -50,7 +56,12 @@ def shown(body: str) -> str:
     why: this file used to derive the string itself, and when the renderer moved to the rich
     conversion the invariant below went on passing about a string nothing produced any more.
     """
-    return as_note_text(body)
+    return as_note_text(body, repository=REPO)
+
+
+def unlinked(body: str) -> str:
+    """The same conversion with no commit linked: what a note showed before issue #186."""
+    return as_rich_text(body, limit=COMMENT_PREVIEW_LIMIT, images=Images.AS_LINKS).text
 
 
 def swapped(text: str) -> str:
@@ -278,6 +289,9 @@ class TestTheReaderCoversTheSwap:
             # one behind them. A reader that read wider than the swap would spend the whole
             # allowance on names nothing renders and never fetch a row for `@john`.
             " ".join(f"`@u{i}`" for i in range(MENTION_LIMIT)) + " @john",
+            # Issue #186. Both halves are handed the text with its commits linked.
+            "@john fixed it in abc1234 and o/r@def5678",
+            "abc1234@john @octo-cat-abc1234 @canon/backend.abc1234",
         ],
     )
     def test_everything_the_swap_asks_about_was_read_first(self, body: str) -> None:
@@ -297,6 +311,74 @@ class TestTheReaderCoversTheSwap:
             "the reader read a name the swap will never ask about - they share a budget of ten "
             "distinct names, so reading wider spends it on names nothing will render"
         )
+
+
+class TestACommitLinkMovesNoName:
+    """Issue #186. A commit link written into a note can neither make a name nor break one.
+
+    The reader and the swap are both handed the linked text, so they agree with each other either
+    way; what this pins is that they agree with the body. A link that cut a login short or left a
+    live one beside it would be a mention gained or lost, and nothing would say so.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "@john fixed it in abc1234",
+            "abc1234@john",
+            "@john-abc1234 and @canon/backend.abc1234",
+            "@abc1234 and @canon/abc1234",
+            "o/r@abc1234 @john",
+            "o/r.@abc1234",
+            "o/r_@abc1234 @octo-cat",
+            "**@john** abc1234 `@canon` def5678",
+        ],
+        ids=[
+            "a name and a hash apart",
+            "a name straight after a hash",
+            "a hash ending a login and a slug",
+            "a hash that is a login and a slug",
+            "another repository's commit and a name",
+            "another repository's commit GitHub reads as a mention",
+            "a name ending on an underscore",
+            "bold, code and two hashes",
+        ],
+    )
+    def test_the_names_read_are_the_names_written(self, body: str) -> None:
+        assert names_a_note_writes(shown(body)) == names_a_note_writes(unlinked(body))
+
+    @given(
+        st.lists(
+            st.sampled_from(
+                [
+                    "@john",
+                    "@octo-cat",
+                    "@canon/backend",
+                    "abc1234",
+                    "o/r@def5678",
+                    "-",
+                    ".",
+                    "_",
+                    "/",
+                    "@",
+                    " ",
+                    "\n",
+                    "`",
+                    "**",
+                    "[",
+                    "](",
+                    "https://x",
+                    ")",
+                    "x",
+                    "…",
+                ]
+            ),
+            max_size=80,
+        ).map("".join)
+    )
+    @settings(max_examples=300)
+    def test_no_body_reads_differently_for_its_links(self, body: str) -> None:
+        assert names_a_note_writes(shown(body)) == names_a_note_writes(unlinked(body))
 
 
 class TestTheShapesThisAlsoOwns:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import islice
 from urllib.parse import urlparse
 
 import discord
@@ -27,14 +28,22 @@ from shannon.discord_bot.safe_text import (
     cut,
     defuse_mentions,
 )
-from shannon.domain.text import ZERO_WIDTH_SPACE
-from shannon.github.urls import GITHUB_HOST
+from shannon.domain.models import RepositoryRef, RepositorySnapshot
+from shannon.domain.text import LINK, ZERO_WIDTH_SPACE
+from shannon.github.commit_names import commits_named_in
+from shannon.github.urls import GITHUB_HOST, commit_url
 
 # Discord's gallery takes ten. Four sits under a card without pushing the fields off a phone.
 IMAGES_SHOWN = 4
 
 # Discord's own ceiling on what a gallery item may be described as.
 ALT_LIMIT = 256
+
+# How many commit hashes in one body become links, issue #186. Each is written after the cut, so
+# each is growth the limit no longer counts - up to 178 characters against the longest names
+# GitHub allows - and five is what keeps the ceiling in `as_rich_text` true for every repository
+# rather than for the ones with short names. Hashes past it are still shown, as written.
+COMMIT_LINK_LIMIT = 5
 
 
 # GitHub's web form submits CRLF, and every rule below is anchored to a line. Folded first so a
@@ -61,13 +70,9 @@ _SUBTEXT = re.compile(r"^([ \t]*-)(#)", re.MULTILINE)
 
 _BLANK_RUN = re.compile(r"\n{3,}")
 
-# Discord renders markdown images nowhere.
+# Discord renders markdown images nowhere. `LINK` is the same shape without the bang, and lives in
+# `domain.text` since issue #186, because the commit finder steps over the same links.
 _IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
-
-# The same shape without the bang, where discord.py's own `[.+](.+)` is greedy and runs to the
-# last parenthesis on the line. Neither class crosses a bracket, parenthesis, space or newline, so
-# a match is one link; `<` and `>` are out of the URL, so no link here can carry a mention.
-_LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
 
 # Discord opens a code block on three backticks wherever they appear, including mid-line.
 _FENCE = re.compile(r"```")
@@ -92,8 +97,7 @@ class Images(StrEnum):
     message per item and has room under it.
 
     `AS_LINKS` leaves them where they were written, as links. Right for everything posted into a
-    thread afterwards: a gallery under every screenshot-heavy comment is noise, and a commit
-    carries no repository for the private-repo gate `_pictures` applies to read.
+    thread afterwards: a gallery under every screenshot-heavy comment is noise.
     """
 
     LIFT = "lift"
@@ -101,7 +105,11 @@ class Images(StrEnum):
 
 
 def as_rich_text(
-    body: str, *, limit: int = DESCRIPTION_PREVIEW_LIMIT, images: Images = Images.LIFT
+    body: str,
+    *,
+    limit: int = DESCRIPTION_PREVIEW_LIMIT,
+    images: Images = Images.LIFT,
+    repository: RepositorySnapshot | None = None,
 ) -> Described:
     """GitHub-authored text with the formatting it was written with, cut to `limit`.
 
@@ -109,11 +117,20 @@ def as_rich_text(
     limit still shows them. A cut can land inside a link or a marker, which the two steps after it
     undo.
 
+    `repository` is where a bare commit hash in the text belongs, and linking those is issue #186.
+    After the cut, so the limit goes on counting only words a reader sees; before `_linked`, so an
+    author's own link is still whole and a hash inside one stays with it, and the links written
+    here are judged by `_destination` like any other. None links nothing, which is right for a
+    draft card: it belongs to no repository, and GitHub links nothing on one either.
+
     The defaults are what the description block has always passed, so adding them moved nothing.
     `limit` has a ceiling worth knowing rather than discovering: nothing here shrinks text after the
-    cut and the growth is bounded - one cut mark, at most six characters from `_balanced`, and one
-    zero-width space per construct - so the published string stays inside Discord's own message
-    ceiling for any limit under about thirteen hundred. Every caller is far below that.
+    cut and the growth is bounded - one cut mark, at most six characters from `_balanced`, one
+    zero-width space per construct, and with a repository up to `COMMIT_LINK_LIMIT` commit links,
+    each 39 characters longer than its hash plus the owner and name it points into, 178 at most -
+    so the published string stays inside Discord's own message ceiling for any limit under about
+    thirteen hundred without a repository, and about seven hundred and thirty with one. Every caller
+    passes seven hundred or less.
     """
     text = _LINE_ENDINGS.sub("\n", body or "")
     text = _HTML_COMMENT.sub("", text)
@@ -126,10 +143,12 @@ def as_rich_text(
     text = _SUBTEXT.sub("\\1" + ZERO_WIDTH_SPACE + "\\2", text)
     text = _BLANK_RUN.sub("\n\n", text)
     text = cut(text, limit=limit)
+    if repository is not None:
+        text = _with_commits(text, repository)
     return Described(text=_balanced(_linked(text)), images=lifted)
 
 
-def as_note_text(body: str) -> str:
+def as_note_text(body: str, *, repository: RepositorySnapshot) -> str:
     """A comment, a review or an inline review comment as its thread actually shows it.
 
     Its own name because two callers have to agree about this string to the character, and spelling
@@ -141,8 +160,39 @@ def as_note_text(body: str) -> str:
     Over-reading is not a safe way out of that either: the reader and the swap share one budget of
     ten distinct names, so a reader looking further into the body than the swap does can spend the
     budget on names the swap will never reach.
+
+    `repository` is required rather than defaulted since issue #186, for the same reason. Every
+    caller links the commits the body names or none does, so the three never derive two strings:
+    the renderer, the reader in `notes.py`, and the check in `reviews.py` that decides whether a
+    review is worth a message at all. A link moves no name either way, and the tests say so.
     """
-    return as_rich_text(body, limit=COMMENT_PREVIEW_LIMIT, images=Images.AS_LINKS).text
+    return as_rich_text(
+        body, limit=COMMENT_PREVIEW_LIMIT, images=Images.AS_LINKS, repository=repository
+    ).text
+
+
+def _with_commits(text: str, repository: RepositorySnapshot) -> str:
+    """Each commit hash the text names, written as a link to the commit. Issue #186.
+
+    Labelled the way GitHub labels one: the first seven characters, with `owner/repo@` in front for
+    another repository's commit. The address keeps every character the hash was written with, which
+    is what GitHub finds the commit by. A hash whose address cannot be built is left as written
+    rather than pointed somewhere else, and so is everything past `COMMIT_LINK_LIMIT`, counted as
+    written rather than as distinct commits: each one is characters the cut has stopped counting.
+    """
+    pieces: list[str] = []
+    typed_from = 0
+    for named in islice(commits_named_in(text), COMMIT_LINK_LIMIT):
+        where = named.repository or RepositoryRef(owner=repository.owner, name=repository.name)
+        url = commit_url(where.owner, where.name, named.sha)
+        if url is None:
+            continue
+        short = named.sha[:7]
+        label = f"{where.full_name}@{short}" if named.repository else short
+        pieces += [text[typed_from : named.start], f"[{label}]({url})"]
+        typed_from = named.end
+    pieces.append(text[typed_from:])
+    return "".join(pieces)
 
 
 def _defused(text: str) -> str:
@@ -164,7 +214,7 @@ def _linked(text: str) -> str:
     """
     pieces: list[str] = []
     typed_from = 0
-    for link in _LINK.finditer(text):
+    for link in LINK.finditer(text):
         pieces.append(_inert(text[typed_from : link.start()]))
         pieces.append(_destination(_defused(link.group(1)), link.group(2)))
         typed_from = link.end()
@@ -249,7 +299,7 @@ def _as_links(text: str) -> str:
 
     Only the bang goes. What is left is a link like any other, so `_linked` judges its host by the
     same rule and an address off GitHub is named rather than followed. Dropping the bang is also
-    what stops `_LINK` matching the inside of the markup and leaving a stray `!` in front of it.
+    what stops `LINK` matching the inside of the markup and leaving a stray `!` in front of it.
     """
     return _IMAGE.sub(lambda image: f"[{image.group(1)}]({image.group(2)})", text)
 

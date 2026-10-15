@@ -100,6 +100,33 @@ class TestWhenThereIsSomethingToShow:
         assert f"{LABEL}\n> said this" in block("> said this")
 
 
+class TestTheCommitsItNames:
+    """Issue #186. A hash in a description links to the commit, in the item's own repository."""
+
+    COMMITS = "https://github.com/Canon-Regularis/Shannon-bot/commit"
+
+    def test_a_hash_links_into_the_items_repository(self) -> None:
+        rendered = block("Builds on 0123abc.")
+
+        assert f"{LABEL}\nBuilds on [0123abc]({self.COMMITS}/0123abc)." in rendered
+
+    def test_an_issues_description_links_them_too(self) -> None:
+        assert f"[0123abc]({self.COMMITS}/0123abc)" in block("Broken since 0123abc.", ISSUE)
+
+    def test_another_repositorys_commit_links_there(self) -> None:
+        rendered = block("Ported from octo/lib@0123abc.")
+
+        assert "[octo/lib@0123abc](https://github.com/octo/lib/commit/0123abc)" in rendered
+
+    def test_a_hash_in_the_title_above_it_is_left_as_written(self) -> None:
+        """Only the description. The fields are escaped text, as every field this bot writes is."""
+        rendered = block("Nothing to link.", replace(PULL_REQUEST, title="Revert 0123abc"))
+
+        fields = rendered.split(LABEL)[0]
+        assert "Revert 0123abc" in fields
+        assert "](" not in fields
+
+
 class TestWhenThereIsNothingToShow:
     @pytest.mark.parametrize(
         "body",

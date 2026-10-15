@@ -45,6 +45,9 @@ MARKS = ("📝", "🔁", "-# ")
 PUSH = (payloads.BEFORE_PUSH, payloads.AFTER_PUSH)
 NUMBERS = CommitStats(additions=4, deletions=1, changed_files=2)
 
+# Where a line's commit links to since issue #186: the repository the delivery came from.
+COMMITS = f"https://github.com/{payloads.OWNER}/{payloads.REPO}/commit"
+
 
 def ref(sha: str, *, by: str | None = "octocat", message: str = "Do the work", merge: bool = False):
     author = Actor(login=by, github_user_id=1) if by is not None else None
@@ -115,7 +118,7 @@ class TestWhatAPushSays:
         assert said(threads) == [
             "📝 **octocat** has committed Add the webhook endpoint\n"
             "Answers the check.\n"
-            "-# With changes: +4, -1, 2 files changed"
+            f"-# [aaaaaaa]({COMMITS}/{'a' * 40}) · With changes: +4, -1, 2 files changed"
         ]
 
     async def test_every_commit_in_the_push_gets_its_own_message(
@@ -360,8 +363,12 @@ class TestABranchThatWasRewritten:
             await with_a_thread(client, container)
             await pushed(client, container)
 
+        # Both ends of the push, each linked, since issue #186.
         assert said(threads) == [
-            "🔁 **octocat** force-pushed this branch, so the commits it replaced are not announced."
+            "🔁 **octocat** force-pushed this branch from "
+            f"[1111111]({COMMITS}/{payloads.BEFORE_PUSH}) to "
+            f"[2222222]({COMMITS}/{payloads.AFTER_PUSH}), so the commits it replaced are not "
+            "announced."
         ]
         assert github.stats_calls == []
 

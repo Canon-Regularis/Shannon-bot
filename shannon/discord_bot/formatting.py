@@ -40,10 +40,12 @@ from shannon.domain.models import (
     CommentSnapshot,
     Commit,
     CommitStats,
+    ForcePush,
     IssueSnapshot,
     ItemNote,
     LabelMove,
     PullRequestSnapshot,
+    RepositorySnapshot,
     ReviewCommentSnapshot,
     ReviewSnapshot,
     TicketSnapshot,
@@ -51,6 +53,7 @@ from shannon.domain.models import (
 )
 from shannon.domain.time import as_utc
 from shannon.github.mentions import rewrite_a_note
+from shannon.github.urls import commit_url
 
 UNKNOWN = "Unknown"
 
@@ -221,7 +224,9 @@ def format_ticket(
                 ("Last Updated", as_timestamp(snapshot.updated_at)),
             ),
             # Last, and dropped entirely for a card nobody wrote anything on - the same shape and
-            # the same guard the other two blocks use.
+            # the same guard the other two blocks use. No repository, so no hash is linked, issue
+            # #186: a draft belongs to none for a bare hash to belong to, and the repository on
+            # the snapshot is the server's, which is a guess about where the commit lives.
             *_the_description(as_rich_text(snapshot.body).text),
         ),
         accent=Accent.DRAFT,
@@ -877,7 +882,8 @@ def _metadata(
     # holds twice a message, and the description under this block is what should give way
     # first. `Panel.trimmed` does both, at the send, over the blocks it can see.
     blocks = [_rows(*rows)]
-    described = as_rich_text(snapshot.body)
+    # The commits the description names link into the item's own repository, issue #186.
+    described = as_rich_text(snapshot.body, repository=snapshot.repository)
     blocks += _the_description(described.text)
     return Panel(
         blocks=tuple(blocks),
@@ -963,7 +969,8 @@ def _note(
     # naming its author, which is what the `> ` markers were there to do.
     # `as_note_text` rather than a recipe spelled out here, because `services.notes` reads the
     # names to look up out of the very same string and the two have to agree to the character.
-    body = _named_in(as_note_text(snapshot.body), mentions, roles)
+    # The repository is where the commits it names are linked into, issue #186.
+    body = _named_in(as_note_text(snapshot.body, repository=snapshot.repository), mentions, roles)
     if body:
         blocks.append(Block(BlockKind.BODY, body))
     if snapshot.html_url:
@@ -1257,36 +1264,51 @@ def format_commit(commit: Commit) -> Panel:
     commit; the account is resolved by GitHub from the address and cannot be typed.
 
     Three lines at most, in the order somebody scanning a thread reads them: who and what, then
-    why, then how much. The body is left out rather than rendered blank when the commit has none,
-    which is most of them.
+    why, then which and how much. The body is left out rather than rendered blank when the commit
+    has none, which is most of them.
+
+    Which, since issue #186: the footnote opens with the commit's short hash, linking to it, so the
+    line leads to the commit rather than only describing it.
     """
     said = f"{_COMMIT_MARK} **{_account(commit.author)}** has committed {_subject(commit)}"
     # Unquoted since issue #113. The rule above it does the separating the `> ` markers were
     # doing, and doing badly.
     # Issue #166. The subject above stays escaped - it sits inside a `**`-matched line, and
     # rendering it could leave that line unbalanced - but the description is prose and is shown as
-    # it was written. Images become links rather than a gallery: a `Commit` carries no repository,
-    # so the private-repo gate a card's pictures go through has nothing to read here.
-    body = as_rich_text(commit.description, limit=COMMIT_MESSAGE_LIMIT, images=Images.AS_LINKS).text
+    # it was written. Images become links rather than a gallery, which under every commit of a push
+    # would be noise. The hashes it names link into the commit's own repository, issue #186; the
+    # subject's stay as written, for the reason the subject is escaped.
+    body = as_rich_text(
+        commit.description,
+        limit=COMMIT_MESSAGE_LIMIT,
+        images=Images.AS_LINKS,
+        repository=commit.repository,
+    ).text
 
     blocks = [Block(BlockKind.HEADING, said)]
     if body:
         blocks.append(Block(BlockKind.BODY, body))
-    blocks.append(Block(BlockKind.FOOTNOTE, _changes(commit.stats)))
+    footnote = f"-# {_which_commit(commit.repository, commit.sha)} · {_changes(commit.stats)}"
+    blocks.append(Block(BlockKind.FOOTNOTE, footnote))
     return Panel(blocks=tuple(blocks), accent=Accent.NEUTRAL)
 
 
-def format_force_push(pusher: Actor | None) -> Panel:
+def format_force_push(push: ForcePush) -> Panel:
     """Said once when a branch was rewritten, instead of the commits it now holds.
 
     The commits after a rewrite have new SHAs and would all be announced as new work, which is
     both wrong and noisy: a rebase of five commits says five things nobody did just now. Naming
     what happened is the honest version of that, and it also covers the rollback, where GitHub
     reports nothing ahead at all and silence would be the alternative.
+
+    Named by both heads since issue #186, each linking to its commit, the way GitHub's own timeline
+    names a force push: the line used to say a branch moved without saying from where to where.
     """
+    replaced = _which_commit(push.repository, push.before)
+    now = _which_commit(push.repository, push.after)
     return _line(
-        f"{_FORCE_PUSH_MARK} **{_account(pusher)}** force-pushed this branch, so the commits it "
-        "replaced are not announced.",
+        f"{_FORCE_PUSH_MARK} **{_account(push.pusher)}** force-pushed this branch from {replaced} "
+        f"to {now}, so the commits it replaced are not announced.",
         Accent.NEUTRAL,
     )
 
@@ -1325,14 +1347,29 @@ def _subject(commit: Commit) -> str:
     return clipped(commit.title, limit=COMMIT_TITLE_LIMIT) or code_span(commit.sha[:7])
 
 
+def _which_commit(repository: RepositorySnapshot, sha: str) -> str:
+    """A commit GitHub told this bot about, as its short hash linking to it. Issue #186.
+
+    Linked whatever its shape, which is the difference from a hash somebody typed: GitHub said this
+    one is a commit, so a hash of nothing but digits is as much one as any other. A code span where
+    the address cannot be built, which only a repository or a hash GitHub could not have sent would
+    cause - defused there, since the value came off a payload rather than out of this module.
+    """
+    url = commit_url(repository.owner, repository.name, sha)
+    if url is None:
+        return code_span(defuse_mentions(sha[:7]))
+    return f"[{sha[:7]}]({url})"
+
+
 def _changes(stats: CommitStats) -> str:
     """How much the commit changed, in the shape `git` itself uses.
 
-    Small text, under the thing it is about. One file is one file: a count that reads "1 files"
-    is the sort of detail that makes everything above it look unmaintained.
+    In the small text under the thing it is about, after the commit's own link. One file is one
+    file: a count that reads "1 files" is the sort of detail that makes everything above it look
+    unmaintained.
     """
     files = "file" if stats.changed_files == 1 else "files"
     return (
-        f"-# With changes: +{stats.additions}, -{stats.deletions}, "
+        f"With changes: +{stats.additions}, -{stats.deletions}, "
         f"{stats.changed_files} {files} changed"
     )

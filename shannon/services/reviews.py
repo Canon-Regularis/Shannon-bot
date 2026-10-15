@@ -100,9 +100,14 @@ def is_worth_a_message(snapshot: ItemNote) -> bool:
     review whose whole body is a template left unfilled renders to nothing - and judged on the raw
     body it is truthy, posts, and puts a header over an empty block. The escaping this replaced kept
     that text, so the gap did not exist before.
+
+    With the repository the renderer is handed since issue #186, so this judges the very string a
+    thread would show. A commit link never empties a body or fills one, but one recipe is one.
     """
     assert isinstance(snapshot, ReviewSnapshot)
-    return snapshot.verdict != "commented" or bool(as_note_text(snapshot.body))
+    return snapshot.verdict != "commented" or bool(
+        as_note_text(snapshot.body, repository=snapshot.repository)
+    )
 
 
 # Skipped rather than counted. A COMMENTED review is a note and not a verdict — GitHub's own rule

@@ -175,6 +175,24 @@ class TestWhatTheBodyKeeps:
         assert fenced in said
         assert said.count("```") % 2 == 0
 
+    def test_a_hash_in_the_body_links_to_its_commit(self) -> None:
+        """Issue #186. An inline note on a diff names commits more often than anything else."""
+        body = format_review_comment(replace(COMMENT, body="Moved here in 0123abc.")).blocks[1]
+
+        assert body.text == (
+            "Moved here in "
+            "[0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
+        )
+
+    def test_a_hash_inside_a_suggestion_stays_code(self) -> None:
+        """A suggestion is code GitHub would apply, and a link in it would be applied with it."""
+        fenced = "```suggestion\nrevert_to = 0123abc\n```"
+
+        said = format_review_comment(replace(COMMENT, body=fenced)).text
+
+        assert fenced in said
+        assert "/commit/" not in said
+
 
 class TestAPathNobodyChoseCarefully:
     def test_a_mention_in_a_file_name_does_not_ring_anybody(self) -> None:

@@ -211,6 +211,14 @@ class TestWhatATicketLeavesOut:
         assert said["Assignees"] == "hubot"
         assert said["Tags"] == "`bug`"
 
+    def test_a_hash_on_a_draft_card_is_left_as_written(self) -> None:
+        """Issue #186. A draft belongs to no repository for a bare hash to belong to, and the
+        repository on the snapshot is the server's, which would only be a guess at the commit's."""
+        card = format_ticket(replace(TICKET, body="Follows 0123abc."), status=Status.IN_REVIEW)
+
+        assert "Follows 0123abc." in card.text
+        assert "/commit/" not in card.text
+
 
 class TestTheCardItIsDrawnOn:
     def test_it_is_grey(self) -> None:
