@@ -66,6 +66,21 @@ async def test_the_thread_opens_with_the_full_metadata_block(
     assert "**Last Updated:**" in metadata
 
 
+async def test_a_description_naming_a_commit_links_it(
+    client: AsyncClient, threads: FakeThreadGateway
+) -> None:
+    """Issue #186: into the repository the delivery came from."""
+    payload = payloads.pull_request_event("opened", body="Builds on 0123abc.")
+
+    await deliver(client, "pull_request", payload)
+
+    metadata = threads.metadata_of(threads.created[0].thread_id)
+    assert (
+        "Builds on [0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
+        in metadata
+    )
+
+
 async def test_the_tracked_item_is_written(
     client: AsyncClient, db_session: AsyncSession, threads: FakeThreadGateway
 ) -> None:

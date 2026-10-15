@@ -89,6 +89,21 @@ async def test_the_comment_carries_everything_the_issue_asks_for(
     assert f"issuecomment-{payloads.COMMENT_ID}" in content
 
 
+async def test_a_comment_naming_a_commit_links_it(
+    tracked: AsyncClient, threads: FakeThreadGateway
+) -> None:
+    """Issue #186: a hash in a comment links to the commit, as it does on GitHub, in the
+    repository the delivery came from."""
+    payload = payloads.issue_comment_event(body="Fixed in 0123abc.")
+
+    await deliver(tracked, "issue_comment", payload, delivery="c1")
+
+    assert (
+        "Fixed in [0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
+        in threads.posts[-1][1]
+    )
+
+
 async def test_a_comment_on_a_pull_request_reaches_the_pull_request_thread(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:
@@ -232,6 +247,25 @@ class TestAnEditedCommentIsShown:
         shown = threads.threads[thread_id].messages[message_id]
         assert "Actually it was the cache" in shown
         assert "Reproduced on main" not in shown, "the thread still shows the text that was edited"
+
+    async def test_an_edit_that_names_a_commit_gains_the_link(
+        self, tracked: AsyncClient, threads: FakeThreadGateway
+    ) -> None:
+        """Issue #186. An edit is redrawn with the same renderer, so a comment mirrored before it
+        named a commit links it once it does."""
+        await self.mirrored(tracked)
+        thread_id = thread_for(threads, 98)
+        message_id = note_message(threads, thread_id)
+
+        await deliver(
+            tracked,
+            "issue_comment",
+            payloads.issue_comment_event("edited", body="Fixed in 0123abc."),
+            delivery="c2",
+        )
+
+        shown = threads.threads[thread_id].messages[message_id]
+        assert "[0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)" in shown
 
     async def test_a_name_the_edit_adds_becomes_a_real_discord_mention(
         self,
