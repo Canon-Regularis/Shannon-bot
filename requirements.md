@@ -232,6 +232,10 @@ All of these blocks, and every other message this bot posts into a thread, show 
 text was written with: a heading, a list, a code span or a link in a GitHub body arrives as what it
 means rather than as the characters somebody typed. One conversion does it for all of them.
 
+A commit hash in that text arrives as a link to the commit wherever the text belongs to a
+repository, which a draft card's does not. It is found by its shape, where GitHub checks that the
+commit exists first. A commit line and a force push link the commits they name.
+
 ---
 
 ## GitHub Webhook Events Required
