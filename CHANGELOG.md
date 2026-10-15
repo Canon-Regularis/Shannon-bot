@@ -8032,3 +8032,40 @@ feature end to end rather than assuming a predecessor the file never recorded.
   is redrawn and what is not, the order across runs, and the time running out; the command tests
   cover every new part of the reply and both waits. Tests that pinned a threaded item being left
   alone, or named in plain text, now pin it being redrawn with real mentions.
+
+## A commit named in a thread is a link to it
+
+- **A hash was seven characters of nothing** (#186). GitHub links a commit hash in a comment to the
+  commit; the same comment in a thread showed the characters and went nowhere. A hash in a
+  description, a comment, a review, an inline comment or a commit message now links to its commit,
+  in the repository the item lives in, and reads the way GitHub shows it: the first seven
+  characters, or `owner/repo@abc1234` for another repository's commit.
+- **Commit lines lead to their commit.** Each commit line's footnote opens with its short hash,
+  linked, before the additions, deletions and files changed. A force push names the head it
+  replaced and the one it is now, each linked, where it used to say only that the branch moved.
+- **Where not.** Not in code written with backticks, which is the code Discord draws - a span
+  that runs across lines included - nor inside a link or an address. Not on a draft card, which
+  belongs to no repository for a bare hash to belong to. Not in a title or a commit's subject,
+  which stay escaped. CI results and merged lines show no hash, so they gain none.
+- **By shape alone.** Seven to forty lowercase hex characters, with a digit and a letter, standing
+  on their own. Nothing asks GitHub whether the commit exists, so a hex word such as `ed25519`
+  links to GitHub's page for a missing commit, shown as its first seven characters like any hash,
+  and a hash of nothing but digits stays plain; the README lists it among the known limitations.
+  A commit line's own hash came from GitHub, so it is linked whatever its shape.
+- **Five per body.** Each link is added after the preview is cut, so it costs no words the preview
+  would have shown. One adds at most 178 characters, against the longest names GitHub allows, and
+  five keeps a body far inside its card. Hashes past five are shown as written.
+- **It rings nobody and never leaves GitHub.** A link names no person, and no name reads
+  differently for one: the reader and the renderer still see one string. Every address is built
+  on `github.com` from an owner and a repository name GitHub could have issued, and is judged by
+  the same rule as every other link in a body.
+- **For whoever deploys it.** No migration, setting or permission. Lines already posted are never
+  edited, so old commit lines and force pushes stay as they were; a comment gains its links the
+  next time it is edited, and a thread's top block the next time it is redrawn, which `/regenerate`
+  and `/refresh` both do.
+- **Tests.** A new file for the hashes a body names, with a case for every neighbour a hash can
+  have, and tests for the address beside the link parsers'. The conversion, the mention reader and
+  every renderer that shows a body are tested with hashes in them, with properties for links
+  reaching no further than GitHub, a body still fitting its card, and names reading the same with
+  links as without. The commit and force-push lines assert their whole new text, end to end as
+  well.

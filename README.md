@@ -36,6 +36,13 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
   Anybody unlinked is still named in plain text. At most ten tags per comment are mentioned,
   because without a limit one comment could ping every linked member of the server.
+- **A commit named is a link to it.** A commit hash in a description, a comment, a review, an
+  inline comment or a commit message links to that commit on GitHub, and reads the way GitHub
+  shows it: `abc1234`, its first seven characters, or `owner/repo@abc1234` for another
+  repository's. Not inside code written with backticks, which is the code Discord draws, nor a
+  link or an address, and not on a draft card, which belongs to no repository for a bare hash to
+  belong to. Five per body; any past that are shown as written. A hash is read by its shape, which
+  is in the limitations below.
 - **Pings.** Reviewers and assignees are told once each, as mentions where the account is linked.
   The claim is taken before the message goes out and handed back if it fails. When a thread is
   first opened the metadata block carries those mentions and is a real message, so it is the
@@ -91,12 +98,14 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   everybody holding a role and gives nobody a way to leave one person out of one: worth it to ask,
   not worth it to stand down. `/track draft off` stops both in one thread.
 - **Commits.** A push to an open pull request posts a message per commit: who wrote it, its
-  subject, its message capped at 250 characters, and the additions, deletions and files changed.
-  Ten per push, newest first, with a footnote counting anything left over. Merge commits and
-  commits somebody else wrote are skipped, so pulling main in says nothing. A force push says it
-  was force-pushed instead, once, because every commit on a rewritten branch has a new hash and
-  would otherwise read as work nobody had just done. None of it pings anybody. Off until a thread
-  asks with `/track commits on`, and nothing is asked of GitHub about a push until one has.
+  subject, its message capped at 250 characters, and under them its short hash, linking to the
+  commit, with the additions, deletions and files changed. Ten per push, newest first, with a
+  footnote counting anything left over. Merge commits and commits somebody else wrote are skipped,
+  so pulling main in says nothing. A force push says it was force-pushed instead, once, naming
+  the head it replaced and the one it is now, each linked, because every commit on a rewritten
+  branch has a new hash and would otherwise read as work nobody had just done. None of it pings
+  anybody. Off until a thread asks with `/track commits on`, and nothing is asked of GitHub about
+  a push until one has.
 - **Choosing what a thread is told.** `/track`, run in an item's thread, picks which kinds of line
   that thread gets on top of the block, which always keeps up: `comments`, `labels`, `commits`,
   `checks`, `approvals`, `draft`, `people` and `state`. Labels and commits start off, because an
@@ -774,7 +783,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Seven things the bot is known to get wrong. All are narrow, and all are written down here rather
+Eight things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -837,6 +846,16 @@ answers 400, the worker retries for two hours and gives up, and the block is fro
 while its thread carries on receiving lines. Rolling back across that change is roll-forward only.
 The other visible effect is that link previews have stopped: a components message carries no
 embeds, so the automatic preview that used to appear under a bare GitHub URL is gone.
+
+**A hash is recognised by its shape.** GitHub links a commit hash in a comment once it has found
+the commit. This bot cannot look without a call to GitHub for every hash, so it links a run of
+seven to forty lowercase hex characters, holding a digit and a letter, that stands on its own
+outside code written with backticks, links and addresses. A hex word that is no commit, such as
+`ed25519` or a container id, links to GitHub's page for a commit that does not exist, and is shown
+as its first seven characters like any hash, with the whole of it kept in the link. A real hash
+written all in digits or all in letters stays plain text. Code indented or fenced with tildes is
+plain text in Discord, and a hash in it is linked like one in prose. A commit's own line and a
+force push name commits GitHub reported, and link them whatever their shape.
 
 ## License
 
