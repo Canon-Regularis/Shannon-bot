@@ -85,6 +85,13 @@ class TestANameTheServerKnows:
         assert "@nobody" in line
         assert "<@" not in line.split("\n")[1], "somebody was mentioned who was never linked"
 
+    def test_a_name_in_a_heading_is_a_mention_in_the_heading(self) -> None:
+        """Issue #245: a heading is drawn now rather than stripped, and its names with it."""
+        assert "## cc <@111>" in said("## cc @john", {"john": 111})
+
+    def test_a_name_in_a_list_item_heading_is_a_mention_in_bold(self) -> None:
+        assert "- **<@111> to review**" in said("- ## @john to review", {"john": 111})
+
 
 class TestNothingTheEscapingDefusedComesBack:
     def test_a_mass_mention_cannot_ping_even_with_that_name_linked(self) -> None:

@@ -381,6 +381,41 @@ class TestACommitLinkMovesNoName:
         assert names_a_note_writes(shown(body)) == names_a_note_writes(unlinked(body))
 
 
+class TestAHeadingMovesNoName:
+    """Issue #245. A heading is drawn now rather than stripped, and one in a list item arrives bold,
+    so the marks in front of a name change - and the names read have to be the names written."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "## cc @john",
+            "- ## @john to review",
+            "#### @octo-cat",
+            "# @canon/backend",
+            "## @john ##",
+            "> ## @john",
+            "# @john#",
+            "    ## @john",
+            "-# @john",
+            "## @john and @octo-cat\n- ## @canon/back_end",
+        ],
+        ids=[
+            "in a heading",
+            "in a list item's heading",
+            "in a heading Discord draws as its third",
+            "a team in a heading",
+            "before a closing run",
+            "in a quoted heading",
+            "before a hash that ends the words",
+            "on a line GitHub calls code",
+            "after small print",
+            "several",
+        ],
+    )
+    def test_the_names_read_are_the_names_written(self, body: str) -> None:
+        assert names_a_note_writes(shown(body)) == names_a_note_writes(body)
+
+
 class TestTheShapesThisAlsoOwns:
     """`/link` and `/link_team` validate what somebody types against the same rules."""
 
