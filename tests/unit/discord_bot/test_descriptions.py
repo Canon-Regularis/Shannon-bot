@@ -26,6 +26,7 @@ from shannon.domain.models import (
     PullRequestSnapshot,
     RepositorySnapshot,
 )
+from tests.support.discord_markdown import headings_drawn
 
 pytestmark = pytest.mark.unit
 
@@ -82,16 +83,36 @@ class TestWhenThereIsSomethingToShow:
     def test_an_issue_gets_one_too(self) -> None:
         assert LABEL in block("why this exists", ISSUE)
 
-    def test_a_heading_goes_and_a_list_stays_a_list(self) -> None:
+    def test_a_heading_stays_a_heading_and_a_list_stays_a_list(self) -> None:
         """Issue #125. A list used to be rewritten to a bullet Discord would not escape back,
         because everything after it escaped a line-leading dash. Nothing escapes a description
-        now, so a dash is what it was on GitHub. A heading still goes: a card built out of labels
-        has one voice already.
+        now, so a dash is what it was on GitHub.
+
+        A heading went, because the card had one voice already, until issue #245 asked for the
+        sections a description is written in. It arrives as a heading now, under the label.
         """
         rendered = block("## Summary\n\n- one\n- two")
 
-        assert f"{LABEL}\nSummary\n\n- one\n- two" in rendered
+        assert f"{LABEL}\n## Summary\n\n- one\n- two" in rendered
         assert "\\" not in rendered.split(LABEL)[1]
+
+    def test_the_sections_issue_245_was_written_in(self) -> None:
+        rendered = block(
+            "Possible workarounds include the following:\n\n"
+            "## Language-Specific Time Multipliers\n"
+            "- C / C++ (base):  `1.0x`\n\n"
+            "## CPU Time vs Wall-Clock Time\n"
+            "`Isolate` (which we are using) can be used to track actual CPU time."
+        )
+
+        assert headings_drawn(rendered.split(LABEL)[1]) == [
+            (2, "Language-Specific Time Multipliers"),
+            (2, "CPU Time vs Wall-Clock Time"),
+        ]
+
+    def test_a_heading_in_a_list_item_arrives_bold(self) -> None:
+        """Discord draws no heading inside a list item, and shows the hashes instead."""
+        assert f"{LABEL}\n- **Step one**\n- **Step two**" in block("- ## Step one\n- ## Step two")
 
     def test_a_plus_becomes_a_dash_because_discord_reads_one_and_not_the_other(self) -> None:
         assert f"{LABEL}\n- one\n- two" in block("+ one\n+ two")

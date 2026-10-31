@@ -104,6 +104,20 @@ async def test_a_comment_naming_a_commit_links_it(
     )
 
 
+async def test_a_comment_written_in_sections_keeps_them(
+    tracked: AsyncClient, threads: FakeThreadGateway
+) -> None:
+    """Issue #245: a heading reaches the thread as a heading, a list item's heading in bold, and a
+    block of code exactly as it was written."""
+    payload = payloads.issue_comment_event(
+        body="## Repro\n```bash\n# run it twice\n```\n- ## Then it hangs"
+    )
+
+    await deliver(tracked, "issue_comment", payload, delivery="c1")
+
+    assert "## Repro\n```bash\n# run it twice\n```\n- **Then it hangs**" in threads.posts[-1][1]
+
+
 async def test_a_comment_on_a_pull_request_reaches_the_pull_request_thread(
     tracked: AsyncClient, threads: FakeThreadGateway
 ) -> None:

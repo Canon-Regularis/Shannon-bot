@@ -308,6 +308,18 @@ class TestWhichCommitItIs:
 
         assert said.splitlines()[1] == f"This reverts commit [0123abc]({COMMITS}/0123abc)."
 
+    def test_a_heading_in_the_message_is_drawn(self) -> None:
+        """Issue #245, as in every body. A squash-merge message carries the pull request's own."""
+        said = formatting.format_commit(commit("Squash the poller\n\n## Summary\nIt polls.")).text
+
+        assert said.splitlines()[1:3] == ["## Summary", "It polls."]
+
+    def test_a_diff_in_the_message_keeps_its_added_lines(self) -> None:
+        """Issue #245. The bullet rule used to turn `+` into `-` inside the block as well."""
+        said = formatting.format_commit(commit("Fix\n\n```diff\n+ added\n- removed\n```")).text
+
+        assert "```diff\n+ added\n- removed\n```" in said
+
     def test_a_hash_in_the_subject_stays_as_written(self) -> None:
         """Escaped like everything else in the subject, which sits inside a `**`-matched line."""
         said = formatting.format_commit(commit("Revert 0123abc")).text

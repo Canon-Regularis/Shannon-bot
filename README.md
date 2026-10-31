@@ -14,11 +14,13 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   last updated, and the description the item was opened with where there is one. It is a card
   with a bar down its side in GitHub's own colour for the item's state, the author's avatar
   beside it, the description under a rule, and a button to the item on GitHub. The
-  description keeps the formatting it was written with: bold, lists, quotes and code, and
-  up to four pictures shown under it. A link to GitHub stays a link; a link anywhere else
-  keeps its words and gains the host it really goes to, so `click here` cannot be
-  somewhere else. Headings are dropped, because a card built out of labels has one voice
-  already.
+  description keeps the formatting it was written with: headings, bold, lists, quotes and
+  code, and up to four pictures shown under it. Discord draws three sizes of heading, so
+  GitHub's fourth to sixth arrive as its third, and a heading Discord cannot draw - in a list
+  item, or under two quote marks - arrives as its words, in bold unless they hold `**`
+  already or end on a backslash. A line in a block of code keeps the hashes and marks it
+  opens with. A link to GitHub stays a link; a link anywhere else keeps its words and gains
+  the host it really goes to, so `click here` cannot be somewhere else.
 - **Comments and reviews.** Posted into the item's thread with a link back. Whoever wrote one is
   named as a mention and not rung by it: they know what they wrote. An inline review comment gets
   a message of its own naming the file and the line it sits on. A reply to one names whom it
@@ -783,7 +785,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Eight things the bot is known to get wrong. All are narrow, and all are written down here rather
+Nine things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -856,6 +858,17 @@ as its first seven characters like any hash, with the whole of it kept in the li
 written all in digits or all in letters stays plain text. Code indented or fenced with tildes is
 plain text in Discord, and a hash in it is linked like one in prose. A commit's own line and a
 force push name commits GitHub reported, and link them whatever their shape.
+
+**A heading GitHub draws that Discord cannot.** GitHub also makes a heading of a line of text with
+`===` or `---` under it, and Discord has no such thing, so those arrive as the line and its
+underline. Code fenced with tildes rather than backticks is words in Discord, and so is a block of
+HTML, which GitHub draws as HTML rather than reading as Markdown: a line in either that Discord
+would draw as a heading shows its hash instead, and the rest is read as markup. Three backticks
+written mid-sentence, which GitHub shows as they are, open a block of code in Discord that runs to
+the next three or to the end of the text, so a heading in between arrives as code. GitHub's
+footnotes and link reference definitions are read as ordinary words, so from one to the next blank
+line, and on a footnote's own line and the indented lines under it, a heading can come out drawn
+where GitHub did not draw it, or the other way round.
 
 ## License
 
