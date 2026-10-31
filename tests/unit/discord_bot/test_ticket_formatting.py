@@ -219,6 +219,12 @@ class TestWhatATicketLeavesOut:
         assert "Follows 0123abc." in card.text
         assert "/commit/" not in card.text
 
+    def test_a_draft_written_in_sections_keeps_them(self) -> None:
+        """Issue #245: a draft's description goes through the same conversion as every block."""
+        card = format_ticket(replace(TICKET, body="## Plan\n- ## Ship it"), status=Status.IN_REVIEW)
+
+        assert "**Description:**\n## Plan\n- **Ship it**" in card.text
+
 
 class TestTheCardItIsDrawnOn:
     def test_it_is_grey(self) -> None:
