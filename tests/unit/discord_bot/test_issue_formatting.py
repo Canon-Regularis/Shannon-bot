@@ -277,6 +277,14 @@ class TestCommentFormatting:
 
         assert "<@7> fixed it in [0123abc](https://github.com/" in message
 
+    def test_a_comment_written_in_sections_keeps_them(self) -> None:
+        """Issue #245: a heading is drawn as one, and one in a list item arrives bold."""
+        body = format_comment(
+            replace(COMMENT, body="## Repro\n- ## Run it twice\n#### Then\nIt hangs.")
+        ).blocks[1]
+
+        assert body.text == "## Repro\n- **Run it twice**\n### Then\nIt hangs."
+
 
 REVIEW = ReviewSnapshot(
     repository=REPO,
@@ -309,6 +317,12 @@ class TestReviewFormatting:
             "Approved as of "
             "[0123abc](https://github.com/Canon-Regularis/Shannon-bot/commit/0123abc)."
         )
+
+    def test_a_review_written_in_sections_keeps_them(self) -> None:
+        """Issue #245, through the same renderer a comment goes through."""
+        body = format_review(replace(REVIEW, body="### Blocking\nThe lock leaks.")).blocks[1]
+
+        assert body.text == "### Blocking\nThe lock leaks."
 
     def test_changes_requested_reads_as_such(self) -> None:
         message = format_review(replace(REVIEW, state="changes_requested")).text

@@ -193,6 +193,21 @@ class TestWhatTheBodyKeeps:
         assert fenced in said
         assert "/commit/" not in said
 
+    def test_a_suggestion_keeps_its_comments_and_its_added_lines(self) -> None:
+        """Issue #245. The heading rule used to strip a comment's hash inside a suggestion, and the
+        bullet rule turned an added line into a removed one."""
+        fenced = "```suggestion\n# keep the lock\n+ return None\n```"
+
+        said = format_review_comment(replace(COMMENT, body=fenced)).text
+
+        assert fenced in said
+
+    def test_a_heading_in_the_body_is_drawn(self) -> None:
+        """Issue #245."""
+        body = format_review_comment(replace(COMMENT, body="## Why\nIt leaks.")).blocks[1]
+
+        assert body.text == "## Why\nIt leaks."
+
 
 class TestAPathNobodyChoseCarefully:
     def test_a_mention_in_a_file_name_does_not_ring_anybody(self) -> None:

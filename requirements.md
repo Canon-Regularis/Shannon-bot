@@ -232,6 +232,13 @@ All of these blocks, and every other message this bot posts into a thread, show 
 text was written with: a heading, a list, a code span or a link in a GitHub body arrives as what it
 means rather than as the characters somebody typed. One conversion does it for all of them.
 
+A heading arrives at the size it was written, up to the three Discord draws: GitHub's fourth to
+sixth arrive as the third, and one Discord cannot draw - in a list item, or under two quote marks -
+arrives as its words, in bold unless they hold `**` already or end on a backslash.
+A line in a block of code keeps the hashes and marks it opens with, and a line GitHub shows as
+text, such as one inside a block of HTML, is not made a heading. The README's known limitations
+name the few places where either rule gives way.
+
 A commit hash in that text arrives as a link to the commit wherever the text belongs to a
 repository, which a draft card's does not. It is found by its shape, where GitHub checks that the
 commit exists first. A commit line and a force push link the commits they name.

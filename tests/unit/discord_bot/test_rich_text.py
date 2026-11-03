@@ -34,11 +34,19 @@ from shannon.discord_bot.safe_text import (
 )
 from shannon.domain.models import RepositorySnapshot
 from shannon.domain.text import LINK
+from tests.support.discord_markdown import (
+    headings_drawn,
+    headings_github_drew,
+    subtext_anywhere,
+)
 
 pytestmark = pytest.mark.unit
 
 ZWSP = "​"
+NBSP = "\N{NO-BREAK SPACE}"
+BOM = "\N{ZERO WIDTH NO-BREAK SPACE}"
 SHOT = "https://user-images.githubusercontent.com/1/a.png"
+EVIL = "https://evil.example/x"
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
 
@@ -99,11 +107,369 @@ class TestWhatIsKeptNow:
         assert said("> said this\n>> and this") == "> said this\n>> and this"
 
 
-class TestWhatIsStillRefused:
-    """The card has one voice, and a description is somebody else's words inside it."""
+class TestHeadings:
+    """Issue #245. A heading arrives as one, where GitHub drew one and nowhere else.
 
-    def test_a_heading_loses_its_hashes(self) -> None:
-        assert said("## Summary\ntext\n### Detail") == "Summary\ntext\nDetail"
+    They used to be stripped, because the card had one voice. The thread is where people read what
+    an item is for, and a description written in sections read as one paragraph of headings-to-be.
+    """
+
+    def test_the_issues_own_body_keeps_its_sections(self) -> None:
+        body = (
+            "Possible workarounds include the following:\n\n"
+            "## Language-Specific Time Multipliers\n"
+            "- C / C++ (base):  `1.0x`\n\n"
+            "## CPU Time vs Wall-Clock Time\n"
+            "`Isolate` can be used to track actual CPU time.\n\n"
+            "## Reference-Based Normalization\n"
+            "**Note:** This is the most time-excessive way of doing this."
+        )
+
+        shown = said(body)
+
+        assert "## Language-Specific Time Multipliers\n- C / C++ (base):  `1.0x`" in shown
+        assert headings_drawn(shown) == [
+            (2, "Language-Specific Time Multipliers"),
+            (2, "CPU Time vs Wall-Clock Time"),
+            (2, "Reference-Based Normalization"),
+        ]
+
+    def test_one_discord_cannot_draw_arrives_as_its_third(self) -> None:
+        assert said("## Summary\ntext\n#### Detail") == "## Summary\ntext\n### Detail"
+
+    def test_one_in_a_list_item_arrives_bold(self) -> None:
+        assert said("- ## Step one\n- ## Step two") == "- **Step one**\n- **Step two**"
+
+    def test_code_is_left_as_written(self) -> None:
+        """The heading rule used to strip a shell comment's hash, and the bullet rule turned a
+        diff's added lines into removed ones."""
+        written = "```bash\n# install deps\n```\n```diff\n+ added\n- removed\n```"
+
+        assert said(written) == written
+
+    @pytest.mark.parametrize(
+        ("written", "shown"),
+        [("    ## code", "\\## code"), (f"{NBSP}# lead", "\\# lead"), ("\t# tab", "\\# tab")],
+        ids=["four spaces", "a no-break space", "a tab"],
+    )
+    def test_a_first_line_github_never_called_a_heading_is_not_made_one(
+        self, written: str, shown: str
+    ) -> None:
+        """`cut` strips the first line of whatever leads it, which used to leave a live heading."""
+        assert said(written) == shown
+        assert headings_drawn(said(written)) == []
+
+    def test_a_heading_the_cut_ran_into_is_still_a_heading(self) -> None:
+        body = "w" * (DESCRIPTION_PREVIEW_LIMIT - 10) + "\n## Summary"
+
+        assert headings_drawn(said(body)) == [(2, "Summar…")]
+
+    def test_hashes_the_cut_left_alone_are_not_a_heading(self) -> None:
+        body = "w" * (DESCRIPTION_PREVIEW_LIMIT - 4) + "\n## Summary"
+
+        assert said(body).endswith("\n##…")
+        assert headings_drawn(said(body)) == []
+
+    def test_a_hash_in_a_heading_links_to_its_commit(self) -> None:
+        assert linked("## Fixed in abc1234") == (
+            "## Fixed in [abc1234](https://github.com/o/n/commit/abc1234)"
+        )
+
+    def test_a_byte_order_mark_in_front_of_the_body_hides_nothing(self) -> None:
+        """GitHub skips one at the start of a body, and draws the heading after it."""
+        assert said(f"{BOM}# Title") == "# Title"
+        assert headings_drawn(said(f"{BOM}# Title")) == [(1, "Title")]
+
+    def test_one_further_in_is_a_character_like_any_other(self) -> None:
+        assert said(f"x\n{BOM}# y") == f"x\n{BOM}# y"
+        assert headings_drawn(said(f"x\n{BOM}# y")) == []
+
+    @pytest.mark.parametrize(
+        "written",
+        [f"{BOM}{BOM}# Posted by the maintainers", f"<!-- -->{BOM}# Posted by the maintainers"],
+        ids=["a second one", "one behind a comment, which is not the start of the body"],
+    )
+    def test_only_one_at_the_very_start_is_skipped(self, written: str) -> None:
+        assert said(written) == f"{BOM}# Posted by the maintainers"
+        assert headings_drawn(said(written)) == []
+
+    def test_an_empty_heading_between_blank_lines_leaves_one_blank_line(self) -> None:
+        """Blank lines are folded after lines are read, so a dropped line's gap goes with it."""
+        assert said("a\n\n#\n\nb") == "a\n\nb"
+
+
+class TestALinkOrAPictureCannotOpenAMark:
+    """Issue #245. A link off GitHub, and a picture lifted into the gallery, leave their words in
+    the line after every line was read - so the words are kept from opening a heading or small
+    print. `[-# posted by the maintainers](…)` used to come out as a footnote in the bot's voice."""
+
+    @pytest.mark.parametrize(
+        ("written", "shown"),
+        [
+            (f"[# Title]({EVIL})", f"{ZWSP}# Title (evil.example)"),
+            (
+                f"[-# posted by the maintainers]({EVIL})",
+                f"{ZWSP}-# posted by the maintainers (evil.example)",
+            ),
+            (f"-[# x]({EVIL})", f"-{ZWSP}# x (evil.example)"),
+            (f"#[ x]({EVIL})", f"#{ZWSP} x (evil.example)"),
+            (f"[#]({EVIL}) tail", f"{ZWSP}# (evil.example) tail"),
+            (f"> [# x]({EVIL})", f"> {ZWSP}# x (evil.example)"),
+            (f"![# alt]({SHOT})", f"{ZWSP}# alt"),
+            (f"#![ x]({SHOT})", f"#{ZWSP} x"),
+            (f"[* -# posted]({EVIL})", f"{ZWSP}* -# posted (evil.example)"),
+            (f"[1. -# posted]({EVIL})", f"{ZWSP}1. -# posted (evil.example)"),
+            (f"1[. -# posted]({EVIL})", f"1{ZWSP}. -# posted (evil.example)"),
+            (f"1[0. -# x]({EVIL})", f"1{ZWSP}0. -# x (evil.example)"),
+            (f"1[9. -# x]({EVIL})", f"1{ZWSP}9. -# x (evil.example)"),
+            (f"- [* -#x]({EVIL})", f"- {ZWSP}* -#x (evil.example)"),
+            (f"#[{BOM}words]({EVIL})", f"#{ZWSP}{BOM}words (evil.example)"),
+        ],
+        ids=[
+            "a heading as a link's words",
+            "small print as a link's words",
+            "a dash typed before the link",
+            "a hash typed before the link",
+            "a hash for the link's words",
+            "inside a quote",
+            "a heading as a picture's words",
+            "a hash typed before the picture",
+            "a bullet and small print as a link's words",
+            "a number and small print",
+            "the number typed before the link",
+            "a zero finishing a number typed before it",
+            "a nine finishing one",
+            "a bullet's words in a list item",
+            "a byte-order mark after a hash, which only Discord calls whitespace",
+        ],
+    )
+    def test_they_stay_words(self, written: str, shown: str) -> None:
+        assert said(written) == shown
+        assert headings_drawn(shown) == []
+        assert subtext_anywhere(shown) == []
+
+    def test_a_picture_shown_as_a_link_too(self) -> None:
+        shown = as_rich_text("![# alt](https://elsewhere.example/a.png)", images=Images.AS_LINKS)
+
+        assert shown.text == f"{ZWSP}# alt (elsewhere.example)"
+
+    def test_inside_a_heading_they_are_the_heading_s_words(self) -> None:
+        shown = said(f"## [# x]({EVIL})")
+
+        assert shown == f"## {ZWSP}# x (evil.example)"
+        assert headings_drawn(shown) == [(2, f"{ZWSP}# x (evil.example)")]
+
+    def test_a_link_on_github_keeps_its_words_as_written(self) -> None:
+        assert said("[# x](https://github.com/o/r)") == "[# x](https://github.com/o/r)"
+
+    def test_one_whose_address_holds_a_fence_is_kept_as_written(self) -> None:
+        """The line reader counted the fence to know where code starts. Dropping the address would
+        move it, and leave a line it kept as code to be drawn as a heading GitHub never drew."""
+        body = "[a](https://x.example/```)\n~~~\n# Posted by the maintainers\n~~~"
+
+        shown = said(body)
+
+        assert shown == (
+            f"[a]{ZWSP}(https://x.example/```)\n~~~\n# Posted by the maintainers\n~~~\n```"
+        )
+        assert headings_drawn(shown) == []
+
+    def test_a_picture_shown_as_a_link_is_kept_the_same_way(self) -> None:
+        body = "![s](https://x.example/a```.png)\n<details>\n# Posted by the maintainers"
+
+        shown = as_rich_text(body, images=Images.AS_LINKS).text
+
+        assert shown.startswith(f"[s]{ZWSP}(https://x.example/a```.png)")
+        assert headings_drawn(shown) == []
+
+    def test_two_fences_in_an_address_move_nothing(self) -> None:
+        assert said("[a](https://x.example/``````)") == "a (x.example)"
+
+    def test_nor_do_backticks_that_make_no_fence(self) -> None:
+        """Dropped like any other address, so a name in one is not read out of it either."""
+        shown = said("Search [results](https://grep.example/?q=`foo`&by=@bob) here")
+
+        assert shown == "Search results (grep.example) here"
+
+    def test_a_fence_in_its_host_is_shown_with_the_host(self) -> None:
+        """Only the fences the address takes with it count: one in the host stays in the line."""
+        body = "```\n[x](https://```e/```)\n# Posted by the maintainers\n```"
+
+        shown = said(body)
+
+        assert shown == f"```\n[x]{ZWSP}(https://```e/```)\n# Posted by the maintainers\n```"
+        assert headings_drawn(shown) == []
+
+    @pytest.mark.parametrize(
+        ("body", "shown"),
+        [
+            (
+                "```\n``[](https://`evil.example/)\n# Posted by the maintainers\n```",
+                f"```\n``{ZWSP}`evil.example\n# Posted by the maintainers\n```",
+            ),
+            (
+                "```\n[](https://evil.example``/)`\n# Posted by the maintainers\n```",
+                f"```\nevil.example``{ZWSP}`\n# Posted by the maintainers\n```",
+            ),
+        ],
+        ids=["backticks typed before it", "a backtick typed after it"],
+    )
+    def test_a_host_shown_alone_does_not_finish_a_fence(self, body: str, shown: str) -> None:
+        """With no words, the host is shown in the link's place, beside whatever was typed."""
+        assert said(body) == shown
+        assert headings_drawn(shown) == []
+
+    def test_words_opening_on_a_backtick_do_not_finish_a_fence(self) -> None:
+        """Two backticks typed before the link and the one its words open on made a fence, and a
+        line the reader kept as code came out of the block."""
+        body = f"```\n``[`x]({EVIL})\n# Posted by the maintainers\n```"
+
+        shown = said(body)
+
+        assert shown == f"```\n``{ZWSP}`x (evil.example)\n# Posted by the maintainers\n```"
+        assert headings_drawn(shown) == []
+
+    def test_a_link_on_github_keeps_its_address_whatever_it_holds(self) -> None:
+        """Its address is kept, fence and all, so nothing the reader counted goes missing."""
+        assert said("[a](https://github.com/o/r/```)") == "[a](https://github.com/o/r/```)\n```"
+
+
+class TestWhatIsTakenOutOfALine:
+    """Issue #245. A comment, and a picture with no words, leave nothing where they were but the
+    line breaks a comment held - unless what was on either side of them could then open a mark."""
+
+    @pytest.mark.parametrize(
+        ("written", "shown"),
+        [
+            ("<!-- --># words", f"{ZWSP}# words"),
+            ("#<!-- --> words", f"#{ZWSP} words"),
+            ("<!--\nmulti line\n--># words", f"{ZWSP}# words"),
+            (f"#![]({SHOT}) words", f"#{ZWSP} words"),
+            ("![]()# words", f"{ZWSP}# words"),
+            (f"Intro\n\n![]({SHOT}) # Steps", f"Intro\n\n{ZWSP} # Steps"),
+            (f"![]({SHOT})> # Security advisory", f"{ZWSP}> # Security advisory"),
+            ("<!-- -->>## Heads up", f"{ZWSP}>## Heads up"),
+            ("> <!-- -->\t# Posted by the maintainers", f"> {ZWSP}\t# Posted by the maintainers"),
+            (f"![]({SHOT}) - # x", f"{ZWSP} - # x"),
+            (f"![]({SHOT})1. # x", f"{ZWSP}1. # x"),
+            ("-<!-- --> words", f"-{ZWSP} words"),
+            (f"*![]({SHOT}) words", f"*{ZWSP} words"),
+            ("+<!-- --> words", f"+{ZWSP} words"),
+            ("1.<!-- --> words", f"1.{ZWSP} words"),
+            ("1)<!-- --> words", f"1){ZWSP} words"),
+            ("#<!-- -->\twords", f"#{ZWSP}\twords"),
+        ],
+        ids=[
+            "a comment before the hash",
+            "a comment after it",
+            "a comment over three lines",
+            "a picture after the hash",
+            "a picture before it",
+            "a picture, then a space and a hash",
+            "a picture before a quote mark",
+            "a comment before one",
+            "a comment, a tab and a hash, in a quote",
+            "a picture before a list mark",
+            "a picture before a number",
+            "a comment after a dash",
+            "a picture after a star",
+            "a comment after a plus",
+            "a comment after a number and its dot",
+            "a comment after a number and its bracket",
+            "a comment between a hash and a tab",
+        ],
+    )
+    def test_a_mark_beside_it_stays_words(self, written: str, shown: str) -> None:
+        assert said(written) == shown
+        assert headings_drawn(shown) == []
+
+    @pytest.mark.parametrize(
+        ("written", "shown"),
+        [
+            ("<!-- note -->\n## Summary", "## Summary"),
+            ("a<!-- c -->b", "ab"),
+            (f"a ![]({SHOT}) b", "a  b"),
+            ("**Reviewer:**<!-- tag someone -->@bob", "**Reviewer:**@bob"),
+            ("Thanks.<!-- for the report -->@dave will follow up", "Thanks.@dave will follow up"),
+        ],
+        ids=[
+            "a comment on its own line",
+            "a comment between words",
+            "a picture between them",
+            "a comment between a star and a name, which nothing but a space makes a list",
+            "and between a full stop and one",
+        ],
+    )
+    def test_anywhere_else_it_leaves_nothing(self, written: str, shown: str) -> None:
+        assert said(written) == shown
+
+
+class TestWhatIsTakenOutIsStillRead:
+    """Issue #245. A comment, and a picture lifted into the gallery, are taken out of what Discord
+    is shown, not out of what is read: GitHub drew the body with them in. A comment opening a line
+    opens a block of HTML, an item holding one is not empty, a line holding one is not blank - and
+    taking them out first changed what GitHub made of the lines after them."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "- <!-- Describe the change -->\n\n  Fixes the crash.\n<img src=x>\n"
+            "# Posted by the maintainers",
+            f"- ![]({SHOT})\n\n  Fixes the crash.\n<img src=x>\n# Posted by the maintainers",
+            "<details>\n<summary>Logs</summary>\n<!-- paste logs below -->\n"
+            "# systemctl status shannon\n</details>",
+            f"<details>\n![]({SHOT})\n# Posted by the maintainers\n</details>",
+            f'<!-- Describe the change --> Fixes the crash.\n<img src="{SHOT}">\n'
+            "# Posted by the maintainers",
+            "-<!-- --> text\n  ~~~\n# Posted by the maintainers\n~~~",
+            "1.<!-- -->\n   ~~~\n# Posted by the maintainers\n~~~",
+            f"-![]({SHOT}) Steps\n  ~~~\n# Posted by the maintainers\n~~~",
+            "```\ncode\n``<!-- -->`\n# Posted by the maintainers\n```",
+        ],
+        ids=[
+            "an item holding only a comment, then a blank line",
+            "an item holding only a picture, then a blank line",
+            "a comment alone on a line inside a block of HTML",
+            "a picture alone on one",
+            "a line opening on a comment, then a tag alone",
+            "a dash glued to a comment",
+            "a number glued to one",
+            "a dash glued to a picture",
+            "a comment between backticks, inside code",
+        ],
+    )
+    @pytest.mark.parametrize("images", list(Images))
+    def test_where_github_drew_no_heading_none_is_drawn(self, body: str, images: Images) -> None:
+        assert headings_drawn(as_rich_text(body, images=images).text) == []
+
+    def test_a_heading_in_an_item_holding_a_comment_arrives_bold(self) -> None:
+        assert said("- <!-- note -->\n\n  # x") == "- \n\n  **x**"
+
+    def test_a_comment_over_lines_leaves_one_line(self) -> None:
+        assert said("Intro\n<!--\nfill\nthis\nin\n-->\nMore") == "Intro\n\nMore"
+
+    def test_words_after_one_over_lines_of_a_quote_stay_in_the_quote(self) -> None:
+        body = "> **Warning**\n> <!-- Describe the risk\n> in a sentence --> Data loss is possible."
+
+        assert said(body) == "> **Warning**\n>  Data loss is possible."
+
+    def test_a_link_whose_words_hold_one_over_lines_is_still_a_link(self) -> None:
+        body = "[the guide <!-- link to\nthe right section --> setup](https://github.com/o/n/wiki)"
+
+        assert said(body) == "[the guide  setup](https://github.com/o/n/wiki)"
+
+    def test_a_picture_whose_words_hold_one_is_still_lifted(self) -> None:
+        shown = as_rich_text(f"![screenshot <!-- add\nalt text --> of the bug]({SHOT})")
+
+        assert shown.text == "screenshot  of the bug"
+        assert [(image.url, image.alt) for image in shown.images] == [
+            (SHOT, "screenshot  of the bug")
+        ]
+
+
+class TestWhatIsStillRefused:
+    """A description is somebody else's words inside the bot's card, so what could speak in the
+    card's own voice - a live mention, the small print its footnotes use - is still refused."""
 
     def test_a_line_leading_issue_reference_keeps_its_hash(self) -> None:
         """The rule needs the space GitHub needs for a heading. Without it this reads `#3` as a
@@ -139,12 +505,14 @@ class TestWhatIsStillRefused:
         assert said("<!-- never closed\nand the rest") == "<!-- never closed\nand the rest"
 
     def test_windows_line_endings_are_folded(self) -> None:
-        assert said("## One\r\n\r\n\r\n\r\n- two") == "One\n\n- two"
+        assert said("## One\r\n\r\n\r\n\r\n- two") == "## One\n\n- two"
 
     def test_a_run_of_blank_lines_collapses(self) -> None:
         assert said("one\n\n\n\n\ntwo") == "one\n\ntwo"
 
-    @pytest.mark.parametrize("body", ["", "   ", "\n\n\n", "## ", "<!-- only a comment -->"])
+    @pytest.mark.parametrize(
+        "body", ["", "   ", "\n\n\n", "## ", "<!-- only a comment -->", "# <!-- --> #"]
+    )
     def test_a_body_that_says_nothing_comes_to_nothing(self, body: str) -> None:
         """What the block reads to decide there is no description to show."""
         assert said(body) == ""
@@ -508,7 +876,8 @@ def test_nothing_typed_can_reach_out_of_the_card(body: str) -> None:
     """The claim the whole module rests on, asserted over text nobody thought of.
 
     Every `](` that comes out is one this module wrote, every one of those points at a host GitHub
-    serves, no mention survives, and neither marker that can run past its own line is left open.
+    serves, no mention survives, neither marker that can run past its own line is left open, and -
+    since issue #245 - no line, code included, opens on the small print the bot's footnotes use.
     """
     described = as_rich_text(body)
 
@@ -522,6 +891,7 @@ def test_nothing_typed_can_reach_out_of_the_card(body: str) -> None:
     assert not re.search(r"<@[!&]?\d+>|<#\d+>", described.text)
     assert "@everyone" not in described.text
     assert "@here" not in described.text
+    assert subtext_anywhere(described.text) == []
     assert len(described.text) < MESSAGE_LIMIT
 
     assert len(described.images) <= IMAGES_SHOWN
@@ -622,3 +992,54 @@ def test_five_links_into_the_longest_names_still_fit_a_message(soup: str) -> Non
     assert "…" in shown, "the draw was never cut, so this measured nothing"
     assert len(LINK.findall(shown)) == COMMIT_LINK_LIMIT
     assert len(shown) < MESSAGE_LIMIT
+
+
+# Lines whose GitHub reading is known, as (line, the level GitHub draws it at, or None), with the
+# links and pictures that are put back into a line after it was read - which is where a heading or
+# small print used to slip past the rules that read lines.
+_SECTIONS = st.sampled_from(
+    [
+        ("## Summary", 2),
+        ("# Big", 1),
+        ("#### Small", 3),
+        ("> ## Quoted", 2),
+        ("## Fixed in [docs](https://github.com/o/r)", 2),
+        ("- ## Step one", None),
+        ("    ## code", None),
+        (f"{NBSP}# lead", None),
+        (f"[# Title]({EVIL})", None),
+        (f"[-# posted]({EVIL})", None),
+        (f"-[# x]({EVIL})", None),
+        (f"[* -# posted]({EVIL})", None),
+        (f"[1. -# posted]({EVIL})", None),
+        (f"#[{BOM}x]({EVIL})", None),
+        ("#<!-- c --> x", None),
+        ("<!-- c --># x", None),
+        (f"#![]({SHOT}) x", None),
+        (f"![# alt]({SHOT})", None),
+        ("![# alt](https://elsewhere.example/a.png)", None),
+        ("[docs](https://github.com/o/r)", None),
+        ("words", None),
+        ("", None),
+        ("```", None),
+        ("~~~", None),
+        ("#", None),
+        ("-# small", None),
+    ]
+)
+
+
+@given(st.lists(_SECTIONS, max_size=20), st.sampled_from(list(Images)))
+@settings(max_examples=300)
+def test_a_heading_reaches_the_card_where_github_drew_one(
+    pieces: list[tuple[str, int | None]], images: Images
+) -> None:
+    """Issue #245, through the whole conversion and either way with pictures: Discord draws a
+    heading exactly where GitHub drew one, at its level, and nothing opens on small print. A limit
+    no draw reaches, so the cut is not what decides."""
+    body = "\n".join(line for line, _ in pieces)
+
+    shown = as_rich_text(body, limit=100_000, images=images).text
+
+    assert [level for level, _ in headings_drawn(shown)] == headings_github_drew(pieces)
+    assert subtext_anywhere(shown) == []

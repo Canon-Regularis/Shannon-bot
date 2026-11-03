@@ -66,6 +66,7 @@ from shannon.github.urls import (
     parse_repository_url,
 )
 from shannon.services.sync.staleness import is_superseded
+from tests.support.discord_markdown import subtext_anywhere
 
 REPO = RepositorySnapshot(github_repo_id=1, owner="o", name="n", html_url="https://github.com/o/n")
 
@@ -475,6 +476,10 @@ class TestRendering:
     # cannot see is a link freeing a name: one the map answers for may be live, and one it does not
     # stays text either way. That is pinned where it can be seen, by `abc1234@alice` in
     # `test_commit_names.py` and by `TestACommitLinkMovesNoName` in `test_mentions.py`.
+    # Since issue #245 a heading is drawn rather than stripped and one in a list item arrives bold,
+    # so names are drawn inside both, beside small print and code GitHub would not read. Measured:
+    # 47/300 bodies come out with a heading drawn that holds a name, and 39/300 with a list item's
+    # heading in bold.
     _NAMEABLE = st.sampled_from(
         (
             "@hubot",
@@ -489,6 +494,13 @@ class TestRendering:
             "o/r@abc1234",
             "abc1234@hubot",
             "@hubot-abc1234",
+            "## cc @hubot",
+            "- ## @hubot to review",
+            "#### @canon/backend",
+            "-# @hubot",
+            "    ## @hubot",
+            "```",
+            "## ",
         )
     )
     bodies_naming_people = st.builds(
@@ -523,6 +535,7 @@ class TestRendering:
         )
         assert "@everyone" not in quoted
         assert "@here" not in quoted
+        assert subtext_anywhere(quoted) == [], "a line opens on the small print footnotes use"
 
         # The markers stay balanced through the swap as well as through the conversion. `rewrite`
         # only ever inserts `<@id>`, which carries neither - but it is the swap that runs last, so

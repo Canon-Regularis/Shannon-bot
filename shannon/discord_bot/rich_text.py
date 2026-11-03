@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import discord
 
+from shannon.discord_bot.line_starts import FENCE, JOINED, as_words, lines_as_github_drew_them
 from shannon.discord_bot.panels import PanelImage
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
@@ -50,32 +51,28 @@ COMMIT_LINK_LIMIT = 5
 # blank line also costs one character against the preview limit rather than two.
 _LINE_ENDINGS = re.compile(r"\r\n?")
 
+# GitHub skips one at the very start of a body, so a heading after it is still a heading; Discord
+# does not, and would show the hashes. Issue #245.
+_BYTE_ORDER_MARK = "\N{ZERO WIDTH NO-BREAK SPACE}"
+
 # Invisible on GitHub and not here: a pull request template is mostly these, so without this the
 # preview of a templated repository is the instructions to the author. Non-greedy, so two comments
 # do not merge and swallow the text between them; an unterminated `<!--` is left as written.
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
-# The space after the hashes is required. Without it the rule also strips a line-leading issue
-# reference, so a description beginning `#3 is fixed by this` came out as `3 is fixed by this`.
-_HEADING = re.compile(r"^#{1,6}[ \t]+", re.MULTILINE)
+# What a comment or a picture was taken out from in front of, behind nothing but spaces and tabs,
+# that could open a mark once it is gone: a hash, a quote mark, a list mark, a number. Issue #245.
+_MARK_AHEAD = re.compile(r"[ \t]*[#>*+.)0-9-]")
 
-# GitHub reads `+` as a bullet and Discord does not, so a list written with one arrives as a
-# paragraph of plus signs. `-` and `*` are Discord's own list syntax already, and are left alone.
-_PLUS_BULLET = re.compile(r"^([ \t]*)\+([ \t]+)", re.MULTILINE)
-
-# `-#` at the start of a line is Discord's subtext, small and grey; GitHub has never heard of it.
-# Every footnote this bot writes uses it, so a description able to produce one could put words in
-# the bot's mouth. Broken rather than stripped: on GitHub those are two characters somebody meant.
-_SUBTEXT = re.compile(r"^([ \t]*-)(#)", re.MULTILINE)
+# And what it was taken out from behind that a space or a tab after it could finish into one: a
+# hash, or the last character of a list mark. Not a quote mark, which is one already on GitHub.
+_MARK_ENDS = ("#", "-", "*", "+", ".", ")")
 
 _BLANK_RUN = re.compile(r"\n{3,}")
 
 # Discord renders markdown images nowhere. `LINK` is the same shape without the bang, and lives in
 # `domain.text` since issue #186, because the commit finder steps over the same links.
 _IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
-
-# Discord opens a code block on three backticks wherever they appear, including mid-line.
-_FENCE = re.compile(r"```")
 
 # An image pasted into an issue is uploaded under `user-images.githubusercontent.com` or
 # `github.com/user-attachments/`, and a file read out of a repository comes from
@@ -117,6 +114,11 @@ def as_rich_text(
     limit still shows them. A cut can land inside a link or a marker, which the two steps after it
     undo.
 
+    Each line is opened the way GitHub drew it before the cut too - a heading drawn as one, issue
+    #245, and code left as written - so the limit counts the hashes a reader sees, and nothing the
+    pass writes is growth after the cut. GitHub drew the body with its comments and pictures in, so
+    that is the body read, and the lines opened are the ones they were taken out of.
+
     `repository` is where a bare commit hash in the text belongs, and linking those is issue #186.
     After the cut, so the limit goes on counting only words a reader sees; before `_linked`, so an
     author's own link is still whole and a hash inside one stays with it, and the links written
@@ -132,15 +134,13 @@ def as_rich_text(
     thirteen hundred without a repository, and about seven hundred and thirty with one. Every caller
     passes seven hundred or less.
     """
-    text = _LINE_ENDINGS.sub("\n", body or "")
-    text = _HTML_COMMENT.sub("", text)
+    written = _LINE_ENDINGS.sub("\n", (body or "").removeprefix(_BYTE_ORDER_MARK))
+    text = _HTML_COMMENT.sub(_left_behind, written)
     if images is Images.LIFT:
         text, lifted = _shown(text)
     else:
         text, lifted = _as_links(text), ()
-    text = _HEADING.sub("", text)
-    text = _PLUS_BULLET.sub(r"\1-\2", text)
-    text = _SUBTEXT.sub("\\1" + ZERO_WIDTH_SPACE + "\\2", text)
+    text = lines_as_github_drew_them(written, text)
     text = _BLANK_RUN.sub("\n\n", text)
     text = cut(text, limit=limit)
     if repository is not None:
@@ -227,13 +227,21 @@ def _destination(label: str, url: str) -> str:
 
     A link off GitHub keeps its words and gains its host: `click here (evil.example)`. An empty
     label falls back to the host: Discord renders a masked link with no words as its own markup.
+
+    Those words are put back after every line was read, so since issue #245 they are kept from
+    opening a heading or the bot's small print - `[-# posted by the maintainers](…)` at the start
+    of a line used to come out as a footnote in the bot's own voice - or making a fence with
+    backticks typed beside them. For the same reason a link off GitHub is kept as written where
+    dropping its address would change the count of fences: the line reader counted them to know
+    where code starts. Only the fences outside the host go, since the host is shown.
     """
     host = _host_of(url)
-    if host is None:
+    if host is None or (not _is_github(host) and (url.count(FENCE) - host.count(FENCE)) % 2):
         return _inert(f"[{label}]({url})")
     if _is_github(host):
         return f"[{label or _named(host)}]({url})"
-    return f"{label} ({_named(host)})" if label else _named(host)
+    words = as_words(f"{label} ({_named(host)})" if label else _named(host))
+    return words + ZERO_WIDTH_SPACE if words.endswith("`") else words
 
 
 def _host_of(url: str) -> str | None:
@@ -279,7 +287,8 @@ def _shown(body: str) -> tuple[str, tuple[PanelImage, ...]]:
 
     Discord fetches a gallery's media before it will accept the message, so an address in an issue
     body that does not resolve costs the item its whole block. Only what GitHub serves becomes a
-    picture; anything else keeps its alt text in the prose and is never fetched.
+    picture; anything else keeps its alt text in the prose and is never fetched. The alt text is
+    words wherever it lands, issue #245, rather than a heading somebody wrote as a picture's name.
     """
     lifted: dict[str, PanelImage] = {}
     for image in _IMAGE.finditer(body):
@@ -287,7 +296,33 @@ def _shown(body: str) -> tuple[str, tuple[PanelImage, ...]]:
         host = _host_of(url)
         if len(lifted) < IMAGES_SHOWN and host is not None and _is_github(host):
             lifted.setdefault(url, PanelImage(url=url, alt=_alt(image.group(1))))
-    return _IMAGE.sub(lambda image: image.group(1), body), tuple(lifted.values())
+    shown = _IMAGE.sub(lambda image: as_words(image.group(1)) or _left_behind(image), body)
+    return shown, tuple(lifted.values())
+
+
+def _left_behind(gone: re.Match[str]) -> str:
+    """What a comment, or a picture with no words, leaves where it was taken out: a `JOINED` for
+    each line break it held, so the line reader still reads every line GitHub read, and nothing
+    else, unless what was on either side of it could then open a mark.
+
+    `#<!-- --> words`, `-<!-- --> words` and `#![](shot.png) words` are text on GitHub, because a
+    heading's hashes and a list mark need a space after them, and so is `![](shot.png)> # words`, a
+    line of words opening on a picture. Taken out with nothing left in their place, they would
+    reach Discord as `# words`, `- words` and `> # words`: a heading the line reader would show
+    with a backslash in front, and a list and a quote it would leave alone. A zero-width space
+    keeps each the words GitHub shows. Issue #245.
+
+    Behind a mark only when a space or a tab follows: `**Reviewer:**<!-- -->@bob` is a name
+    GitHub links, and a zero-width space in front of it would hide it from the mention reader.
+    """
+    text = gone.string
+    left = JOINED * gone[0].count("\n")
+    behind = text[gone.start() - 1 : gone.start()] in _MARK_ENDS
+    if behind and text[gone.end() : gone.end() + 1] in (" ", "\t"):
+        return left + ZERO_WIDTH_SPACE
+    if _MARK_AHEAD.match(text, gone.end()):
+        return left + ZERO_WIDTH_SPACE
+    return left
 
 
 def _as_links(text: str) -> str:
@@ -305,8 +340,11 @@ def _as_links(text: str) -> str:
 
 
 def _alt(alt: str) -> str | None:
-    """None rather than an invented word: "Image" tells a reader who cannot see it nothing."""
-    said = _defused(alt).strip()[:ALT_LIMIT]
+    """None rather than an invented word: "Image" tells a reader who cannot see it nothing.
+
+    Without the `JOINED` a comment over several lines left in it, which only the line reader reads.
+    """
+    said = _defused(alt.replace(JOINED, "")).strip()[:ALT_LIMIT]
     return said or None
 
 
@@ -319,6 +357,8 @@ def _balanced(text: str) -> str:
     """
     if text.count("**") % 2:
         text += "**"
-    if len(_FENCE.findall(text)) % 2:
+    # Counted as `line_starts` counts it, which is what lets that call a line code before this has
+    # decided where a block left open ends.
+    if text.count(FENCE) % 2:
         text += "\n```"
     return text

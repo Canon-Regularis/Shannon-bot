@@ -8069,3 +8069,61 @@ feature end to end rather than assuming a predecessor the file never recorded.
   reaching no further than GitHub, a body still fitting its card, and names reading the same with
   links as without. The commit and force-push lines assert their whole new text, end to end as
   well.
+
+## A heading in a GitHub body is a heading in its thread
+
+- **Headings are drawn** (#245). A heading in a description, a comment, a review, an inline
+  comment or a commit message used to lose its hashes and arrive as a plain line. It arrives as a
+  heading now, at the size it was written. Discord draws three sizes, so GitHub's fourth to sixth
+  arrive as its third, which is bold text at body size - how GitHub draws a fourth.
+- **In a list item, bold.** Discord draws no heading inside a list item and shows its hashes
+  instead, so `- ## Step one` arrives as `- **Step one**`, and so does a heading on a line that
+  carries an item on, or under two quote marks, which Discord does not nest. Words that hold `**`
+  already, or end on a backslash, arrive as they are.
+- **Code is code.** A line in a block of code keeps the hashes and marks it opens with. The
+  heading rule used to strip a shell comment's hash inside one, and the bullet rule turned a
+  diff's added lines into removed ones. A link off GitHub is kept as written where dropping its
+  address would change the count of fences, and the words or host shown in its place are kept
+  from making a fence with backticks typed beside them, since either would move where code
+  starts.
+- **What GitHub would not call a heading is not one here.** A line indented into code, led by
+  whitespace Discord counts and GitHub does not, inside a fence of tildes, or inside a block of
+  HTML - a `<pre>`, a `<details>` written without a blank line, the tag GitHub's editor writes for
+  a pasted screenshot - gets a backslash before its hash, which Discord shows as the hash. A
+  heading with nothing in it is left out, because Discord would make the next line its words, and
+  a hash ending a heading's words is kept rather than eaten.
+- **Lines are read the way GitHub reads them.** A tab counts to the next stop of four and a form
+  feed as no space at all; a line carries on the quotes and list items it is indented into, and a
+  list item with nothing in it ends at a blank line; a fence or a block of HTML ends where GitHub
+  ends it, with the quote or item it is in; a tag alone on its line cannot interrupt a paragraph,
+  and a table is one only with as many cells on its first two lines, counted as GitHub counts
+  them. A byte-order mark at the very start of a body is skipped, as GitHub skips it. Comments
+  and lifted pictures are taken out of what Discord is shown, not out of what is read, because
+  GitHub read the body with them in: a comment opening a line still opens a block of HTML, a line
+  holding only a comment is not blank, and a list item holding only a comment is not empty.
+- **The bot's small print stays its own.** `-#` is broken by a zero-width space, which does not
+  show, on every line, code included, because where code starts is decided by counting backticks,
+  which a link can fool. A link off GitHub or a picture's words can no longer open a heading or
+  small print either, whatever they open with - a hash, a dash, a bullet, a number:
+  `[-# posted by the maintainers](...)` used to come out as a footnote in the bot's voice. A
+  comment, or a picture with no words, taken out from in front of a mark, or from between a hash
+  or a list mark and the space after it, leaves a zero-width space behind, so `#<!-- --> words`
+  stays the words GitHub shows.
+- **Limits.** A heading can be the largest text in its thread, and a comment can print a heading
+  that looks like one of the bot's own, inside its own card. A heading written as a line over
+  `===` or `---` is not drawn, and a fence of tildes or a block of HTML is still words in Discord.
+  Three backticks written mid-sentence still open code in Discord, so a heading after them
+  arrives as code. Footnotes and link reference definitions are read as ordinary words. A
+  comment, a picture or a link off GitHub inside a block of code is still taken out or rewritten,
+  as it was before.
+- **For whoever deploys it.** No migration, setting or permission. A thread's top block is drawn
+  with its headings the next time it is redrawn, which `/regenerate` and `/refresh` both do, and a
+  comment the next time it is edited.
+- **Tests.** A test-side spelling of how Discord reads a heading and its small print, and a new
+  file for the pass, with properties that a heading is drawn exactly where GitHub drew one, that
+  code passes through it as written but for small print, and that no line opens on small print.
+  Its tables pin the cases where GitHub's reading is subtle - tabs, form feeds, list items carried
+  on, fences and blocks of HTML ending, comments and pictures read where they were written - each
+  checked against what GitHub's own renderer draws, and a line written to make the reading slow is
+  read at once. The conversion, every renderer that shows a body, the mention reader and the
+  comment path end to end are tested with headings in them.
