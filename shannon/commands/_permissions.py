@@ -19,7 +19,8 @@ SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
 WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 
 # The commands that take no gate at all, by name. `/mentions` decides only whether your own name
-# notifies you, where every other command decides something about the server. A test holds this
+# notifies you, and `/linked` only reads back what this server holds about you: each is about
+# whoever runs it, where every other command decides something about the server. A test holds this
 # set against what the command factories actually take.
 #
 # `/link` is not here and reads as though it should be: connecting your own GitHub account needs
@@ -37,7 +38,7 @@ WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 # because deleting a credential that is yours must not depend on a role you may since have lost.
 # So it keeps its gate too, and its own tests hold the tiers. `/authorise_board` used to sit in
 # this set, ungated whole, which let anybody hand over a credential nothing would ever use.
-UNGATED = frozenset({"mentions"})
+UNGATED = frozenset({"linked", "mentions"})
 
 # Whoever's authorisation a board ever actually uses: the tier that links one, whose grant the
 # board is read with, and the tier that moves cards, whose grant each move is made with. `/board
