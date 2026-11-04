@@ -1,18 +1,44 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from shannon.db.stores.identities import ProvedAccount, VerifiedIdentityStore
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.team_links import TeamLinkStore
-from shannon.db.stores.user_links import UserLinkStore
+from shannon.db.stores.user_links import LinkRecord, UserLinkStore
 from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.domain.text import code_span
 from shannon.github.mentions import is_team_slug
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LinkStanding:
+    """What this server holds about one member's GitHub account, for `/linked`. Issue #232.
+
+    Plain facts rather than a sentence, so the command decides how to say them, as `BoardStanding`
+    leaves the saying to `/board show`. Every fact is the asking member's own, so the login in it
+    is theirs to see.
+    """
+
+    # The repository this server mirrors, as "owner/name". None where none is registered: a link
+    # belongs to the server, so it stands without one and carries over to whatever comes next.
+    repo_name: str | None
+    # Their link here and the day it was made. None where nothing links them in this server.
+    link: LinkRecord | None
+    # Their latest sign-in to GitHub from this server, whatever it was for. Every round trip
+    # writes one and the last one wins, so a sign-in for /register or /board is here too.
+    proof: ProvedAccount | None
+
+    @property
+    def proved(self) -> bool:
+        """Whether GitHub has vouched for the account their link points at, by `/assign`'s rule."""
+        return self.link is not None and self.link.account.proved_by(self.proof)
 
 
 class UserLinkingService:
@@ -22,6 +48,10 @@ class UserLinkingService:
     issue #144 closed: a login that exists says nothing about whose it is. Nothing types one any
     more, so there is nothing left here to validate and nothing to ask GitHub, and what the class
     does is write down an answer that has already been given.
+
+    And, since issue #232, read that answer back to the member it is about. Here rather than with
+    the verification service, because the question is about exactly the row `bind` writes and the
+    proof `redeem` writes just before it.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -52,6 +82,28 @@ class UserLinkingService:
             guild_id,
         )
         return username
+
+    async def standing(self, *, guild_id: int, discord_user_id: int) -> LinkStanding:
+        """What this server holds about one member's link, for the member asking about it.
+
+        Stored facts only. GitHub is not asked, so nothing waits on a round trip to answer
+        somebody who only wanted to know, and a rename since the link was made is not seen here.
+
+        The proof is read from its store rather than through `ever_proved`, which makes the same
+        read: the verification service is handed this one to bind with, and handing it back
+        would make the two a cycle.
+        """
+        async with self._sessionmaker() as session:
+            link = await UserLinkStore(session).record_for(
+                guild_id=guild_id, discord_user_id=discord_user_id
+            )
+            proof = await VerifiedIdentityStore(session).proved(
+                guild_id=guild_id, discord_user_id=discord_user_id
+            )
+            repository = await RepositoryStore(session).get_by_guild(guild_id)
+            # Read while the session is open, which is the only time the row can be read.
+            repo_name = None if repository is None else repository.repo_name
+        return LinkStanding(repo_name=repo_name, link=link, proof=proof)
 
     async def _write(
         self, guild_id: int, username: str, github_user_id: int, discord_user_id: int
