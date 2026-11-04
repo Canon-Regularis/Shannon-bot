@@ -16,6 +16,7 @@ from shannon.commands.conversations import (
 from shannon.commands.labels import build_label_command, build_unlabel_command
 from shannon.commands.link import build_link_command
 from shannon.commands.link_team import build_link_team_command
+from shannon.commands.linked import build_linked_command
 from shannon.commands.mentions import build_mentions_command
 from shannon.commands.people import (
     build_assign_command,
@@ -763,7 +764,7 @@ def _commands(
         ),
         # One command for a board, with five halves, since issue #201. It is gated on all but one
         # of them - withdrawing your own authorisation takes no tier - so it keeps its `gate`, and
-        # `/mentions` below is again the only command with none.
+        # `/linked` and `/mentions` below are the only commands with none.
         build_board_command(boards, verification, board_credentials, gate),
         build_pr_command(build_pull_request_sync(sessionmaker, github, pr_sync), gate),
         build_issue_command(build_issue_sync(sessionmaker, github, issue_sync), gate),
@@ -773,8 +774,12 @@ def _commands(
         build_track_command(ThreadTracking(sessionmaker), gate),
         build_link_command(verification, gate),
         build_link_team_command(TeamLinkingService(sessionmaker, github), gate),
-        # The only one with no gate at all, which is visible at a glance and is the point.
-        # See `_permissions.UNGATED`.
+        # The two with no gate at all, which is visible at a glance and is the point: each is
+        # about whoever runs it. See `_permissions.UNGATED`.
+        # `/linked` reads back through the service a followed link binds with, which was handed
+        # in here unused from issue #144 until something asked about a link, and asks the
+        # verification service only whether `/link` can run here at all. Issue #232.
+        build_linked_command(links, verification),
         build_mentions_command(MentionPreferences(sessionmaker)),
         # Gated on one of its halves, as `/link` is: reminding yourself takes no role, reminding
         # somebody else does.
@@ -844,6 +849,7 @@ def build_container(
     # Built here rather than in `_commands`, where it used to be constructed twice, because
     # the verification service needs it too: following a one-time link is what writes a link
     # row now, so the thing that spends the link is the thing that has to be able to write one.
+    # `/linked` reads it back through the same service.
     links = UserLinkingService(sessionmaker)
     # The board authorisations, and the cipher over them. Built beside the verification service
     # because following a BOARD link is what stores one, in the same way that following a LINK link
