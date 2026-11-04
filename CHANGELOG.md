@@ -8127,3 +8127,45 @@ feature end to end rather than assuming a predecessor the file never recorded.
   checked against what GitHub's own renderer draws, and a line written to make the reading slow is
   read at once. The conversion, every renderer that shows a body, the mention reader and the
   comment path end to end are tested with headings in them.
+
+## Whether you are linked, without linking again
+
+- **`/linked`** (#232) says whether you are linked to a GitHub account in this server: which
+  one, since when, whether GitHub has vouched that it is yours, and which repository the server
+  mirrors. Finding out used to mean running `/link` again and going through the whole round trip.
+  It reads what this bot already holds and asks GitHub nothing. Anybody may run it, about their
+  own account only, and the answer is private.
+- **What is still owed, it says.** "Linked" has states that look alike from outside, and each one
+  is told apart, with `/link` as the thing to run:
+  - a link nothing proves, because it was made without signing in, or because a later sign-in as
+    another account replaced the proof behind it;
+  - a link whose name GitHub has since handed to another account, the one the member signed in
+    as, so it points at an account nobody can sign in as;
+  - a link by name alone, from before this bot asked GitHub whose a login was, which never
+    mentions anybody;
+  - a sign-in for `/register`, `/unregister` or `/board`, which proves an account and links none
+    to you. This is the likeliest way to believe you are linked when you are not.
+- **Only what it can know.** Everything it says is stored, so a GitHub rename since the link was
+  made is not seen: a link GitHub vouched for says to run `/link` after one rather than that
+  nothing is owed, and the small print says where threads can mention you only as far as it
+  always holds. Where this deployment cannot run `/link` at all, it says an admin has to finish
+  setting up sign-in rather than sending anybody to a command that will refuse them.
+- **Since when.** The day a link was made, shown in each reader's own calendar. It follows the
+  login, as the row does: linking the same login again or following a rename keeps the day, and
+  linking another login starts it again, even for the same account under a new name.
+- **One rule for proved.** Whether a proof stands behind a link is decided in one place, which
+  `/assign` and its siblings and `/linked` all ask, so the two answers cannot drift apart.
+  `/assign` now reads the proof for a link by name alone too, and answers it no, as before.
+- **The second command with no role behind it.** It is about whoever runs it, as `/mentions` is,
+  and decides nothing about the server. It takes no member argument, because another member's link
+  names their GitHub account.
+- **For whoever deploys it.** No migration, setting or permission. The command is registered the
+  next time the bot starts.
+- **Said truly elsewhere too.** `README.md`'s `SHANNON_REQUIRE_PROVED_LINKS` row no longer says
+  every link since #144 stays proved, the `verified_identities` row no longer says proofs are
+  kept briefly, and the comments on why proofs and mutes have tables of their own say the link
+  row is replaced when its login changes rather than on every `/link`.
+- **Tests.** New files for the rule, the service and the command, and one through the container
+  the bot builds, which fails on any call to GitHub at all. The store gains tests for the day a
+  link was made, changing login and account one at a time, and the formatting tests gain the
+  day's own form.
