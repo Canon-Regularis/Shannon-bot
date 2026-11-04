@@ -120,7 +120,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           # Pinned for the reason the matrix job below gives at length.
-          version: "0.12.0"
+          version: "0.13.7"
           enable-cache: true
           cache-dependency-glob: uv.lock
           python-version: "3.12"
@@ -161,7 +161,9 @@ jobs:
       # One version failing should not hide the result for the others.
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13", "3.14"]
+        # 3.15 because the image runs it. A release should never ship on an interpreter the
+        # suite has not been run on.
+        python: ["3.12", "3.13", "3.14", "3.15"]
 
     services:
       postgres:
@@ -191,7 +193,10 @@ jobs:
           # version that is, on every leg of the matrix, and a build that has changed nothing
           # can start failing on a release nobody here made. An exact version skips that
           # question; a range does not, because the action resolves a range by asking anyway.
-          version: "0.12.0"
+          #
+          # 0.13.7 rather than 0.12: a uv installs only the Pythons it knew of when it was
+          # released, and 0.12.0 knew 3.15 as a beta. This one installs 3.15.2, the image's.
+          version: "0.13.7"
           enable-cache: true
           cache-dependency-glob: uv.lock
           python-version: ${{ matrix.python }}
@@ -199,9 +204,9 @@ jobs:
       - run: uv sync --extra dev --locked
 
       - name: Test
-        # Coverage on one version rather than all three. The answer does not differ between
-        # them, nothing here branches on the Python version, and a floor enforced three times is
-        # three chances for one flaky test to fail the build over a number.
+        # Coverage on one version rather than all four. The answer does not differ between
+        # them, nothing here branches on the Python version, and a floor enforced four times is
+        # four chances for one flaky test to fail the build over a number.
         run: >-
           uv run pytest -q --durations=10
           ${{ matrix.python == '3.14' && '--cov' || '' }}
@@ -218,8 +223,8 @@ jobs:
         # tests were reading a real `.env` off whoever's machine they ran on. README tells a
         # newcomer to run the whole suite, so the whole suite is what this guards.
         #
-        # One version rather than three, for the reason the coverage flag above gives: nothing
-        # here branches on the Python version, so the other two legs would be running the unit
+        # One version rather than four, for the reason the coverage flag above gives: nothing
+        # here branches on the Python version, so the other three legs would be running the unit
         # tier a second time to re-learn the same answer.
         #
         # No `--cov` on purpose: with the integration tier skipped the hundred per cent floor
@@ -359,7 +364,7 @@ jobs:
         with:
           # Pinned for the reason the matrix job gives. It matters most here: this is the one job
           # that runs whatever else was skipped, so it is the one whose red nobody can dismiss.
-          version: "0.12.0"
+          version: "0.13.7"
           enable-cache: true
           cache-dependency-glob: uv.lock
 

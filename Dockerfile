@@ -1,6 +1,6 @@
 # Build the package into a virtualenv, then carry only that venv into the runtime image, so
 # neither pip's cache nor the build inputs end up in the shipped layer.
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -24,7 +24,7 @@ RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt -o /
     && uv pip install --python /opt/venv/bin/python --no-deps .
 
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
