@@ -1073,6 +1073,16 @@ def as_relative_time(value: datetime) -> str:
     return f"<t:{int(as_utc(value).timestamp())}:R>"
 
 
+def as_date(value: datetime) -> str:
+    """The day alone, as each reader's own calendar writes it. Issue #232.
+
+    "4 March 2026" or "March 4, 2026", for a fact that lasts months, such as the day somebody
+    linked their account: the minute `as_timestamp` adds is noise there, and a relative "3 months
+    ago" reads wrong after "since".
+    """
+    return f"<t:{int(as_utc(value).timestamp())}:D>"
+
+
 # Issue #229. A heading, like every other line this bot says on its own account, so a reminder can
 # be found by scrolling a channel for it. An alarm clock because that is what this is, and nothing
 # else here uses one.
