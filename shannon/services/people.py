@@ -227,21 +227,15 @@ class ItemPeople:
     ) -> bool:
         """Whether GitHub has vouched that this member holds the account their link points at.
 
-        Held on the account id rather than the login, which matters both ways round. A proof
-        survives a rename, because the name moved and the account did not. And it does not
-        survive the link being pointed somewhere else, because that is a different account and
-        nobody has vouched for it.
-
-        A link with no id cannot be proved at all. That is the honest answer rather than a
-        lenient one: those rows predate the column, so there is nothing to compare, and reading
-        no evidence as a yes is what this whole path is here to stop.
+        The rule is `LinkedAccount.proved_by`, which `/linked` asks too, so the two cannot come
+        to disagree about whose a link is. It reads the proof even for a link by name alone, which
+        the rule then answers no: one indexed read, for rows older than the id column, so that
+        the rule stays in one place.
         """
-        if claimed.github_user_id is None:
-            return False
         proved = await self._proof.ever_proved(
             guild_id=found.guild_id, discord_user_id=discord_user_id
         )
-        return proved is not None and proved.github_user_id == claimed.github_user_id
+        return claimed.proved_by(proved)
 
     async def _as_github_names_it(
         self, found: FoundItem, claimed: LinkedAccount, discord_user_id: int
