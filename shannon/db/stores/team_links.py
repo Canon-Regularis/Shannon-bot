@@ -49,7 +49,7 @@ class TeamLinkStore:
         race on and no advisory lock to take, unlike linking a person.
         """
         slug = github_team.strip().lstrip("@").lower()
-        row = await self._session.scalar(
+        row: TeamLink | None = await self._session.scalar(
             pg_insert(TeamLink)
             .values(
                 discord_guild_id=guild_id,
