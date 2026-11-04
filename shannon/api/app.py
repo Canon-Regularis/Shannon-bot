@@ -20,7 +20,16 @@ def create_app(
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Build the ASGI app. Leaving the queue out makes the route do its work inline."""
-    app = FastAPI(title="Shannon Bot", version="0.1.0", lifespan=lifespan)
+    # FastAPI traces every request by itself once any OpenTelemetry provider is set up in the
+    # process, and its span keeps the query string word for word: on the OAuth callbacks that is
+    # the `code` and the `state` that `oauth.py` promises are never logged. Nothing here sets a
+    # provider up; this keeps the promise on the day something does.
+    app = FastAPI(
+        title="Shannon Bot",
+        version="0.1.0",
+        lifespan=lifespan,
+        telemetry={"tracing": False, "metrics": False, "logs": False},
+    )
     app.state.settings = settings or get_settings()
     app.state.event_router = event_router or EventRouter()
     app.state.delivery_queue = queue
