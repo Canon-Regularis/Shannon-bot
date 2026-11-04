@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import UserLink
-from shannon.db.stores.user_links import LinkedAccount, UserLinkStore
+from shannon.db.stores.user_links import LinkedAccount, LinkRecord, UserLinkStore
 from shannon.services.linking import UserLinkingService
 
 pytestmark = pytest.mark.integration
+
+LONG_AGO = datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -275,6 +278,145 @@ class TestWhatOneMemberClaimed:
         found = await UserLinkStore(db_session).account_for(guild_id=1, discord_user_id=42)
 
         assert found == LinkedAccount(login="octocat", github_user_id=None)
+
+
+class TestWhenAMemberWasLinked:
+    """A member's link and the day it was made, which `/linked` tells them about. Issue #232.
+
+    The day is the row's `created_at`, so what it means is whatever `link` does with the row, and
+    `link` keeps or replaces it by the LOGIN. So the day is kept when the same login is linked
+    again, whichever account holds it, and when a rename is followed; it starts again when another
+    login is linked, even for the same account under a new name. Found reviewing #232, where the
+    first version said "account" and the tests changed login and account together, so they could
+    not tell the two rules apart.
+    """
+
+    async def linked_long_ago(
+        self, store: UserLinkStore, session: AsyncSession, login: str, github_user_id: int
+    ) -> None:
+        await store.link(
+            guild_id=1, github_username=login, github_user_id=github_user_id, discord_user_id=42
+        )
+        await session.execute(update(UserLink).values(created_at=LONG_AGO))
+
+    async def read_back(self, store: UserLinkStore, session: AsyncSession) -> LinkRecord:
+        """What the database holds now, rather than whatever the session remembers.
+
+        Flushed first, as `UserLinkingService` commits after `link`: the same-login path changes
+        the row in memory and leaves the write to the caller, and expiring before it is written
+        would throw the change away rather than read it back.
+        """
+        await session.flush()
+        session.expire_all()
+        found = await store.record_for(guild_id=1, discord_user_id=42)
+        assert found is not None
+        return found
+
+    async def test_it_answers_the_account_and_the_day_its_row_was_made(
+        self, db_session: AsyncSession
+    ) -> None:
+        store = UserLinkStore(db_session)
+        await store.link(
+            guild_id=1, github_username="OctoCat", github_user_id=111, discord_user_id=42
+        )
+        made = await db_session.scalar(select(UserLink.created_at))
+        assert made is not None
+
+        found = await store.record_for(guild_id=1, discord_user_id=42)
+
+        assert found == LinkRecord(
+            account=LinkedAccount(login="octocat", github_user_id=111), linked_at=made
+        )
+
+    async def test_a_member_who_has_not_linked_has_no_record(
+        self, db_session: AsyncSession
+    ) -> None:
+        assert await UserLinkStore(db_session).record_for(guild_id=1, discord_user_id=42) is None
+
+    async def test_a_link_in_another_server_is_not_this_ones(
+        self, db_session: AsyncSession
+    ) -> None:
+        await UserLinkStore(db_session).link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+
+        assert await UserLinkStore(db_session).record_for(guild_id=2, discord_user_id=42) is None
+
+    async def test_linking_the_same_login_again_keeps_the_day(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Running `/link` again as the same account under the same name is the same link."""
+        store = UserLinkStore(db_session)
+        await self.linked_long_ago(store, db_session, "octocat", 111)
+
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+
+        assert await self.read_back(store, db_session) == LinkRecord(
+            account=LinkedAccount(login="octocat", github_user_id=111), linked_at=LONG_AGO
+        )
+
+    async def test_the_same_login_held_by_another_account_now_keeps_the_day(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The row is kept by its login, so a name that changed hands keeps the day it was
+        first linked on, with the new account's id written over the old one."""
+        store = UserLinkStore(db_session)
+        await self.linked_long_ago(store, db_session, "octocat", 111)
+
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=999, discord_user_id=42
+        )
+
+        assert await self.read_back(store, db_session) == LinkRecord(
+            account=LinkedAccount(login="octocat", github_user_id=999), linked_at=LONG_AGO
+        )
+
+    async def test_linking_another_login_starts_the_day_again(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Another login is another link, and how long the first one stood says nothing about
+        this one."""
+        store = UserLinkStore(db_session)
+        await self.linked_long_ago(store, db_session, "octocat", 111)
+
+        await store.link(
+            guild_id=1, github_username="monalisa", github_user_id=222, discord_user_id=42
+        )
+        found = await self.read_back(store, db_session)
+
+        assert found.account == LinkedAccount(login="monalisa", github_user_id=222)
+        assert found.linked_at > LONG_AGO
+
+    async def test_the_same_account_under_a_new_name_starts_the_day_again(
+        self, db_session: AsyncSession
+    ) -> None:
+        """A rename nothing followed, then `/link`: the new name finds no row, so the old one is
+        replaced and the day is today's, although the account is the one linked all along."""
+        store = UserLinkStore(db_session)
+        await self.linked_long_ago(store, db_session, "octocat", 111)
+
+        await store.link(
+            guild_id=1, github_username="the-octocat", github_user_id=111, discord_user_id=42
+        )
+        found = await self.read_back(store, db_session)
+
+        assert found.account == LinkedAccount(login="the-octocat", github_user_id=111)
+        assert found.linked_at > LONG_AGO
+
+    async def test_following_a_rename_keeps_the_day(self, db_session: AsyncSession) -> None:
+        """Following a rename changes the name in place, so it is still the link made then."""
+        store = UserLinkStore(db_session)
+        await self.linked_long_ago(store, db_session, "octocat", 111)
+
+        await store.follow_rename(
+            guild_id=1, discord_user_id=42, github_user_id=111, login="the-octocat"
+        )
+
+        assert await self.read_back(store, db_session) == LinkRecord(
+            account=LinkedAccount(login="the-octocat", github_user_id=111), linked_at=LONG_AGO
+        )
 
 
 class TestFollowingARename:

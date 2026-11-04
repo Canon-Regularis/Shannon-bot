@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.models import UserLink
+from shannon.db.stores.identities import ProvedAccount
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,50 @@ class LinkedAccount:
     @classmethod
     def of(cls, row: UserLink) -> LinkedAccount:
         return cls(login=row.github_username, github_user_id=row.github_user_id)
+
+    def proved_by(self, proof: ProvedAccount | None) -> bool:
+        """Whether this proof is GitHub vouching that the member holds the account linked.
+
+        Held on the account id rather than the login, which matters both ways round. A proof
+        survives a rename, because the name moved and the account did not. And it does not survive
+        the link being pointed somewhere else, because that is a different account and nobody has
+        vouched for it.
+
+        A link with no id cannot be proved at all. That is the honest answer rather than a lenient
+        one: those rows predate the column, so there is nothing to compare, and reading no
+        evidence as a yes is what this whole question is here to stop.
+
+        One rule, so `/assign`, which notes a link nothing proves, and `/linked`, which tells a
+        member theirs is one, cannot come to disagree. Issue #232.
+        """
+        return (
+            self.github_user_id is not None
+            and proof is not None
+            and proof.github_user_id == self.github_user_id
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LinkRecord:
+    """A member's link here and the day it was made, for the member asking about their own.
+
+    Beside `LinkedAccount` rather than inside it, because the day is something to tell somebody
+    and never something to compare: two reads of the same link are the same claim whenever each
+    was made.
+
+    `linked_at` is the row's `created_at`, which means "linked to this login since" rather than
+    "last ran /link", because `link` keeps or replaces the row by its login. Linking the same
+    login again keeps the row and the day, even where the account behind the name is another one
+    now, and so does following a rename. Linking another login replaces the row and the day
+    starts again, even for the same account under a new name that nothing has followed yet.
+    """
+
+    account: LinkedAccount
+    linked_at: datetime
+
+    @classmethod
+    def of(cls, row: UserLink) -> LinkRecord:
+        return cls(account=LinkedAccount.of(row), linked_at=row.created_at)
 
 
 class UserLinkStore:
@@ -99,13 +145,8 @@ class UserLinkStore:
             resolved[row.github_username] = row.discord_user_id
         return resolved
 
-    async def account_for(self, *, guild_id: int, discord_user_id: int) -> LinkedAccount | None:
-        """What this Discord member claimed here, or None if they never claimed anything.
-
-        Both halves, because the login alone is not enough to write to GitHub with. This used to
-        answer with the name and a note saying there was no second id to hold it against; there
-        was, one column over, and the cost of not reading it was a collaborator being told he had
-        no access to a repository he could write to. Issue #133.
+    async def record_for(self, *, guild_id: int, discord_user_id: int) -> LinkRecord | None:
+        """This Discord member's link here and the day it was made, or None if there is none.
 
         At most one row matches: `uq_user_links_guild_discord` is unique on this pair and its
         index serves the lookup.
@@ -116,7 +157,20 @@ class UserLinkStore:
                 UserLink.discord_user_id == discord_user_id,
             )
         )
-        return None if row is None else LinkedAccount.of(row)
+        return None if row is None else LinkRecord.of(row)
+
+    async def account_for(self, *, guild_id: int, discord_user_id: int) -> LinkedAccount | None:
+        """What this Discord member claimed here, or None if they never claimed anything.
+
+        Both halves, because the login alone is not enough to write to GitHub with. This used to
+        answer with the name and a note saying there was no second id to hold it against; there
+        was, one column over, and the cost of not reading it was a collaborator being told he had
+        no access to a repository he could write to. Issue #133.
+
+        The same read as `record_for`, without the day nobody acting on the claim needs.
+        """
+        record = await self.record_for(guild_id=guild_id, discord_user_id=discord_user_id)
+        return None if record is None else record.account
 
     async def follow_rename(
         self, *, guild_id: int, discord_user_id: int, github_user_id: int, login: str
