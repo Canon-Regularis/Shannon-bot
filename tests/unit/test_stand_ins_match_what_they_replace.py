@@ -21,6 +21,7 @@ from shannon.commands.board import AuthorisesBoards
 from shannon.commands.conversations import LogsConversations
 from shannon.commands.link import ProvesIdentity
 from shannon.commands.link_team import LinksTeams
+from shannon.commands.linked import OffersLinks, RemembersWhoIsLinked
 from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.people import PutsSomebodyOnAnItem
 from shannon.commands.regenerate import RedrawsAnItem
@@ -270,6 +271,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (SendsReminders, ReminderSender),
     # Issue #163.
     (ChoosesWhatAThreadIsTold, ThreadTracking),
+    # Issue #232. The service that binds a link reads it back, so one class answers two protocols,
+    # and the one that hands links out says whether it can.
+    (RemembersWhoIsLinked, UserLinkingService),
+    (OffersLinks, GitHubIdentityVerification),
 ]
 
 
