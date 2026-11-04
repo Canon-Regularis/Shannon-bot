@@ -375,9 +375,10 @@ class MutedMember(TimestampMixin, Base):
     """One member of one server who asked this bot not to notify them.
 
     The row is the fact: an absent row reads as pinged, so there is nothing to backfill. Its own
-    table because `UserLinkStore.link` deletes and rewrites the `user_links` row, which would
-    silently forget a preference kept there. Muting keeps the mention in the thread and takes
-    away only the notification, unlike `quiet_metadata`, which strips the mention itself.
+    table because `UserLinkStore.link` replaces the `user_links` row whenever the linked login
+    changes, which would silently forget a preference kept there. Muting keeps the mention in the
+    thread and takes away only the notification, unlike `quiet_metadata`, which strips the
+    mention itself.
     """
 
     __tablename__ = "muted_members"
@@ -551,11 +552,13 @@ class IdentityVerification(TimestampMixin, Base):
 
 
 class VerifiedIdentity(TimestampMixin, Base):
-    """Who a Discord account proved they are on GitHub, and when they proved it.
+    """Who a Discord account last proved they are on GitHub here, and when they proved it.
 
     Kept rather than re-proved on every command, because the proof costs a browser visit, and the
-    freshness rule lives with the service rather than here. Its own table for the reason
-    `muted_members` is: `UserLinkStore.link` rewrites the `user_links` row from scratch.
+    freshness rule lives with the service rather than here. One row per member and server, so
+    every round trip replaces the one before, whatever it was for. Its own table for the reason
+    `muted_members` is: `UserLinkStore.link` replaces the `user_links` row whenever the linked
+    login changes.
     """
 
     __tablename__ = "verified_identities"

@@ -330,8 +330,9 @@ class FakeInteraction:
     def mark(self) -> str:
         """Which of the three outcome marks the one reply opens with. Issue #147.
 
-        Empty for the one reply that carries none: `/mentions` reading back what it found did
-        not change anything, and a tick on the answer to a question would be claiming it had.
+        Empty for the replies that carry none: a command reading back what it found, as
+        `/mentions`, `/track` and `/linked` do, changed nothing, and a tick on the answer to a
+        question would be claiming it had.
         """
         head = self.reply.split(" ", 1)[0]
         return head if head in _MARKS else ""

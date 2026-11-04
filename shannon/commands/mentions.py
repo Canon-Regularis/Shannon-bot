@@ -46,7 +46,7 @@ _STILL_REACHES_YOU = (
 
 
 def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
-    """The one command here that takes no permission gate, and the only one that should.
+    """One of the two commands here that take no permission gate, with `/linked`.
 
     It decides whether your own name notifies you, which is nobody else's business.
     `_permissions.UNGATED` names it and a test holds that list against the factories in this

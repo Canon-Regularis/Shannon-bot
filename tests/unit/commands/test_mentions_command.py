@@ -1,4 +1,4 @@
-"""`/mentions`, the one command anybody may run. Issue #80.
+"""`/mentions`, one of the two commands anybody may run. Issue #80.
 
 Worth asserting the exact wording rather than a clause of it, for the same reason `/refresh`
 does: the reply is the whole of what somebody gets back, it is ephemeral so nobody else can
@@ -121,7 +121,7 @@ class TestAskingWithoutSetting:
 
 class TestWhoMayRunIt:
     async def test_anybody_can_run_it(self) -> None:
-        """The deliberate break: this is the only command in the bot with no role behind it.
+        """The deliberate break: this and `/linked` are the only commands with no role behind them.
 
         Every other one decides something about the server. This decides whether your own name
         notifies you, and gating it would mean asking a project manager to turn off your own
