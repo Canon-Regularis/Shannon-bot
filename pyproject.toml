@@ -14,11 +14,14 @@ dependencies = [
     # verification of somebody else's token - goes unused, and it pulls this in regardless.
     "cryptography>=43.0.0",
     "discord-py>=2.7.1",
-    "fastapi>=0.141.1",
+    # 0.142 is the first that takes `telemetry=`, which `api/app.py` uses to keep its tracing off.
+    "fastapi>=0.142.0",
     "httpx>=0.28.1",
     "pydantic>=2.12.0",
     "pydantic-settings>=2.15.0",
-    "sqlalchemy>=2.0.51",
+    # The asyncio extra is what brings greenlet, which every async session and the migrations'
+    # `run_sync` need. SQLAlchemy 2.0 installed it regardless; 2.1 installs it only when asked.
+    "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.52.1",
 ]
 
