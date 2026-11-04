@@ -202,10 +202,14 @@ class IdentityVerificationStore:
             discord_user_id=found[1],
             purpose=found[2],
             # A null owner back to the blank `ChosenBoard` uses for "nobody named one".
-            board=None if found[3] is None else ChosenBoard(number=found[3], owner=found[4] or ""),
+            # Bound before the test so the narrowing holds: a check on `found[3]` itself says
+            # nothing to pyright about the next time it is read.
+            board=None
+            if (number := found[3]) is None
+            else ChosenBoard(number=number, owner=found[4] or ""),
             tier=None
-            if found[5] is None
-            else frozenset(name for name in found[5].split(",") if name),
+            if (tier := found[5]) is None
+            else frozenset(name for name in tier.split(",") if name),
             chosen_under=found[6],
         )
 

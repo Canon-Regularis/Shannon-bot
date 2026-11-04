@@ -356,7 +356,13 @@ class TrackedItemStore:
             )
             .order_by(TrackedItem.github_updated_at.desc().nullslast(), TrackedItem.id.desc())
         )
-        return [StrandedThread(row[0], row[1], row[2], row[3], row[4]) for row in rows.all()]
+        return [
+            StrandedThread(row[0], row[1], row[2], thread_id, row[4])
+            for row in rows.all()
+            # Narrowed per row rather than trusted from the WHERE clause, which filters in SQL and
+            # tells the type checker nothing.
+            if (thread_id := row[3]) is not None
+        ]
 
     async def forget_the_board(self, repository_id: int) -> None:
         """Let go of everything this repository remembers about the board it was on.

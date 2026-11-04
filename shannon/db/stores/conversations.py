@@ -157,23 +157,39 @@ class ConversationStore:
             .group_by(LoggedConversation.id)
             .order_by(LoggedConversation.id)
         )
+        # Unpacked by name rather than indexed: SQLAlchemy types a select's first ten columns one
+        # by one, and an index past them reads as any column's type at all.
         return [
             PendingBatch(
-                conversation_id=row[0],
-                tracked_item_id=row[1],
-                discord_thread_id=row[2],
-                count=row[3],
-                characters=row[4],
-                oldest=row[5],
-                newest=row[6],
-                through_id=row[7],
-                stopped=row[8] is not None,
-                flush_id=row[9],
-                flush_started_at=row[10],
-                flush_through_id=row[11],
-                failed_flushes=row[12],
+                conversation_id=conversation_id,
+                tracked_item_id=tracked_item_id,
+                discord_thread_id=discord_thread_id,
+                count=count,
+                characters=characters,
+                oldest=oldest,
+                newest=newest,
+                through_id=through_id,
+                stopped=stopped_at is not None,
+                flush_id=flush_id,
+                flush_started_at=flush_started_at,
+                flush_through_id=flush_through_id,
+                failed_flushes=failed_flushes,
             )
-            for row in rows.all()
+            for (
+                conversation_id,
+                tracked_item_id,
+                discord_thread_id,
+                count,
+                characters,
+                oldest,
+                newest,
+                through_id,
+                stopped_at,
+                flush_id,
+                flush_started_at,
+                flush_through_id,
+                failed_flushes,
+            ) in rows.all()
         ]
 
     async def claim(
