@@ -7,6 +7,7 @@ import pytest
 
 from shannon.discord_bot.formatting import (
     OPEN_ON_GITHUB,
+    as_date,
     format_card_archived,
     format_card_converted,
     format_card_deleted,
@@ -676,3 +677,13 @@ class TestTheCardTheBlockIsDrawnOn:
         """A plain panel goes out as a string and costs no components. This one has a bar, a
         button and usually a face, so it never can."""
         assert not format_pull_request(SNAPSHOT, status=Status.NOT_REVIEWED).is_plain
+
+
+class TestADay:
+    """The day alone, which `/linked` says a link was made on. Issue #232."""
+
+    def test_it_is_discords_long_date_form(self) -> None:
+        assert as_date(UPDATED) == f"<t:{int(UPDATED.timestamp())}:D>"
+
+    def test_a_time_with_no_zone_is_read_as_utc_rather_than_the_hosts(self) -> None:
+        assert as_date(UPDATED.replace(tzinfo=None)) == f"<t:{int(UPDATED.timestamp())}:D>"

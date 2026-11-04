@@ -115,6 +115,7 @@ class TestWhatItWiresUp:
             "label",
             "link",
             "link_team",
+            "linked",
             "log_conversation",
             "mentions",
             "pr",

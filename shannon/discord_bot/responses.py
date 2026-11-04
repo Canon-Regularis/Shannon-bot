@@ -45,7 +45,8 @@ async def reply(interaction: discord.Interaction, message: Panel) -> None:
     A `Panel` rather than a string, so a reply carrying no mark is not a thing this project can
     express: `done`, `owed` and `refused` are the only ways to build one and both type checkers
     hold it, which is a stronger promise than a test could make. A panel with no accent still
-    goes out as ordinary text — `/mentions` reporting what it reads is the one that does.
+    goes out as ordinary text — `/mentions`, `/track` and `/linked` reporting what they read are
+    the ones that do.
 
     It stays where it was sent; `reply_then_delete` is the one that goes.
     """

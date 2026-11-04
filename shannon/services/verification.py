@@ -441,7 +441,11 @@ class GitHubIdentityVerification:
             )
 
     async def ever_proved(self, *, guild_id: int, discord_user_id: int) -> ProvedAccount | None:
-        """The account this person has proved they hold, however long ago that was.
+        """The last account this person proved they hold here, however long ago that was.
+
+        The last one, because every round trip replaces the proof whatever it was for: a link
+        proved at `/link` is no longer proved once its member signs in as another account for
+        `/register`, `/unregister` or `/board`, which `/linked` tells them.
 
         Two methods rather than one taking a window, because the difference is not a parameter: it
         is the difference between asking permission for something irreversible and asking whether a
