@@ -33,13 +33,14 @@ from shannon.commands._guards import DecidesGitHubAccess, github_allows, in_a_th
 from shannon.commands._permissions import WORKFLOW_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import defer, done, refused, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import ShannonError
 from shannon.github import people
-from shannon.services.workflow import WorkflowOutcome
+from shannon.github.projects import BoardColumn
+from shannon.services.workflow import WorkflowOutcome, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class MovesItems(Protocol):
         self,
         *,
         thread_id: int,
-        status: Status,
+        status: Status | None,
         column: str = "",
         acting: int | None = None,
     ) -> WorkflowOutcome: ...
@@ -102,9 +103,11 @@ class MovesItems(Protocol):
 
 
 class OffersColumns(Protocol):
-    """Which columns this server's board has, for the picker to offer."""
+    """Which columns this server's board has, for the picker to offer and the command to accept."""
 
     async def offered(self, guild_id: int) -> tuple[str, ...]: ...
+
+    async def column_named(self, guild_id: int, column: str) -> BoardColumn | None: ...
 
 
 def build_workflow_commands(
@@ -134,26 +137,30 @@ def _status_command(
         # autocomplete offers suggestions: what arrives may have been typed, may be a column
         # from the board this repository mirrored last week, or may be prose.
         wanted = status_from_column(to)
-        if wanted is None:
-            await reply(interaction, refused(_not_a_status(to)))
-            return
-        # The text goes down as the column too. The status decides the label, the lock and the
-        # block in Discord; the column decides which of the board's own columns the card lands
-        # in, and they are not the same question on a board with two columns for one status.
-        await _act(
-            interaction,
-            "status",
-            gate,
-            access,
-            lambda thread_id: service.set_status(
+
+        async def move(thread_id: int) -> WorkflowOutcome:
+            # A column this bot has no status for is one all the same where the board has it,
+            # since issue #246: `Ready To Merge` moves the card and the label, and the item keeps
+            # its status. Asked here, after the defer, because it can be a GitHub read. The guild
+            # is there by now, since `_act` refuses anywhere else, and None is no board.
+            guild_id = interaction.guild_id
+            if wanted is None and (
+                guild_id is None or await columns.column_named(guild_id, to) is None
+            ):
+                raise WorkflowRefusedError(_not_a_status(to))
+            # The text goes down as the column too. The status decides the lock and the block in
+            # Discord; the column decides the label and which of the board's own columns the card
+            # lands in, which are not the same question on a board with two columns for one
+            # status.
+            return await service.set_status(
                 thread_id=thread_id,
                 status=wanted,
                 column=to.strip(),
                 # Whoever ran it, so the card is moved as them. Issue #170.
                 acting=interaction.user.id,
-            ),
-            said=to.strip(),
-        )
+            )
+
+        await _act(interaction, "status", gate, access, move, said=to.strip())
 
     run.autocomplete("to")(_suggesting(columns))
 
@@ -291,8 +298,8 @@ def _suggesting(columns: OffersColumns) -> Suggesting:
 
     This bot's own names behind them, never instead: they are what works when a board will not read
     inside the three seconds Discord allows, and what works for a server mirroring no board at all.
-    A column this bot cannot read as a status is left out, because offering one would be offering an
-    entry its own callback refuses.
+    Every column the board has is offered, since issue #246, including one this bot has no status
+    for: `Ready To Merge` moves the card and its label, and the item keeps the status it has.
 
     Never raises, and answers nothing rather than badly. An autocomplete that fails shows the person
     nothing at all, so a GitHub outage is indistinguishable from a board with no columns - and there
@@ -315,10 +322,9 @@ def _suggesting(columns: OffersColumns) -> Suggesting:
         # somebody is looking at. So this bot's own name is offered only for a status the board
         # has no column for at all - which is what keeps `/status Done` available on a board
         # with nowhere to put it, so the answer is the sentence saying so rather than silence.
-        on_the_board = [name for name in offered if status_from_column(name) is not None]
-        covered = {status_from_column(name) for name in on_the_board}
+        covered = {status_from_column(name) for name in offered}
         names = [
-            *on_the_board,
+            *offered,
             *(name for name in OWN_NAMES if status_from_column(name) not in covered),
         ]
 
