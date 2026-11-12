@@ -33,6 +33,7 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
+from shannon.github.projects import BoardColumn
 from shannon.services.projects import (
     ARCHIVED_CARD_RECHECK_SECONDS,
     CARD_READ_SPACING_SECONDS,
@@ -766,6 +767,78 @@ class TestABoardThatMayNotSetAStatus:
         assert item.status is Status.IN_REVIEW
 
 
+class BoardColumnsOf:
+    """The workflow's view of a board's columns, as the container wires `BoardColumns` in."""
+
+    def __init__(self, *columns: BoardColumn) -> None:
+        self.board = columns
+
+    async def columns(self, guild_id: int, *, fresh: bool = False) -> tuple[BoardColumn, ...]:
+        return self.board
+
+
+class TestABoardMoveIsLabelledAsTheBoardHasIt:
+    """Issue #246, with the board's columns wired in as they are in production: a card moved on
+    the board gets the board's own column as its label, in the board's colour."""
+
+    @pytest.fixture
+    def workflow(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        github_client: FakeGitHubClient,
+        threads: FakeThreadGateway,
+    ) -> ItemWorkflow:
+        github_client.label_colours_by_repo[REPO_FULL] = {"backend": "1d76db"}
+        return build_item_workflow(
+            db_sessionmaker,
+            github_client,
+            threads,
+            pr_sync=build_item_sync(db_sessionmaker, threads, PullRequestPolicy()),
+            issue_sync=build_item_sync(db_sessionmaker, threads, IssuePolicy()),
+            authorisations=FakeBoardCredentials(),
+            columns=BoardColumnsOf(
+                BoardColumn("Todo", "BLUE"),
+                BoardColumn("In Progress", "YELLOW"),
+                BoardColumn("Ready To Merge", "ORANGE"),
+                BoardColumn("Done", "GREEN"),
+            ),
+        )
+
+    @pytest.fixture
+    async def mirrored_pr(
+        self,
+        registered: Repository,
+        threads: FakeThreadGateway,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        pr_event,
+    ) -> int:
+        snapshot = pr_event("opened")
+        await build_item_sync(db_sessionmaker, threads, PullRequestPolicy()).sync(snapshot)
+        return snapshot.github_object_id
+
+    async def test_the_label_is_the_boards_column_in_its_colour(
+        self, mirrored_pr: int, poller_for, github_client: FakeGitHubClient
+    ) -> None:
+        await poller_for(
+            FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        ).run_once()
+
+        assert github_client.labels[(REPO_FULL, 7)] == ["backend", "status: In Progress"]
+        assert github_client.label_colours_by_repo[REPO_FULL]["status: In Progress"] == "d4a72c"
+
+    async def test_a_column_with_no_status_is_labelled_and_coloured_too(
+        self, mirrored_pr: int, poller_for, github_client: FakeGitHubClient
+    ) -> None:
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Ready To Merge")]
+
+        assert await poller.run_once() == 1
+        assert github_client.labels[(REPO_FULL, 7)] == ["backend", "status: Ready To Merge"]
+        assert github_client.label_colours_by_repo[REPO_FULL]["status: Ready To Merge"] == "fb8500"
+
+
 class TestCardsWrappingSomethingAlreadyMirrored:
     """The half of "mirror board movement" that is not about drafts.
 
@@ -814,11 +887,36 @@ class TestCardsWrappingSomethingAlreadyMirrored:
     async def test_the_github_label_follows_the_board(
         self, mirrored_pr: int, poller_for, github_client: FakeGitHubClient
     ) -> None:
-        """It goes through the workflow, so the board and the labels stay in agreement."""
+        """It goes through the workflow, so the board and the labels stay in agreement. This
+        workflow is handed no board columns, so the label is this bot's own name for the status;
+        `TestABoardMoveIsLabelledAsTheBoardHasIt` holds the board's own spelling."""
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
         await poller_for(board).run_once()
 
-        assert "IN_REVIEW" in github_client.labels[(REPO_FULL, 7)]
+        assert "status: In review" in github_client.labels[(REPO_FULL, 7)]
+
+    async def test_a_column_with_no_status_moves_the_label_and_keeps_the_status(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        github_client: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """Issue #246. A card dragged to `Ready To Merge` used to be passed over, so its label
+        went on saying the column it had left."""
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Progress"))
+        poller = poller_for(board)
+        await poller.run_once()
+        board.items = [wraps(ObjectType.PR, mirrored_pr, column="Ready To Merge")]
+
+        assert await poller.run_once() == 1
+        assert github_client.labels[(REPO_FULL, 7)] == ["backend", "status: Ready To Merge"]
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.status is Status.IN_REVIEW
+        assert item.project_column == "Ready To Merge"
 
     async def test_a_card_already_in_the_right_column_does_nothing(
         self, mirrored_pr: int, poller_for, github_client: FakeGitHubClient
@@ -832,27 +930,44 @@ class TestCardsWrappingSomethingAlreadyMirrored:
         assert moved == 0
         assert github_client.label_calls == []
 
-    async def test_a_column_nobody_taught_us_moves_nothing(
-        self, mirrored_pr: int, poller_for, db_session: AsyncSession
+    async def test_a_column_nobody_taught_us_moves_the_label_and_not_the_status(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        db_session: AsyncSession,
+        github_client: FakeGitHubClient,
     ) -> None:
-        """The column is written down anyway, and that is what proves the card was matched.
-
-        `0` is the answer to every other question this poller asks - a board it could not read, a
-        card wrapping nothing, a row with no thread yet - so on its own it holds whether or not
-        the unknown column was ever reached. The memory is the only thing that says it was, and
-        it is also what stops the same card being looked at again on every poll for ever.
-        """
+        """Issue #246. A first look at an item nobody has decided about lets the board fill it
+        in, as it does for any other column: the label follows the card, and with no status to
+        take from the column the item keeps NOT_REVIEWED. The column is written down, which is
+        what stops the same card being looked at again on every poll for ever."""
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Needs design input"))
 
-        assert await poller_for(board).run_once() == 0
+        assert await poller_for(board).run_once() == 1
 
+        assert github_client.labels[(REPO_FULL, 7)] == ["backend", "status: Needs design input"]
         db_session.expire_all()
         item = await db_session.scalar(
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
-        assert item.project_column == "Needs design input", (
-            "the card never reached its row, so nothing refused anything"
-        )
+        assert item.status is Status.NOT_REVIEWED
+        assert item.project_column == "Needs design input"
+
+    async def test_a_first_look_at_a_decided_item_in_such_a_column_leaves_it_alone(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        workflow: ItemWorkflow,
+        threads: FakeThreadGateway,
+        github_client: FakeGitHubClient,
+    ) -> None:
+        """The first-look rule, the same as for any other column."""
+        await workflow.set_status(thread_id=threads.created[0].thread_id, status=Status.BACKLOG)
+        before = list(github_client.label_calls)
+        board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="Needs design input"))
+
+        assert await poller_for(board).run_once() == 0
+        assert github_client.label_calls == before
 
     async def test_a_card_wrapping_something_untracked_is_left_alone(
         self, board_channel: None, poller_for
@@ -1366,6 +1481,66 @@ class TestASecondReviewFound:
             select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
         )
         assert item.status is Status.BACKLOG
+
+    async def test_a_cleared_column_is_not_a_move(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        github_client: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """No Status says nothing about where the item is. Its label stays the board's, and the
+        poll costs no GitHub or Discord call for it. A neighbour keeps its column, so this is
+        somebody clearing one card rather than the field going."""
+        board = FakeBoard(
+            wraps(ObjectType.PR, mirrored_pr, column="In Progress"),
+            card(item_id=901, title="A card that keeps its column"),
+        )
+        poller = poller_for(board)
+        await poller.run_once()
+        before = list(github_client.label_calls)
+        board.items = [
+            wraps(ObjectType.PR, mirrored_pr, column=None),
+            card(item_id=901, title="A card that keeps its column"),
+        ]
+
+        assert await poller.run_once() == 0
+        assert github_client.label_calls == before
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.project_column == "", "the clear was not written down"
+
+    async def test_a_board_gone_blank_is_not_a_move_on_any_poll(
+        self,
+        mirrored_pr: int,
+        poller_for,
+        github_client: FakeGitHubClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """Every card blank at once is the Status field going, not a clear. The column is kept,
+        and nothing is sent round for any card, on this poll or the next."""
+        board = FakeBoard(
+            wraps(ObjectType.PR, mirrored_pr, column="In Progress"),
+            card(item_id=901, title="A card on the same board"),
+        )
+        poller = poller_for(board)
+        await poller.run_once()
+        before = list(github_client.label_calls)
+        board.items = [
+            wraps(ObjectType.PR, mirrored_pr, column=None),
+            card(item_id=901, title="A card on the same board", column=None),
+        ]
+
+        assert await poller.run_once() == 0
+        assert await poller.run_once() == 0
+        assert github_client.label_calls == before
+        db_session.expire_all()
+        item = await db_session.scalar(
+            select(TrackedItem).where(TrackedItem.github_object_type == ObjectType.PR)
+        )
+        assert item.project_column == "In Progress"
 
 
 class TestABoardNobodyFinishedSettingUp:
@@ -1923,7 +2098,12 @@ class RememberingWorkflow:
         self.acted_as: list[int | None] = []
 
     async def set_status(
-        self, *, thread_id: int, status: Status, acting: int | None = None
+        self,
+        *,
+        thread_id: int,
+        status: Status | None,
+        column: str = "",
+        acting: int | None = None,
     ) -> WorkflowOutcome:
         self.acted_as.append(acting)
         return WorkflowOutcome("Canon-Regularis/Shannon-bot", 7, changed=True)
@@ -1936,7 +2116,12 @@ class ExplodingWorkflow:
         self.calls = 0
 
     async def set_status(
-        self, *, thread_id: int, status: Status, acting: int | None = None
+        self,
+        *,
+        thread_id: int,
+        status: Status | None,
+        column: str = "",
+        acting: int | None = None,
     ) -> object:
         self.calls += 1
         raise RuntimeError("something nobody wrote a branch for")

@@ -97,7 +97,7 @@ class TestSettingAStatus:
         outcome = await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
 
         assert outcome.changed is True
-        assert github.labels[REPO_KEY] == ["backend", "IN_REVIEW"]
+        assert github.labels[REPO_KEY] == ["backend", "status: In review"]
         assert (await stored(db_session)).status is Status.IN_REVIEW
 
     async def test_github_is_written_before_discord(
@@ -187,7 +187,7 @@ class TestSettingAStatus:
 
         await workflow.set_status(thread_id=thread_id, status=Status.NOT_REVIEWED)
 
-        assert github.labels[REPO_KEY] == ["backend", "NOT_REVIEWED"]
+        assert github.labels[REPO_KEY] == ["backend", "status: Not reviewed"]
 
     async def test_a_repeated_command_takes_no_action(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
@@ -343,7 +343,7 @@ class TestSettingAPriority:
         outcome = await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
 
         assert outcome.changed is True
-        assert "HIGH" in github.labels[REPO_KEY]
+        assert "priority: High" in github.labels[REPO_KEY]
 
     async def test_the_stored_priority_follows_the_label(
         self, workflow: ItemWorkflow, thread_id: int, db_session: AsyncSession
@@ -372,7 +372,7 @@ class TestSettingAPriority:
         The status half of this service has always asked both. This is that rule, applied to the
         half that did not.
         """
-        github.set_labels(REPO_KEY, [*github.labels[REPO_KEY], "HIGH"])
+        github.set_labels(REPO_KEY, [*github.labels[REPO_KEY], "priority: High"])
         assert (await stored(db_session)).priority is not Priority.HIGH
 
         outcome = await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
@@ -400,8 +400,8 @@ class TestSettingAPriority:
 
         await workflow.set_priority(thread_id=thread_id, priority=Priority.LOW)
 
-        assert "HIGH" not in github.labels[REPO_KEY]
-        assert "LOW" in github.labels[REPO_KEY]
+        assert "priority: High" not in github.labels[REPO_KEY]
+        assert "priority: Low" in github.labels[REPO_KEY]
 
     async def test_a_synonym_does_not_leave_the_thread_showing_the_tag_twice(
         self,
@@ -414,14 +414,14 @@ class TestSettingAPriority:
         adds the canonical name, which the item already had, and appending it regardless rendered
         the tag twice, and only for one of the two orders GitHub might have listed them in.
         """
-        github.set_labels(REPO_KEY, ["HIGH", "urgent"])
+        github.set_labels(REPO_KEY, ["priority: High", "urgent"])
 
         await workflow.set_priority(thread_id=thread_id, priority=Priority.HIGH)
 
         tags = next(
             line for line in threads.metadata_of(thread_id).splitlines() if "**Tags:**" in line
         )
-        assert tags.count("`HIGH`") == 1, f"the tag was rendered more than once: {tags}"
+        assert tags.count("`priority: High`") == 1, f"the tag was rendered more than once: {tags}"
 
     async def test_a_repeated_command_takes_no_action(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
@@ -450,7 +450,7 @@ class TestSettingAPriority:
     ) -> None:
         await workflow.set_priority(thread_id=issue_thread_id, priority=Priority.MEDIUM)
 
-        assert "MEDIUM" in github.labels[ISSUE_KEY]
+        assert "priority: Medium" in github.labels[ISSUE_KEY]
 
 
 class TestTheAwkwardOnes:
@@ -479,18 +479,18 @@ class TestTheAwkwardOnes:
         outcome = await workflow.set_status(thread_id=result.thread_id, status=Status.DONE)
 
         assert outcome.changed is True
-        assert "DONE" in github.labels[ISSUE_KEY]
+        assert "status: Done" in github.labels[ISSUE_KEY]
 
     async def test_an_item_wearing_two_statuses_is_tidied_without_a_write(
         self, workflow: ItemWorkflow, thread_id: int, github: FakeGitHubClient
     ) -> None:
         """Somebody labelling by hand can leave both on. Setting one it already has removes the
         other and adds nothing, which is a change with no addition in it."""
-        github.set_labels(REPO_KEY, ["BACKLOG", "IN_REVIEW"])
+        github.set_labels(REPO_KEY, ["status: Backlog", "IN_REVIEW"])
 
         await workflow.set_status(thread_id=thread_id, status=Status.BACKLOG)
 
-        assert github.labels[REPO_KEY] == ["BACKLOG"]
+        assert github.labels[REPO_KEY] == ["status: Backlog"]
         assert [call[0] for call in github.label_calls] == ["remove"], "it wrote a label it had"
 
     async def test_an_item_unregistered_mid_command_is_reported(
@@ -656,7 +656,7 @@ class TestWhatAReviewFound:
         assert outcome.changed is True, "the move it did carry out was reported as no move"
         assert outcome.locked is False
         assert outcome.lock_refused is True
-        assert "DONE" in github.label_calls[-1][-1], github.label_calls
+        assert github.label_calls[-1][-1] == "status: Done", github.label_calls
         assert "Done" in threads.metadata_of(thread_id)
 
     async def test_anything_else_that_fails_still_fails_the_whole_command(
