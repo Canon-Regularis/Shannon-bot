@@ -8169,3 +8169,59 @@ feature end to end rather than assuming a predecessor the file never recorded.
   the bot builds, which fails on any call to GitHub at all. The store gains tests for the day a
   link was made, changing login and account one at a time, and the formatting tests gain the
   day's own form.
+
+## Labels that say what they are
+
+- **Named for what they are** (#246, first half). A priority label is `priority: High`,
+  `priority: Medium` or `priority: Low`, and a status label is `status: ` and the board's column,
+  as the board spells it: `status: Ready To Merge`. Where no board is linked it is one of this
+  bot's own four, `status: Backlog`, `status: Not reviewed`, `status: In review` and
+  `status: Done`. They used to be the enum's own spelling, `HIGH` and `IN_REVIEW`, which said
+  nothing about what kind of label they were.
+- **Coloured so they read apart.** Priorities are red, amber and yellow. A status label takes the
+  colour its column has on the board, and the four built-in ones are grey, blue, purple and green.
+  Nothing used to make these labels at all, so GitHub made each one grey the first time it was
+  put on an item. Now the bot makes the label on the repository in its colour first, and puts a
+  wrong colour right. A failure there is logged and never stops the write: the label is then grey,
+  as before.
+- **The old labels are renamed in place.** The first time a new name is written in a repository,
+  the label it replaces is renamed to it, which moves it on every item carrying it at once, so no
+  item has to be touched. Two cases are left alone: a repository that already has the new name,
+  because GitHub will not rename onto it or merge two labels, and a board with two columns for one
+  status, such as `In progress` and `In review`, because there is no telling which column each
+  item carrying `IN_REVIEW` is in. The old spellings are still read, so an item carrying one is
+  cleared properly when it is next set.
+- **`/status` takes every board column.** A column this bot has no status for, such as
+  `Ready To Merge`, used to be left out of the picker and refused if typed, which made it a dead
+  end: the board's column order refused skipping it, and nothing here could move a card into it.
+  Now it is offered and accepted. It moves the card and the label, and the item keeps its status,
+  so the lock and the Done rules are unchanged. Anything Done is refused one, a closed issue
+  because closing is what makes it Done and anything else because it would stay Done with its
+  thread shut. A column name too long for a GitHub label, 50 characters, is refused with a
+  reason.
+- **The label names the column the card is in.** The label and the card write resolve a column
+  by one rule, so a name typed as `in-progress`, or a status the board calls by another name,
+  labels the column the card actually lands in. A column added or renamed on the board a moment
+  ago is read again rather than missed. While the board will not read, the label is the name
+  given, put on as it is: the bot does not rename or recolour a repository's label on a guess.
+- **A board move relabels too.** Where `SHANNON_BOARD_MAY_SET_STATUS` is on, a card dragged to a
+  column now gets that column's label, including a column with no status, which used to be passed
+  over. A card with no column at all, cleared or on a board whose Status field will not read, is
+  still passed over.
+- **Low priority is yellow in Discord too,** on the tag line and its bar, where it used to share
+  the green that means open or passed.
+- **A bug that would have shipped with the names.** Setting a priority compared the item's labels
+  against the enum's spelling. With new names, every `/priority` would have taken the label off and
+  put it back, and never answered "already".
+- **A status label is never a priority.** A column called `High priority` would otherwise have made
+  every item moved into it urgent. Only the `status:` prefix counts, so a team's own
+  `status-high-priority` label is still read as high priority.
+- **For whoever deploys it.** No migration, setting or new permission: `Issues: Read and write`
+  already covers a repository's labels. The rename happens the first time each label is written
+  in a repository, not at start-up, so the old names go as items are next moved. Anything outside
+  this bot that matches on `HIGH` or `IN_REVIEW`, such as a saved GitHub search or a workflow
+  filter, needs the new name. A repository's own labels starting `status:` count as status labels
+  from now on: a status move takes them off, and `/label` refuses them.
+- **Tests.** The label names and colours, the rename, the convergence of a repeated `/priority`,
+  the client calls for listing, making and renaming a label, the colour read off a board column,
+  and `/status` with a column this bot has no status for, from the command to the label.
