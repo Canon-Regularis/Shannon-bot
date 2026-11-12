@@ -52,8 +52,8 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   nobody. Anybody who has run `/mentions off` is still named in all of it, as a mention Discord
   renders and does not ring. `/track people off` stops the separate line in one thread, and
   nobody added while it is off is rung for it later.
-- **Lines in the thread.** A tag moving says so, priority coloured by level and the five workflow
-  statuses told apart from ordinary labels. A tag the opening block already listed says nothing:
+- **Lines in the thread.** A tag moving says so, priority coloured by level and status labels
+  told apart from ordinary labels. A tag the opening block already listed says nothing:
   GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening
   posts a header saying what became of the thread, and a finished item's thread is shut: locked
   and archived out of the channel, and opened again if the item is. A draft card's thread follows
@@ -604,11 +604,11 @@ rather than leaving somebody with triage thinking this bot got it wrong.
 | `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
 | `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you` or a reminder set for you with `/remind`, which are a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
 | `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin or Project Manager to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. The private answer counts down to a reminder fourteen minutes away or less and disappears at zero; for anything further it gives the time and how long after setting it that is. Twenty-five may be waiting per person per server |
-| `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. The five statuses and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
+| `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. A status label, `status: ` and a column or one of the older `IN_REVIEW` spellings, and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
 | `/unlabel <name>` | Developer, Project Manager | Takes one off |
 | `/log_conversation` | Developer, Project Manager, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
 | `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
-| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from this server's board columns where a board is linked, and from Backlog, Not reviewed, In review and Done where one is not. Done shuts the thread. A card may move forward one column at a time and back as far as you like, measured against the board's own column order |
+| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from this server's board columns where a board is linked, and from Backlog, Not reviewed, In review and Done where one is not. Every column the board has can be picked, including one this bot has no status for, such as `Ready To Merge`: that moves the card and the label, and the item keeps its status. Done shuts the thread. A card may move forward one column at a time and back as far as you like, measured against the board's own column order |
 | `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
 
 **The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:
@@ -648,9 +648,31 @@ anything.
 Reminding somebody else takes the same tier for the same reason: it has this bot ping them in
 public on your say-so. Reminding yourself takes none.
 
-The eight workflow commands take no argument and act on the thread they are run in, which is the
-item you are looking at. Status and priority live as labels on the repository, and each is single
-valued: setting one takes the previous one off, in whatever spelling the repository was using.
+`/status` and `/priority` act on the thread they are run in, which is the item you are looking at.
+Status and priority live as labels on the repository, and each is single valued: setting one takes
+the previous one off, in whatever spelling the repository was using.
+
+| Label | Colour |
+|---|---|
+| `priority: High` | red, `#d73a4a` |
+| `priority: Medium` | amber, `#f59e0b` |
+| `priority: Low` | yellow, `#fde047` |
+| `status: ` and the board's column, such as `status: Ready To Merge` | the column's colour on the board |
+| `status: Backlog`, `status: Not reviewed`, `status: In review`, `status: Done` where no board is linked | grey, blue, purple and green |
+
+The bot makes each label on the repository in its colour before it first puts it on an item,
+except while the board will not read: then the label is the column name given, put on as it is,
+and GitHub makes it grey if the repository does not have it yet. Every label starting `status:`
+counts as a status label, including any the repository had already, so a move takes it off. The
+labels it wrote before, `HIGH`, `MEDIUM`, `LOW`, `BACKLOG`, `NOT_REVIEWED`, `IN_REVIEW` and `DONE`,
+are renamed in place the first time their new name is written in a repository, which moves them on
+every item at once. GitHub will not rename onto a name a repository already has, so where the new
+label exists already, made by hand or by an earlier write, the old one stays and comes off each
+item as it is next set. They are still read, so an item carrying one is cleared properly. On a
+board with two columns for one status, such as `In progress` and `In review`, the old label for
+that status is not renamed to either, because there is no telling which column each item is in. A column name
+that would make a label over GitHub's 50 characters is refused, and says to shorten it on the
+board.
 
 `/log_conversation` is the only thing here that reads Discord rather than writing to it, and it
 needs setting up in two places before it works at all. Message content is a privileged intent, so
@@ -812,11 +834,11 @@ thread could serve this case as well; what has kept it out is that every comment
 untracked would then cost a call to GitHub, for a case that is mostly a first run. It may be
 fixed later.
 
-**A status label moved on GitHub, against a status the block still shows.** The five statuses live
-as labels on the repository, but nothing on the webhook path reads one back onto the item: only
-the slash commands and the board write that column. So labelling an item `BACKLOG` in GitHub posts
-a line saying so, in a thread that asked for tag lines, while the block above goes on reading
-`IN_REVIEW`, and both are true of different things. The line reports what somebody did to the
+**A status label moved on GitHub, against a status the block still shows.** Statuses live as
+labels on the repository, but nothing on the webhook path reads one back onto the item: only the
+slash commands and the board write that column. So labelling an item `status: Backlog` in GitHub
+posts a line saying so, in a thread that asked for tag lines, while the block above goes on reading
+In review, and both are true of different things. The line reports what somebody did to the
 labels, which is what every line in a thread reports. Making a GitHub label move the stored status
 is a decision about which of GitHub and Discord wins, and it is a bigger question than the line
 that made it visible.
