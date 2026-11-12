@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol, Self, runtime_checkable
 
-from shannon.domain.enums import ObjectType, Priority, Status
+from shannon.domain.enums import ObjectType, Priority
 from shannon.domain.priority import parse_priority
 
 
@@ -51,8 +51,10 @@ class LabelMove:
     # Read off the name whichever way the label is moving: `urgent` is a priority label coming
     # off as much as going on. UNSET where the name says nothing about priority.
     priority: Priority = Priority.UNSET
-    # None unless the name is one of the five statuses, spelled exactly as `status_of` has them.
-    status: Status | None = None
+    # Whether the name is a status label, in today's `status: <column>` spelling or the one before
+    # issue #246. A flag rather than the status it reads as, because a column this bot has no
+    # status for - `status: Ready To Merge` - is still a status label moving, and is said as one.
+    is_status: bool = False
 
 
 @dataclass(frozen=True, slots=True)

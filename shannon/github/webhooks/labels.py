@@ -7,7 +7,7 @@ import logging
 from shannon.domain.json import JsonObject, is_json_object
 from shannon.domain.models import LabelMove
 from shannon.domain.priority import parse_priority
-from shannon.github.labels import status_of
+from shannon.github.labels import is_status_label
 
 logger = logging.getLogger(__name__)
 
@@ -40,5 +40,5 @@ def parse_label_move(action: str, payload: JsonObject) -> LabelMove | None:
         name=name,
         added=action == "labeled",
         priority=parse_priority([name]),
-        status=status_of([name]),
+        is_status=is_status_label(name),
     )

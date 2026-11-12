@@ -10,7 +10,14 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.enums import Priority, Status
+from shannon.github.labels import own_column, status_label
 from shannon.github.webhooks.labels import LABEL_ACTIONS, parse_label_move
+
+# Every status label, in today's spelling and the one before issue #246.
+STATUS_NAMES = [
+    *(status_label(own_column(status)).name for status in Status),
+    *(status.value for status in Status),
+]
 
 pytestmark = pytest.mark.unit
 
@@ -63,12 +70,14 @@ class TestWhatTheLabelMeans:
     """Classified where the move is built, so nothing downstream has to ask twice and get a
     different answer from the one the delivery was read with."""
 
-    def test_our_own_spelling_of_a_priority_is_carried_as_one(self) -> None:
-        move = parse_label_move("labeled", a_delivery("HIGH"))
+    @pytest.mark.parametrize("name", ["priority: High", "HIGH"])
+    def test_our_own_spelling_of_a_priority_is_carried_as_one(self, name: str) -> None:
+        """Today's, and the one before issue #246."""
+        move = parse_label_move("labeled", a_delivery(name))
 
         assert move is not None
         assert move.priority is Priority.HIGH
-        assert move.status is None
+        assert not move.is_status
 
     @pytest.mark.parametrize(
         ("name", "level"),
@@ -100,27 +109,35 @@ class TestWhatTheLabelMeans:
         assert move.priority is Priority.HIGH
         assert move.added is False
 
-    @pytest.mark.parametrize("status", list(Status))
-    def test_each_status_is_carried_as_one(self, status: Status) -> None:
-        move = parse_label_move("labeled", a_delivery(status.value))
+    @pytest.mark.parametrize("name", STATUS_NAMES)
+    def test_each_status_is_carried_as_one(self, name: str) -> None:
+        move = parse_label_move("labeled", a_delivery(name))
 
         assert move is not None
-        assert move.status is status
+        assert move.is_status
         assert move.priority is Priority.UNSET
+
+    def test_a_column_this_bot_has_no_status_for_is_a_status_all_the_same(self) -> None:
+        """Issue #246: `/status Ready To Merge` writes this, and the line says a status was set."""
+        move = parse_label_move("labeled", a_delivery("status: Ready To Merge"))
+
+        assert move is not None
+        assert move.is_status
 
     def test_an_ordinary_label_is_neither(self) -> None:
         move = parse_label_move("labeled", a_delivery("good first issue"))
 
         assert move is not None
         assert move.priority is Priority.UNSET
-        assert move.status is None
+        assert not move.is_status
 
-    @pytest.mark.parametrize("status", list(Status))
-    def test_the_two_groups_cannot_both_claim_a_label(self, status: Status) -> None:
+    @pytest.mark.parametrize("name", [*STATUS_NAMES, "status: High priority"])
+    def test_the_two_groups_cannot_both_claim_a_label(self, name: str) -> None:
         """The renderer tests one group and then the other, so this says that order is a
         formality rather than a precedence rule nobody wrote down. Numbered priority schemes are
-        deliberately unread, which is what keeps a `P1` out of both groups as well."""
-        move = parse_label_move("labeled", a_delivery(status.value))
+        deliberately unread, which is what keeps a `P1` out of both groups as well. A column
+        called `High priority` is a status label and only that."""
+        move = parse_label_move("labeled", a_delivery(name))
 
         assert move is not None
-        assert move.priority is Priority.UNSET, f"{status.value} was read as a priority too"
+        assert move.priority is Priority.UNSET, f"{name} was read as a priority too"

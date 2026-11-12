@@ -19,8 +19,9 @@ import pytest
 
 from shannon.discord_bot.formatting import format_label_change
 from shannon.discord_bot.panels import Accent, BlockKind
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import Priority
 from shannon.domain.models import LabelMove
+from shannon.github.labels import PRIORITY_LABELS
 
 pytestmark = pytest.mark.unit
 
@@ -33,17 +34,18 @@ class TestAPriorityLabel:
         [
             (Priority.HIGH, "🔴", Accent.HIGH),
             (Priority.MEDIUM, "🟠", Accent.MEDIUM),
-            (Priority.LOW, "🟢", Accent.LOW),
+            (Priority.LOW, "🟡", Accent.LOW),
         ],
     )
     def test_each_level_has_its_own_colour(
         self, level: Priority, mark: str, accent: Accent
     ) -> None:
-        move = LabelMove(name=level.value, added=True, priority=level)
+        name = PRIORITY_LABELS[level].name
+        move = LabelMove(name=name, added=True, priority=level)
 
         said = format_label_change(move)
 
-        assert said.text == f"{mark} **Priority set:** `{level.value}`"
+        assert said.text == f"{mark} **Priority set:** `{name}`"
         assert said.accent == accent
 
     def test_whatever_the_repository_spells_it_is_coloured_by_what_it_means(self) -> None:
@@ -70,14 +72,19 @@ class TestAPriorityLabel:
 
 class TestAStatusLabel:
     def test_one_going_on_is_a_status_set(self) -> None:
-        move = LabelMove(name="IN_REVIEW", added=True, status=Status.IN_REVIEW)
+        move = LabelMove(name="status: In review", added=True, is_status=True)
 
-        assert format_label_change(move).text == "📋 **Status set:** `IN_REVIEW`"
+        assert format_label_change(move).text == "📋 **Status set:** `status: In review`"
 
     def test_one_coming_off_is_a_status_cleared(self) -> None:
-        move = LabelMove(name="BACKLOG", added=False, status=Status.BACKLOG)
+        move = LabelMove(name="BACKLOG", added=False, is_status=True)
 
         assert format_label_change(move).text == "📋 **Status cleared:** `BACKLOG`"
+
+    def test_a_column_this_bot_has_no_status_for_is_a_status_set_too(self) -> None:
+        move = LabelMove(name="status: Ready To Merge", added=True, is_status=True)
+
+        assert format_label_change(move).text == "📋 **Status set:** `status: Ready To Merge`"
 
 
 class TestAnOrdinaryLabel:
@@ -105,7 +112,7 @@ class TestEveryLineIsOneCard:
         [
             LabelMove(name="urgent", added=True, priority=Priority.HIGH),
             LabelMove(name="urgent", added=False, priority=Priority.HIGH),
-            LabelMove(name="DONE", added=True, status=Status.DONE),
+            LabelMove(name="status: Done", added=True, is_status=True),
             LabelMove(name="bug", added=True),
         ],
     )
@@ -127,7 +134,7 @@ class TestALabelNameNobodyHereChose:
         assert "<@1234>" not in format_label_change(move).text
 
     def test_a_mention_cannot_ping_from_a_status_line(self) -> None:
-        move = LabelMove(name="<@1234>", added=True, status=Status.DONE)
+        move = LabelMove(name="<@1234>", added=True, is_status=True)
 
         assert "<@1234>" not in format_label_change(move).text
 
