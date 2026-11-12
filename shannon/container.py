@@ -988,6 +988,10 @@ def build_container(
     # its set before the gateway connects.
     conversations = ConversationLog(sessionmaker, threads)
 
+    # One for the picker and the workflow both, so the columns a person was just offered are the
+    # ones their status label is spelled and coloured from, out of the same cached answer.
+    board_columns = BoardColumns(sessionmaker, boards)
+
     # After the board reader, because the workflow is handed it: a status set in Discord drags
     # the card to match, and the board's own column order decides whether the move is allowed
     # at all. Handed over unconditionally - what a deployment can turn off is the WRITE, which
@@ -1004,6 +1008,8 @@ def build_container(
         # out under, so GitHub's board history names them rather than one shared account.
         authorisations=board_credentials,
         cards=boards,
+        # Issue #246: a status label is `status: ` and the board's own column, in its colour.
+        columns=board_columns,
     )
 
     return Container(
@@ -1066,7 +1072,7 @@ def build_container(
             ),
             conversations,
             board_linking,
-            BoardColumns(sessionmaker, boards),
+            board_columns,
             board_credentials,
             GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),
             capturing=settings.capture_discord_messages,
