@@ -228,6 +228,14 @@ class GitHubClient(
 
     async def list_labels(self, owner: str, name: str) -> Sequence[str]: ...
 
+    async def label_colours(self, owner: str, name: str) -> dict[str, str]: ...
+
+    async def create_label(self, owner: str, name: str, label: str, colour: str) -> None: ...
+
+    async def update_label(
+        self, owner: str, name: str, label: str, *, new_name: str, colour: str
+    ) -> None: ...
+
     async def list_check_runs(
         self, owner: str, name: str, sha: str
     ) -> Sequence[CheckRun] | None: ...
@@ -615,8 +623,11 @@ class HttpGitHubClient:
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Take a label off an item, treating one that is not there as done.
 
-        Removals are computed from a snapshot read a moment earlier, so a 404 means the end
-        state is already the wanted one.
+        Removals are computed from a snapshot read a moment earlier, so a 404 means the label is
+        not on the item any more - usually because somebody took it off, which is the wanted end
+        state. Since issue #246 it can also mean the label was renamed in place under it, and is
+        on the item still under its new name. For a priority `workflow._renamed_since` takes that
+        one off too; a status label is left to the next move, which takes every other one off.
         """
         path = f"{_repository(owner, name)}/issues/{number}/labels/{quote(label, safe='')}"
         with contextlib.suppress(GitHubNotFoundError):
@@ -706,6 +717,53 @@ class HttpGitHubClient:
                 if isinstance(label, str) and label:
                     found.append(label)
         return found
+
+    async def label_colours(self, owner: str, name: str) -> dict[str, str]:
+        """Every label this repository has, with its colour as six hex digits. Issue #246.
+
+        Its own read rather than a second answer from `list_labels`, because the one asker is the
+        step that makes sure this bot's own labels look the way they should, and it wants the
+        colour where every other caller wants the name alone.
+        """
+        found: dict[str, str] = {}
+        async for body in self.get_pages(
+            f"{_repository(owner, name)}/labels", owner=owner, per_page=LIST_PAGE_SIZE
+        ):
+            for row in body if is_json_list(body) else []:
+                if not is_json_object(row):
+                    continue
+                label, colour = row.get("name"), row.get("color")
+                if isinstance(label, str) and label:
+                    found[label] = colour.lower() if isinstance(colour, str) else ""
+        return found
+
+    async def create_label(self, owner: str, name: str, label: str, colour: str) -> None:
+        """Add a label to the repository itself, in a colour. Issue #246.
+
+        GitHub answers 422 for a name the repository already has, which arrives here as
+        `GitHubRefusedError` and is the caller's to read as "it is there already".
+        """
+        await self._send(
+            "POST",
+            f"{_repository(owner, name)}/labels",
+            owner,
+            json={"name": label, "color": colour},
+        )
+
+    async def update_label(
+        self, owner: str, name: str, label: str, *, new_name: str, colour: str
+    ) -> None:
+        """Rename and recolour one of the repository's labels. Issue #246.
+
+        A rename moves the label on every item carrying it at once, which is what lets an old
+        label become a new one without touching a single issue.
+        """
+        await self._send(
+            "PATCH",
+            f"{_repository(owner, name)}/labels/{quote(label, safe='')}",
+            owner,
+            json={"new_name": new_name, "color": colour},
+        )
 
     async def list_reviews(
         self, repository: RepositorySnapshot, number: int
