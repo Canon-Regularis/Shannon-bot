@@ -11,6 +11,15 @@ class GitHubNotFoundError(GitHubError):
     """The repository or pull request does not exist, or the token cannot see it."""
 
 
+class NoStatusFieldError(GitHubNotFoundError):
+    """The board opened, and has no Status field this bot can read. Issue #246.
+
+    A `GitHubNotFoundError` so everything that already treats a board it cannot read as one goes
+    on doing so, and its own type so the service in front of the picker can say what is wrong
+    and remember it, rather than ask GitHub again on every keystroke.
+    """
+
+
 class GitHubAuthError(GitHubError):
     """The token is missing, expired, or lacks the scope for this call."""
 

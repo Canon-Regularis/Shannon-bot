@@ -28,7 +28,8 @@ from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
-from shannon.github.projects import ProjectListing
+from shannon.github.errors import GitHubUnavailableError, NoStatusFieldError
+from shannon.github.projects import BoardColumn, ProjectListing
 from shannon.services.board_credentials import BoardCredentials
 from shannon.services.boards import (
     LIFETIME,
@@ -1239,15 +1240,23 @@ class _CountingSessions:
 
 
 class FakeColumnReader:
-    """The Status columns of one board, out of a tuple. Records what it was asked."""
+    """The Status columns of one board, out of a tuple. Records what it was asked.
 
-    def __init__(self, *columns: str) -> None:
+    A bare name is a column the board gave no colour, which is most of what these tests need.
+    """
+
+    def __init__(self, *columns: str | BoardColumn) -> None:
         self.columns = columns
+        self.error: Exception | None = None
         self.asked: list[tuple[str, int]] = []
 
-    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]:
+    async def status_columns(self, owner: str, project_number: int) -> tuple[BoardColumn, ...]:
         self.asked.append((owner, project_number))
-        return self.columns
+        if self.error is not None:
+            raise self.error
+        return tuple(
+            one if isinstance(one, BoardColumn) else BoardColumn(one) for one in self.columns
+        )
 
 
 class TestTheColumnsThePickerOffers:
@@ -1378,6 +1387,142 @@ class TestTheColumnsThePickerOffers:
 
         clock = clock + LIFETIME + timedelta(seconds=1)
         assert await columns.offered(registered.discord_guild_id) == ("Backlog",)
+
+
+class TestOneColumnByName:
+    """Issue #246. A status label is `status: ` and the board's own column, in its colour, so the
+    workflow asks for one column by the name somebody picked or typed."""
+
+    @pytest.fixture
+    async def board(self, registered: Repository, db_session: AsyncSession) -> Repository:
+        await RepositoryStore(db_session).set_board(
+            registered, project_number=6, project_owner=None
+        )
+        await db_session.commit()
+        return registered
+
+    async def test_it_answers_the_board_spelling_and_colour(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        reader = FakeColumnReader("Backlog", BoardColumn("Ready To Merge", "ORANGE"))
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        found = await columns.column_named(board.discord_guild_id, "  ready to MERGE ")
+
+        assert found == BoardColumn("Ready To Merge", "ORANGE")
+
+    @pytest.mark.parametrize("typed", ["in-progress", "In_Progress", "in  progress", "IN PROGRESS"])
+    async def test_it_matches_the_way_the_card_write_does(
+        self, typed: str, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """`normalise` on both sides, so the label and the card resolve the same column."""
+        columns = BoardColumns(db_sessionmaker, FakeColumnReader("Backlog", "In progress"))
+
+        found = await columns.column_named(board.discord_guild_id, typed)
+
+        assert found == BoardColumn("In progress")
+
+    async def test_a_column_the_board_does_not_have_is_none_after_one_more_look(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        reader = FakeColumnReader("Backlog")
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        assert await columns.column_named(board.discord_guild_id, "Ready To Merge") is None
+        assert len(reader.asked) == 2
+
+    async def test_a_column_added_since_the_answer_was_cached_is_found(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Exactly the column somebody has just picked or dragged a card into."""
+        reader = FakeColumnReader("Backlog")
+        columns = BoardColumns(db_sessionmaker, reader)
+        await columns.offered(board.discord_guild_id)
+        reader.columns = ("Backlog", "Ready To Merge")
+
+        found = await columns.column_named(board.discord_guild_id, "Ready To Merge")
+
+        assert found == BoardColumn("Ready To Merge")
+        assert await columns.offered(board.discord_guild_id) == ("Backlog", "Ready To Merge"), (
+            "the fresh answer was not kept"
+        )
+        assert len(reader.asked) == 2
+
+    async def test_a_fresh_read_skips_the_cache(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        reader = FakeColumnReader("Backlog")
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        await columns.columns(board.discord_guild_id)
+        await columns.columns(board.discord_guild_id)
+        await columns.columns(board.discord_guild_id, fresh=True)
+
+        assert len(reader.asked) == 2
+
+    @pytest.mark.parametrize("typed", ["", "   "])
+    async def test_no_name_asks_nothing(
+        self, typed: str, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The poller and a repository mirroring no board pass no column at all."""
+        reader = FakeColumnReader("Backlog")
+
+        assert await BoardColumns(db_sessionmaker, reader).column_named(1, typed) is None
+        assert reader.asked == []
+
+    async def test_it_shares_the_pickers_answer(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Naming a column a moment after picking it costs nothing."""
+        reader = FakeColumnReader("Backlog")
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        await columns.offered(board.discord_guild_id)
+        await columns.column_named(board.discord_guild_id, "Backlog")
+
+        assert len(reader.asked) == 1
+
+    async def test_a_board_with_no_status_field_says_what_to_do(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Rather than "GitHub could not find that item", which is what the bare GitHub error
+        reads as in a reply."""
+        reader = FakeColumnReader()
+        reader.error = NoStatusFieldError("board 6 of Canon-Regularis has no Status field")
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        with pytest.raises(BoardUnreadableError, match="single-select field called Status"):
+            await columns.column_named(board.discord_guild_id, "Ready To Merge")
+
+    async def test_a_board_with_no_status_field_is_remembered_as_one(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The picker asks on every keystroke, and the field is not coming back between two of
+        them. A fresh read, which the workflow makes, still asks."""
+        reader = FakeColumnReader()
+        reader.error = NoStatusFieldError("board 6 of Canon-Regularis has no Status field")
+        columns = BoardColumns(db_sessionmaker, reader)
+
+        for _ in range(3):
+            with pytest.raises(BoardUnreadableError):
+                await columns.offered(board.discord_guild_id)
+        assert len(reader.asked) == 1
+
+        with pytest.raises(BoardUnreadableError):
+            await columns.columns(board.discord_guild_id, fresh=True)
+        assert len(reader.asked) == 2
+
+    async def test_any_other_failure_is_not_remembered(
+        self, board: Repository, db_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        reader = FakeColumnReader("Backlog")
+        reader.error = GitHubUnavailableError("GitHub is down")
+        columns = BoardColumns(db_sessionmaker, reader)
+        with pytest.raises(GitHubUnavailableError):
+            await columns.offered(board.discord_guild_id)
+        reader.error = None
+
+        assert await columns.offered(board.discord_guild_id) == ("Backlog",)
 
 
 class TestABoardIsLinkedBySomebodyWhoAuthorisedIt:

@@ -17,7 +17,8 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from shannon.domain.enums import Status
+from shannon.domain.enums import Priority, Status, spoken
+from shannon.domain.priority import parse_priority
 
 _SEPARATORS = re.compile(r"[\s_\-:/]+")
 
@@ -77,6 +78,73 @@ def status_from_column(column: str | None) -> Status | None:
     if not column:
         return None
     return _COLUMNS.get(normalise(column))
+
+
+def named_column(columns: Sequence[str], wanted: str) -> int | None:
+    """Where in these columns the one called exactly this is, however either side spells it.
+
+    Both sides go through `normalise`, so a board saying `In Progress` and somebody typing
+    `in-progress` mean the same column.
+    """
+    asked = normalise(wanted)
+    return next((at for at, column in enumerate(columns) if normalise(column) == asked), None)
+
+
+def reads_as(column: str, state: Status | Priority) -> bool:
+    """Whether a column name is a SYNONYM for this state.
+
+    Both tables are many-to-one and both are already the single source for their half:
+    `status_from_column` for a column, `parse_priority` for a label. The second answers UNSET
+    where the first answers None, so it is folded to None here the way `labels.reserved_as`
+    already folds it.
+    """
+    if isinstance(state, Status):
+        return status_from_column(column) is state
+    found = parse_priority([column])
+    return found is not Priority.UNSET and found is state
+
+
+def column_for(columns: Sequence[str], state: Status | Priority) -> int | None:
+    """Where the board's own column standing for this state is, or None where it has none.
+
+    Two passes, and the first one is not an optimisation. The words a board may use are read
+    through tables that are many-to-one on purpose - `In progress` and `In review` both mean
+    IN_REVIEW, `urgent` and `critical` both mean HIGH - because a board using either is saying
+    the same thing. That is right for READING a column back.
+
+    Writing one, it is not enough. A board carrying BOTH columns is the ordinary case rather than
+    a corner - GitHub's own default template ships Backlog, Ready, In progress, In review, Done -
+    and picking whichever came first would move a card to `In progress` when somebody asked for
+    `In review`. So a column called exactly what this bot calls the state wins over one that
+    merely maps to it.
+
+    The fallback keeps board order, which is left to right. It only decides between synonyms,
+    where neither is the state's own name and there is nothing better to go on.
+    """
+    exact = named_column(columns, spoken(state))
+    if exact is not None:
+        return exact
+    return next((at for at, column in enumerate(columns) if reads_as(column, state)), None)
+
+
+def landing_column(columns: Sequence[str], state: Status | Priority, named: str = "") -> int | None:
+    """Where a card asked to move to this state, or to this column, lands on these columns.
+
+    The column somebody named, or the one the state maps to where they named none or named one
+    this board does not have. One resolver for the card write, the rule that decides whether the
+    write is allowed, and since issue #246 the status label, which names the column the card is
+    in: three answers reached by different routes would refuse moves they then made, or label a
+    card `status: In review` while it sits in `In progress`.
+
+    A name that is not on this board falls back rather than failing. It arrives from a picker
+    that had three seconds and may have shown nothing at all, so what reaches here may be typed
+    prose or a column from the board this repository mirrored last week.
+    """
+    if named:
+        found = named_column(columns, named)
+        if found is not None:
+            return found
+    return column_for(columns, state)
 
 
 def must_pass_through(columns: Sequence[str], *, frm: str | None, to: str) -> tuple[str, ...]:
