@@ -24,7 +24,9 @@ from shannon.commands.workflow import (
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.github import people
+from shannon.github.errors import GitHubUnavailableError
 from shannon.github.labels import PRIORITY_LABELS
+from shannon.github.projects import BoardColumn
 from shannon.services.workflow import NotAnItemThreadError, WorkflowOutcome
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import (
@@ -52,7 +54,12 @@ class StubWorkflow:
         self.acted: list[int | None] = []
 
     async def set_status(
-        self, *, thread_id: int, status: Status, column: str = "", acting: int | None = None
+        self,
+        *,
+        thread_id: int,
+        status: Status | None,
+        column: str = "",
+        acting: int | None = None,
     ) -> WorkflowOutcome:
         self.calls.append(("status", thread_id, status))
         self.columns.append(column)
@@ -85,6 +92,13 @@ class FakeColumns:
             raise self.error
         return self.columns
 
+    async def column_named(self, guild_id: int, column: str) -> BoardColumn | None:
+        self.asked.append(guild_id)
+        if self.error is not None:
+            raise self.error
+        wanted = column.strip().casefold()
+        return next((BoardColumn(name) for name in self.columns if name.casefold() == wanted), None)
+
 
 def commands(
     service: StubWorkflow,
@@ -103,13 +117,14 @@ async def run(
     member: FakeMember,
     value: str,
     access: FakeAccess | None = None,
+    columns: FakeColumns | None = None,
 ) -> FakeInteraction:
     interaction = FakeInteraction(user=member, channel_id=THREAD_ID)
     # A plain string for status and a choice for priority, because that is the difference
     # between them now: a priority is the same three everywhere and stays a validated
     # dropdown, and a status is whatever columns somebody arranged on their board.
     handed: object = value if name == "status" else app_commands.Choice(name=value, value=value)
-    await commands(service, access)[name].callback(interaction, handed)
+    await commands(service, access, columns)[name].callback(interaction, handed)
     return interaction
 
 
@@ -502,14 +517,12 @@ class TestThePicker:
         assert "Backlog" in offered
         assert "Done" in offered
 
-    async def test_a_column_this_bot_cannot_read_is_not_offered(self) -> None:
-        """Offering it would be offering an entry its own callback then refuses.
-        `status_from_column` is the same function the callback uses, so the two cannot disagree
-        about what is pickable."""
-        offered = await self.suggest(FakeColumns("Backlog", "Needs design input"))
+    async def test_a_column_this_bot_has_no_status_for_is_offered_too(self) -> None:
+        """Issue #246. It used to be left out, which made a board with a `Ready To Merge` column a
+        dead end: the column order refused skipping it and nothing here could pick it."""
+        offered = await self.suggest(FakeColumns("Backlog", "Ready To Merge", "Done"))
 
-        assert "Backlog" in offered
-        assert "Needs design input" not in offered
+        assert offered[:3] == ["Backlog", "Ready To Merge", "Done"]
 
     async def test_a_board_spelling_one_of_our_names_is_offered_once(self) -> None:
         """`In review` from the board and `In review` from this bot are the same column. Two entries
@@ -593,9 +606,9 @@ class TestWhatArrivesInTheStatusField:
         assert service.calls == [("status", THREAD_ID, Status.IN_REVIEW)]
 
     async def test_the_column_goes_down_beside_the_status(self) -> None:
-        """The status decides the label, the lock and the block in Discord. The column decides which
-        of the board's own columns the card lands in, and on a board with two columns for one status
-        those are not the same question."""
+        """The status decides the lock and the block in Discord. The column decides which of the
+        board's own columns the card lands in, and since issue #246 the label, and on a board with
+        two columns for one status those are not the same question as the status."""
         service = StubWorkflow()
 
         await run("status", service, project_manager(), "In progress")
@@ -610,6 +623,54 @@ class TestWhatArrivesInTheStatusField:
 
         assert "is not a status this bot knows" in said(interaction)
         assert service.calls == []
+
+    async def test_a_column_the_board_has_is_a_move_that_keeps_the_status(self) -> None:
+        """Issue #246. `Ready To Merge` reads as no status, and moves the card and its label all
+        the same; None tells the workflow to keep the status the item has."""
+        service = StubWorkflow()
+
+        await run(
+            "status",
+            service,
+            project_manager(),
+            "ready to merge",
+            columns=FakeColumns("In review", "Ready To Merge"),
+        )
+
+        assert service.calls == [("status", THREAD_ID, None)]
+        assert service.columns == ["ready to merge"]
+
+    async def test_a_column_some_other_board_has_is_still_refused(self) -> None:
+        service = StubWorkflow()
+
+        interaction = await run(
+            "status", service, project_manager(), "Ready To Merge", columns=FakeColumns("Done")
+        )
+
+        assert "is not a status this bot knows" in said(interaction)
+        assert service.calls == []
+
+    async def test_a_board_that_will_not_read_says_so(self) -> None:
+        """Rather than calling the column unknown, which it may not be."""
+        service = StubWorkflow()
+
+        interaction = await run(
+            "status",
+            service,
+            project_manager(),
+            "Ready To Merge",
+            columns=FakeColumns(error=GitHubUnavailableError("GitHub is down")),
+        )
+
+        assert "is not a status this bot knows" not in said(interaction)
+        assert service.calls == []
+
+    async def test_a_status_this_bot_knows_does_not_ask_the_board(self) -> None:
+        columns = FakeColumns(error=GitHubUnavailableError("GitHub is down"))
+
+        await run("status", StubWorkflow(), project_manager(), "Done", columns=columns)
+
+        assert columns.asked == []
 
     async def test_the_refusal_names_what_always_works(self) -> None:
         """Somebody whose picker came back empty has otherwise been handed a text box and no

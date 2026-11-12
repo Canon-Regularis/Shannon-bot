@@ -1977,6 +1977,115 @@ class TestListingARepositoryLabels:
         assert found == ["bug", "last"]
 
 
+class TestDefiningARepositoryLabel:
+    """Issue #246. This bot's own labels are made to exist on the repository in their colours,
+    and the ones it used to write are renamed to them, before one is put on an item."""
+
+    async def test_the_colours_are_read_with_the_names(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    [{"name": "bug", "color": "D73A4A"}, {"name": "HIGH", "color": "ededed"}]
+                ),
+            )
+
+        async with client_with(handler) as client:
+            found = await client.label_colours("acme", "widget")
+
+        assert found == {"bug": "d73a4a", "HIGH": "ededed"}
+
+    async def test_a_row_this_cannot_read_is_skipped_and_a_missing_colour_is_empty(self) -> None:
+        """Empty rather than skipped: the label is there, and a colour this cannot read is one
+        that is wrong, which the caller corrects."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=json.dumps(["nope", {"name": ""}, {"name": "bug", "color": 7}])
+            )
+
+        async with client_with(handler) as client:
+            assert await client.label_colours("acme", "widget") == {"bug": ""}
+
+    async def test_a_body_that_is_not_a_list_reads_as_no_labels(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"message": "nope"}))
+
+        async with client_with(handler) as client:
+            assert await client.label_colours("acme", "widget") == {}
+
+    async def test_every_page_of_colours_is_read(self) -> None:
+        asked: list[str] = []
+        following = {"Link": '<https://api.github.com/repos/acme/widget/labels?page=2>; rel="next"'}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(str(request.url))
+            if len(asked) == 1:
+                return httpx.Response(
+                    200, content=json.dumps([{"name": "bug", "color": "aaaaaa"}]), headers=following
+                )
+            return httpx.Response(200, content=json.dumps([{"name": "LOW", "color": "bbbbbb"}]))
+
+        async with client_with(handler) as client:
+            found = await client.label_colours("acme", "widget")
+
+        assert found == {"bug": "aaaaaa", "LOW": "bbbbbb"}
+
+    async def test_a_label_is_created_with_its_colour(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(201, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.create_label("acme", "widget", "priority: High", "d73a4a")
+
+        assert seen[0].method == "POST"
+        assert seen[0].url.raw_path.decode() == "/repos/acme/widget/labels"
+        assert json.loads(seen[0].content) == {"name": "priority: High", "color": "d73a4a"}
+
+    async def test_one_the_repository_has_already_is_refused(self) -> None:
+        """GitHub's 422, which the caller reads as "it is there already"."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422, content=json.dumps({"message": "Validation Failed", "errors": []})
+            )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRefusedError):
+                await client.create_label("acme", "widget", "priority: High", "d73a4a")
+
+    async def test_a_label_is_renamed_and_recoloured_at_its_own_address(self) -> None:
+        """The name goes in the path, so a space or a slash in it is escaped rather than read as
+        a second path segment."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, content=json.dumps({}))
+
+        async with client_with(handler) as client:
+            await client.update_label(
+                "acme", "widget", "status: In/out", new_name="status: In review", colour="8250df"
+            )
+
+        assert seen[0].method == "PATCH"
+        assert seen[0].url.raw_path.decode() == "/repos/acme/widget/labels/status%3A%20In%2Fout"
+        assert json.loads(seen[0].content) == {"new_name": "status: In review", "color": "8250df"}
+
+    async def test_a_label_that_is_not_there_is_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubNotFoundError):
+                await client.update_label(
+                    "acme", "widget", "HIGH", new_name="priority: High", colour="d73a4a"
+                )
+
+
 class TestEveryReviewOnAPullRequest:
     """Issue #155. Read from GitHub rather than tallied from the webhooks that arrive.
 

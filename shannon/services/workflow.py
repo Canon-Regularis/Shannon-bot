@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,7 +30,8 @@ from shannon.domain.models import Fetcher, Label, TrackedSnapshot
 from shannon.domain.text import code_span
 from shannon.github import labels
 from shannon.github.client import GitHubClient
-from shannon.github.projects import BoardOrder, CardMove, CardMoved
+from shannon.github.projects import BoardColumn, BoardOrder, CardMove, CardMoved
+from shannon.services.label_definitions import LabelDefinitions
 from shannon.services.labels import RepositoryLabels
 from shannon.services.sync.items import ShutsAndKnowsServers, SyncsItems
 from shannon.services.sync.one_at_a_time import ItemLock
@@ -194,6 +195,21 @@ class BoardCard:
     card_id: int
 
 
+class EnsuresLabels(Protocol):
+    """Making sure a label this bot writes exists on the repository in its colour. Issue #246."""
+
+    async def ensure(self, owner: str, name: str, definition: labels.LabelDefinition) -> None: ...
+
+
+class NamesColumns(Protocol):
+    """A server's board columns, spelled and coloured as the board has them, in board order.
+
+    `fresh` reads past whatever is cached, for a column added or renamed a moment ago.
+    """
+
+    async def columns(self, guild_id: int, *, fresh: bool = False) -> tuple[BoardColumn, ...]: ...
+
+
 class LabelsItems(Protocol):
     """Putting a label on an item, taking one off, and asking which ones exist.
 
@@ -225,6 +241,9 @@ class ItemWorkflow:
         repository_labels: RepositoryLabels,
         authorisations: WhoIsMovingTheCard,
         cards: MovesCards | None = None,
+        *,
+        definitions: EnsuresLabels,
+        columns: NamesColumns | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -238,12 +257,19 @@ class ItemWorkflow:
         # token to make them with. Wiring rather than a flag read here, so a deployment
         # that has not opted in cannot reach the write at all.
         self._cards = cards
+        # Puts a status or priority label on the repository in its colour before it is written,
+        # and renames the one this bot used to write in its place. Issue #246.
+        self._definitions = definitions
+        # The board's own columns, so a status label is spelled and coloured as the board has
+        # its column. None where this deployment reads no board, and then every status label is
+        # one of this bot's own four.
+        self._columns = columns
 
     async def set_status(
         self,
         *,
         thread_id: int,
-        status: Status,
+        status: Status | None,
         column: str = "",
         acting: int | None = None,
     ) -> WorkflowOutcome:
@@ -260,22 +286,35 @@ class ItemWorkflow:
         question rather than two that can disagree. A board write with nobody to attribute it to is
         now unrepresentable rather than merely discouraged.
 
-        `column` is the board column somebody picked, where they picked one. The status is still
-        what drives the label, the lock and the block in Discord; the column decides only which
-        of the board's own columns the card lands in, and it exists because a board may have two
-        that mean one status. Empty where nothing named a column - the poller, and a repository
-        mirroring no board - and then the status picks the column as it always did.
+        `column` is the board column somebody picked or the poller saw, where there is one. The
+        status drives the lock and the block in Discord; the column decides which of the board's
+        own columns the card lands in, and since issue #246 the label too, `status: ` and that
+        column, spelled and coloured as the board has it. It exists because a board may have two
+        columns that mean one status. Empty where nothing named a column, and then the status
+        picks the column as it always did.
+
+        `status` is None for a column this bot has no status for, such as `Ready To Merge`, and the
+        item then keeps the status it has. The column alone moves: the label, and the card, which
+        the board's own column order still has to allow.
         """
         found = await locate(self._sessionmaker, thread_id)
         self._refuse_a_kind_it_cannot_move(found, instead="Move its card on the board instead.")
         snapshot = await self._fetch(found)
+        # Before the status is filled in, so a closed issue is refused a column that is not Done.
         self._refuse_conflicting_status(found, snapshot, status)
+        wanted = found.status if status is None else status
+        label = await self._status_label(found, wanted, column)
         if acting is not None:
-            await self._refuse_a_move_the_board_forbids(found, status, column)
-            await self._refuse_a_card_nobody_authorised(found, acting, status)
+            await self._refuse_a_move_the_board_forbids(found, wanted, column)
+            await self._refuse_a_card_nobody_authorised(found, acting, wanted)
 
-        change = labels.status_change(snapshot.label_names, status)
-        if change.nothing_to_do and found.status is status:
+        change = labels.status_change(snapshot.label_names, label.definition)
+        if not label.settled:
+            # Put on as it is, without making the repository hold it in a colour: see
+            # `StatusLabel`. GitHub matches a label name without regard to case, so one the
+            # repository has already is the one attached.
+            change = replace(change, define=None)
+        if change.nothing_to_do and found.status is wanted:
             # Nothing to write, which is not the same as nothing to do. The lock is the last step
             # of a status change and the likeliest to have been refused on its own, so a repeat
             # is what gets it a second go.
@@ -299,7 +338,7 @@ class ItemWorkflow:
             # So the state of the ITEM decides too, not the status alone. A reopened pull request
             # is not closed, so the case this branch exists for - a refused unlock on something
             # reopened - still gets its second go.
-            wants_lock = status is Status.DONE or snapshot.closed
+            wants_lock = wanted is Status.DONE or snapshot.closed
             # Held across the lock this sets, because this is a Discord call the sync path never
             # makes and so never covered. An event for the same item can be in its own Discord
             # phase right now, and locking is the step where interleaving shows: it is last on
@@ -308,7 +347,7 @@ class ItemWorkflow:
             # through, because a caller already holding it is not something to wait for.
             async with self._one_item.held(found.github_object_id):
                 moved_to = await self._status_now(found.tracked_item_id)
-                if moved_to is not status:
+                if moved_to is not wanted:
                     # Somebody moved the item while this waited, and their lock is the current
                     # one. Everything this branch acts on was read before the wait: the status
                     # off `locate`, the labels off a GitHub round trip after it. The branch
@@ -330,12 +369,13 @@ class ItemWorkflow:
                     # the item cannot hold, which is final, and writes the column down for it.
                     # This is the opposite of final, so it is the one error here that wants the
                     # ordinary treatment: said to whoever ran it, and left for the next poll.
+                    asked = spoken(wanted) if status is not None else column.strip()
                     raise ItemMovedError(
                         f"{found.full_name}#{found.number} is "
                         f"{spoken(moved_to) if moved_to is not None else 'no longer tracked'} "
-                        f"now, not {spoken(status)}: somebody moved it while this was "
+                        f"now, not {spoken(wanted)}: somebody moved it while this was "
                         f"running, so its thread was left alone. Run this again if you still "
-                        f"want it {spoken(status)}."
+                        f"want it in {asked}."
                     )
 
                 lock = await self._set_lock(thread_id, wants_lock, guild_id=found.guild_id)
@@ -351,7 +391,7 @@ class ItemWorkflow:
             # moment is noticed by nothing. Running the command again is what a person
             # does, and it answered 'already Done' and asked the board nothing.
             repeated = acting is not None and await self._move_the_card(
-                found, status, acting=acting, column=column
+                found, wanted, acting=acting, column=column
             )
             return WorkflowOutcome(
                 found.full_name,
@@ -371,6 +411,19 @@ class ItemWorkflow:
         # limited GitHub call would be paying for the wrong thing.
         async with self._one_item.held(found.github_object_id):
             previous = await self._store_status(found.tracked_item_id, status)
+            # A column with no status keeps the status the row has NOW, read under its lock,
+            # rather than the one read before three GitHub round trips: writing that back would
+            # undo a move somebody else finished in between, and lift the lock theirs took.
+            wanted = previous if status is None else status
+            if status is None and previous is Status.DONE:
+                # Finished by somebody else while this was writing the label, which the Done
+                # refusal above could not see. Left where they put it: the label this wrote is
+                # tidied by the next move, which every Done item still gets asked for.
+                raise ItemMovedError(
+                    f"{found.full_name}#{found.number} is {spoken(Status.DONE)} now: somebody "
+                    f"finished it while this was running, so it was left {spoken(Status.DONE)}. "
+                    "Move it to a status first if you still want it in that column."
+                )
             try:
                 written = await self._rerender(found, snapshot, change, settles_the_lock=False)
             except BaseException:
@@ -382,7 +435,7 @@ class ItemWorkflow:
                 # write lands a moment later.
                 with contextlib.suppress(Exception):
                     await asyncio.shield(
-                        self._give_the_status_back(found.tracked_item_id, status, previous)
+                        self._give_the_status_back(found.tracked_item_id, wanted, previous)
                     )
                 raise
 
@@ -393,7 +446,7 @@ class ItemWorkflow:
             # ever going to lift it. The commands to move it back are all allowed and all
             # reported success, and left the thread shut against the discussion they had just
             # reopened.
-            wants_lock = status is Status.DONE
+            wants_lock = wanted is Status.DONE
             touched = wants_lock or previous is Status.DONE
             lock = (
                 await self._set_lock(written or thread_id, wants_lock, guild_id=found.guild_id)
@@ -404,10 +457,16 @@ class ItemWorkflow:
                 await self._write_the_lock_down(found.tracked_item_id, written or thread_id, lock)
 
         no_column = acting is not None and await self._move_the_card(
-            found, status, acting=acting, column=column
+            found, wanted, acting=acting, column=column
         )
 
-        logger.info("%s#%s set to %s", found.full_name, found.number, status.value)
+        logger.info(
+            "%s#%s set to %s, labelled %r",
+            found.full_name,
+            found.number,
+            wanted.value,
+            label.definition.name,
+        )
         return WorkflowOutcome(
             found.full_name,
             found.number,
@@ -556,15 +615,60 @@ class ItemWorkflow:
         # not `set_medium_priority` - a derived name would have been wrong for exactly one of the
         # eight and right everywhere it was tested. With the state a choice rather than a command
         # name, nothing about it is underivable and the table has nothing left to say.
-        if isinstance(reserved, Status):
+        if isinstance(reserved, Priority):
             raise WorkflowRefusedError(
-                f"{code_span(name)} is a workflow status here. Run /status and pick "
-                f"{spoken(reserved)} instead."
+                f"{code_span(name)} already means {spoken(reserved)} priority here. Run "
+                f"/priority and pick {spoken(reserved)} instead."
             )
+        # A status label names its column rather than a status since issue #246, so the column is
+        # what to pick: `status: Ready To Merge` is a column this bot has no status for.
         raise WorkflowRefusedError(
-            f"{code_span(name)} already means {spoken(reserved)} priority here. Run /priority "
-            f"and pick {spoken(reserved)} instead."
+            f"{code_span(name)} is a workflow status here. Run /status and pick {reserved} instead."
         )
+
+    async def _status_label(
+        self, found: FoundItem, status: Status, column: str
+    ) -> labels.StatusLabel:
+        """The status label for this move, refusing one GitHub would not take.
+
+        `labels.status_label_on` decides, from the board's own columns: the column the card lands
+        in, spelled and coloured as the board has it, or one of this bot's own four names.
+        """
+        label = labels.status_label_on(await self._board_columns(found), status, column)
+        name = label.definition.name
+        if len(name) > labels.LONGEST_LABEL:
+            raise WorkflowRefusedError(
+                f"{code_span(name)} is {len(name)} characters, and GitHub takes a label of "
+                f"{labels.LONGEST_LABEL} at most. Give that column a shorter name on the board to "
+                "use it here."
+            )
+        return label
+
+    async def _board_columns(self, found: FoundItem) -> tuple[BoardColumn, ...] | None:
+        """The board's columns, empty for no board, or None where the board will not read.
+
+        Read fresh, as `order_for` and the card write read it. The label names the column the
+        card lands in, and a cached answer a column rename old would name one the card write no
+        longer finds - a settled label, made in its colour, for a column the card is not in. One
+        read per move, beside the two the card write already makes.
+
+        None does not fail the move. The label is then the name it was given, unsettled - see
+        `labels.StatusLabel` - and a GitHub outage must not take `/status` down for everybody,
+        the same bargain the board's column order makes.
+        """
+        if self._columns is None:
+            return ()
+        try:
+            board = await self._columns.columns(found.guild_id, fresh=True)
+        except ShannonError as unreadable:
+            logger.warning(
+                "could not read the board's columns for %s#%s: %s",
+                found.full_name,
+                found.number,
+                unreadable.message,
+            )
+            return None
+        return board
 
     async def _spelling_the_repository_uses(self, found: FoundItem, name: str) -> str:
         """The repository's own spelling of this label, refusing one it does not have.
@@ -752,7 +856,7 @@ class ItemWorkflow:
         )
 
     def _refuse_conflicting_status(
-        self, found: FoundItem, snapshot: TrackedSnapshot, status: Status
+        self, found: FoundItem, snapshot: TrackedSnapshot, status: Status | None
     ) -> None:
         """Refuse, rather than write a status that something else is going to overwrite.
 
@@ -761,6 +865,11 @@ class ItemWorkflow:
         directions of disagreement have to be refused here: marking an open issue done, and
         marking a closed one anything else. Writing either would put the label on GitHub,
         report the change as made, and then have the very next render take it back.
+
+        None is a board column this bot has no status for, which is not Done either: a closed
+        issue labelled `status: Ready To Merge` would be Done in Discord and not on GitHub. Nor is
+        anything else that is Done moved to one. The item would keep DONE, and its thread shut,
+        while its label and its card said `Ready To Merge`.
         """
         if found.object_type is ObjectType.ISSUE:
             if snapshot.closed and status is not Status.DONE:
@@ -774,6 +883,11 @@ class ItemWorkflow:
                     "that locks the thread too."
                 )
             return
+        if status is None and found.status is Status.DONE:
+            raise WorkflowRefusedError(
+                f"That item is {spoken(Status.DONE)}, and a column this bot has no status for "
+                "would leave it Done with its thread shut. Move it to a status first."
+            )
 
     async def _refuse_a_move_the_board_forbids(
         self, found: FoundItem, status: Status, column: str = ""
@@ -864,9 +978,17 @@ class ItemWorkflow:
 
         Removals first. The two states this can be interrupted in are an item with no status
         label and an item with two, and the first is the one a reader can make sense of.
+
+        The label being put on is made to exist in its colour after the removals and before the
+        add. After, because making it can be renaming the label it replaces, which moves that label
+        on every item at once - this one included, if it were still carrying it, and the removal
+        would then ask GitHub to take off a label the item no longer has. Before, because adding a
+        label the repository does not have makes it grey. Issue #246.
         """
-        for name in change.remove:
+        for name in (*change.remove, *_renamed_since(change)):
             await self._github.remove_label(found.owner, found.name, found.number, name)
+        if change.define is not None:
+            await self._definitions.ensure(found.owner, found.name, change.define)
         if change.add:
             await self._github.add_label(found.owner, found.name, found.number, change.add)
 
@@ -949,8 +1071,11 @@ class ItemWorkflow:
             )
         return _Lock(locked=locked)
 
-    async def _store_status(self, tracked_item_id: int, status: Status) -> Status:
+    async def _store_status(self, tracked_item_id: int, status: Status | None) -> Status:
         """Written before the re-render, because the render reads it back off the row.
+
+        None writes nothing: a board column this bot has no status for keeps the status the row
+        has, and answering with it is how the caller learns what that is under the lock.
 
         Answers with the status it replaced, read under the row's own lock. Whether the thread
         gets locked or given back is decided from that and not from the read at the top of the
@@ -971,7 +1096,8 @@ class ItemWorkflow:
             if item is None:
                 raise ItemNotReadyError("That item is no longer tracked here.")
             previous = item.status
-            item.status = status
+            if status is not None:
+                item.status = status
             return previous
 
     async def _write_the_lock_down(self, tracked_item_id: int, thread_id: int, lock: _Lock) -> None:
@@ -1085,6 +1211,30 @@ class ItemWorkflow:
             )
 
 
+def _renamed_since(change: labels.LabelChange) -> tuple[str, ...]:
+    """The new names of the old priority labels being taken off, where they are not going on.
+
+    Another item's write can rename `HIGH` to `priority: High` between this one reading its
+    labels and taking `HIGH` off. The rename moves the label onto this item under its new name,
+    the removal then finds nothing and is answered as done, and the item ends up carrying two
+    priorities, which `parse_priority` reads back as the higher. So the new name is taken off as
+    well. It costs a removal GitHub answers 404, swallowed, and only while an item still carries
+    a label this bot used to write.
+
+    A status label is left to the next move, which takes every other status label off. Its old
+    name has no one new name to look for - it is renamed to whichever column claims it - and the
+    stored status is never read back off a label, so nothing is decided from the stray one.
+    """
+    gone = {name.strip().casefold() for name in change.remove}
+    return tuple(
+        definition.name
+        for definition in labels.PRIORITY_LABELS.values()
+        if any(old.casefold() in gone for old in definition.replaces)
+        and definition.name.casefold() != change.add.casefold()
+        and definition.name.casefold() not in gone
+    )
+
+
 def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> TrackedSnapshot:
     """The snapshot as it will be once the change lands, without asking GitHub again.
 
@@ -1097,7 +1247,7 @@ def _relabelled(snapshot: TrackedSnapshot, change: labels.LabelChange) -> Tracke
     gone = {name.casefold() for name in change.remove}
     kept = [label for label in snapshot.labels if label.name.casefold() not in gone]
     if change.add and change.add.casefold() not in {label.name.casefold() for label in kept}:
-        kept.append(Label(name=change.add))
+        kept.append(Label(name=change.add, color=change.define.colour if change.define else None))
     return snapshot.relabelled(tuple(kept))
 
 
@@ -1201,6 +1351,7 @@ def build_item_workflow(
     issue_sync: SyncsItems,
     authorisations: WhoIsMovingTheCard,
     cards: MovesCards | None = None,
+    columns: NamesColumns | None = None,
 ) -> ItemWorkflow:
     """Assemble the workflow service with a fetcher and a renderer per object type."""
     return ItemWorkflow(
@@ -1220,4 +1371,6 @@ def build_item_workflow(
         RepositoryLabels(github),
         authorisations,
         cards,
+        definitions=LabelDefinitions(github),
+        columns=columns,
     )

@@ -192,7 +192,12 @@ class MovesStatus(Protocol):
     """
 
     async def set_status(
-        self, *, thread_id: int, status: Status, acting: int | None = None
+        self,
+        *,
+        thread_id: int,
+        status: Status | None,
+        column: str = "",
+        acting: int | None = None,
     ) -> WorkflowOutcome: ...
 
 
@@ -886,11 +891,25 @@ class ProjectPoller:
                 await self._remember_column(tracked, column, readable)
             return 0
 
+        if not column:
+            # A card with no Status: cleared by somebody, or a board whose Status field will not
+            # read at all. Neither says where the item is, so neither is a move. Written down,
+            # or refused to be forgotten where the board is unreadable - `_remember_column` says
+            # which - and passed over, so a board gone blank costs no GitHub or Discord call per
+            # card per poll.
+            await self._remember_column(tracked, column, readable)
+            return 0
+
         wanted = status_from_column(column)
-        if wanted is None or (wanted is tracked.status and tracked.column is None):
-            # A column nobody has taught us, or the first look at a card that already agrees
-            # with its item. Neither is a move to carry out, and both have to be written down
-            # or the same card is looked at again on every poll for ever.
+        # What the logs call the move: the status, or the column where this bot has no status for
+        # it. Since issue #246 a column like `Ready To Merge` is still a move - its label follows
+        # the card - and the item keeps the status it has.
+        said = wanted.value if wanted is not None else repr(column)
+        if tracked.column is None and wanted is tracked.status:
+            # The first look at a card that already agrees with its item. Not a move to carry
+            # out, and it has to be written down or the same card is looked at again on every
+            # poll for ever. A first look at a column this bot has no status for goes on to the
+            # first-look rule below, the same as any other column.
             await self._remember_column(tracked, column, readable)
             return 0
 
@@ -927,7 +946,7 @@ class ProjectPoller:
                 "not moving %s to %s: the board is not allowed to set a status. Set "
                 "SHANNON_BOARD_MAY_SET_STATUS to turn that on",
                 item.title,
-                wanted.value,
+                said,
             )
             await self._remember_column(tracked, column, readable)
             return 0
@@ -937,8 +956,10 @@ class ProjectPoller:
             # the card moved, so writing to the board would put back the column it has just
             # read - and since issue #170 a board write is made AS somebody, and no member asked
             # for this one. `acting=None` says both at once.
+            # The column as well, so the label is the board's own: `status: In progress` for a card
+            # in that column, rather than the name this bot gives the status it reads as.
             moved = await self._workflow.set_status(
-                thread_id=tracked.thread_id, status=wanted, acting=None
+                thread_id=tracked.thread_id, status=wanted, column=column, acting=None
             )
         except WorkflowRefusedError as refusal:
             # A status the item cannot hold, such as anything but DONE on a closed issue.
@@ -983,7 +1004,7 @@ class ProjectPoller:
                 "could not move %s to %s and no waiting will change that, so it will not be "
                 "tried again: %s",
                 item.title,
-                wanted.value,
+                said,
                 refusal,
             )
             await self._remember_column(tracked, column, readable)
@@ -994,7 +1015,7 @@ class ProjectPoller:
             # move as seen while it never happened, and since nothing else ever rederives a
             # status from a board, the card would sit in its new column for ever with the
             # old status and no poll would look at it again.
-            logger.warning("could not move %s to %s: %s", item.title, wanted.value, error)
+            logger.warning("could not move %s to %s: %s", item.title, said, error)
             return 0
 
         if moved.lock_refused and not moved.lock_refusal_is_permanent:
@@ -1006,7 +1027,7 @@ class ProjectPoller:
             logger.warning(
                 "moved %s to %s but could not lock its thread; it will be tried again",
                 item.title,
-                wanted.value,
+                said,
             )
             return 0
 
@@ -1025,7 +1046,7 @@ class ProjectPoller:
                 "moved %s to %s but Discord will not let this bot lock threads, so it stays "
                 "open; grant Manage Threads and move the card again",
                 item.title,
-                wanted.value,
+                said,
             )
 
         await self._remember_column(tracked, column, readable)

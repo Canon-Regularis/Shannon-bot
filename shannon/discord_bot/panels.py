@@ -28,7 +28,6 @@ class Accent(IntEnum):
 
     OPEN = 0x3FB950
     PASSED = 0x3FB950
-    LOW = 0x3FB950
 
     NEUTRAL = 0x8B949E
     DRAFT = 0x8B949E
@@ -46,6 +45,9 @@ class Accent(IntEnum):
     DELETED = 0xF85149
 
     MEDIUM = 0xD29922
+    # Issue #246. Yellow, as the `priority: Low` label is on GitHub, where it used to share the
+    # green that says something is open or passed, which a low priority says nothing about.
+    LOW = 0xF2CC60
 
     SAID = 0x58A6FF
 

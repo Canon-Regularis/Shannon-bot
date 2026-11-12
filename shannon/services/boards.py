@@ -23,13 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.board import board_owner
+from shannon.domain.board import board_owner, named_column
 from shannon.domain.errors import (
     BoardNotAuthorisedError,
     NotRegisteredError,
     ShannonError,
 )
-from shannon.github.projects import ProjectListing
+from shannon.github.errors import NoStatusFieldError
+from shannon.github.projects import BoardColumn, ProjectListing
 
 # Long enough that choosing a board is one call rather than one per keystroke, short enough that
 # a board made on GitHub a moment ago can be picked. The same bargain `RepositoryLabels` strikes,
@@ -78,9 +79,9 @@ class ReadsProjects(Protocol):
 
 
 class ReadsColumns(Protocol):
-    """The Status columns one board has, which is all the `/status` picker needs."""
+    """The Status columns one board has, with their colours, which is all `/status` needs."""
 
-    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]: ...
+    async def status_columns(self, owner: str, project_number: int) -> tuple[BoardColumn, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,12 +517,16 @@ def said(link: BoardLink) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _RememberedColumns:
-    columns: tuple[str, ...]
+    # None for a board with no Status field this bot can read, which is remembered as long as
+    # an answer is: the picker asks on every keystroke, and the field is not coming back between
+    # two of them.
+    columns: tuple[BoardColumn, ...] | None
     until: datetime
 
 
 class BoardColumns:
-    """Which columns a server's board has, for the `/status` picker to offer.
+    """Which columns a server's board has, for the `/status` picker to offer and, since issue
+    #246, for a status label to be spelled and coloured from.
 
     Keyed on the guild rather than on the board, because that is what the picker knows: an
     autocomplete is handed an interaction and has to get from there to a board in the three seconds
@@ -549,13 +554,46 @@ class BoardColumns:
     async def offered(self, guild_id: int) -> tuple[str, ...]:
         """The board's own columns, or nothing where this server mirrors no board.
 
-        Nothing is the honest answer for a server with no board, no repository, or a board that
-        will not read. The picker puts this bot's own four names behind whatever comes back, so
-        an empty answer is a picker that still works rather than one that offers nothing.
+        Nothing is the honest answer for a server with no board or no repository. A board that
+        will not read raises, as `columns` says, and the picker answers that with this bot's own
+        four names, the same as it puts them behind whatever comes back - so either way it is a
+        picker that still works rather than one that offers nothing.
+        """
+        return tuple(column.name for column in await self.columns(guild_id))
+
+    async def column_named(self, guild_id: int, column: str) -> BoardColumn | None:
+        """The board's own column by this name, or None where the board has no such column.
+
+        Matched the way the card write matches - `normalise` on both sides, so `in-progress` is
+        `In progress` - and answered as the BOARD spells it and colours it. Issue #246: a status
+        label is `status: ` and the column, coloured like the column, so `/status in review` on a
+        board calling it `In review` writes the board's spelling rather than what was typed.
+
+        Out of the same cached answer the picker uses, so naming a column a moment after picking
+        it costs nothing - and read again once on a miss, because a column added or renamed since
+        that answer was cached is exactly the one somebody has just picked or dragged a card into.
+        Raises where the board will not read, as `offered` does.
+        """
+        if not column.strip():
+            return None
+        for fresh in (False, True):
+            found = await self.columns(guild_id, fresh=fresh)
+            at = named_column([one.name for one in found], column)
+            if at is not None:
+                return found[at]
+        return None
+
+    async def columns(self, guild_id: int, *, fresh: bool = False) -> tuple[BoardColumn, ...]:
+        """The board's Status columns in board order, with their colours, or nothing for no board.
+
+        `fresh` reads past the cache. Raises where the board will not read: `BoardUnreadableError`,
+        saying what to do, for a board with no Status field this bot can read.
         """
         remembered = self._held.get(guild_id)
         now = self._now()
-        if remembered is not None and remembered.until > now:
+        if remembered is not None and remembered.until > now and not fresh:
+            if remembered.columns is None:
+                raise _no_status_field()
             return remembered.columns
 
         async with self._sessionmaker() as session:
@@ -569,6 +607,17 @@ class BoardColumns:
             return ()
 
         owner = board_owner(project_owner=stored.project_owner, repo_name=stored.repo_name)
-        found = await self._columns.status_columns(owner, number)
+        try:
+            found = await self._columns.status_columns(owner, number)
+        except NoStatusFieldError as missing:
+            self._held[guild_id] = _RememberedColumns(columns=None, until=now + self._lifetime)
+            raise _no_status_field() from missing
         self._held[guild_id] = _RememberedColumns(columns=found, until=now + self._lifetime)
         return found
+
+
+def _no_status_field() -> BoardUnreadableError:
+    return BoardUnreadableError(
+        "This server's board has no Status field this bot can read, so none of its columns can "
+        "be picked here. Give the board a single-select field called Status, then try again."
+    )

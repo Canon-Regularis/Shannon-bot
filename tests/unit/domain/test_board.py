@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from shannon.domain.board import is_board_page, must_pass_through, status_from_column
-from shannon.domain.enums import Status
+from shannon.domain.board import (
+    is_board_page,
+    landing_column,
+    must_pass_through,
+    named_column,
+    status_from_column,
+)
+from shannon.domain.enums import Priority, Status
 
 
 @pytest.mark.parametrize(
@@ -65,6 +71,39 @@ def test_no_column_at_all_says_nothing(column: str | None) -> None:
 # the only thing on a board that says which move comes after which, because Projects v2 has no
 # transition rule to read and a single-select option carries no position of its own.
 TEMPLATE = ("Backlog", "Ready", "In progress", "In review", "Done")
+
+
+MERGE_BOARD = ["Backlog", "Ready", "In progress", "In review", "Ready To Merge", "Done"]
+
+
+class TestWhereACardLands:
+    """One resolver for the card write, the column order rule and the status label. Issue #246."""
+
+    def test_a_column_named_is_where_it_lands_however_it_is_spelled(self) -> None:
+        assert landing_column(MERGE_BOARD, Status.IN_REVIEW, "in-progress") == 2
+
+    def test_a_column_with_no_status_is_where_it_lands(self) -> None:
+        assert landing_column(MERGE_BOARD, Status.IN_REVIEW, "Ready To Merge") == 4
+
+    def test_the_states_own_name_wins_over_a_synonym(self) -> None:
+        assert landing_column(MERGE_BOARD, Status.IN_REVIEW) == 3
+
+    def test_a_name_the_board_lacks_falls_back_on_the_state(self) -> None:
+        assert landing_column(MERGE_BOARD, Status.DONE, "Shipped") == 5
+
+    def test_a_synonym_in_board_order_where_the_own_name_is_missing(self) -> None:
+        assert landing_column(["Todo", "Doing", "Started", "Done"], Status.IN_REVIEW) == 1
+
+    def test_a_priority_lands_on_its_option(self) -> None:
+        assert landing_column(["Low", "Urgent"], Priority.HIGH) == 1
+
+    def test_nowhere_to_land_is_none(self) -> None:
+        assert landing_column(["Todo", "Done"], Status.BACKLOG) is None
+        assert landing_column(["Low"], Priority.HIGH) is None
+
+    def test_a_column_is_found_by_name_or_not_at_all(self) -> None:
+        assert named_column(MERGE_BOARD, " READY to merge ") == 4
+        assert named_column(MERGE_BOARD, "Shipped") is None
 
 
 class TestWhatAMoveHasToPassThrough:

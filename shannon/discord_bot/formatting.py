@@ -287,7 +287,7 @@ def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | No
 # and a zero-width space. They are here because these lines are read at a glance in a busy
 # channel and the words alone do not carry that far: a colour says how urgent an item is before
 # anybody has read which label moved.
-_PRIORITY_MARKS = {Priority.HIGH: "🔴", Priority.MEDIUM: "🟠", Priority.LOW: "🟢"}
+_PRIORITY_MARKS = {Priority.HIGH: "🔴", Priority.MEDIUM: "🟠", Priority.LOW: "🟡"}
 # The same three levels as a bar down the side of the card, so urgency reads before
 # anything has been read at all.
 _PRIORITY_ACCENTS = {
@@ -316,8 +316,9 @@ def format_label_change(move: LabelMove) -> Panel:
     one that matters under the one that does not.
 
     Which group a label is in was decided where the move was read, so the order of the tests
-    below is a formality and not a precedence rule: no status name parses as a priority and no
-    priority spelling is one of the five statuses, which a test pins rather than assumes.
+    below is a formality and not a precedence rule: no status label parses as a priority - the
+    parser refuses the `status:` prefix - and no priority spelling is a status label, which a test
+    pins rather than assumes.
 
     "Tag" rather than "label", to match the word the block uses for the same thing.
 
@@ -343,7 +344,7 @@ def format_label_change(move: LabelMove) -> Panel:
             _PRIORITY_ACCENTS[move.priority],
         )
 
-    if move.status is not None:
+    if move.is_status:
         return _line(
             f"{_STATUS_MARK} **Status {'set' if move.added else 'cleared'}:** {named}", Accent.SAID
         )

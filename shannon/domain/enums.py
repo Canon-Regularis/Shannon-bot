@@ -27,10 +27,10 @@ class Priority(StrEnum):
 
 # What a state is called in front of a person. Issue #147.
 #
-# A table rather than a transformation of `.value`, because the enum's own spelling is three other
-# things at once: the GitHub label name (`github/labels.py`), the varchar in `tracked_items`, and
-# the key a priority label is case-folded against. SCREAMING_SNAKE is what all three want and none
-# of them is a sentence, so the display form has to be its own answer and never the same string.
+# A table rather than a transformation of `.value`, because the enum's own spelling is other things:
+# the varchar in `tracked_items`, and what the GitHub labels were called before issue #246, which
+# `github/labels.py` still reads. SCREAMING_SNAKE is what those want and neither is a sentence, so
+# the display form has to be its own answer and never the same string.
 #
 # Written out for the reason `services/workflow._OWNED_BY` was written out: a derived form would
 # be right for seven of these and silently wrong for the eighth, and there is nowhere in a

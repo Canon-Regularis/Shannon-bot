@@ -10,6 +10,10 @@ _SEPARATORS = re.compile(r"[\s_\-:/]+")
 _PREFIXES = ("priority", "prio", "p")
 _SUFFIX = "priority"
 
+# What a status label starts with since issue #246: `status: Ready To Merge`. Here rather than
+# beside the rest of the label vocabulary in `github/labels.py`, which imports this module.
+STATUS_PREFIX = "status:"
+
 _WORDS: dict[str, Priority] = {
     "high": Priority.HIGH,
     "urgent": Priority.HIGH,
@@ -34,6 +38,13 @@ def parse_priority(label_names: Iterable[str]) -> Priority:
 
 
 def _from_label(name: str) -> Priority | None:
+    # A status label is never a priority, whatever its column is called. Issue #246: a board's
+    # column becomes `status: <column>`, and one named "High priority" would otherwise turn
+    # every item moved into it urgent. The prefix exactly, as `labels.is_status_label` reads it,
+    # so a team's own `status-high-priority` is still the priority it always was.
+    if name.strip().casefold().startswith(STATUS_PREFIX):
+        return None
+
     parts = [part for part in _SEPARATORS.split(name.strip().lower()) if part]
     if not parts:
         return None

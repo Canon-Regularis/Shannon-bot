@@ -18,7 +18,7 @@ from shannon.domain.models import (
     ReviewCommentSnapshot,
     ReviewSnapshot,
 )
-from shannon.github.errors import GitHubNotFoundError
+from shannon.github.errors import GitHubNotFoundError, GitHubRefusedError
 from shannon.github.paging import PagedRead
 
 # The same shape the real client uses, so one helper answers for both stores.
@@ -136,6 +136,13 @@ class FakeGitHubClient:
         # which labels exist fails loudly rather than passing on a guess.
         self.repo_labels: dict[str, list[str]] = {}
         self.label_list_calls: list[str] = []
+        # The repository's labels as objects with a colour, by `owner/name`, and every write to
+        # them as (op, owner/name, label, new name, colour). Issue #246. Kept apart from
+        # `label_calls`, which is what was done to ITEMS, so a test counting those is unmoved by
+        # this bot making sure its own labels look right.
+        self.label_colours_by_repo: dict[str, dict[str, str]] = {}
+        self.label_colour_reads: list[str] = []
+        self.definition_calls: list[tuple[str, str, str, str, str]] = []
         self.assignable_calls: list[tuple[str, str]] = []
         # Every comment written, as (owner/name, number, body). Issue #103.
         self.comments: list[tuple[str, int, str]] = []
@@ -287,6 +294,44 @@ class FakeGitHubClient:
             raise self.error
         return list(self.repo_labels.get(key, []))
 
+    async def label_colours(self, owner: str, name: str) -> dict[str, str]:
+        key = f"{owner}/{name}".lower()
+        self.label_colour_reads.append(key)
+        if self.error is not None:
+            raise self.error
+        return dict(self.label_colours_by_repo.get(key, {}))
+
+    async def create_label(self, owner: str, name: str, label: str, colour: str) -> None:
+        key = f"{owner}/{name}".lower()
+        self.definition_calls.append(("create", key, label, "", colour))
+        if self.write_error is not None:
+            raise self.write_error
+        held = self.label_colours_by_repo.setdefault(key, {})
+        if any(existing.casefold() == label.casefold() for existing in held):
+            # GitHub's answer to a name the repository already has.
+            raise GitHubRefusedError(f"GitHub refused to create {label!r}: already_exists")
+        held[label] = colour
+
+    async def update_label(
+        self, owner: str, name: str, label: str, *, new_name: str, colour: str
+    ) -> None:
+        key = f"{owner}/{name}".lower()
+        self.definition_calls.append(("update", key, label, new_name, colour))
+        if self.write_error is not None:
+            raise self.write_error
+        held = self.label_colours_by_repo.setdefault(key, {})
+        found = next((existing for existing in held if existing.casefold() == label.casefold()), "")
+        if not found:
+            raise GitHubNotFoundError(f"GitHub has no label {label!r}")
+        del held[found]
+        held[new_name] = colour
+        # A rename moves the label on every item carrying it, which is the point of making one.
+        for item in [item for item in self.labels if item[0] == key]:
+            self.labels[item] = [
+                new_name if on.casefold() == found.casefold() else on for on in self.labels[item]
+            ]
+            self._restate(item)
+
     async def list_check_runs(self, owner: str, name: str, sha: str) -> Sequence[CheckRun] | None:
         self.check_run_calls.append((f"{owner}/{name}".lower(), sha))
         if self.error is not None:
@@ -331,6 +376,11 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         self.labels.setdefault(key, []).append(label)
+        # GitHub makes a label nobody defined, in its own grey, which is how the old ones got
+        # their look. Only where the repository's labels are being kept at all.
+        held = self.label_colours_by_repo.get(key[0])
+        if held is not None and not any(on.casefold() == label.casefold() for on in held):
+            held[label] = "ededed"
         self._restate(key)
 
     async def remove_label(self, owner: str, name: str, number: int, label: str) -> None:

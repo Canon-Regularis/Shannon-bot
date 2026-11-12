@@ -83,3 +83,22 @@ def test_a_word_that_merely_contains_a_priority_is_not_one() -> None:
 
 def test_an_unknown_word_after_a_priority_prefix_is_unset() -> None:
     assert parse_priority(["priority: whenever"]) is Priority.UNSET
+
+
+@pytest.mark.parametrize("label", ["status: High priority", "Status: Low", "status:urgent"])
+def test_a_status_label_is_never_a_priority(label: str) -> None:
+    """Issue #246. A status label is `status: ` and a board column, and one called `High
+    priority` would otherwise make every item moved into it urgent."""
+    assert parse_priority([label]) is Priority.UNSET
+
+
+@pytest.mark.parametrize("label", ["status-high-priority", "status_high_priority"])
+def test_a_teams_own_label_that_only_starts_with_the_word_is_still_read(label: str) -> None:
+    """Only the `status:` prefix makes a status label, as `labels.is_status_label` reads it."""
+    assert parse_priority([label]) is Priority.HIGH
+
+
+def test_the_labels_this_bot_writes_are_read() -> None:
+    assert parse_priority(["priority: High"]) is Priority.HIGH
+    assert parse_priority(["priority: Medium"]) is Priority.MEDIUM
+    assert parse_priority(["priority: Low"]) is Priority.LOW

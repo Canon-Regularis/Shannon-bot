@@ -20,11 +20,13 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubRefusedError,
     GitHubUnavailableError,
+    NoStatusFieldError,
 )
 from shannon.github.paging import PagedRead
 from shannon.github.projects import (
     PAGE_SIZE,
     UNREADABLE,
+    BoardColumn,
     CardMove,
     HttpProjectBoards,
     parse_item,
@@ -2187,18 +2189,52 @@ class TestTheColumnsAPickerIsOffered:
 
         found = await boards.status_columns("monalisa", PROJECT)
 
-        assert found == ("Backlog", "Ready", "In progress", "In review", "Done")
+        assert [column.name for column in found] == [
+            "Backlog",
+            "Ready",
+            "In progress",
+            "In review",
+            "Done",
+        ]
 
-    async def test_a_board_with_no_status_field_offers_nothing(self) -> None:
-        """Empty rather than None. A picker has three seconds and nowhere to put a refusal, so
-        having nothing to offer and having nothing to say are one outcome to it."""
+    async def test_each_column_carries_the_colour_the_board_shows_it_in(self) -> None:
+        """Issue #246: a status label is coloured like its column."""
+        client = FakeJson(fields=[DEFAULT_TEMPLATE])
+        boards = HttpProjectBoards(client, FakeBoardCredentials(), writer=FakeWriter())
+
+        found = await boards.status_columns("monalisa", PROJECT)
+
+        assert found[0] == BoardColumn("Backlog", "GREEN")
+        assert found[3] == BoardColumn("In review", "PURPLE")
+
+    @pytest.mark.parametrize("colour", [None, "", 7])
+    async def test_a_column_with_no_usable_colour_has_none(self, colour: object) -> None:
+        """Left for the label to fall back on its status's own colour, rather than guessed."""
+        option: dict[str, object] = {
+            "id": "f75ad846",
+            "name": {"raw": "Backlog", "html": "Backlog"},
+        }
+        if colour is not None:
+            option["color"] = colour
+        field = {"id": 1, "name": "Status", "data_type": "single_select", "options": [option]}
+        boards = HttpProjectBoards(
+            FakeJson(fields=[field]), FakeBoardCredentials(), writer=FakeWriter()
+        )
+
+        assert await boards.status_columns("monalisa", PROJECT) == (BoardColumn("Backlog"),)
+
+    async def test_a_board_with_no_status_field_is_unreadable_rather_than_empty(self) -> None:
+        """Empty is a server with no board, where a status label is one of this bot's own names
+        and takes over the old label. A board that will not say what its columns are is no
+        ground for that. The picker treats anything raised as nothing to offer."""
         boards = HttpProjectBoards(
             FakeJson(fields=[{"id": 1, "name": "Title"}]),
             FakeBoardCredentials(),
             writer=FakeWriter(),
         )
 
-        assert await boards.status_columns("monalisa", PROJECT) == ()
+        with pytest.raises(NoStatusFieldError, match="no Status field"):
+            await boards.status_columns("monalisa", PROJECT)
 
     async def test_it_reads_the_board_again_every_time(self) -> None:
         """This is the list somebody chooses FROM, so a stale one offers a column the board no

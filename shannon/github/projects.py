@@ -22,16 +22,20 @@ from enum import StrEnum
 from typing import Protocol
 from urllib.parse import quote
 
-from shannon.domain.board import columns_for, normalise, status_from_column
+from shannon.domain.board import (
+    column_for,
+    columns_for,
+    landing_column,
+)
 from shannon.domain.enums import ObjectType, Priority, Status, spoken
 from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import Actor, Label
-from shannon.domain.priority import parse_priority
 from shannon.github import mapping
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubNotFoundError,
     GitHubUnavailableError,
+    NoStatusFieldError,
 )
 from shannon.github.paging import PagedRead
 
@@ -153,6 +157,18 @@ class BoardOption:
 
     option_id: str
     name: str
+    # The colour the board shows it in, as GitHub names one (`GRAY`, `BLUE` and so on), or None
+    # where the board sent none. Issue #246: a status label is coloured like its column.
+    colour: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BoardColumn:
+    """One of a board's Status columns as a picker and a label want it: what it is called and the
+    colour the board shows it in. Issue #246."""
+
+    name: str
+    colour: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,25 +737,30 @@ class HttpProjectBoards:
         self._kinds[owner] = decided
         return decided
 
-    async def status_columns(self, owner: str, project_number: int) -> tuple[str, ...]:
-        """This board's Status columns, in board order, for a picker to offer.
+    async def status_columns(self, owner: str, project_number: int) -> tuple[BoardColumn, ...]:
+        """This board's Status columns, in board order, for a picker to offer and a label to wear.
 
         Read fresh, the same way `order_for` reads fresh and for a sharper reason: this is the
         list somebody chooses FROM, so a stale one offers a column the board no longer has and
         hides one it does. The caller in front of this keeps the answer for a couple of minutes,
         which is what stops a keystroke being a GitHub call.
 
-        Empty rather than None for a board that cannot be read. A picker has three seconds and
-        nowhere to put a refusal, so having nothing to offer and having nothing to say are the
-        same outcome to it.
+        Raises for a board whose Status field will not read, rather than answering empty.
+        Empty is what a server with no board answers, and since issue #246 the two mean different
+        things: with no board a status label is one of this bot's own names, made in its colour
+        and taking over the old label, while a board that will not say what its columns are is no
+        ground for renaming a label on every item. The picker loses nothing by it, because it
+        already treats anything raised as nothing to offer.
         """
         token = await self._read_as(owner, project_number)
         board = await self._board_path(owner, project_number, token)
         self._fields.pop((owner, project_number), None)
         fields = await self._board_fields(board, owner, project_number, token)
         if fields is None:
-            return ()
-        return tuple(one.name for one in fields.status.options)
+            raise NoStatusFieldError(
+                f"board {project_number} of {owner} has no Status field this bot can read"
+            )
+        return tuple(BoardColumn(one.name, one.colour) for one in fields.status.options)
 
     async def order_for(
         self, *, owner: str, project_number: int, frm: Status, to: Status, column: str = ""
@@ -849,73 +870,28 @@ class HttpProjectBoards:
         return found
 
 
-def _option_named(options: Sequence[BoardOption], wanted: str) -> BoardOption | None:
-    """The column called exactly this, however either side spells it.
-
-    Both sides go through `normalise`, so a board saying `HIGH` and this bot saying `High`
-    are the same word.
-    """
-    asked = normalise(wanted)
-    return next((one for one in options if normalise(one.name) == asked), None)
-
-
-def _reads_as(name: str, state: Status | Priority) -> bool:
-    """Whether a column name is a SYNONYM for this state.
-
-    Both tables are many-to-one and both are already the single source for their half:
-    `status_from_column` for a column, `parse_priority` for a label. The second answers
-    UNSET where the first answers None, so it is folded to None here the way
-    `labels.reserved_as` already folds it.
-    """
-    if isinstance(state, Status):
-        return status_from_column(name) is state
-    found = parse_priority([name])
-    return found is not Priority.UNSET and found is state
-
-
 def _option_named_or_for(
     options: Sequence[BoardOption], state: Status | Priority, column: str
 ) -> BoardOption | None:
     """The column somebody named, or the one this state maps to where they named none.
 
-    One resolver for both the write and the rule that decides whether the write is allowed. They
-    used to reach the same answer by two routes and only because both routes were `_option_for`;
-    now that a person can name a column the picker showed them, a rule measuring to one column
-    while the write went to another would refuse moves it then made, or make moves it had just
-    approved somewhere else.
-
-    A name that is not on this board falls back rather than failing. It arrives from a picker
-    that had three seconds and may have shown nothing at all, so what reaches here may be typed
-    prose or a column from the board this repository mirrored last week.
+    `landing_column` decides, over the options' names, so the write, the rule that decides
+    whether the write is allowed and the status label all land on the same column.
     """
-    if column:
-        named = _option_named(options, column)
-        if named is not None:
-            return named
-    return _option_for(options, state)
+    return _at(options, landing_column([one.name for one in options], state, column))
 
 
 def _option_for(options: Sequence[BoardOption], state: Status | Priority) -> BoardOption | None:
     """The board's own column standing for this state, or None where it has none.
 
-    Two passes, and the first one is not an optimisation. The words a board may use are read
-    through tables that are many-to-one on purpose - `In progress` and `In review` both mean
-    IN_REVIEW, `urgent` and `critical` both mean HIGH - because a board using either is
-    saying the same thing. That is right for READING a column back.
-
-    Writing one, it is not enough. A board carrying BOTH columns is the ordinary case rather
-    than a corner - GitHub's own default template ships Backlog, Ready, In progress, In
-    review, Done - and picking whichever came first would move a card to `In progress` when
-    somebody asked for `In review`. So a column called exactly what this bot calls the state
-    wins over one that merely maps to it.
-
-    The fallback keeps board order, which is left to right. It only decides between synonyms
-    now, where neither is the state's own name and there is nothing better to go on.
+    `column_for` decides: a column called exactly what this bot calls the state, then the first
+    synonym in board order.
     """
-    exact = _option_named(options, spoken(state))
-    if exact is not None:
-        return exact
-    return next((one for one in options if _reads_as(one.name, state)), None)
+    return _at(options, column_for([one.name for one in options], state))
+
+
+def _at(options: Sequence[BoardOption], at: int | None) -> BoardOption | None:
+    return options[at] if at is not None else None
 
 
 def _select_of(field: JsonObject | None) -> BoardSelect | None:
@@ -948,7 +924,11 @@ def _options_of(field: JsonObject) -> tuple[BoardOption, ...]:
     listed = field.get("options")
     rows = listed if is_json_list(listed) else []
     return tuple(
-        BoardOption(option_id=option_id, name=name)
+        BoardOption(
+            option_id=option_id,
+            name=name,
+            colour=colour if isinstance(colour := row.get("color"), str) and colour else None,
+        )
         for row in rows
         if is_json_object(row)
         and isinstance(option_id := row.get("id"), str)
