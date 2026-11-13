@@ -6,10 +6,11 @@ what a reader sees and in what order.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 
 from shannon.discord_bot.panels import (
+    PANEL_BUDGET,
     Accent,
     Block,
     BlockKind,
@@ -31,15 +32,18 @@ from shannon.discord_bot.safe_text import (
     clipped_path,
     code_span,
     defuse_mentions,
+    fit,
 )
 from shannon.domain.enums import Priority, StateChange, Status, spoken
 from shannon.domain.models import (
     Actor,
+    ChangesAsked,
     CheckReport,
     CheckRun,
     CommentSnapshot,
     Commit,
     CommitStats,
+    FileAuthors,
     ForcePush,
     IssueSnapshot,
     ItemNote,
@@ -63,6 +67,21 @@ _VERDICTS = {
     "commented": "left a review",
     "dismissed": "dismissed a review",
 }
+
+# What the lines naming a review's files and who made them may cost. Issue #263.
+#
+# A share of PANEL_BUDGET rather than all of it, because the lines sit between the heading and the
+# review itself: lines allowed to fill the message would leave the reviewer's own words, which are
+# what the review asks for, no room at all. What is left holds the heading, a body cut to
+# COMMENT_PREVIEW_LIMIT and the link back to GitHub. Linking the body's names and commits can
+# still take it past what is left, so `_note` cuts the body to the room there is rather than let
+# the panel drop it whole.
+FILE_LINES_BUDGET = 2400
+
+# The longest a mention of a Discord account can be written: the largest id a snowflake holds,
+# 2**64 - 1, is twenty digits. Issue #263 measures every name against it, because whether somebody
+# is linked is only known when the message is written, after whoever chose them has finished.
+_WIDEST_MENTION = f"<@{2**64 - 1}>"
 
 
 def thread_name(snapshot: TrackedSnapshot) -> str:
@@ -756,9 +775,78 @@ def format_review(
 
     A review with an empty body is normal: approving without comment is the common case, and
     the verdict alone is the point.
+
+    A review asking for changes says whom it asks, in whichever shape its `changes_asked` carries
+    (issue #263): each file its inline comments are on with who made it, or one line naming the
+    pull request's author and everybody who committed to it. Asked of `changes_asked` and never of
+    the verdict, which is the mirror's question and already answered by the time this runs. Either
+    shape names people above the body, because the `<@id>` text is what rings somebody and a panel
+    over budget drops from the end. Asking nobody reads as the verdict always has.
     """
     assert isinstance(snapshot, ReviewSnapshot)
+    asked = snapshot.changes_asked
+    if asked is not None and asked.files:
+        named = len(asked.files) + asked.more_files
+        noun = "file" if named == 1 else "files"
+        files = _made_by(asked, lambda person: _person(person, mentions))
+        return _note(snapshot, f"requested changes on the {noun}", mentions, roles, files=files)
+    if asked is not None and asked.everyone:
+        verb = f"requested changes from {_people(asked.everyone, mentions)}"
+        return _note(snapshot, verb, mentions, roles)
     return _note(snapshot, _VERDICTS.get(snapshot.verdict, "reviewed"), mentions, roles)
+
+
+def file_lines_width(asked: ChangesAsked) -> int:
+    """The most the file lines could ever cost, whoever on them turns out to be linked. Issue #263.
+
+    For whoever chooses the names, to hold them to FILE_LINES_BUDGET. Measured by writing the lines
+    exactly as `format_review` does, with every person at the wider of their escaped login and the
+    longest mention there is, so the measure and the message cannot drift apart. The lines are
+    chosen before anybody is resolved to an account, so a measure of the narrower one would let
+    lines through that leave the reviewer's own words less room than FILE_LINES_BUDGET promises.
+    """
+    return len(_made_by(asked, _widest))
+
+
+def _widest(person: Actor) -> str:
+    """The longest `_person` could write this person, as a stand-in of that length."""
+    return max(as_plain_text(person.login), _WIDEST_MENTION, key=len)
+
+
+def _made_by(asked: ChangesAsked, person: Callable[[Actor], str]) -> str:
+    """One line per file, and a count of the files there was no room for. Issue #263.
+
+    `person` writes each name, so `file_lines_width` measures with the very lines that are sent.
+    The count is subtext, as `_broken_jobs` writes its own, because it is a footnote to the list
+    rather than a part of it.
+    """
+    lines = [_file_made_by(file, person) for file in asked.files]
+    if asked.more_files:
+        noun = "file" if asked.more_files == 1 else "files"
+        lines.append(f"-# and {asked.more_files} more {noun}")
+    return "\n".join(lines)
+
+
+def _file_made_by(file: FileAuthors, person: Callable[[Actor], str]) -> str:
+    """One file and who made it, in the words of issue #263.
+
+    The path is clipped, defused and fenced the way `_where` does it, for the reasons given there.
+
+    A file nobody can be named for says so as `Unknown`, the word a commit with no account behind
+    it gets, rather than as nobody: every commit on it was a merge or had no account, which is not
+    the same as there being no author. One whose names all went to the count says the count, so
+    it never reads as unknown when GitHub said exactly who it was.
+    """
+    named = code_span(defuse_mentions(clipped_path(file.path)))
+    count = len(file.authors) + file.more
+    if not count:
+        return f"{named} made by {UNKNOWN}"
+    noun = "author" if count == 1 else "authors"
+    if not file.authors:
+        return f"{named} made by {count} {noun}"
+    names = ", ".join(person(author) for author in file.authors)
+    left = f" and {file.more} more" if file.more else ""
+    return f"{named} made by {noun} {names}{left}"
 
 
 def format_review_comment(
@@ -949,33 +1037,49 @@ def _note(
     verb: str,
     mentions: Mapping[str, int] | None,
     roles: Mapping[str, int] | None = None,
+    *,
+    files: str = "",
 ) -> Panel:
     """A comment or a review, posted under the metadata block.
+
+    `files` is the list a review asking for changes names under its heading, issue #263. Straight
+    after the heading and before the body, because the `<@id>` text is what rings somebody and the
+    names are what the review is addressed to; FIELDS, because a list is what the CI panel puts
+    there too. The body is cut to whatever room the heading, these lines and the link leave it, so
+    a panel over budget shortens what the reviewer said rather than dropping it.
 
     `roles` is kept apart from `mentions` rather than folded in with it, because a team slug that
     happens to match a login is not that person. The two are looked up in different tables and
     Discord writes them with different syntax, and a user id written as a role mention resolves
     to nobody and reads as broken rather than as an error.
 
-    The names in the body are swapped in the quoted text and nowhere else. The line above it
-    carries mentions this bot built itself - the author, and on a reply whoever it answers - live
-    and never defused, and a GitHub login may be all digits, so handing the assembled message to
-    the swap would let `<@7>` be read as a name and rewritten into somebody else.
+    The names in the body are swapped in the quoted text and nowhere else. The lines above it
+    carry mentions this bot built itself - the author, on a reply whoever it answers, and on a
+    review asking for changes whoever it asks - live and never defused, and a GitHub login may be
+    all digits, so handing the assembled message to the swap would let `<@7>` be read as a name
+    and rewritten into somebody else.
     """
     author = _person(snapshot.author, mentions) if snapshot.author else UNKNOWN
 
     said = f"**{author}** {verb} {as_timestamp(snapshot.created_at)}"
     blocks = [Block(BlockKind.HEADING, said)]
+    if files:
+        blocks.append(Block(BlockKind.FIELDS, files))
     # Unquoted since issue #113: the rule above it separates the comment from the line
     # naming its author, which is what the `> ` markers were there to do.
     # `as_note_text` rather than a recipe spelled out here, because `services.notes` reads the
     # names to look up out of the very same string and the two have to agree to the character.
     # The repository is where the commits it names are linked into, issue #186.
     body = _named_in(as_note_text(snapshot.body, repository=snapshot.repository), mentions, roles)
+    footnote = f"<{snapshot.html_url}>" if snapshot.html_url else ""
     if body:
-        blocks.append(Block(BlockKind.BODY, body))
-    if snapshot.html_url:
-        blocks.append(Block(BlockKind.FOOTNOTE, f"<{snapshot.html_url}>"))
+        # Cut to the room the other blocks leave, issue #263, so a panel over budget never drops
+        # it: the names above it and the link below it can together leave less than a body linked
+        # in full takes, and a body cut on a line still says what the reviewer asked for.
+        room = PANEL_BUDGET - len(said) - len(files) - len(footnote)
+        blocks.append(Block(BlockKind.BODY, fit(body, limit=room)))
+    if footnote:
+        blocks.append(Block(BlockKind.FOOTNOTE, footnote))
     return Panel(blocks=tuple(blocks), accent=Accent.SAID)
 
 
