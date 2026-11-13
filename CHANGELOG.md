@@ -8225,3 +8225,57 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Tests.** The label names and colours, the rename, the convergence of a repeated `/priority`,
   the client calls for listing, making and renaming a label, the colour read off a board column,
   and `/status` with a column this bot has no status for, from the command to the label.
+
+## A review asking for changes rings whoever made the code
+
+- **Asking for changes reached nobody** (#263). A review asking for changes was posted into its
+  thread and rang only the names typed in its body, so it read like any other comment, and the
+  people who had to make the changes heard nothing. The pull request's author was never rung:
+  the review's webhook names who opened the pull request, and nothing kept it.
+- **Each file, and who made it.** A review with inline comments names the files they are on, in the
+  order it commented, each with the authors of this pull request's commits that touched it. The
+  heading reads ``**monalisa** requested changes on the files``, and a line per file under it reads
+  `` `notes.py` made by authors alice, bob ``. Each linked person is a mention, and rung unless
+  they muted themselves. A file whose only commits are merges or have no account reads
+  `made by Unknown`.
+- **Or everybody, in one line.** ``**monalisa** requested changes from octocat, alice, bob``: the
+  pull request's author first, then everybody who committed to it, once each. Used for a review
+  with no inline comments, for more than ten files, for a review on a commit the pull request no
+  longer has (a force-push, or a pull request past the 250 commits GitHub lists, which is logged),
+  and for a file history GitHub refuses or no longer has, where the first refusal stops the reads
+  behind it.
+- **Held to what one message can carry.** Each file has room for at least five people, more when
+  there are fewer files, so one file with eight authors rings all eight, and counts the rest as
+  `and N more`. The lines are measured with every name at its widest and kept to a budget of their
+  own, so the review's own words keep their room: a line short of room names fewer people, and
+  files past it are counted as `and N more files`. Where linking the names and commits in the
+  review's words makes them longer than the room left, they are cut on a line rather than dropped.
+  Only the people shown are rung, and the file lines never ring more than fifty.
+- **Whoever is reviewing is never rung**, which is #231's rule for whoever wrote a note, and is
+  left out of the one line, which is #230's. They stay named on a file they made, because the line
+  says who made it.
+- **Every request for changes rings,** a second one as well, and one on a draft: unlike a CI run,
+  asking for changes is something a person chose to do. An approval keeps its own line, and a
+  review that only comments, a thread with comments off and an item nobody tracks ask GitHub
+  nothing.
+- **An edit keeps it.** The heading is drawn again and rings nobody. A delivery GitHub sends twice
+  is posted once.
+- **When GitHub will not say,** the rule a reply on a diff follows (#231). Unreachable, rate limited
+  or out of time: a review under half an hour old waits, failing before anything is claimed so the
+  delivery comes round again, and an older one names whoever could be read - everybody if the
+  commits came back, the pull request's author if not. A refusal: the one line, at once.
+- **What it costs.** Two lists, each read a page at a time, and one read per file: the pull
+  request's commits, its inline comments, and each file's history read back from the reviewed
+  commit. A history behind a commit never changes, so it is kept, up to 512 files, and an edit or
+  another review on the same commit reads only the two lists again. No database connection is held
+  during the reads.
+- **Known limits, in the README.** The history of a path does not follow a rename, one page of a
+  hundred commits is read per file, and `Co-authored-by` lines are not read.
+- **For whoever deploys it.** No migration, setting or new permission. A repository whose file
+  history GitHub will not show this bot gets the one line, with a warning logged once per review.
+- **Tests.** The review and inline-comment parsers gain the commit, the pull request's author and
+  the review a comment came in. The client tests gain a class for the read of a file's history, the
+  audience tests the merge rule the author and the committers now share, and the review thread
+  tests the wait a reply and a review now share. New files cover whom a review asks, the lines and
+  their budget, every path through the reads, and the whole path through the container and the
+  worker.
