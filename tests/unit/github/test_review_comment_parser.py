@@ -237,3 +237,33 @@ class TestSayingWhyOneWasDropped:
 
         assert parsed is not None
         assert caplog.text == ""
+
+
+class TestWhichReviewItCameIn:
+    """Issue #263. A review asking for changes names the files its own inline comments are on, and
+    picks them out of every inline comment on the pull request by this."""
+
+    def test_an_inline_comment_knows_the_review_it_came_in(self) -> None:
+        snapshot = parse_review_comment_event(
+            "created", payloads.pull_request_review_comment_event()
+        )
+
+        assert snapshot is not None
+        assert snapshot.review_id == payloads.REVIEW_ID
+
+    def test_one_that_does_not_say_has_no_review(self) -> None:
+        payload = payloads.pull_request_review_comment_event()
+        del payload["comment"]["pull_request_review_id"]
+
+        snapshot = parse_review_comment_event("created", payload)
+
+        assert snapshot is not None
+        assert snapshot.review_id is None
+
+    def test_a_review_id_that_is_not_a_number_is_no_review(self) -> None:
+        snapshot = parse_review_comment_event(
+            "created", payloads.pull_request_review_comment_event(pull_request_review_id="555")
+        )
+
+        assert snapshot is not None
+        assert snapshot.review_id is None

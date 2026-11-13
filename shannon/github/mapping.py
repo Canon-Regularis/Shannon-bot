@@ -295,11 +295,15 @@ def review(payload: object, repo: RepositorySnapshot, *, item_number: int) -> Re
         return None
 
     state = payload.get("state")
+    commit_id = payload.get("commit_id")
     return ReviewSnapshot(
         repository=repo,
         item_number=item_number,
         review_id=review_id,
         state=state if isinstance(state, str) else "",
+        # Issue #263 reads a file's history from the commit the review was made on. The webhook
+        # and the REST list both carry it, so both readers get it from here.
+        commit_id=commit_id if isinstance(commit_id, str) else "",
         **_note_fields(payload, created="submitted_at"),
     )
 
@@ -329,6 +333,9 @@ def review_comment(
         start_line=_optional_int(payload.get("start_line")),
         original_line=_optional_int(payload.get("original_line")),
         in_reply_to_id=_optional_int(payload.get("in_reply_to_id")),
+        # Which review the comment came in with. Issue #263 picks one review's files out of the
+        # whole list by it, because GitHub's list of a pull request's comments mixes every review.
+        review_id=_optional_int(payload.get("pull_request_review_id")),
         **_note_fields(payload, created="created_at"),
     )
 

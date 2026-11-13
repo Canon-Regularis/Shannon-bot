@@ -234,6 +234,56 @@ class CommentSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class FileAuthors:
+    """One file a review asking for changes commented on, and who made it. Issue #263.
+
+    `authors` is who the line names, and so who it rings: a person is only ever rung beside a
+    `<@id>` the message shows. `more` counts the rest, so a file with more authors than the line
+    has room for says how many it left out rather than leaving them out without a word.
+    """
+
+    path: str
+    # Empty when every commit that touched the file is a merge or has no GitHub account behind
+    # it, which the line says as an unknown author rather than as nobody.
+    authors: tuple[Actor, ...] = ()
+    more: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ChangesAsked:
+    """Whom a review asking for changes asks, in one of two shapes. Issue #263.
+
+    `files` when the review's inline comments say which files it is about and GitHub said who made
+    each of them. `everyone` otherwise - no inline comments, too many files, a commit the pull
+    request has moved off, or a read GitHub refused - which is the pull request's author and every
+    commit author. Never both: the message is written from whichever one is set, and so is the list
+    of people it rings, which is what keeps the two from disagreeing.
+    """
+
+    files: tuple[FileAuthors, ...] = ()
+    everyone: tuple[Actor, ...] = ()
+    # The files the message had no room left to name, counted on a line of their own so the list
+    # never reads as the whole of what the review commented on. Nobody on them is rung, for the
+    # reason `FileAuthors.more` gives: nobody is rung who is not shown.
+    more_files: int = 0
+
+    @property
+    def rung(self) -> tuple[Actor, ...]:
+        """Everybody the message names, once each.
+
+        Deduped by lowered login, because somebody who made four of the files is named on four
+        lines and is still one person to ring once.
+        """
+        # On `files` itself rather than on whether anybody is in them: a review on files nobody can
+        # be named for rings nobody, never the `everyone` the message does not show.
+        named = [person for file in self.files for person in file.authors]
+        people: dict[str, Actor] = {}
+        for person in named if self.files else self.everyone:
+            people.setdefault(person.login.lower(), person)
+        return tuple(people.values())
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewSnapshot:
     """A submitted pull request review.
 
@@ -248,6 +298,16 @@ class ReviewSnapshot:
     state: str
     author: Actor | None = None
     created_at: datetime | None = None
+    # The commit the review was made on. Issue #263 reads which commits touched a file from here
+    # rather than from the branch's head, which may have moved since. Empty where GitHub did not
+    # say, which reads downstream as a commit nobody can find the files' history at.
+    commit_id: str = ""
+    # Who opened the pull request, off the webhook's own `pull_request` block, so a review asking
+    # for changes can name them without asking GitHub for the pull request. None for a deleted
+    # account, and on a review read from the REST list, which carries no pull request at all.
+    pull_request_author: Actor | None = None
+    # Set only on a review asking for changes, by the mirror before it resolves anybody. Issue #263.
+    changes_asked: ChangesAsked | None = None
 
     # Only pull requests have reviews.
     object_type: ObjectType = field(default=ObjectType.PR, init=False)
@@ -258,8 +318,14 @@ class ReviewSnapshot:
 
     @property
     def replying_to(self) -> tuple[Actor, ...]:
-        """Nobody: a review answers the pull request, not a comment on it."""
-        return ()
+        """Whom a review asking for changes asks, and nobody for any other review. Issue #263.
+
+        A review answers the pull request rather than a comment on it, so until #263 this was
+        always empty. A request for changes is addressed to whoever has to make them, which is
+        the people who made the code it is about, and they reach the ring through here exactly
+        as the people a reply answers do: linked, muted and named-but-not-rung by the same rules.
+        """
+        return self.changes_asked.rung if self.changes_asked is not None else ()
 
     @property
     def verdict(self) -> str:
@@ -287,6 +353,9 @@ class ReviewCommentSnapshot:
     # documents it as that opening comment, whichever comment in the thread the reply was typed
     # under, because it keeps a review thread flat.
     in_reply_to_id: int | None = None
+    # The review this comment was left as part of. Issue #263 picks a review's own files out of
+    # every inline comment on the pull request by it. None where GitHub did not say.
+    review_id: int | None = None
     author: Actor | None = None
     created_at: datetime | None = None
     # Everybody who wrote in this reply's thread before it, apart from whoever is replying (issue
@@ -479,10 +548,12 @@ class ItemNote(Protocol):
 
     @property
     def replying_to(self) -> tuple[Actor, ...]:
-        """Whoever this note answers, which only a reply on a diff ever names. Issue #231.
+        """Whom this note addresses beyond the people its body names.
 
-        Empty on the other two kinds, and on a reply nobody has read the thread of yet: no
-        webhook says, and the mirror fills it in before it resolves anybody."""
+        Two kinds ever name anybody: a reply on a diff names whoever wrote in its thread before it
+        (issue #231), and a review asking for changes names the people who made the code it is
+        about (issue #263). Empty on everything else, and on either of those before the mirror
+        has asked GitHub: no webhook says, and the mirror fills it in before it resolves anybody."""
         ...
 
     @property
