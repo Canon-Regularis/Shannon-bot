@@ -165,6 +165,15 @@ class FakeGitHubClient:
         # Raised by this read alone. `error` fails every call, including the rebuild a note can
         # ask for, which is no use for showing what a reply does when only this one question fails.
         self.review_comment_error: Exception | None = None
+        # The commits that touched one file, keyed the way the real read is addressed: a lowered
+        # full name, the commit the history is read from, and the file. Issue #263. A missing key
+        # answers None, the real client's answer for a commit GitHub does not have, which is the
+        # quiet path: the review falls back to naming everybody rather than naming nobody.
+        self.file_history: dict[tuple[str, str, str], Sequence[CommitRef] | None] = {}
+        self.file_history_calls: list[tuple[str, str, str]] = []
+        # Raised by this read alone, for the reason `review_comment_error` gives: a refused file
+        # read is the case worth showing, and `error` would refuse the reads before it as well.
+        self.file_history_error: Exception | None = None
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
         full_name = f"{owner}/{name}"
@@ -258,6 +267,17 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return self.pull_request_commits.get((f"{owner}/{name}".lower(), number))
+
+    async def list_commits_on_path(
+        self, owner: str, name: str, *, sha: str, file_path: str
+    ) -> Sequence[CommitRef] | None:
+        key = (f"{owner}/{name}".lower(), sha, file_path)
+        self.file_history_calls.append(key)
+        if self.file_history_error is not None:
+            raise self.file_history_error
+        if self.error is not None:
+            raise self.error
+        return self.file_history.get(key)
 
     async def list_open_pull_requests(
         self, repository: RepositorySnapshot

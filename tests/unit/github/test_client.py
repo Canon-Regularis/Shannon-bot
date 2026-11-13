@@ -1619,6 +1619,183 @@ class TestReadingTheCommitsInAPullRequest:
         assert wire[0].startswith(b"/repos/acme/widget%2Fevil/pulls/7/commits")
 
 
+class TestReadingWhoTouchedAFile:
+    """Issue #263. Which commits touched one file, read back from the commit a review was made on.
+
+    A review asking for changes rings whoever made each file it commented on, and this is the only
+    read that says which of a pull request's commits touched which file. It is one page by design,
+    and sent with the file as a query parameter httpx encodes, because the parameter is called
+    `path` and the paged helpers already use that name for the endpoint.
+    """
+
+    SHA = "d" * 40
+
+    def row(self, sha: str = "a" * 40, login: str | None = "octocat", parents: int = 1) -> dict:
+        """One commit as the endpoint sends it, which is the shape a pull request's commits take."""
+        return {
+            "sha": sha,
+            "commit": {"message": "Touch the file", "author": {"name": "Somebody Else"}},
+            "author": {"login": login, "id": 583231} if login is not None else None,
+            "parents": [{"sha": "b" * 40}] * parents,
+        }
+
+    async def test_it_asks_for_the_history_of_that_file_from_that_commit(self) -> None:
+        seen: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_commits_on_path(
+                payloads.OWNER, payloads.REPO, sha=self.SHA, file_path="shannon/domain/models.py"
+            )
+
+        assert [url.path for url in seen] == [f"/repos/{payloads.OWNER}/{payloads.REPO}/commits"]
+        assert dict(seen[0].params) == {
+            "sha": self.SHA,
+            "path": "shannon/domain/models.py",
+            "per_page": "100",
+        }
+
+    async def test_a_file_name_github_would_misread_reaches_it_encoded(self) -> None:
+        """Read off the raw query, the bytes on the wire. A space, a `#` and anything outside
+        ASCII each break a query written by hand: the `#` cuts it short where it stands."""
+        wire: list[bytes] = []
+        awkward = "docs/a file #2 for the café.md"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.query)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path=awkward)
+
+        assert b"#" not in wire[0]
+        assert b" " not in wire[0]
+        assert wire[0].isascii()
+        assert httpx.QueryParams(wire[0].decode())["path"] == awkward
+
+    async def test_it_escapes_the_repository_in_the_path(self) -> None:
+        wire: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps([]))
+
+        async with client_with(handler) as client:
+            await client.list_commits_on_path("acme", "widget/evil", sha=self.SHA, file_path="a.py")
+
+        assert wire[0].startswith(b"/repos/acme/widget%2Fevil/commits?")
+
+    async def test_it_reads_one_page_even_when_github_offers_another(self) -> None:
+        """The pull request's own commits come first in a history read from its commit, and a
+        review reads this once per file, so a second page would cost a read to find nobody new."""
+        asked: list[str] = []
+        following = {"Link": '<https://api.github.com/next?page=2>; rel="next"'}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(str(request.url))
+            return httpx.Response(200, content=json.dumps([self.row()]), headers=following)
+
+        async with client_with(handler) as client:
+            found = await client.list_commits_on_path(
+                "acme", "widget", sha=self.SHA, file_path="a.py"
+            )
+
+        assert len(asked) == 1
+        assert found is not None
+        assert len(found) == 1
+
+    async def test_a_page_of_rows_becomes_commits_with_their_accounts(self) -> None:
+        handler = responds(
+            200,
+            [self.row("a" * 40), self.row("c" * 40, None), self.row("e" * 40, parents=2)],
+        )
+
+        async with client_with(handler) as client:
+            found = await client.list_commits_on_path(
+                "acme", "widget", sha=self.SHA, file_path="a.py"
+            )
+
+        assert found is not None
+        assert [commit.sha for commit in found] == ["a" * 40, "c" * 40, "e" * 40]
+        assert [commit.author.login if commit.author else None for commit in found] == [
+            "octocat",
+            None,
+            "octocat",
+        ]
+        assert [commit.merge for commit in found] == [False, False, True]
+
+    async def test_a_row_with_no_sha_is_dropped_without_losing_the_rest(self) -> None:
+        handler = responds(200, [{"commit": {}}, self.row("c" * 40, "hubot")])
+
+        async with client_with(handler) as client:
+            found = await client.list_commits_on_path(
+                "acme", "widget", sha=self.SHA, file_path="a.py"
+            )
+
+        assert found is not None
+        assert [commit.sha for commit in found] == ["c" * 40]
+
+    async def test_a_body_that_is_not_an_array_is_read_as_no_commits(self) -> None:
+        async with client_with(responds(200, {"commits": [self.row()]})) as client:
+            found = await client.list_commits_on_path(
+                "acme", "widget", sha=self.SHA, file_path="a.py"
+            )
+
+        assert found == []
+
+    async def test_a_body_that_is_not_json_is_github_unavailable(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content="<html>")
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path="a.py")
+
+    async def test_a_commit_github_does_not_have_answers_none(self) -> None:
+        """Final, so retrying the delivery would spend every attempt on the same answer. Distinct
+        from the empty list, which is a file no commit before this one touched."""
+        async with client_with(responds(404, {"message": "No commit found for SHA"})) as client:
+            found = await client.list_commits_on_path(
+                "acme", "widget", sha=self.SHA, file_path="a.py"
+            )
+
+        assert found is None
+
+    async def test_a_forbidden_read_is_a_refusal(self) -> None:
+        """Raised rather than answered, so the caller can fall back to naming everybody."""
+        handler = responds(403, {"message": "Resource not accessible by integration"})
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubAuthError):
+                await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path="a.py")
+
+    async def test_a_forbidden_that_is_really_a_rate_limit_is_one(self) -> None:
+        """A rate limit is worth waiting for and a refusal is not, so the two must not merge."""
+        handler = responds(
+            403, {"message": "API rate limit exceeded"}, {"x-ratelimit-remaining": "0"}
+        )
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubRateLimitError):
+                await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path="a.py")
+
+    async def test_a_query_github_will_not_answer_is_refused(self) -> None:
+        async with client_with(responds(422, {"message": "Invalid path"})) as client:
+            with pytest.raises(GitHubRefusedError, match="Invalid path"):
+                await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path="a.py")
+
+    async def test_github_out_of_reach_is_unavailable(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("no route", request=request)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.list_commits_on_path("acme", "widget", sha=self.SHA, file_path="a.py")
+
+
 class TestReadingOneCommitsNumbers:
     def commit(self, **overrides: object) -> dict[str, object]:
         body = {"stats": {"additions": 42, "deletions": 7, "total": 49}, "files": [{}, {}, {}]}

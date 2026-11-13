@@ -133,6 +133,9 @@ class ReadsCommits(Protocol):
 class ReadsWhoWroteIt(Protocol):
     """The commits on one pull request, which is how a CI result finds who to ring.
 
+    A review asking for changes reads them too, issue #263: the commits a file's history is kept
+    to, and the authors the review names when it cannot name them file by file.
+
     Its own protocol rather than a third method on `ReadsCommits`: that one is about what a PUSH
     did to a branch and answers from a range of two SHAs, while this answers from a pull request
     number and is read for the people rather than the changes.
@@ -176,6 +179,9 @@ class ReadsReviewComments(Protocol):
     that, or who else has answered it since, and nothing here keeps a note's author - so GitHub is
     asked, which also reaches the threads that were already open before anybody asked this.
 
+    A review asking for changes reads them too, issue #263, to pick out its own and with them the
+    files it is on: its webhook names none of them.
+
     None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
     """
 
@@ -184,11 +190,26 @@ class ReadsReviewComments(Protocol):
     ) -> Sequence[ReviewCommentSnapshot] | None: ...
 
 
+class ReadsFileHistory(Protocol):
+    """Which commits touched one file, read back from one commit. Issue #263.
+
+    How a review asking for changes finds who made each file it commented on: the pull request's
+    own commits, kept to the ones in this list, are that file's authors on the pull request.
+
+    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
+    """
+
+    async def list_commits_on_path(
+        self, owner: str, name: str, *, sha: str, file_path: str
+    ) -> Sequence[CommitRef] | None: ...
+
+
 class GitHubClient(
     ListsOpenItems,
     LooksUpUsers,
     ReadsChecks,
     ReadsCommits,
+    ReadsFileHistory,
     ReadsReviewComments,
     ReadsReviews,
     ReadsWhoWroteIt,
@@ -425,10 +446,12 @@ class HttpGitHubClient:
     ) -> Sequence[CommitRef] | None:
         """Every commit on one pull request, read for the accounts that WROTE them.
 
-        Not for the commits. A CI result rings whoever put the code there, and `CommitRef.author`
-        is the GitHub account GitHub itself resolved from the commit's email address - the only
-        name on a commit that anybody else chose. The message and the SHA come along because the
-        row carries them, and nothing here reads either.
+        A CI result rings whoever put the code there (#164), and `CommitRef.author` is the GitHub
+        account GitHub itself resolved from the commit's email address - the only name on a
+        commit that anybody else chose. Since issue #263 the SHAs are read too: a review asking
+        for changes keeps a file's history to the pull request's own commits by them, and checks
+        that the commit it was made on is still one of them. The message comes along because the
+        row carries it, and nothing here reads it.
 
         Paged, for the reason `list_reviews` is paged: a branch argued over for a week runs past
         one page, and a half-read list here is the shape that silently leaves a contributor out -
@@ -452,6 +475,42 @@ class HttpGitHubClient:
             logger.info("GitHub has no commits for %s/%s#%s", owner, name, number)
             return None
         return found
+
+    async def list_commits_on_path(
+        self, owner: str, name: str, *, sha: str, file_path: str
+    ) -> Sequence[CommitRef] | None:
+        """The commits that touched one file, newest first from `sha`. Issue #263.
+
+        ONE page, on purpose, where `list_pull_request_commits` reads them all. History runs
+        newest first from the commit a review was made on, so the pull request's own commits are
+        the first ones listed; the caller only keeps those, and a page of a hundred holds them
+        unless more than a hundred commits on the base branch touched the same file in between.
+        Paging past that would cost a read per hundred commits of a file's whole history to find
+        a name that is, at worst, missing from one line - and a review asking for changes reads
+        this once per file it commented on.
+
+        Sent through `_fetch` with the query as a mapping rather than through `get_json` or
+        `get_pages`. Both of those take the endpoint as `path` and the query as keywords, so a
+        query parameter that is itself called `path` cannot be passed to either; httpx encodes it
+        here, a space, a `#` and anything outside ASCII included.
+
+        None for a 404, which is a commit or a repository GitHub does not have: final, for the
+        reason `ReadsCommits` gives. A refusal or an outage is raised for the caller to judge.
+        """
+        endpoint = f"{_repository(owner, name)}/commits"
+        response = await self._fetch(
+            endpoint,
+            params={"sha": sha, "path": file_path, "per_page": LIST_PAGE_SIZE},
+            headers=await self._authorization(owner),
+        )
+        try:
+            _raise_for_status(response, endpoint)
+        except GitHubNotFoundError:
+            logger.info("GitHub has no history of %s at %s on %s/%s", file_path, sha, owner, name)
+            return None
+        body = self._body(response, endpoint)
+        parsed = (mapping.commit_ref(row) for row in (body if is_json_list(body) else []))
+        return [commit for commit in parsed if commit is not None]
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
         payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}", owner)
