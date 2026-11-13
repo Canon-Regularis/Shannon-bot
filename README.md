@@ -34,6 +34,27 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   a diff in a review, so mirroring that wrapper says "left a review" with nothing underneath it,
   once for every reply. An edit rewrites the message it went out as and rings nobody; a deletion
   is not mirrored. `/track comments off` stops all of it in one thread.
+- **A review asking for changes reaches whoever has to make them.** Its message names the people
+  who made the code it is about and rings them where they are linked. With inline comments, it
+  lists each file they are on, up to ten, with the authors of this pull request's commits that
+  touched it: `` `shannon/services/notes.py` made by authors @alice, @bob ``. A file whose only
+  commits are merges or have no account behind them reads `made by Unknown`. Each file has room for
+  at least five people, more when there are fewer files, names fewer when the message runs short of
+  room, and counts the rest as `and N more`, so the file lines ring at most fifty, beside whoever
+  the review's own `@tags` reach as usual; files past what fits in the message are counted as well,
+  and only the people shown are rung. Where the files cannot be told, one line names the pull
+  request's author and everybody who committed to it instead: a review with no inline comments,
+  more than ten files, a review on a commit the pull request no longer has after a force-push or
+  past the 250 commits GitHub lists, or a file history GitHub refuses or no longer has. The
+  reviewer is named on a file they made, left out of the one line, and never rung. Every request
+  for changes rings, a second one as well, and so does one on a draft: unlike a CI run, asking for
+  changes is something a person chose to do. Who to name is read from GitHub when the review
+  arrives: the pull request's commits and its inline comments, two lists read a page at a time,
+  then one read per file. A file's history is kept, so an edit or another review on the same commit
+  reads only the two lists again. If GitHub cannot be reached, a review waits up to half an hour
+  after it was submitted and then names whoever could be read; one GitHub refuses to answer for
+  goes out at once in one line. An approval and a review that only comments make none of these
+  reads.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
   Anybody unlinked is still named in plain text. At most ten tags per comment are mentioned,
@@ -89,9 +110,9 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   Withdrawing the last outstanding request says it too: at that moment everybody remaining has
   approved and no further review is coming, so nothing else would ever notice.
   `/track approvals off` stops it in one thread.
-- **The draft switch.** A draft rings nobody on purpose: GitHub runs CI on one like any other
-  pull request, but a draft is the state in which this bot asks nothing of anybody, and the card
-  is grey rather than green to say so. Both moments that changes now post a header naming whoever pressed the button, and both
+- **The draft switch.** CI on a draft rings nobody on purpose: GitHub runs CI on one like any
+  other pull request, but a draft is the state in which this bot asks nothing of anybody on its
+  own account, and the card is grey rather than green to say so. Both moments that changes now post a header naming whoever pressed the button, and both
   reach everybody GitHub still lists on the item: its author, its assignees, its reviewers and
   its review teams, once each, minus the person who pressed it, because they know. Going out of
   draft is an ask. Going back in withdraws one, which is worth telling the people who were about
@@ -810,7 +831,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Nine things the bot is known to get wrong. All are narrow, and all are written down here rather
+Ten things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -894,6 +915,14 @@ the next three or to the end of the text, so a heading in between arrives as cod
 footnotes and link reference definitions are read as ordinary words, so from one to the next blank
 line, and on a footnote's own line and the indented lines under it, a heading can come out drawn
 where GitHub did not draw it, or the other way round.
+
+**Who made a file is read from its history.** A review asking for changes names a file's authors
+from GitHub's list of the commits that touched that path, kept to the pull request's own. That
+list does not follow a rename, so a file renamed on the pull request, or one changed only by a
+merge, can read `made by Unknown`. One page of a hundred commits is read per file, newest first
+from the reviewed commit, so a file that is busy on the branch the pull request came from can push
+the older commits of a long-lived pull request off the page. And a commit names the account that
+authored it and nobody else: a `Co-authored-by` line is not read.
 
 ## License
 
