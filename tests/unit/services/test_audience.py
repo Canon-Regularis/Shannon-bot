@@ -16,6 +16,7 @@ from shannon.domain.models import Actor, CommitRef, PullRequestSnapshot, Reposit
 from shannon.services.audience import (
     PEOPLE_RUNG,
     author_and_assignees,
+    author_and_committers,
     everyone_who_worked_on_it,
 )
 
@@ -158,3 +159,63 @@ class TestEverybodyACheckResultIsNewsTo:
 
         assert len(people) == PEOPLE_RUNG
         assert logins(people)[:2] == ["octocat", "hubot"]
+
+
+class TestWhoAReviewAskingForChangesIsFor:
+    """Issue #263. With no files to name, a review asking for changes is for the pull request's
+    author and whoever wrote its commits - and nobody else, which is where it parts from a CI
+    result."""
+
+    def test_the_author_leads_and_the_committers_follow_in_order(self) -> None:
+        people = author_and_committers(
+            Actor("octocat"), [a_commit("defunkt"), a_commit("hubot", sha="b" * 40)]
+        )
+
+        assert logins(people) == ["octocat", "defunkt", "hubot"]
+
+    def test_an_author_who_also_committed_is_named_once_whatever_the_case(self) -> None:
+        people = author_and_committers(Actor("octocat"), [a_commit("OctoCat")])
+
+        assert len(people) == 1, "the author was rung twice for their own commit"
+        assert people[0].login.lower() == "octocat"
+
+    def test_somebody_with_two_commits_is_named_once(self) -> None:
+        people = author_and_committers(
+            Actor("octocat"), [a_commit("defunkt"), a_commit("DEFUNKT", sha="b" * 40)]
+        )
+
+        assert [login.lower() for login in logins(people)] == ["octocat", "defunkt"]
+
+    def test_a_merge_and_a_commit_with_no_account_add_nobody(self) -> None:
+        """The same rule as a CI result, by the same code: whoever pressed "Update branch" made
+        none of the code a review is asking to change."""
+        people = author_and_committers(
+            Actor("octocat"), [a_commit("monalisa", merge=True), a_commit(None, sha="b" * 40)]
+        )
+
+        assert logins(people) == ["octocat"]
+
+    def test_a_deleted_author_leaves_the_committers(self) -> None:
+        """GitHub sends a null user for a deleted account, and whoever wrote the code is still
+        somebody."""
+        assert logins(author_and_committers(None, [a_commit("defunkt")])) == ["defunkt"]
+
+    def test_nobody_at_all_is_an_empty_answer(self) -> None:
+        assert author_and_committers(None, []) == ()
+
+    def test_the_assignees_are_not_asked(self) -> None:
+        """Where it parts from `everyone_who_worked_on_it`: it takes the author on their own, so
+        an assignee who wrote none of the code cannot be in the answer."""
+        item = a_pull_request(author="octocat", assignees=("hubot",))
+
+        people = author_and_committers(item.author, [a_commit("defunkt")])
+
+        assert logins(people) == ["octocat", "defunkt"]
+
+    def test_the_answer_is_capped_with_the_author_kept(self) -> None:
+        crowd = [a_commit(f"person{index}", sha=f"{index:040d}") for index in range(PEOPLE_RUNG)]
+
+        people = author_and_committers(Actor("octocat"), crowd)
+
+        assert len(people) == PEOPLE_RUNG
+        assert logins(people)[0] == "octocat"

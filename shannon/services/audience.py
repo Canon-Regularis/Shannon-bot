@@ -4,11 +4,16 @@ Two things ask this and get the same answer: a CI result, which tells whoever a 
 concerns, and a pull request leaving draft, which tells whoever it is now waiting on. Both need
 the same three reads, and each of those reads is done the way it is for a reason worth writing
 down once rather than twice.
+
+A review asking for changes asks only the first half, who made the code (issue #263). Its names
+reach Discord through the note mirror, which already names the reviewer without ringing them, but
+which commits count as somebody's work is decided here, by the same rule as a CI result, so the
+two cannot drift apart on it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,11 +95,45 @@ def everyone_who_worked_on_it(
     Capped at `PEOPLE_RUNG`, with the author and assignees first so the names that fall off are
     contributors to a branch long enough for the count to matter.
     """
-    wrote_it = (
-        commit.author for commit in commits if commit.author is not None and not commit.merge
-    )
-    people = {person.login.lower(): person for person in (*author_and_assignees(item), *wrote_it)}
+    people = {
+        person.login.lower(): person
+        for person in (*author_and_assignees(item), *_committers(commits))
+    }
     return tuple(people.values())[:PEOPLE_RUNG]
+
+
+def author_and_committers(author: Actor | None, commits: Sequence[CommitRef]) -> tuple[Actor, ...]:
+    """Who a review asking for changes is for when it cannot say which files: the pull request's
+    author, then whoever wrote its commits. Issue #263.
+
+    Not `everyone_who_worked_on_it`, because assignees are left out: a request for changes is
+    work for whoever made the code, and an assignee who wrote none of it has nothing to change.
+    Taking the author on its own rather than a pull request is also why this is a function of its
+    own - a review's webhook carries who opened the pull request, and nothing else a
+    `PullRequestSnapshot` would need, so asking GitHub for one would be a read spent on a name the
+    payload already gave.
+
+    The same merge rule as a CI result, through `_committers`, and for the same reason: whoever
+    pressed "Update branch" made none of the code a review is asking to change.
+
+    The author first, then the committers in the order GitHub listed them, once each by lowered
+    login, and capped at `PEOPLE_RUNG` so the names that fall off are contributors to a branch
+    long enough for the count to matter. A deleted author adds nobody, and the committers are
+    still somebody.
+    """
+    first = (author,) if author else ()
+    people = {person.login.lower(): person for person in (*first, *_committers(commits))}
+    return tuple(people.values())[:PEOPLE_RUNG]
+
+
+def _committers(commits: Sequence[CommitRef]) -> Iterator[Actor]:
+    """The accounts behind a pull request's commits, merges and accountless commits left out.
+
+    One rule for every caller, so the CI result and the review asking for changes cannot drift
+    apart on who counts as having written the code. Why merges and accountless commits add nobody
+    is set out on `everyone_who_worked_on_it`.
+    """
+    return (commit.author for commit in commits if commit.author is not None and not commit.merge)
 
 
 async def reachable(
