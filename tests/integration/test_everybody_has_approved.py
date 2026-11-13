@@ -109,7 +109,11 @@ def handler_over(
     threads: FakeThreadGateway,
     github: FakeGitHubClient,
 ):
-    """The review route as the container wires it, so the order of the two hooks is under test."""
+    """The review route as the container wires it, so the order of the two hooks is under test.
+
+    All but the read of who a review asking for changes asks (issue #263), which no approval
+    makes: what that read costs and what it rings is tested where the container builds it.
+    """
     mirror = ItemNoteMirror(
         db_sessionmaker,
         threads,

@@ -38,9 +38,10 @@ NoteParser = Callable[[str, JsonObject], ItemNote | None]
 # comments, and a transcript this bot published itself.
 WorthPosting = Callable[[ItemNote], bool]
 Follow = Callable[[ItemNote], Awaitable[None]]
-# Optional, and given to one mirror alone: only a reply on a diff answers anybody in particular,
-# and finding out who is a read from GitHub the other two must never pay for (issue #231). Handed
-# the note and answering with it filled in, so the renderer keeps the three arguments it takes.
+# Optional, and given to two mirrors of the three: a reply on a diff answers whoever it replies to
+# (issue #231), and a review asking for changes asks whoever made the files it is about (#263).
+# Finding out who is a read from GitHub, which the comments mirror must never pay for. Handed the
+# note and answering with it filled in, so the renderer keeps the three arguments it takes.
 Answering = Callable[[ItemNote], Awaitable[ItemNote]]
 
 
@@ -159,8 +160,9 @@ class ItemNoteMirror:
     async def _audience(self, snapshot: ItemNote, found: ItemInThread) -> _NoteTarget:
         """Who the note names, and which of them it may ring.
 
-        Its own session rather than the one that found the thread, because what an inline reply
-        answers is read from GitHub in between, and no connection is held across that.
+        Its own session rather than the one that found the thread, because whom the note addresses
+        is read from GitHub in between - who an inline reply answers (issue #231), or who made the
+        files a review asks changes on (#263) - and no connection is held across that.
         """
         # Read from the very string the renderer swaps names in, and through the very same
         # function. The preview is cut mid-word, so the raw body would name `monalisa` where the
@@ -179,9 +181,10 @@ class ItemNoteMirror:
         # Three sources, in an order that is load-bearing: `resolve_many` lowercases into a fresh
         # mapping, so the last entry for a name wins, and the changed-hands check runs on the
         # GitHub id that entry carries. A name the body writes has none, so it goes first and is
-        # overwritten by anything that does: whoever an inline reply answers, with the ids GitHub
-        # listed them under (issue #231), and then the author, last, so a self-mention cannot
-        # take the unverified entry either.
+        # overwritten by anything that does: whoever the note addresses, with the ids GitHub
+        # listed them under - who an inline reply answers (issue #231), or who made the code a
+        # review asks changes on (#263) - and then the author, last, so a self-mention cannot
+        # take the unverified entry either, and a reviewer who made a file is still not rung.
         people: dict[str, int | None] = dict.fromkeys(named.people, None)
         people.update({person.login: person.github_user_id for person in snapshot.replying_to})
         if snapshot.author:
@@ -296,7 +299,8 @@ class ItemNoteMirror:
         carries - so a name that has been linked to a Discord account since the original post
         resolves now, and the edited comment shows the tag the original could not. A reply on a
         diff has its thread read again for the same reason, so the heading keeps saying whom it
-        answered (issue #231).
+        answered (issue #231), and a review asking for changes its files, so it keeps saying whom
+        it asks (#263).
 
         Nobody is pinged, and nothing here chooses that: Discord sends no notification for an edit
         whatever the content says. It is the whole reason this is an edit rather than a replacement
@@ -422,12 +426,13 @@ def build_note_handler(
     it is rather than by convenience.
 
     `then` runs before. A submitted review is the only note that means something beyond its own
-    text: it closes the request that asked for it. Database work only — a review line needs
-    nothing from GitHub to be posted, and a hook that reached for it would make a GitHub outage
-    cost the line itself. The one mirror that does read GitHub before it posts is the inline one,
-    for who a reply answers (issue #231), and that read is the mirror's own rather than a hook's:
-    made after the thread is found and before the claim, it holds back one young reply for a
-    GitHub that is briefly down, and nothing beside it.
+    text: it closes the request that asked for it. Database work only — closing a request needs
+    nothing from GitHub, and a hook that reached for it would make a GitHub outage cost the line
+    itself. Two mirrors do read GitHub before they post: the inline one, for who a reply answers
+    (issue #231), and the review one, for who made the files a review asking for changes is about
+    (#263). Those reads are the mirror's own rather than a hook's: made after the thread is found
+    and before the claim, they hold back one young note for a GitHub that is briefly down, and
+    nothing beside it.
 
     `after` runs once the note is in the thread, so anything it says lands underneath the note
     rather than above it. Issue #155: a round-up saying every review has come back approving is

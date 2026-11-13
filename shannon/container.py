@@ -76,6 +76,7 @@ from shannon.github.webhooks.router import EventRouter
 from shannon.services.access import GitHubAccess
 from shannon.services.board_credentials import BoardCredentials
 from shannon.services.boards import BoardColumns, BoardLinkingService, OwnerBoards
+from shannon.services.changes_requested import ChangesRequested
 from shannon.services.channels import ChannelMappingService
 from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
 from shannon.services.delivery.queue import WebhookDeliveryQueue
@@ -405,9 +406,10 @@ def _event_router(
         The rarest of the note path's calls to GitHub. It fires when a thread has actually gone
         rather than on every comment, though a review round gives it more chances to: every
         inline comment on an item whose thread is missing arrives here, and only the first of them
-        spends a call, because the ones behind it find the thread that one built. The other two
+        spends a call, because the ones behind it find the thread that one built. The others
         are deliberate and ordinary: a reply on a diff asks who it answers before it is posted
-        (issue #231), and an approval asks whether everybody has approved after it is (#155).
+        (issue #231), a review asking for changes asks who made the files it is about before it is
+        (#263), and an approval asks whether everybody has approved after it is (#155).
         """
         owner, _, name = note.repository.full_name.partition("/")
         if note.object_type is ObjectType.PR:
@@ -443,10 +445,16 @@ def _event_router(
         # different reason: that one is about a note this bot wrote, this one is about a note
         # GitHub manufactured.
         worth_posting=is_worth_a_message,
+        # Issue #263. A review asking for changes is addressed to whoever has to make them, and
+        # who made the files it is about is a read from GitHub, the same kind of read the inline
+        # mirror below makes for who a reply answers. Every other review asks it nothing. Its
+        # own instance with its own held histories, and the same share of the delivery's time.
+        answering=ChangesRequested(github, read_within=thread_read_within).answering,
     )
     # Its own mirror rather than a branch inside the comments one, because what differs is what
     # this class takes injected: the renderer, and the read of who a reply answers (issue #231),
-    # which only a note on a diff can need and no other note may pay for.
+    # which only a note on a diff can need and no other note may pay for. The reviews mirror above
+    # takes a read too, but a different one: who made what a review asks changes on (#263).
     review_comments = ItemNoteMirror(
         sessionmaker,
         threads,
@@ -979,8 +987,10 @@ def build_container(
         github,
         pr_sync,
         issue_sync,
-        # Half of what a delivery is given, so a slow read of a reply's thread leaves the claim
-        # and the post their room, and lowering the deadline cannot leave the read outlasting it.
+        # Half of what a delivery is given, so slow reads leave the claim and the post their room,
+        # and lowering the deadline cannot leave the reads outlasting it. That is a reply's
+        # thread, and since issue #263 a review asking for changes too: its commits, its inline
+        # comments and each file's history, one after another inside the same half.
         thread_read_within=timedelta(seconds=settings.worker_delivery_timeout_seconds / 2),
     )
     # Built here rather than inside `_commands`, because three things hold it: the two commands,

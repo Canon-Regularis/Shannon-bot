@@ -36,9 +36,12 @@ class MutedMemberStore:
         allowing ten assignees and fifteen requested reviewers while a comment mentions ten - and
         a reply on a diff at most ten more it answers (issue #231).
 
-        One caller is NOT bounded by GitHub, and caps itself instead. A CI result rings everybody
-        with a commit on the pull request (issue #164), and a long-lived branch can carry work
-        from dozens of accounts, so `audience.PEOPLE_RUNG` cuts the list before it arrives here.
+        Two callers are NOT bounded by GitHub, and cap themselves instead. A CI result rings
+        everybody with a commit on the pull request (issue #164), and a long-lived branch can carry
+        work from dozens of accounts, so `audience.PEOPLE_RUNG` cuts the list before it arrives
+        here. A review asking for changes rings whoever made the files it is about, or the author
+        and everybody who committed (issue #263), and the same PEOPLE_RUNG bounds that too - which
+        with the ten its body may mention still leaves the message under Discord's hundred.
         """
         wanted = set(ids)
         if not wanted:
