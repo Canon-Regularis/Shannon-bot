@@ -43,12 +43,29 @@ from shannon.github.mentions import MENTION_LIMIT
 
 logger = logging.getLogger(__name__)
 
-# How long a reply is held back for a GitHub that cannot be reached, counted from when it was
-# written. Long enough to ride out the blips that make up nearly every failure, so the person it
-# answers is rung late rather than not at all; short enough that a real outage costs the ping and
-# not the reply, which waits for nothing past this. Read when it is needed rather than bound at
-# construction, so a test can move it.
+# How long a note is held back for a GitHub that cannot be reached, counted from when it was
+# written: a reply on a diff (#231), or a review asking for changes (#263). Long enough to ride out
+# the blips that make up nearly every failure, so whoever the note is addressed to is rung late
+# rather than not at all; short enough that a real outage costs the ping and not the note, which
+# waits for nothing past this. Named for the reply, which waited first, and read when it is needed
+# rather than bound at construction, so a test can move it.
 REPLY_WAITS_FOR_GITHUB = timedelta(minutes=30)
+
+
+def still_worth_waiting_for(created_at: datetime | None, now: datetime) -> bool:
+    """Whether a note written at `created_at` is still young enough to hold back for GitHub.
+
+    A function of its own rather than a method, because a reply on a diff is no longer the only
+    note that waits for a read: a review asking for changes asks GitHub who made the files it is
+    about (issue #263), and an outage there is weighed on the same clock for the same reason - the
+    ping is worth a retry, the note is not worth losing.
+
+    A note GitHub gave no time for is treated as old: waiting on a clock that cannot be read is the
+    one way here to lose the note rather than the ping.
+    """
+    if created_at is None:
+        return False
+    return now - created_at < REPLY_WAITS_FOR_GITHUB
 
 
 def everyone_it_answers(
@@ -131,7 +148,7 @@ class ReviewThreads:
             async with asyncio.timeout(self._read_within.total_seconds()):
                 thread = await self._github.list_review_comments(note.repository, note.item_number)
         except (GitHubUnavailableError, GitHubRateLimitError, TimeoutError):
-            if self._worth_waiting_for(note):
+            if still_worth_waiting_for(note.created_at, self._now()):
                 raise
             logger.warning(
                 "GitHub could not list the inline comments on %s#%s and the reply there is too "
@@ -158,13 +175,3 @@ class ReviewThreads:
             )
             return note
         return replace(note, replying_to=everyone_it_answers(note, thread))
-
-    def _worth_waiting_for(self, note: ReviewCommentSnapshot) -> bool:
-        """Whether the reply is still young enough to hold back for GitHub.
-
-        A reply GitHub gave no time for is treated as old: waiting on a clock that cannot be read
-        is the one way here to lose the reply rather than the ping.
-        """
-        if note.created_at is None:
-            return False
-        return self._now() - note.created_at < REPLY_WAITS_FOR_GITHUB

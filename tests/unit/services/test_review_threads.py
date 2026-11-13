@@ -27,7 +27,11 @@ from shannon.github.errors import (
 )
 from shannon.github.mentions import MENTION_LIMIT
 from shannon.services import review_threads
-from shannon.services.review_threads import ReviewThreads, everyone_it_answers
+from shannon.services.review_threads import (
+    ReviewThreads,
+    everyone_it_answers,
+    still_worth_waiting_for,
+)
 from tests.fakes.github import FakeGitHubClient
 
 REPO = RepositorySnapshot(
@@ -317,6 +321,33 @@ class TestWhenGitHubWillNotSay:
 
         assert answered is DONE
         assert "refused to list" in caplog.text
+
+
+class TestHowLongANoteWaitsForGitHub:
+    """The clock on its own, because a review asking for changes reads GitHub too (issue #263)
+    and is weighed on it the same way a reply is."""
+
+    def test_a_note_written_just_now_is_worth_waiting_for(self) -> None:
+        assert still_worth_waiting_for(NOW, NOW)
+
+    def test_a_note_just_inside_the_wait_is_still_worth_waiting_for(self) -> None:
+        nearly = NOW + review_threads.REPLY_WAITS_FOR_GITHUB - timedelta(seconds=1)
+
+        assert still_worth_waiting_for(NOW, nearly)
+
+    def test_a_note_as_old_as_the_wait_is_not(self) -> None:
+        assert not still_worth_waiting_for(NOW, NOW + review_threads.REPLY_WAITS_FOR_GITHUB)
+
+    def test_a_note_with_no_time_on_it_is_never_worth_waiting_for(self) -> None:
+        """Waiting on a clock that cannot be read is the one way to lose the note itself."""
+        assert not still_worth_waiting_for(None, NOW)
+
+    def test_the_wait_is_read_when_it_is_asked_so_a_test_can_move_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(review_threads, "REPLY_WAITS_FOR_GITHUB", timedelta(hours=5))
+
+        assert still_worth_waiting_for(NOW, NOW + timedelta(hours=4))
 
 
 class SlowGitHub:
