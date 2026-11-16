@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from shannon.domain.enums import ObjectType, Priority
@@ -158,3 +160,32 @@ def test_priority_comes_from_the_labels(labels: list, expected: Priority) -> Non
 
     assert snapshot is not None
     assert snapshot.priority is expected
+
+
+class TestWhenItWasOpened:
+    """Issue #259. The names a description writes ring only while the item is new, so the sync
+    has to know when it was opened, and an issue did not say until then."""
+
+    def test_a_real_github_payload_says(self) -> None:
+        snapshot = parse_issue_event("opened", load("issues_opened.json"))
+
+        assert snapshot is not None
+        assert snapshot.created_at == datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
+
+    def test_a_payload_that_does_not_say_leaves_it_unknown(self) -> None:
+        """Never guessed. An item nobody knows the age of is not treated as a new one."""
+        payload = payloads.issue_event("opened")
+        del payload["issue"]["created_at"]
+
+        snapshot = parse_issue_event("opened", payload)
+
+        assert snapshot is not None
+        assert snapshot.created_at is None
+
+    def test_an_unparseable_one_is_unknown_too(self) -> None:
+        payload = payloads.issue_event("opened", created_at="whenever")
+
+        snapshot = parse_issue_event("opened", payload)
+
+        assert snapshot is not None
+        assert snapshot.created_at is None
