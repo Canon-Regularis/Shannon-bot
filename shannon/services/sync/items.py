@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -40,6 +41,14 @@ from shannon.services.sync.threads import ItemThreads, ThreadTarget, ThreadWrite
 logger = logging.getLogger(__name__)
 
 SnapshotParser = Callable[[str, JsonObject], TrackedSnapshot | None]
+
+# How long after an item was opened the names its description writes may still ring, issue #259.
+# A name in a description is something said once, when it was written, and the block that opens a
+# thread is the one message that can ring for it. That block is not only posted for a new item:
+# any delivery for an item with no row yet opens one, so the first edit to an issue from before
+# `/register` would otherwise wake everybody it named a year ago. A day covers a delivery that
+# arrives late or out of order, and nothing older is news.
+DESCRIBED_RINGS_FOR = timedelta(hours=24)
 
 
 class SyncOutcome(StrEnum):
@@ -184,6 +193,7 @@ class ItemSyncService:
         mentions: bool = True,
         notifies: bool = True,
         archives: ArchivesThreads | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessionmaker = sessionmaker
         self._one_item = ItemLock(sessionmaker)
@@ -214,6 +224,10 @@ class ItemSyncService:
         # A refresh is a sweep over every open item, and waking all of them would fill the
         # channel's thread list with threads nobody has touched in a week.
         self._archives = archives
+        # Issue #259. What an item's age is measured against, to decide whether the names its
+        # description writes are still news. Injected so a test can stand either side of
+        # `DESCRIBED_RINGS_FOR` without waiting a day.
+        self._now = now
 
     async def sync(
         self,
@@ -836,6 +850,11 @@ class ItemSyncService:
             )
 
         roles: Mapping[ActorRole, Sequence[Actor]] = self._policy.assignments(snapshot)
+        # Issue #259. Who the description @names, so the block can show them as mentions and the
+        # block that opens the thread can ring them beside the people on the item. Left empty on
+        # the superseded branch below for the reason the roles are: that payload is not believed
+        # about who is on the item, and nor is it about who its description names.
+        named: tuple[str, ...] = ()
         if superseded:
             # The item lost its thread, so one gets built however old this delivery is. That is
             # no reason to believe the payload about anything else: adopting it would put back a
@@ -859,6 +878,7 @@ class ItemSyncService:
             # would tell the guard that an older delivery is the newest thing applied.
             if arrived is not None:
                 item.last_delivery_id = arrived
+            named = self._policy.names_written(snapshot)
 
         # People only. A team slug and a GitHub login are separate namespaces on GitHub's side,
         # so somebody may genuinely hold the user account `security` while a team of that name
@@ -871,12 +891,23 @@ class ItemSyncService:
         # keeps the slug out of the map in the first place, so that a later reader of it cannot
         # reopen the hole by looking up something by name without knowing which namespace it came
         # from. Deleting it changes nothing today, which is exactly why it needs saying.
-        people = {
+        #
+        # The description's names go in first and the people on the item over them, and the order
+        # is load-bearing. A name read out of a body carries no GitHub id, so it can only be
+        # resolved on the link's word; a role carries the id from the payload, which is what
+        # catches a login that changed hands (issue #135). `resolve_many` lowercases the keys and
+        # the last one wins, and a role's login keeps GitHub's case where the body's is lowered,
+        # so both can be here at once. Put the other way round, an author writing their own name
+        # would trade the one verified id for none, and a stranger holding their old login would
+        # be rung.
+        on_the_item = {
             actor.login: actor.github_user_id
             for role, actors in roles.items()
             if role is not ActorRole.REVIEWER_TEAM
             for actor in actors
         }
+        people: dict[str, int | None] = dict.fromkeys(named, None)
+        people.update(on_the_item)
         # Off wholesale for a path built without them. Opening a thread posts the block as a real
         # message, which notifies everybody it mentions, so a path that opens threads for a whole
         # backlog needs this or `notifies` off: either keeps a run over twenty-five items from
@@ -921,10 +952,27 @@ class ItemSyncService:
         # is nothing to ask about, which makes it silent twice over off one switch rather than by
         # the rendering alone. And a path built without `notifies` does not ask at all, which is
         # how a block can name people as live mentions and still ring none of them.
+        #
+        # Issue #259. The people the description names may be rung only by the write that opens
+        # the thread, and only while the item is new; the people on the item whatever its age,
+        # as they always were. A name in a description is something said once, when it was
+        # written, and the block is not only posted for a new item: the first delivery for any
+        # item with no row opens a thread, so a year-old issue first seen today would wake
+        # everybody it named back then. Shown as a mention either way, which is the thread
+        # saying who was named, and costs nobody a ring.
+        #
+        # A thread that is already there has had its opening block, the one write that may ring
+        # for them. The write to it is an edit, which rings nobody whatever it is allowed, except
+        # where somebody deleted the message and `_edit_or_post` posts a new one with this same
+        # list. The people on the item are rung again there, as before #259; the description's
+        # names have no ledger to stop a second ring, so they are kept off it.
+        rung: Iterable[int] = mentions.values()
+        if item.discord_thread_id is not None or not _still_news(snapshot.created_at, self._now()):
+            rung = [mentions[login.lower()] for login in on_the_item if login.lower() in mentions]
         notify: tuple[int, ...] = ()
         if self._notifies:
             notify = await MutedMemberStore(session).may_be_pinged(
-                guild_id=placement.repository.discord_guild_id, ids=mentions.values()
+                guild_id=placement.repository.discord_guild_id, ids=rung
             )
 
         metadata = self._policy.render(
@@ -1023,6 +1071,7 @@ def build_item_sync(
     mentions: bool = True,
     notifies: bool = True,
     rearchives: bool = False,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> ItemSyncService:
     """Assemble a sync service and the thread binding it drives.
 
@@ -1036,6 +1085,9 @@ def build_item_sync(
     `rearchives` on puts a thread Discord archived for going quiet back that way after writing to
     it, at the price of asking about it first. Only the wiring behind `/refresh` turns it on, issue
     #185: everything else that writes is activity, and should leave the thread awake.
+
+    `now` is the clock an item's age is read against, issue #259, and only a test passes one: it
+    holds the clock still so an item stands exactly either side of `DESCRIBED_RINGS_FOR`.
     """
     return ItemSyncService(
         sessionmaker,
@@ -1046,6 +1098,7 @@ def build_item_sync(
         mentions=mentions,
         notifies=notifies,
         archives=threads if rearchives else None,
+        now=now,
     )
 
 
@@ -1111,6 +1164,16 @@ def build_item_handler(
         return WebhookOutcome.PROCESSED if result.synced else WebhookOutcome.IGNORED
 
     return handle
+
+
+def _still_news(created_at: datetime | None, now: datetime) -> bool:
+    """Whether an item opened at `created_at` is new enough for its description to ring, #259.
+
+    No date is no: a payload that does not say when the item was opened gives no reason to believe
+    the names in it were written today. A date ahead of `now` is a clock out by a little, and
+    reads as new, which it is.
+    """
+    return created_at is not None and now - created_at <= DESCRIBED_RINGS_FOR
 
 
 @dataclass(slots=True)
