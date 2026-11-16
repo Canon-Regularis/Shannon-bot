@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from shannon.domain.enums import ActorRole, ObjectType, Status
+from shannon.discord_bot.panels import BlockKind
+from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT
+from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.domain.errors import PermanentError, WrongPolicyError
 from shannon.domain.models import (
     Actor,
     IssueSnapshot,
     PullRequestSnapshot,
     RepositorySnapshot,
+    TicketSnapshot,
 )
+from shannon.github.mentions import MENTION_LIMIT
 from shannon.services.sync.items import build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 
@@ -34,6 +40,17 @@ COMMON = {
 }
 PULL_REQUEST = PullRequestSnapshot(**COMMON)
 ISSUE = IssueSnapshot(**COMMON)
+TICKET = TicketSnapshot(
+    repository=REPO,
+    github_object_id=901,
+    number=6,
+    title="Write the poller",
+    html_url="https://github.com/orgs/Canon-Regularis/projects/6",
+    state="open",
+    updated_at=datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+    column="In Progress",
+    project_number=6,
+)
 
 
 class TestWhatEachPolicyShuts:
@@ -172,3 +189,164 @@ class TestWhatTheRowAloneSaysAboutTheLock:
         policy = TicketPolicy()
 
         assert policy.shut_for_state(status=Status.DONE, github_state=state) is False
+
+
+class EveryoneIsLinked(Mapping[str, int]):
+    """A server where every name has an account, so the block swaps every name it reaches.
+
+    The ids are handed out in the order the swap asks, which lets a test read back off the block
+    which names were swapped, and compare them with the ones the policy read.
+    """
+
+    def __init__(self) -> None:
+        self.asked: dict[str, int] = {}
+
+    def __getitem__(self, login: str) -> int:
+        return self.asked.setdefault(login, 1000 + len(self.asked))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.asked)
+
+    def __len__(self) -> int:
+        return len(self.asked)
+
+    def __bool__(self) -> bool:
+        """Never empty, though nobody has been asked about yet: the swap reads an empty map as
+        no map at all, and would ask it nothing."""
+        return True
+
+
+def swapped(policy: PullRequestPolicy | IssuePolicy, body: str) -> tuple[str, ...]:
+    """The logins the block shows as mentions under its label, in the order they are written."""
+    linked = EveryoneIsLinked()
+    snapshot = replace(PULL_REQUEST if isinstance(policy, PullRequestPolicy) else ISSUE, body=body)
+    card = policy.render(
+        snapshot, status=Status.NOT_REVIEWED, priority=Priority.UNSET, mentions=linked
+    )
+    description = next(part for part in card.blocks if part.kind is BlockKind.BODY)
+    logins = {account: login for login, account in linked.asked.items()}
+    shown = (logins[int(account)] for account in re.findall(r"<@(\d+)>", description.text))
+    return tuple(dict.fromkeys(shown))
+
+
+ITEMS = [
+    pytest.param(PullRequestPolicy(), PULL_REQUEST, id="pull request"),
+    pytest.param(IssuePolicy(), ISSUE, id="issue"),
+]
+
+
+class TestWhoADescriptionNames:
+    """The people the block's description @names, which the sync rings when it opens. Issue #259.
+
+    The same answer for a pull request and an issue: both blocks show the description through
+    `as_description`, and both read it through it.
+    """
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_each_name_once_lowercased_in_the_order_written(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """Lowercased because that is how a link is stored, and once because one person rings
+        once however often they are named."""
+        named = replace(item, body="Thanks @Monalisa, and @hubot too. @MONALISA, look again.")
+
+        assert policy.names_written(named) == ("monalisa", "hubot")
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_a_team_is_not_somebody_to_ring(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """The block writes a team as text and never as a role mention, so there is nobody to
+        look up, and a slug that matches a login is not that person."""
+        named = replace(item, body="@canon-regularis/backend, and @monalisa")
+
+        assert policy.names_written(named) == ("monalisa",)
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_no_more_than_ten(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """The budget a comment has. The eleventh is shown as written and is nobody's ping."""
+        logins = [f"u{i}" for i in range(MENTION_LIMIT + 1)]
+        named = replace(item, body=" ".join(f"@{login}" for login in logins))
+
+        assert policy.names_written(named) == tuple(logins[:MENTION_LIMIT])
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_a_team_spends_the_budget_it_shares_with_people(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """Ten distinct names, teams among them, because the swap counts them that way. Reading
+        ten people past a team would ring a tenth person the block leaves as text."""
+        logins = [f"u{i}" for i in range(MENTION_LIMIT)]
+        named = replace(item, body="@canon-regularis/backend " + " ".join(f"@{x}" for x in logins))
+
+        assert policy.names_written(named) == tuple(logins[: MENTION_LIMIT - 1])
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_a_name_in_code_or_an_address_is_nobody(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """GitHub reads no mention in a code span, and the block shows one there as text."""
+        body = "`@span` and\n```\n@fenced\n```\nmail monalisa@example.com, ask @hubot"
+
+        assert policy.names_written(replace(item, body=body)) == ("hubot",)
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_a_name_past_the_preview_is_not_read(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        """Read off what the block shows, not the whole body. A name the cut went through is
+        the front of somebody's name, and ringing it would ring whoever is linked by it."""
+        past = replace(item, body="x" * DESCRIPTION_PREVIEW_LIMIT + " @hubot")
+        through = replace(item, body="x" * (DESCRIPTION_PREVIEW_LIMIT - 16) + " @monalisa @hubot")
+
+        assert policy.names_written(past) == ()
+        assert policy.names_written(through) == ("monalisa",)
+
+    @pytest.mark.parametrize(("policy", "item"), ITEMS)
+    def test_nothing_written_names_nobody(
+        self, policy: PullRequestPolicy | IssuePolicy, item: PullRequestSnapshot | IssueSnapshot
+    ) -> None:
+        assert policy.names_written(replace(item, body="")) == ()
+
+    def test_a_ticket_names_nobody(self) -> None:
+        """Its block swaps nothing into a draft's body, and ringing for it would start every
+        card on a board at once, which is why its `assignments` answers nobody too."""
+        assert TicketPolicy().names_written(replace(TICKET, body="@monalisa, @hubot")) == ()
+
+
+class TestTheNamesReadAreTheNamesTheBlockSwaps:
+    """The reader and the swap, through the real render, issue #259.
+
+    A name read and not swapped rings somebody the block shows as text; a name swapped and not
+    read shows as a mention that rang nobody. Neither one is reported anywhere, so each body
+    below is one of the shapes where two recipes could tell the description apart.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param("@Monalisa, @hubot and @MONALISA", id="case and repeats"),
+            pytest.param("@canon-regularis/backend and @monalisa", id="a team"),
+            pytest.param("`@span`\n```\n@fenced\n```\n@hubot", id="code"),
+            pytest.param("monalisa@example.com and @hubot", id="an address"),
+            pytest.param(
+                "![@monalisa](https://user-images.githubusercontent.com/1/shot.png) @hubot",
+                id="a lifted image's alt text",
+            ),
+            pytest.param("<!-- @hidden -->@monalisa", id="an html comment"),
+            pytest.param(
+                "x" * (DESCRIPTION_PREVIEW_LIMIT - 16) + " @monalisa @hubot", id="at the cut"
+            ),
+            pytest.param(" ".join(f"@u{i}" for i in range(MENTION_LIMIT + 2)), id="past ten"),
+            pytest.param("see deadbeefcafe and @hubot", id="a commit hash"),
+        ],
+    )
+    @pytest.mark.parametrize("policy", [PullRequestPolicy(), IssuePolicy()], ids=["pr", "issue"])
+    def test_the_same_names_in_the_same_order(
+        self, policy: PullRequestPolicy | IssuePolicy, body: str
+    ) -> None:
+        item = PULL_REQUEST if isinstance(policy, PullRequestPolicy) else ISSUE
+
+        assert policy.names_written(replace(item, body=body)) == swapped(policy, body)

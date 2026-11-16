@@ -5,6 +5,7 @@ from typing import Protocol
 
 from shannon.discord_bot import formatting
 from shannon.discord_bot.panels import Panel
+from shannon.discord_bot.rich_text import as_description
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
 from shannon.domain.models import (
@@ -14,6 +15,7 @@ from shannon.domain.models import (
     TicketSnapshot,
     TrackedSnapshot,
 )
+from shannon.github.mentions import names_a_note_writes
 
 
 class SyncPolicy(Protocol):
@@ -49,6 +51,16 @@ class SyncPolicy(Protocol):
         """Who this event has just asked for, as opposed to who is on the item.
 
         Only an event can tell a request made again from a request never withdrawn.
+        """
+        ...
+
+    def names_written(self, snapshot: TrackedSnapshot) -> tuple[str, ...]:
+        """The logins the description @names where the block shows it, issue #259.
+
+        Lowercased, in the order they are written, and no more than the ten the swap reaches.
+        Teams are left out: the block writes them as text and never as a role mention, so there
+        is nobody to look up for one. Read here rather than in the sync because only the kind
+        knows whether its block shows a description it should ring for at all.
         """
         ...
 
@@ -111,6 +123,9 @@ class PullRequestPolicy:
             ActorRole.REVIEWER_TEAM: ([snapshot.team_asked_now] if snapshot.team_asked_now else []),
         }
 
+    def names_written(self, snapshot: TrackedSnapshot) -> tuple[str, ...]:
+        return _named_in_the_description(snapshot)
+
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """Closing a pull request does not move its workflow status; MVP 3 owns that."""
         return current
@@ -164,6 +179,9 @@ class IssuePolicy:
     def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         """Nothing. Only reviewers can be asked again."""
         return {}
+
+    def names_written(self, snapshot: TrackedSnapshot) -> tuple[str, ...]:
+        return _named_in_the_description(snapshot)
 
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """A closed issue is done, and reopening one resets only DONE.
@@ -237,6 +255,15 @@ class TicketPolicy:
     def asked_again(self, snapshot: TrackedSnapshot) -> Mapping[ActorRole, Sequence[Actor]]:
         return {}
 
+    def names_written(self, snapshot: TrackedSnapshot) -> tuple[str, ...]:
+        """Nobody, issue #259, for the reason `assignments` answers nobody.
+
+        A draft card's body is shown, and its names stay as written there: `format_ticket` swaps
+        nothing into it. Answering here would ring for names the block never shows as mentions,
+        and would turn it on for every card on a board at once.
+        """
+        return ()
+
     def status_for(self, snapshot: TrackedSnapshot, current: Status) -> Status:
         """The board is the source: its column is the status.
 
@@ -269,6 +296,18 @@ class TicketPolicy:
     def thread_name(self, snapshot: TrackedSnapshot) -> str:
         """No number in front: a draft item has none."""
         return snapshot.title.strip() or "Untitled ticket"
+
+
+def _named_in_the_description(snapshot: TrackedSnapshot) -> tuple[str, ...]:
+    """The people an issue's or a pull request's description names, read off what its block shows.
+
+    `as_description` and `names_a_note_writes` because the block swaps names into that string with
+    `rewrite_a_note`, issue #259, and the two have to agree to the character. A name this missed
+    would show as a mention and ring nobody; a name read past the preview cut would ring somebody
+    the block never shows, and spend the budget of ten the swap shares with it.
+    """
+    described = as_description(snapshot.body, repository=snapshot.repository)
+    return names_a_note_writes(described.text).people
 
 
 def channel_fallbacks() -> dict[ObjectType, ObjectType]:
