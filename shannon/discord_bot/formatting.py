@@ -18,7 +18,7 @@ from shannon.discord_bot.panels import (
     PanelImage,
     PanelLink,
 )
-from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
+from shannon.discord_bot.rich_text import Images, as_description, as_note_text, as_rich_text
 from shannon.discord_bot.safe_text import (
     CARD_FIELD_LIMIT,
     COMMIT_MESSAGE_LIMIT,
@@ -82,6 +82,10 @@ FILE_LINES_BUDGET = 2400
 # 2**64 - 1, is twenty digits. Issue #263 measures every name against it, because whether somebody
 # is linked is only known when the message is written, after whoever chose them has finished.
 _WIDEST_MENTION = f"<@{2**64 - 1}>"
+
+# What stands over an item's description in its block. Its length is counted against the room the
+# rows leave, issue #259, so it is written once rather than measured from a second spelling.
+_DESCRIPTION_LABEL = "**Description:**\n"
 
 
 def thread_name(snapshot: TrackedSnapshot) -> str:
@@ -946,6 +950,14 @@ def _metadata(
     """The block both kinds of item share; only the noun and the reviewers line differ.
 
     The rows go through `_rows`, which a ticket's block shares since issue #166.
+
+    Since issue #259 the names the description writes become mentions where `mentions` knows them,
+    as a comment's do. Whether that rings anybody is not decided here but by the allow-list the
+    block is sent with, and an edit rings nobody whatever it says. Only the description is swapped
+    and never the rows, which carry mentions this built itself - live, and a GitHub login may be
+    all digits, so `<@7>` would be read as a name and rewritten into somebody else. Teams are left
+    as written, `roles` None: a role mention cannot be muted, and the block is written again on
+    every delivery, `/refresh` and `/regenerate` with it.
     """
     rows = [
         (f"{noun} Name", _title(snapshot)),
@@ -967,13 +979,22 @@ def _metadata(
         ("Tags", _tags(snapshot.label_names)),
         ("Last Updated", as_timestamp(snapshot.updated_at)),
     ]
-    # Not `fit`, which cut this to a MESSAGE and is the wrong budget twice over: a card
-    # holds twice a message, and the description under this block is what should give way
-    # first. `Panel.trimmed` does both, at the send, over the blocks it can see.
-    blocks = [_rows(*rows)]
+    # The rows are not `fit`, which cuts to a MESSAGE and is the wrong budget for them twice over:
+    # a card holds twice a message, and the description under this block is what should give way
+    # first. `Panel.trimmed` does both, at the send, over the blocks it can see. Only the
+    # description is fit, below, and only to the room these rows leave it.
+    fields = _rows(*rows)
     # The commits the description names link into the item's own repository, issue #186.
-    described = as_rich_text(snapshot.body, repository=snapshot.repository)
-    blocks += _the_description(described.text)
+    # `as_description` rather than a recipe spelled out here, because `services.sync.policies`
+    # reads the names to ring out of the very same string, issue #259.
+    described = as_description(snapshot.body, repository=snapshot.repository)
+    named = _named_in(described.text, mentions, None)
+    # Each name swapped makes the text longer than the preview limit counted, so it is cut back to
+    # the room the rows leave, as `_note` cuts a comment, rather than letting the panel drop it
+    # whole. Never shorter than it was written, so a description the rows leave no room for at all
+    # is still dropped whole by `Panel.trimmed` rather than left as a label over a cut mark.
+    room = PANEL_BUDGET - len(fields.text) - len(_DESCRIPTION_LABEL)
+    blocks = [fields, *_the_description(fit(named, limit=max(room, len(described.text))))]
     return Panel(
         blocks=tuple(blocks),
         accent=accent,
@@ -1019,7 +1040,7 @@ def _the_description(described: str) -> list[Block]:
     """
     if not described:
         return []
-    return [Block(BlockKind.BODY, f"**Description:**\n{described}")]
+    return [Block(BlockKind.BODY, f"{_DESCRIPTION_LABEL}{described}")]
 
 
 def _opens_github(url: str) -> PanelLink | None:
@@ -1095,9 +1116,13 @@ def _named_in(
     this module already makes: the thread records who was named even where the server has no way
     to reach them.
 
+    Since issue #259 it swaps the names in an item's description too, with `roles` None so a team
+    stays plain text, and `services.sync.policies` reads the names to ring out of that same text.
+
     `rewrite_a_note` rather than `rewrite`, so that nothing here chooses whether a name inside a
-    code span counts: that answer has to match the one the note path reads with, and it is paired
-    with it at the other end rather than passed from both.
+    code span counts: that answer has to match the one the note path and the policies' reader of
+    a description read with, and it is paired with them at the other end rather than passed from
+    both.
 
     Code spans are skipped, which GitHub does and this could not until issue #166: the escaping
     used to turn the backticks into literal characters before the swap ran, so there was no span

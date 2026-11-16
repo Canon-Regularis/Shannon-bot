@@ -171,6 +171,22 @@ def as_note_text(body: str, *, repository: RepositorySnapshot) -> str:
     ).text
 
 
+def as_description(body: str, *, repository: RepositorySnapshot) -> Described:
+    """An issue's or a pull request's description as the block at the top of its thread shows it.
+
+    Its own name since issue #259, for the reason `as_note_text` has one: the block swaps the names
+    a description writes into it, and the sync reads the names to look up and to ring out of it.
+    The two have to agree to the character, and a disagreement is silent both ways - a name the
+    reader missed renders exactly as an unlinked name renders, and a reader that looks further
+    than the swap spends the shared budget of ten names on names the swap never reaches.
+
+    Not `as_note_text`, which is a different string: a note leaves its pictures where they were
+    written, as links, and the block lifts them out into its gallery and keeps only the alt text.
+    The images come back with the text so the block has one call to make rather than two.
+    """
+    return as_rich_text(body, repository=repository)
+
+
 def _with_commits(text: str, repository: RepositorySnapshot) -> str:
     """Each commit hash the text names, written as a link to the commit. Issue #186.
 
