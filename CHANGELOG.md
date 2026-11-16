@@ -8279,3 +8279,45 @@ feature end to end rather than assuming a predecessor the file never recorded.
   tests the wait a reply and a review now share. New files cover whom a review asks, the lines and
   their budget, every path through the reads, and the whole path through the container and the
   worker.
+
+## A description rings whoever it names
+
+- **A description named people and reached none of them** (#259). An issue or a pull request
+  that `@`-named somebody in its description showed the name as plain text in the thread's opening
+  block, and only the Author, Assignees and Reviewers rows rang. A comment naming the same person
+  rang them (#231).
+- **Now a mention, and rung once.** An `@someone` in the description is a mention where that login
+  is linked, and the block that opens the thread rings them along with the people on the item, in
+  the same one message. Somebody both named and assigned is rung once. An unlinked name and a
+  link with no GitHub id stay plain text and are not rung. A member who ran `/mentions off` is
+  shown as a mention and not rung.
+- **Only while the item is new.** The opening block rings for description names only when the item
+  was opened no more than a day before. Any delivery for an item this bot has no row for opens its
+  thread, so without the limit the first edit to a year-old issue would wake everybody it named a
+  year ago. An item that does not say when it was opened rings nobody for its description. The
+  people on the item are rung as they were, whatever its age.
+- **An edit rings nobody.** A name added to the description later is shown as a mention on the next
+  write of the block, which is an edit, and Discord rings nobody for one. The same goes for a
+  thread already open before this change, including #259's own: its names become mentions on its
+  next edit or `/regenerate`, with no ring. `/refresh`, `/regenerate`, a rebuild from an old
+  delivery and a thread opened to replace a deleted one ring nobody, as for the rows. A block
+  somebody deleted and that is posted again into its own thread rings the people on the item, as
+  before, and not the description's names: the block that opened the thread already rang them.
+- **The same limits as a comment.** Ten names at most, and only in the part of the description the
+  block shows: a name past the cut, or past the tenth, stays plain text. Names in code written with
+  backticks and email addresses are not names. `@org/team` stays plain text and is never a role
+  mention. Only the description is rewritten, never the rows above it, and it is fit back into the
+  block when the mentions make it longer.
+- **One string, read and rewritten.** The names that ring are read from the exact text the block
+  shows, so a name shown as a mention is a name that can ring, and the other way round. The order
+  of the lookup keeps the check on a login that changed hands (#135): the author naming
+  themselves is judged on the payload's id, not on the link alone.
+- **For whoever deploys it.** No migration, setting or new permission. An issue and a pull request
+  now carry when they were opened, read from the payload GitHub already sends.
+- **Tests.** The description string and its reader agree to the character, the block's rewriting
+  of names and its fit, the policies' reading of who a description names, the parsers' opening
+  date, and a new file covering the whole sync: an issue and a pull request opened naming two
+  people, the deliveries GitHub sends beside the opening one, an item too old to ring, the day's
+  edge, a missing date, unlinked, unproved and muted names, a login that changed hands, an edit,
+  a deleted block posted again, both switches, a rebuild from an old delivery and a replacement
+  thread.
