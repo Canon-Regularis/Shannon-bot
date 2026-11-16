@@ -20,7 +20,9 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   item, or under two quote marks - arrives as its words, in bold unless they hold `**`
   already or end on a backslash. A line in a block of code keeps the hashes and marks it
   opens with. A link to GitHub stays a link; a link anywhere else keeps its words and gains
-  the host it really goes to, so `click here` cannot be somewhere else.
+  the host it really goes to, so `click here` cannot be somewhere else. An `@someone` in the
+  description is a mention where that login is linked, the same as in a comment, and the block
+  that opens the thread rings them: see Pings below.
 - **Comments and reviews.** Posted into the item's thread with a link back. Whoever wrote one is
   named as a mention and not rung by it: they know what they wrote. An inline review comment gets
   a message of its own naming the file and the line it sits on. A reply to one names whom it
@@ -58,7 +60,10 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
 - **Tags in a comment reach people.** `@someone` in a comment body becomes a real Discord mention
   where that login has been linked, and `@org/team` becomes a role mention where that team has.
   Anybody unlinked is still named in plain text. At most ten tags per comment are mentioned,
-  because without a limit one comment could ping every linked member of the server.
+  because without a limit one comment could ping every linked member of the server. An issue's or
+  a pull request's description reads its tags the same way, ten at most and only in the part the
+  block shows, with one difference: `@org/team` there stays plain text and is never a role
+  mention.
 - **A commit named is a link to it.** A commit hash in a description, a comment, a review, an
   inline comment or a commit message links to that commit on GitHub, and reads the way GitHub
   shows it: `abc1234`, its first seven characters, or `owner/repo@abc1234` for another
@@ -70,9 +75,12 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   The claim is taken before the message goes out and handed back if it fails. When a thread is
   first opened the metadata block carries those mentions and is a real message, so it is the
   ping; the separate line is kept for people added later, when editing the block would reach
-  nobody. Anybody who has run `/mentions off` is still named in all of it, as a mention Discord
-  renders and does not ring. `/track people off` stops the separate line in one thread, and
-  nobody added while it is off is rung for it later.
+  nobody. That first block also rings whoever its description `@`-names, once each, if the item
+  was opened no more than a day before: a name added by a later edit, or in an item this bot first
+  sees days after it was opened, is shown as a mention and rings nobody. Anybody who has run
+  `/mentions off` is still named in all of it, as a mention Discord renders and does not ring.
+  `/track people off` stops the separate line in one thread, and nobody added while it is off is
+  rung for it later.
 - **Lines in the thread.** A tag moving says so, priority coloured by level and status labels
   told apart from ordinary labels. A tag the opening block already listed says nothing:
   GitHub sends those as their own deliveries a moment after it. Closing, merging or reopening
@@ -867,9 +875,9 @@ that made it visible.
 **A tag resolved from a comment body cannot be checked against the account that wrote it.** Every
 other mention the bot builds is checked against the GitHub id the payload carries, so a login
 somebody freed and a stranger took does not inherit the previous holder's mention. A name read out
-of a comment body carries no id at all, so that check cannot run and the name alone decides. It
-follows the rule the link table already states for a payload with no id: no evidence is not
-evidence, and refusing on it would take away mentions that work.
+of a comment body or a description carries no id at all, so that check cannot run and the name
+alone decides. It follows the rule the link table already states for a payload with no id: no
+evidence is not evidence, and refusing on it would take away mentions that work.
 
 **The same commit announced in two threads.** A commit is announced where it lands, in a thread
 that asked for commit lines, and merging a branch that carries your own earlier work lands it again

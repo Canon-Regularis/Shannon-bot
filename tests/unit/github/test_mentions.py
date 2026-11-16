@@ -16,8 +16,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from shannon.discord_bot.rich_text import Images, as_note_text, as_rich_text
-from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, clipped
+from shannon.discord_bot.rich_text import Images, as_description, as_note_text, as_rich_text
+from shannon.discord_bot.safe_text import COMMENT_PREVIEW_LIMIT, DESCRIPTION_PREVIEW_LIMIT, clipped
 from shannon.domain.models import RepositorySnapshot
 from shannon.github import mentions
 from shannon.github.mentions import (
@@ -57,6 +57,15 @@ def shown(body: str) -> str:
     conversion the invariant below went on passing about a string nothing produced any more.
     """
     return as_note_text(body, repository=REPO)
+
+
+def described(body: str) -> str:
+    """A description as the block at the top of its thread shows it, issue #259.
+
+    Its own string rather than `shown`'s: the block lifts a picture out and leaves its alt text in
+    the prose, which a note never does, so the pairing below has to be asked of this one too.
+    """
+    return as_description(body, repository=REPO).text
 
 
 def unlinked(body: str) -> str:
@@ -311,6 +320,59 @@ class TestTheReaderCoversTheSwap:
             "the reader read a name the swap will never ask about - they share a budget of ten "
             "distinct names, so reading wider spends it on names nothing will render"
         )
+
+
+class TestTheReaderCoversTheSwapInADescription:
+    """The same invariant over the string the block at the top of a thread shows, issue #259.
+
+    The block is not a note. It lifts a picture out and leaves the alt text where the markup was,
+    so a name can arrive in the prose from a place no note ever puts one, and it is cut at the
+    description's limit rather than a comment's. The sync reads the names to ring out of this
+    string and the block swaps them into it, through the same pair a note uses.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "hi @john and @octo-cat",
+            "![@john](https://user-images.githubusercontent.com/x.png) and @octo-cat",
+            "![@john](https://evil.example/x.png)",
+            "<!-- -->@john",
+            "**Reviewer:**<!-- -->@john",
+            "x" * (DESCRIPTION_PREVIEW_LIMIT - 5) + "@monalisa",
+            "x" * (DESCRIPTION_PREVIEW_LIMIT - 6) + " @john",
+            " ".join(f"`@u{i}`" for i in range(MENTION_LIMIT)) + " @john",
+            "```\n@john\n```\n@canon/backend after it",
+            "@john fixed it in abc1234 and o/r@def5678",
+            "@everyone @here <@123> <@&456> a@b.com",
+        ],
+        ids=[
+            "two names",
+            "a lifted picture named for somebody",
+            "a picture that is not lifted",
+            "behind a comment",
+            "behind a comment behind a mark",
+            "cut short",
+            "at the cut",
+            "ten in code and one real",
+            "a fence and a team",
+            "commit hashes",
+            "what is refused",
+        ],
+    )
+    def test_everything_the_swap_asks_about_was_read_first(self, body: str) -> None:
+        said = described(body)
+        read = names_a_note_writes(said)
+        covered = {(False, name) for name in read.people} | {(True, name) for name in read.teams}
+
+        assert asked_about(said) == covered
+
+    def test_a_picture_named_for_somebody_is_a_name_here(self) -> None:
+        """The block lifts the picture and leaves its alt text as prose, where a note keeps it
+        inside a link. The name is read where the block leaves it, so it is answered."""
+        said = described("![@john](https://user-images.githubusercontent.com/x.png)")
+
+        assert names_a_note_writes(said).people == ("john",)
 
 
 class TestACommitLinkMovesNoName:

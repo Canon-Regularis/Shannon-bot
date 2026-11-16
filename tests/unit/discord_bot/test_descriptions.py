@@ -15,17 +15,19 @@ from datetime import UTC, datetime
 
 import pytest
 
-from shannon.discord_bot.formatting import format_issue, format_pull_request
+from shannon.discord_bot.formatting import format_comment, format_issue, format_pull_request
 from shannon.discord_bot.panels import PANEL_BUDGET, BlockKind
 from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import ObjectType, Priority, Status
 from shannon.domain.models import (
     Actor,
+    CommentSnapshot,
     IssueSnapshot,
     Label,
     PullRequestSnapshot,
     RepositorySnapshot,
 )
+from shannon.github.mentions import MENTION_LIMIT
 from tests.support.discord_markdown import headings_drawn
 
 pytestmark = pytest.mark.unit
@@ -48,6 +50,14 @@ COMMON = {
 }
 PULL_REQUEST = PullRequestSnapshot(**COMMON)
 ISSUE = IssueSnapshot(**COMMON)
+COMMENT = CommentSnapshot(
+    repository=REPO,
+    item_number=79,
+    comment_id=999,
+    object_type=ObjectType.PR,
+    html_url="https://github.com/Canon-Regularis/Shannon-bot/pull/79#issuecomment-999",
+    body="",
+)
 
 LABEL = "**Description:**"
 
@@ -61,6 +71,17 @@ def block(body: str, snapshot: PullRequestSnapshot | IssueSnapshot = PULL_REQUES
     render = format_issue if isinstance(snapshot, IssueSnapshot) else format_pull_request
     card = render(replace(snapshot, body=body), status=Status.NOT_REVIEWED, priority=Priority.UNSET)
     return card.trimmed().text
+
+
+def described(
+    body: str,
+    mentions: dict[str, int],
+    snapshot: PullRequestSnapshot | IssueSnapshot = PULL_REQUEST,
+) -> str:
+    """What stands under the label once the names the server knows are swapped in. Issue #259."""
+    render = format_issue if isinstance(snapshot, IssueSnapshot) else format_pull_request
+    card = render(replace(snapshot, body=body), status=Status.NOT_REVIEWED, mentions=mentions)
+    return card.trimmed().text.split(f"{LABEL}\n")[1]
 
 
 class TestWhenThereIsSomethingToShow:
@@ -166,8 +187,10 @@ class TestWhenThereIsNothingToShow:
 
 class TestNothingUntrustedGetsThrough:
     """A description is written by whoever opened the item, which on a public repository is
-    anybody. It is escaped exactly as a comment body is, and never resolved into a mention: the
-    block is rewritten on every delivery, and a mention is an event rather than a standing field.
+    anybody. It is escaped exactly as a comment body is. Since issue #259 the @names it writes
+    resolve into mentions as a comment's do, because the bot built those itself from accounts that
+    were linked; what an author typed as a mention - a raw `<@id>`, a role, `@everyone`, `@here` -
+    is still defused, whoever it was meant for.
     """
 
     @pytest.mark.parametrize("written", ["<@1234567890>", "<@&999>", "@everyone", "@here"])
@@ -194,16 +217,17 @@ class TestNothingUntrustedGetsThrough:
         assert "-# posted by the maintainers" not in rendered
         assert "posted by the maintainers" in rendered
 
-    def test_a_linked_name_is_still_only_text(self) -> None:
-        """A name in a comment resolves. A name here does not, because this line is rewritten
-        every time anything about the item changes."""
+    def test_a_linked_name_is_a_mention(self) -> None:
+        """Issue #259. This said the opposite until then, on the grounds that the block is
+        rewritten on every delivery. It is, and an edit rings nobody whatever it says: whether the
+        name rings is the allow-list's to decide, on the one post that opens the thread."""
         rendered = format_pull_request(
             replace(PULL_REQUEST, body="ask @octocat"),
             status=Status.NOT_REVIEWED,
             mentions={"octocat": 4242},
         )
 
-        assert "<@4242>" not in rendered.text.split(LABEL)[1]
+        assert f"{LABEL}\nask <@4242>" in rendered.text
 
     def test_it_cannot_forge_a_row_among_the_fields(self) -> None:
         """A forged row can be written, and it cannot be written WHERE it would be read as one.
@@ -237,6 +261,93 @@ class TestNothingUntrustedGetsThrough:
         """The marker that swallows every line after it rather than restyling one."""
         for written in ("```", "```py\ncode", "a ``` b"):
             assert block(written).count("```") % 2 == 0, written
+
+
+class TestTheNamesItWrites:
+    """Issue #259. A tag in a description reaches the person, as a tag in a comment does.
+
+    Swapped through the same pair a comment uses, so everything a comment leaves as written is left
+    here too. The one difference is a team, which stays as written rather than becoming a role.
+    """
+
+    def test_an_unlinked_name_stays_as_written(self) -> None:
+        """The two names the issue was reported with, neither linked here."""
+        written = "for @a-dish12 and @matthew831709 to be able to use the figures"
+
+        assert described(written, {"octocat": 4242}) == written
+
+    def test_a_linked_name_beside_an_unlinked_one(self) -> None:
+        assert described("ask @a-dish12 and @matthew831709", {"a-dish12": 4242}) == (
+            "ask <@4242> and @matthew831709"
+        )
+
+    def test_the_case_it_was_written_in_does_not_matter(self) -> None:
+        assert described("ask @OctoCat", {"octocat": 4242}) == "ask <@4242>"
+
+    def test_an_issues_description_carries_them_too(self) -> None:
+        assert described("ask @octocat", {"octocat": 4242}, ISSUE) == "ask <@4242>"
+
+    def test_a_team_is_never_a_role_mention(self) -> None:
+        """A role cannot be muted, and the block goes out again on every `/refresh` and
+        `/regenerate`. The slug matching a linked login proves the person is not put in its place
+        either."""
+        said = described("ask @octo-org/octocat", {"octocat": 4242})
+
+        assert said == "ask @octo-org/octocat"
+        assert "<@&" not in said
+
+    @pytest.mark.parametrize(
+        "written",
+        ["run `@octocat` first", "```\n@octocat\n```", "write to octocat@example.com"],
+        ids=["a code span", "a fence", "an email address"],
+    )
+    def test_what_github_does_not_read_as_a_name_stays_as_written(self, written: str) -> None:
+        assert "<@4242>" not in described(written, {"octocat": 4242})
+
+    def test_the_rows_are_never_rewritten(self) -> None:
+        """A login may be all digits. The author row holds the `<@7>` this built for monalisa,
+        and a swap over the rows would read the 7 in it as a name."""
+        card = format_pull_request(
+            replace(PULL_REQUEST, author=Actor("monalisa"), body="ask @7"),
+            status=Status.NOT_REVIEWED,
+            mentions={"monalisa": 7, "7": 4242},
+        )
+        fields = next(part for part in card.blocks if part.kind is BlockKind.FIELDS)
+
+        assert "**Author:** <@7>" in fields.text
+        assert card.text.split(LABEL)[1] == "\nask <@4242>"
+
+    def test_only_ten_names_become_mentions(self) -> None:
+        """The budget a comment has. The eleventh is shown, and is nobody's ping."""
+        logins = [f"u{i}" for i in range(MENTION_LIMIT + 1)]
+        said = described(
+            " ".join(f"@{login}" for login in logins),
+            {login: 1000 + i for i, login in enumerate(logins)},
+        )
+
+        assert f"<@{1000 + MENTION_LIMIT - 1}>" in said
+        assert said.endswith(f"@u{MENTION_LIMIT}")
+
+    def test_a_name_repeated_to_the_limit_keeps_the_description(self) -> None:
+        """Each `@a` grows by twenty characters when it is swapped, after the preview limit has
+        been counted. Cut to the room the rows leave, as a comment is, rather than dropped whole by
+        the panel for being over it."""
+        body = " ".join(["@a"] * (DESCRIPTION_PREVIEW_LIMIT // 3))
+        card = format_pull_request(
+            replace(PULL_REQUEST, body=body), status=Status.NOT_REVIEWED, mentions={"a": 2**64 - 1}
+        )
+
+        assert card.length() <= PANEL_BUDGET
+        assert card.trimmed().text.split(LABEL)[1].startswith(f"\n<@{2**64 - 1}>")
+
+    def test_a_name_in_a_search_link_is_read_as_a_comment_reads_it(self) -> None:
+        """Pinned rather than fixed. An `@` after `=` is read as a name, which is what a comment
+        already does; the two are one rule and change together or not at all."""
+        written = "see https://github.com/search?q=@octocat"
+        comment = format_comment(replace(COMMENT, body=written), {"octocat": 4242})
+
+        assert described(written, {"octocat": 4242}) == "see https://github.com/search?q=<@4242>"
+        assert "search?q=<@4242>" in comment.text
 
 
 class TestWhenThereIsTooMuch:

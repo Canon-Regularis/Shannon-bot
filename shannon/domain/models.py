@@ -97,6 +97,10 @@ class ItemSnapshot:
     # Empty where they wrote nothing, which GitHub sends as a null rather than an empty string,
     # and which the block reads as a section to leave out rather than one to render blank.
     body: str = ""
+    # When the item was opened, or None where GitHub did not say. A draft card carried it alone
+    # until issue #259, which reads it on an issue and a pull request too: the names a description
+    # writes ring only while the item is new, and a year-old issue first seen today is not.
+    created_at: datetime | None = None
 
     @property
     def label_names(self) -> tuple[str, ...]:
@@ -194,7 +198,6 @@ class TicketSnapshot(ItemSnapshot):
     #
     # `priority_name` rather than reusing the inherited `priority`, which is derived from labels and
     # is `UNSET` for a card whatever the board says. A draft has no labels to derive one from.
-    created_at: datetime | None = None
     priority_name: str | None = None
     story_point: str | None = None
     iteration: str | None = None
@@ -599,6 +602,9 @@ class TrackedSnapshot(Protocol):
 
     @property
     def updated_at(self) -> datetime | None: ...
+
+    @property
+    def created_at(self) -> datetime | None: ...
 
     @property
     def action(self) -> str | None: ...

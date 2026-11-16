@@ -43,6 +43,7 @@ class _SharedFields(TypedDict):
     updated_at: datetime | None
     action: str | None
     body: str
+    created_at: datetime | None
 
 
 class _NoteFields(TypedDict):
@@ -263,6 +264,8 @@ def _shared_fields(
         "updated_at": parse_timestamp(payload.get("updated_at")),
         "action": action,
         "body": body if isinstance(body, str) else "",
+        # Issue #259: the names a description writes ring only while the item is new.
+        "created_at": parse_timestamp(payload.get("created_at")),
     }
 
 

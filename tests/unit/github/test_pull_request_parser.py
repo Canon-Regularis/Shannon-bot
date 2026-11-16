@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from shannon.github.webhooks.events import PULL_REQUEST_ACTIONS
@@ -426,3 +428,32 @@ class TestAReviewAskedOfATeam:
         payload["pull_request"]["requested_teams"] = teams
 
         assert parse_pull_request_event("opened", payload).reviewer_teams == ()
+
+
+class TestWhenItWasOpened:
+    """Issue #259. The names a description writes ring only while the item is new, so the sync
+    has to know when it was opened, and a pull request did not say until then."""
+
+    def test_a_real_github_payload_says(self) -> None:
+        snapshot = parse_pull_request_event("opened", load("pull_request_opened.json"))
+
+        assert snapshot is not None
+        assert snapshot.created_at == datetime(2026, 8, 10, 11, 4, 33, tzinfo=UTC)
+
+    def test_a_payload_that_does_not_say_leaves_it_unknown(self) -> None:
+        """Never guessed. An item nobody knows the age of is not treated as a new one."""
+        payload = payloads.pull_request_event("opened")
+        payload["pull_request"].pop("created_at", None)
+
+        snapshot = parse_pull_request_event("opened", payload)
+
+        assert snapshot is not None
+        assert snapshot.created_at is None
+
+    def test_an_unparseable_one_is_unknown_too(self) -> None:
+        payload = payloads.pull_request_event("opened", created_at="last tuesday")
+
+        snapshot = parse_pull_request_event("opened", payload)
+
+        assert snapshot is not None
+        assert snapshot.created_at is None

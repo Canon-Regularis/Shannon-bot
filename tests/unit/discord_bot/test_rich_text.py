@@ -12,11 +12,13 @@ claim about text nobody thought of, so it is asserted over text nobody thought o
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from shannon.discord_bot.formatting import format_issue
 from shannon.discord_bot.rich_text import (
     ALT_LIMIT,
     COMMIT_LINK_LIMIT,
@@ -24,6 +26,7 @@ from shannon.discord_bot.rich_text import (
     Images,
     _host_of,
     _is_github,
+    as_description,
     as_note_text,
     as_rich_text,
 )
@@ -32,7 +35,8 @@ from shannon.discord_bot.safe_text import (
     DESCRIPTION_PREVIEW_LIMIT,
     MESSAGE_LIMIT,
 )
-from shannon.domain.models import RepositorySnapshot
+from shannon.domain.enums import Status
+from shannon.domain.models import IssueSnapshot, RepositorySnapshot
 from shannon.domain.text import LINK
 from tests.support.discord_markdown import (
     headings_drawn,
@@ -669,6 +673,57 @@ class TestANoteBody:
         assert as_note_text("Fixed in abc1234.", repository=REPO) == (
             "Fixed in [abc1234](https://github.com/o/n/commit/abc1234)."
         )
+
+
+class TestADescription:
+    """`as_description`, which the block and the sync are both handed. Issue #259.
+
+    The block is asked rather than a second spelling of its recipe: the string has to be the one
+    the block shows, to the character, or the names read out of it are not the names it swaps.
+    """
+
+    PUBLIC = RepositorySnapshot(
+        github_repo_id=1,
+        owner="o",
+        name="n",
+        html_url="https://github.com/o/n",
+        private=False,
+    )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "ask @john",
+            "<!-- the template -->\nask @john<!-- and more -->",
+            f"![a screenshot]({SHOT}) from @john",
+            "@john fixed it in abc1234 and o/r@def5678",
+            "x" * (DESCRIPTION_PREVIEW_LIMIT - 6) + " @monalisa",
+        ],
+        ids=["a name", "a comment", "a lifted picture", "commit hashes", "a name at the cut"],
+    )
+    def test_it_is_what_the_block_shows(self, body: str) -> None:
+        issue = IssueSnapshot(
+            repository=self.PUBLIC,
+            github_object_id=1,
+            number=1,
+            title="t",
+            html_url="https://github.com/o/n/issues/1",
+            state="open",
+            updated_at=datetime(2026, 11, 13, tzinfo=UTC),
+            body=body,
+        )
+        card = format_issue(issue, status=Status.NOT_REVIEWED)
+        description = as_description(body, repository=self.PUBLIC)
+
+        assert card.text.split("**Description:**\n")[1] == description.text
+        assert card.images == description.images
+
+    def test_it_is_not_a_notes_text(self) -> None:
+        """Why the block has a function of its own rather than borrowing `as_note_text`: a note
+        keeps a picture where it was written, as a link, and the block lifts it into its gallery."""
+        body = f"![a screenshot]({SHOT}) from @john"
+
+        assert as_description(body, repository=REPO).text != as_note_text(body, repository=REPO)
 
 
 class TestTheCommitsABodyNames:

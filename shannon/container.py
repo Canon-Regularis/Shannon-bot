@@ -650,7 +650,9 @@ def _regenerate(
     One invariant that guarantee leans on and does not own: `_may_notify` sets only `users`, so
     `roles` stays whatever the client allows, which is everything. This is safe because the
     metadata block never builds a role mention - teams are named plainly and never looked up in
-    the mention map. Anybody adding one to the block has to deal with this.
+    the mention map. Anybody adding one to the block has to deal with this. That stays true since
+    issue #259, which made the names a description writes into user mentions: a team it writes
+    is left as written, so the description carries user mentions and still never a role mention.
     """
     return ItemRegeneration(
         sessionmaker,
