@@ -27,7 +27,14 @@ from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubRateLimitError
 from shannon.services.sync.refresh import MissedTickets, RefreshOutcome, RefreshScope
 from tests.fakes.discord_objects import FakeInteraction, FakeMember, FakeResponse
-from tests.unit.commands.conftest import administrator, default_gate, developer, member_with
+from tests.fakes.grants import FakeGrants
+from tests.unit.commands.conftest import (
+    administrator,
+    default_gate,
+    developer,
+    gate_with,
+    member_with,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -562,6 +569,58 @@ class TestHowSoonItMayRunAgain:
 
     def test_the_wait_is_the_minute_the_words_promise(self) -> None:
         assert REFRESH_SPACING_SECONDS == 60
+
+
+class TestACooldownAndTheGitHubRoute:
+    """Issue #94. The wait is still asked about after the tier, so GitHub standing in for the role
+    moves nothing about who spends a turn; it moves only where a granted member's amber lands."""
+
+    def taking_turns(self, service: StubRefresh, clock: Clock, grants: FakeGrants):
+        return build_refresh_command(
+            service, gate_with(grants), cooldown=Cooldown(REFRESH_SPACING_SECONDS, clock=clock)
+        )
+
+    async def fire(self, command, member: FakeMember) -> FakeInteraction:
+        interaction = FakeInteraction(guild_id=1, channel_id=99, user=member)
+        await command.callback(interaction, None)
+        return interaction
+
+    async def test_a_member_github_turns_away_spends_nobodys_turn(self) -> None:
+        service = StubRefresh()
+        command = self.taking_turns(service, Clock(), FakeGrants())
+        turned_away = await self.fire(command, FakeMember())
+
+        await self.fire(command, developer())
+
+        assert turned_away.mark == REFUSED
+        assert len(service.calls) == 1
+
+    async def test_a_member_github_lets_in_hears_about_the_wait_in_a_private_followup(
+        self,
+    ) -> None:
+        """The guard deferred before asking GitHub, so the amber cannot be the first response."""
+        service = StubRefresh()
+        command = self.taking_turns(service, Clock(), FakeGrants(None))
+        await self.fire(command, FakeMember())
+
+        interaction = await self.fire(command, FakeMember())
+
+        assert interaction.mark == OWED
+        assert interaction.said.startswith("/refresh ran in this server less than a minute ago.")
+        assert interaction.response.messages == []
+        assert interaction.ephemerally == [True]
+        assert len(service.calls) == 1
+
+    async def test_a_role_holders_wait_is_still_the_first_response(self) -> None:
+        grants = FakeGrants(None)
+        command = self.taking_turns(StubRefresh(), Clock(), grants)
+        await self.fire(command, developer())
+
+        interaction = await self.fire(command, developer())
+
+        assert interaction.mark == OWED
+        assert interaction.response.deferred is False
+        assert grants.asked == []
 
 
 class TestWhatItAsksFor:
