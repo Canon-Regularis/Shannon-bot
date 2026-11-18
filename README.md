@@ -167,9 +167,10 @@ GitHub allows ten seconds and never redelivers anything it recorded as failed.
   the next five seconds after the last finished.
 - **Reminders.** `/remind` pings somebody once, after the days, hours and minutes you give, in
   the channel or thread it was run in, with up to 500 characters of your own words under it.
-  Anybody may remind themselves; reminding somebody else takes Admin or Project Manager. The
-  private answer counts down to a reminder fourteen minutes away or less and disappears as it
-  goes off; further away, it gives the time and how long after setting it that is, because a
+  Anybody may remind themselves; reminding somebody else takes Admin or Project Manager, or GitHub
+  admin where a server lets GitHub access stand in for a role. The private answer counts down to a
+  reminder fourteen minutes away or less and disappears as it goes off; further away, it gives the
+  time and how long after setting it that is, because a
   Discord countdown runs on past zero and Discord lets a bot take its answer back only for
   fifteen minutes. The reminder always rings, `/mentions off` or not, because somebody asked for
   exactly that, and the words ring nobody else: a mention in them shows as text, and so does
@@ -503,6 +504,7 @@ at the door.
 | `SHANNON_GITHUB_BOARD_CLIENT_SECRET` | empty | Exchanges the OAuth code for a board authorisation. Empty makes `/board link` and `/board authorise` refuse rather than send somebody to GitHub to grant something that cannot be used, and so does an empty `SHANNON_BOARD_CREDENTIAL_KEY` |
 | `SHANNON_BOARD_CREDENTIAL_KEY` | empty | The Fernet key those authorisations are encrypted with — the only encryption in this schema, because a board authorisation is the one thing stored here that *acts as* somebody rather than describing them. A comma-separated list, newest first: the cipher writes with the first key and reads with any, so a rotation does not make everybody authorise again. Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Unset or unreadable means boards are off and said so once, rather than a process that will not start |
 | `SHANNON_REQUIRE_PROVED_LINKS` | `false` | Whether a link nobody proved may be used to write to GitHub. Before issue #144 `/link` recorded a login somebody typed and GitHub was never asked whose it was, so a wrong one acts on a repository under another person's name. Off by default, because turning it on before people have run `/link` again refuses every assignment; until then the reply says the link is unproved. A link made since #144 is proved when it is made, and stays proved until its member signs in from the same server as another GitHub account for `/register`, `/unregister` or `/board`, because only the last sign-in is kept. So the rows this can refuse are the ones written before #144 and the ones whose member has since signed in as somebody else. Ignored where `SHANNON_GITHUB_APP_CLIENT_ID`, `SHANNON_GITHUB_APP_CLIENT_SECRET` or `SHANNON_PUBLIC_BASE_URL` is unset. Not where only Discord sign-in is missing: there it is still enforced, and a member who never proved a link is refused and cannot prove one until `SHANNON_DISCORD_CLIENT_ID` and `SHANNON_DISCORD_CLIENT_SECRET` are set, which `/link` says. Separate from the rule added by issue #135, which is about mentions rather than writes: a link with no account id behind it stops resolving into a Discord ping at all, whatever this is set to, because a login somebody typed reaching the wrong member is not something the thread can show. A member can see whether their own link is proved with `/linked` |
+| `SHANNON_GITHUB_ACCESS_GRANTS_TIERS` | `false` | Whether GitHub access may stand in for a Discord role, issue #94. On, a member with no Developer role whose own account has write on the registered repository passes wherever Developer does, and admin passes wherever Project Manager does too. The Admin tier, `/register` and asking somebody else to `/link` stay Discord only, and a tier switched off by an empty role setting stays off. It counts only for an account proved with `/link` since migration `0039`, so a member who proved one before runs `/link` once more. Fails closed: where GitHub cannot be asked, nothing is granted and the role alone decides. Off, every gate is the role check alone and asks GitHub nothing about letting anybody in. Needs the same settings `/link` does, and says so at startup where they are missing. See [Commands](#commands) |
 | `SHANNON_GITHUB_OAUTH_URL` | `https://github.com` | Where `authorize` and `access_token` live, which is not `api.github.com`. The GitHub Enterprise escape hatch, beside `SHANNON_GITHUB_API_URL` |
 | `SHANNON_ROLE_ADMIN` | `Admin` | Role names per tier, comma separated for more than one |
 | `SHANNON_ROLE_PROJECT_MANAGER` | `Project Manager` | |
@@ -594,56 +596,89 @@ the same reason it ignores the capture setting: a thread has been told logging i
 away the way to turn it off is worse than letting somebody who has lost access turn it off.
 Stopping writes nothing to GitHub in any case.
 
-That is a deliberate floor rather than a wall. It raises the bar for everybody who has connected
-an account and does not lock out anybody who has not, which also means never running `/link` was a
-way to keep the old behaviour. `SHANNON_REQUIRE_PROVED_LINKS` closes it by refusing an unproved
-caller outright - off by default, because turning it on takes those commands away from every
-member who has not linked, which is a decision about a deployment rather than a default.
+That is a deliberate floor rather than a wall. It only ever takes away: it raises the bar for a
+role holder who has connected an account and does not lock out anybody who has not, which also
+means never running `/link` was a way to keep the old behaviour. `SHANNON_REQUIRE_PROVED_LINKS`
+closes it by refusing an unproved caller outright - off by default, because turning it on takes
+those commands away from every member who has not linked, which is a decision about a deployment
+rather than a default. Letting somebody in without the role is a separate setting, below, which
+needs a proof as well and fails the other way.
 
 It also **fails open** when GitHub cannot be reached: an outage must not turn every one of those
 commands in every server into a refusal. Anybody who can wait for an outage gets the
-Discord-role-only behaviour back for its duration, and the log says so while it lasts.
+Discord-role-only behaviour back for its duration, and the log says so while it lasts. That never
+reaches a member GitHub alone let in: during an outage they are refused.
 
 Read and triage are not enough; write, maintain and admin are. GitHub folds `maintain` onto write
 and `triage` onto read before it answers, so those are the whole ladder, and the refusal says so
 rather than leaving somebody with triage thinking this bot got it wrong.
 
+**GitHub can let somebody in as well, where a server asks it to.** With
+`SHANNON_GITHUB_ACCESS_GRANTS_TIERS` on, a member the Discord role turns away is asked about on
+GitHub instead (issue #94): write on the registered repository passes wherever Developer does, and
+admin passes wherever Project Manager does too. Those are the rows below that say *or GitHub write*
+and *or GitHub admin*, and off, none of them asks GitHub whether to let somebody in. The Admin
+tier is never granted, so GitHub admin does not pass every gate the way a guild administrator
+does, and a tier a server switched off by emptying its role setting stays off. `/register` and
+asking somebody else to `/link` stay Discord only: there is no repository to ask about until
+`/register` has run, and the note `/link @member` posts has to be the command's first answer,
+which a question to GitHub would come before.
+
+It counts only for the account you proved with `/link`, and only for a proof made since migration
+`0039`: those are the ones Discord bound to your own browser, and one from before cannot show it,
+so run `/link` once more after the setting is turned on. GitHub is asked about that account by name
+and its answer is held against the account's id, so a name somebody else has taken since a rename
+lets nobody in, and the reply says to run `/link` again. GitHub folds an organisation's base
+permission and its owners into the answer, so in an organisation whose base permission is write,
+every member who links gets the Developer tier. And because GitHub admin counts as Project Manager,
+an admin who wrote a pull request can move it with `/status` themselves, which keeping `/status` to
+Project Manager was otherwise there to stop.
+
+Unlike the check above, this one **fails closed**. It only ever adds access, so where GitHub cannot
+be asked nothing is granted, the reply says GitHub could not be asked, and the Discord role works as
+it always did. A role holder is never asked about at all. Anybody GitHub is asked about sees
+Discord's "thinking" for a moment before the answer, because the question goes out after Discord
+has been told one is coming. An answer that lets nobody in is remembered for a minute, so somebody
+just given write on GitHub may wait that long, or run `/link` again; one that lets somebody in is
+never remembered, so access taken away on GitHub is gone here at once. On a command the check above
+also asks about, a member let in this way costs GitHub the same question twice.
+
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository |
-| `/unregister <repository>` | Admin, Project Manager, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
-| `/board link <board> [owner]` | Admin, Project Manager | Which GitHub project board this server's repository mirrors, picked from the boards that owner has — listed as you, so your private boards are offered. Until you have authorised the list is empty, and nothing is asked of GitHub: type the number or paste the board's URL, which carries the owner. The board is opened with your own authorisation before it is stored, so a number that is a digit out is a sentence here rather than a warning in a log. Not authorised yet, or it will not open with what you granted: it hands you one link, and signing in authorises **and** links — there is nothing else to run. Following it asks Discord again whether you still hold the role, so a role taken away in between takes the link with it. Two servers may not share a board: each would open its own thread for every card |
-| `/board unlink` | Admin, Project Manager | Stops mirroring the board. The authorisation it was read with is forgotten too, and the reply names whose it was: forgetting this copy is not revoking the grant, and only they can do that, on GitHub |
-| `/board authorise` | Admin, Project Manager | Lets the cards you move with `/status` and `/priority` move as you on GitHub. One link, and signing in is the whole of it; following it asks Discord again whether you still hold the role. Changes nothing about which board is mirrored |
+| `/register <github_repo_link>` | Admin, Project Manager, **and GitHub** | Binds a repository to this server and points PR threads at the current channel. Run it once to get a one-time link proving who you are on GitHub, then again with the same repository link to finish. Only an account with admin on the repository can do it: mirroring a repository into a channel discloses everything in it, and a Discord role cannot establish who may make that decision. One repository per server. Refuses, with a link, if the GitHub App is not installed on the repository. GitHub access never stands in for the role here, wherever a server lets it elsewhere: until this has run there is no repository to ask about |
+| `/unregister <repository>` | Admin, Project Manager or *GitHub admin*, **and GitHub** | Unbinds it. Run it once to get a one-time link proving who you are on GitHub, then again to finish. Only an account with admin on the repository can do it, because a Discord role cannot establish that and `/link` is a claim rather than proof. The full name is typed out as confirmation. Everything mirrored is forgotten and the threads already open are orphaned |
+| `/board link <board> [owner]` | Admin, Project Manager, *or GitHub admin* | Which GitHub project board this server's repository mirrors, picked from the boards that owner has — listed as you, so your private boards are offered. Until you have authorised the list is empty, and nothing is asked of GitHub: type the number or paste the board's URL, which carries the owner. The board is opened with your own authorisation before it is stored, so a number that is a digit out is a sentence here rather than a warning in a log. Not authorised yet, or it will not open with what you granted: it hands you one link, and signing in authorises **and** links — there is nothing else to run. Following it asks Discord again whether you still hold the role, and GitHub too where it counts, so a role taken away in between takes the link with it, and for a member GitHub let in, so does GitHub not answering. Two servers may not share a board: each would open its own thread for every card |
+| `/board unlink` | Admin, Project Manager, *or GitHub admin* | Stops mirroring the board. The authorisation it was read with is forgotten too, and the reply names whose it was: forgetting this copy is not revoking the grant, and only they can do that, on GitHub |
+| `/board authorise` | Admin, Project Manager, *or GitHub admin* | Lets the cards you move with `/status` and `/priority` move as you on GitHub. One link, and signing in is the whole of it; following it asks Discord again whether you still hold the role, and GitHub too where it counts. Changes nothing about which board is mirrored |
 | `/board withdraw` | Anyone, for their own | Forgets the authorisation you gave this bot in this server. No role, deliberately: deleting a credential that is yours must not depend on a role you may since have lost |
-| `/board show` | Admin, Project Manager | Which board this server mirrors, who linked it, whether it still opens with their authorisation, and whether you have authorised yourself |
-| `/set_channel <object_type> <channel>` | Admin, Project Manager | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
-| `/pr <pr_link>` | Developer, Project Manager | Fetches a pull request and mirrors it |
-| `/issue <issue_link>` | Developer, Project Manager | Fetches an issue and mirrors it |
-| `/refresh [scope]` | Developer, Project Manager | Opens a thread for every open pull request, issue and board ticket that has no thread yet, and redraws every open pull request and issue that has one, from the same listing. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: people are named as real mentions and Discord is told to ring none of them. A thread Discord archived for going quiet is archived again after its redraw. Closed items are left to `/regenerate`, and tickets that already have a thread to the board. Twenty-five new threads per run across all kinds together, then up to five minutes of redrawing, starting with the items whose record this bot changed longest ago, and the reply says how many of each are left. One run at a time per server, and the next a minute after the last one finished; admins wait too, and the reply says how long. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
-| `/regenerate` | Developer, Project Manager | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived, which `/refresh` never redraws. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened. One run at a time per thread, and the next five seconds after the last one finished |
-| `/track [event] [state]` | Developer, Project Manager | Run inside an item's thread. Which kinds of line that thread is told besides its block: `comments`, `labels`, `commits`, `checks`, `approvals`, `draft`, `people` and `state`. Pick one and `on` or `off` to change it, leave the state out to see one, or leave both out to see every kind the item can get. Labels and commits start off and the rest on. A kind an issue or a board card never gets is refused, and says which ones it does. The answer is private and nothing is posted in the thread |
-| `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody |
+| `/board show` | Admin, Project Manager, *or GitHub admin* | Which board this server mirrors, who linked it, whether it still opens with their authorisation, and whether you have authorised yourself |
+| `/set_channel <object_type> <channel>` | Admin, Project Manager, *or GitHub admin* | Where threads of one kind appear, and where the ones already open are moved to. That kind only: a kind that had been borrowing this channel is given it outright instead, so it stays put and the reply names the command that would move it. Ten per run; the reply says how many are left |
+| `/pr <pr_link>` | Developer, Project Manager, *or GitHub write* | Fetches a pull request and mirrors it |
+| `/issue <issue_link>` | Developer, Project Manager, *or GitHub write* | Fetches an issue and mirrors it |
+| `/refresh [scope]` | Developer, Project Manager, *or GitHub write* | Opens a thread for every open pull request, issue and board ticket that has no thread yet, and redraws every open pull request and issue that has one, from the same listing. `all`, `pull requests`, `issues` or `tickets`; leaving it out is the same as `all`. Nobody is pinged: people are named as real mentions and Discord is told to ring none of them. A thread Discord archived for going quiet is archived again after its redraw. Closed items are left to `/regenerate`, and tickets that already have a thread to the board. Twenty-five new threads per run across all kinds together, then up to five minutes of redrawing, starting with the items whose record this bot changed longest ago, and the reply says how many of each are left. One run at a time per server, and the next a minute after the last one finished; admins wait too, and the reply says how long. `tickets` needs `/board link` and `/set_channel project tickets`; without either, `all` covers the other kinds and says which command is missing. An archived card is never offered |
+| `/regenerate` | Developer, Project Manager, *or GitHub write* | Run inside an item's thread, no argument. Reads it from GitHub again and redraws the block, including for a closed item whose thread is locked and archived, which `/refresh` never redraws. Nobody is pinged. This is also what turns a name into a mention for somebody who linked after the thread was opened. One run at a time per thread, and the next five seconds after the last one finished |
+| `/track [event] [state]` | Developer, Project Manager, *or GitHub write* | Run inside an item's thread. Which kinds of line that thread is told besides its block: `comments`, `labels`, `commits`, `checks`, `approvals`, `draft`, `people` and `state`. Pick one and `on` or `off` to change it, leave the state out to see one, or leave both out to see every kind the item can get. Labels and commits start off and the rest on. A kind an issue or a board card never gets is refused, and says which ones it does. The answer is private and nothing is posted in the thread |
+| `/link [member]` | Anyone, for their own account; Admin or Project Manager to ask somebody else | Connects your GitHub account so pings become mentions. Run it, open the link, done: GitHub decides which account it is, so nobody types a login and nobody can be connected to an account that is not theirs. It replaces whatever was linked before, including a login somebody else had claimed — a proof beats a claim. Naming a member posts a public note asking them to run it and connects nobody. That half stays with the role wherever GitHub access counts elsewhere, because the note has to be the command's first answer |
 | `/linked` | Anyone, about their own account | Whether you are linked to a GitHub account in this server: which one, since when, whether GitHub has vouched that it is yours, and which repository the server mirrors. It reads what this bot already holds and asks GitHub nothing, so a GitHub rename since the link is not seen, and the answer says to run `/link` after one. Where something is still owed it says what, and to run `/link`: a link nothing proves, because it was made without signing in or a later sign-in as another account replaced its proof; a link whose name GitHub has since handed to another account; a link by name alone, from before this bot asked GitHub whose a login was; and a sign-in for `/register`, `/unregister` or `/board`, which links no account to you. Where `/link` cannot run, it says an admin has to finish setting up sign-in instead. No member argument, because another member's link names their GitHub account |
-| `/link_team <github_team> <role>` | Admin, Project Manager | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
-| `/assign <member>` | Developer, Project Manager | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once, unless the thread ran `/track people off` |
-| `/unassign <member>` | Developer, Project Manager | Takes them off the assignees |
-| `/request_review <member>` | Developer, Project Manager | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
-| `/unrequest_review <member>` | Developer, Project Manager | Withdraws the review request |
+| `/link_team <github_team> <role>` | Admin, Project Manager, *or GitHub admin* | Points a Discord role at a GitHub team, so a review asked of that team pings the role. Refused where the registered repository belongs to a personal account: teams are an organisation's, so GitHub would never ask one for a review there and the mapping could never match anything |
+| `/assign <member>` | Developer, Project Manager, *or GitHub write* | Run inside an item's thread. Puts that person on its assignees, which a pull request and an issue both have. They need a linked GitHub account, and one whose owner has renamed it since is followed rather than refused. GitHub takes an assignee with write access or better, and a refusal says which of the reasons it was. Nothing is posted here: GitHub sends the change back and the ordinary mirror says so in the thread, once, unless the thread ran `/track people off` |
+| `/unassign <member>` | Developer, Project Manager, *or GitHub write* | Takes them off the assignees |
+| `/request_review <member>` | Developer, Project Manager, *or GitHub write* | Asks that person for a review. Pull requests only, because an issue has no reviewers, and an issue says so and points at `/assign`. A person can be an assignee and a reviewer on the same pull request |
+| `/unrequest_review <member>` | Developer, Project Manager, *or GitHub write* | Withdraws the review request |
 | `/mentions [state]` | Anyone | Whether this bot's messages about items notify you in this server. It does not cover somebody running `/link @you` or a reminder set for you with `/remind`, which are a person addressing you rather than this bot reporting on anything. Off still names you on every item you are on, as a mention Discord shows and does not ring, and it does not reach a transcript published to GitHub. With no argument it says which way round you are |
-| `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin or Project Manager to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. The private answer counts down to a reminder fourteen minutes away or less and disappears at zero; for anything further it gives the time and how long after setting it that is. Twenty-five may be waiting per person per server |
-| `/label <name>` | Developer, Project Manager | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. A status label, `status: ` and a column or one of the older `IN_REVIEW` spellings, and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
-| `/unlabel <name>` | Developer, Project Manager | Takes one off |
-| `/log_conversation` | Developer, Project Manager, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
-| `/stop_conversation` | Developer, Project Manager | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop |
-| `/status <to>` | Project Manager | Moves the item whose thread you are in, picked from this server's board columns where a board is linked, and from Backlog, Not reviewed, In review and Done where one is not. Every column the board has can be picked, including one this bot has no status for, such as `Ready To Merge`: that moves the card and the label, and the item keeps its status. Done shuts the thread. A card may move forward one column at a time and back as far as you like, measured against the board's own column order |
-| `/priority <to>` | Project Manager | Same, for High, Medium and Low. There is no way to clear one back to none |
+| `/remind <member> [days] [hours] [minutes] [message]` | Anyone, for themselves; Admin, Project Manager or *GitHub admin* to remind somebody else | Pings them once, here, after the time given: up to 365 days, 23 hours and 59 minutes, added together, and at least a minute. The message is up to 500 characters and rings nobody else. Refused for a bot, for somebody who cannot see the channel, and where you or this bot cannot post, because it goes off later with nobody there to be told it could not. The private answer counts down to a reminder fourteen minutes away or less and disappears at zero; for anything further it gives the time and how long after setting it that is. Twenty-five may be waiting per person per server |
+| `/label <name>` | Developer, Project Manager, *or GitHub write* | Run inside an item's thread. Puts an ordinary label on it, with a picker listing the ones the repository already has. A name it does not have is refused rather than created, because GitHub would create it and nothing here can delete one. A status label, `status: ` and a column or one of the older `IN_REVIEW` spellings, and anything read as a priority are refused too, and say which of `/status` and `/priority` to pick them in |
+| `/unlabel <name>` | Developer, Project Manager, *or GitHub write* | Takes one off |
+| `/log_conversation` | Developer, Project Manager or *GitHub write*, and GitHub | Run inside an item's thread, no argument. Everything said in that thread from then on is published to the item's GitHub comments, as one comment per burst rather than one per message. It posts a visible line in the thread saying so, and a thread that will not take that line is not logged. Needs `SHANNON_CAPTURE_DISCORD_MESSAGES` and the message content intent, and says so if they are missing |
+| `/stop_conversation` | Developer, Project Manager, *or GitHub write* | Stops it, and publishes whatever was still waiting. Works whether or not capture is currently switched on, so a thread that was told logging is on can always be made to stop by somebody with the tier. A member GitHub alone let in is asked again, like any other command, so one who has since lost write cannot |
+| `/status <to>` | Project Manager, *or GitHub admin* | Moves the item whose thread you are in, picked from this server's board columns where a board is linked, and from Backlog, Not reviewed, In review and Done where one is not. Every column the board has can be picked, including one this bot has no status for, such as `Ready To Merge`: that moves the card and the label, and the item keeps its status. Done shuts the thread. A card may move forward one column at a time and back as far as you like, measured against the board's own column order |
+| `/priority <to>` | Project Manager, *or GitHub admin* | Same, for High, Medium and Low. There is no way to clear one back to none |
 
 **The board is the one thing here that acts with nobody running it.** A poll opens and updates threads for the cards on a board, which is the same work `/pr`, `/issue`, `/refresh` and `/regenerate` do behind the Developer tier — and there is no caller to check a role against. Two halves, gated differently and deliberately:
 
-- **Mirroring a card into a thread** is behind the Developer tier, like the other three, because `/refresh tickets` is its on-demand equivalent. It had no flag and no equivalent until that scope existed; what it had instead was the webhook path's argument, which is ungated by design — on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. Two things still gate it beyond the tier: it cannot happen at all until somebody with Admin or Project Manager runs **both** `/board link` and `/set_channel project tickets` — tickets are the one kind with no fallback channel. Note what the tier split now means: a Developer can spend the linker's rate limit, which is what the poller reads the board with, while linking the board stays Admin or Project Manager. It pings nobody either way: a draft card names no assignees and its block carries no mentions.
-- **A card changing an item's status** is behind `SHANNON_BOARD_MAY_SET_STATUS`, off by default, because that one *does* have a Discord equivalent to bypass: `/status` is Project Manager only, and nothing GitHub sends with a board says who dragged the card.
+- **Mirroring a card into a thread** is behind the Developer tier, like the other three, because `/refresh tickets` is its on-demand equivalent. It had no flag and no equivalent until that scope existed; what it had instead was the webhook path's argument, which is ungated by design — on a public registered repository a stranger can cause a thread by opening an issue, while adding a card needs write access to the board. Two things still gate it beyond the tier: it cannot happen at all until somebody with Admin or Project Manager, or GitHub admin where a server lets GitHub access stand in for a role, runs **both** `/board link` and `/set_channel project tickets` — tickets are the one kind with no fallback channel. Note what the tier split now means: a Developer can spend the linker's rate limit, which is what the poller reads the board with, while linking the board stays Admin or Project Manager, or GitHub admin where that counts. It pings nobody either way: a draft card names no assignees and its block carries no mentions.
+- **A card changing an item's status** is behind `SHANNON_BOARD_MAY_SET_STATUS`, off by default, because that one *does* have a Discord equivalent to bypass: `/status` is Project Manager only (or GitHub admin, where a server lets GitHub access stand in for a role), and nothing GitHub sends with a board says who dragged the card.
 - **A card being archived, restored or deleted** shuts, reopens or ends its thread, and is not gated: it is the mirror keeping up with the board rather than an action anybody takes in Discord, there is no command that does it, and archiving or deleting a card needs write access to the board (#198).
 
 The reverse direction — a status set here dragging the card — is behind `SHANNON_BOARD_MAY_MOVE_CARDS`, which is **on**, because a board somebody linked is a board they want kept. The card is moved as whoever set the status, so they need to have authorised: `/status` and `/priority` refuse up front for somebody who has not, because that is the one board failure they can put right themselves. Turning it off stops the write and nothing else: the board's own column order is still read, and a move that skips a column is still refused.
@@ -675,7 +710,9 @@ no link: a link is only ever issued for whoever ran the command, so the member i
 anything.
 
 Reminding somebody else takes the same tier for the same reason: it has this bot ping them in
-public on your say-so. Reminding yourself takes none.
+public on your say-so. Reminding yourself takes none. Unlike asking somebody to `/link`, GitHub
+admin counts for it where a server lets it, because a reminder's answer to whoever set it is
+private and can wait for GitHub.
 
 `/status` and `/priority` act on the thread they are run in, which is the item you are looking at.
 Status and priority live as labels on the repository, and each is single valued: setting one takes
@@ -784,7 +821,7 @@ any step that fails rather than abandoning the rest.
 | `team_links` | GitHub team slug to Discord role, per server. Kept apart from `user_links` because a slug and a login are separate namespaces on GitHub and only one of them is claimable here |
 | `github_installations` | Which App installation covers a GitHub account. Keyed on the account, because that is what an App is installed on. A cache with a fallback: GitHub is authoritative and is asked when this has nothing, so a missing row costs a read of the App's own installations and then writes itself down |
 | `identity_verifications` | Outstanding one-time links. The `state` names the row a browser is following and completes nothing on its own: `bound_browser` is the browser Discord said is held by the member the link was issued for, as a hash keyed by a cookie only that browser holds, and a link is spent by that browser alone. `purpose` is the only record of which command sent them. A board link also carries the board somebody chose, so following it both authorises and links; it is kept here and never in the URL, so nothing can change it on the way to GitHub and back. And `tier`, the roles the board command was gated on, which following the link asks Discord about again before anything is kept |
-| `verified_identities` | Who a Discord account last proved to be on GitHub from this server, kept until a later sign-in replaces it. Separate from `user_links` because `/link` replaces that row whenever the linked login changes, and because a link is a claim while this is something GitHub vouched for |
+| `verified_identities` | Who a Discord account last proved to be on GitHub from this server, kept until a later sign-in replaces it. Separate from `user_links` because `/link` replaces that row whenever the linked login changes, and because a link is a claim while this is something GitHub vouched for. `through_discord` is true for every proof written since `0039`, each of which came back through a link Discord bound to the member's own browser. A proof from before cannot show that, so only the newer ones can let somebody in |
 | `board_authorizations` | The GitHub authorisation one person granted so one server could reach their project board, with the token **encrypted**. The only encrypted column in the schema, and the first credential this project stores: everything else it keeps about somebody describes them, where this one acts as them. One row per person per server, which is how both readers reach it — a card move by whoever ran the command, a poll by the member named in `repositories.project_linked_by` |
 | `logged_conversations` | Which threads are being published to GitHub, and the claim on the batch each is publishing. Kept after logging stops, so who turned it on and when can still be answered. Unique on the item only while open, so an item can be logged again later |
 | `logged_messages` | What has been said in a logged thread and not yet reached GitHub. Deleted as soon as the comment carrying it lands, because these rows hold what people said |
@@ -795,7 +832,7 @@ knowing that they are unconstrained in the database: the mapping asks for a `CHE
 does not emit one, so the column accepts any string that fits and the application is the only
 thing enforcing the values.
 
-Alembic revisions `0001` to `0038`. A test applies them to an empty database and diffs the result
+Alembic revisions `0001` to `0039`. A test applies them to an empty database and diffs the result
 against the models, so the two cannot drift apart, and another compares this section against what
 is on disk, because both the range and the table above had already gone stale once.
 
@@ -839,7 +876,7 @@ and there is no middleware of any kind.
 
 ## Known limitations
 
-Ten things the bot is known to get wrong. All are narrow, and all are written down here rather
+Fourteen things the bot is known to get wrong. All are narrow, and all are written down here rather
 than fixed. Only the second leaves anything lost: the comment it drops is never mirrored
 afterwards.
 
@@ -931,6 +968,32 @@ merge, can read `made by Unknown`. One page of a hundred commits is read per fil
 from the reviewed commit, so a file that is busy on the branch the pull request came from can push
 the older commits of a long-lived pull request off the page. And a commit names the account that
 authored it and nobody else: a `Co-authored-by` line is not read.
+
+**Two commands take the role whatever GitHub says.** Where a server lets GitHub access stand in
+for a role, GitHub admin passes every Project Manager gate except `/register` and asking somebody
+else to `/link`. `/register` has nothing to ask about: GitHub access is judged on the registered
+repository, there is none until it has run, and once there is one it refuses anyway. Asking
+somebody else to `/link` posts a public note that has to be the command's first answer, and asking
+GitHub first would answer privately before it. Both are left to the role rather than worked around.
+
+**A proof GitHub access cannot count yet.** GitHub access only stands in for a role on a proof made
+since migration `0039`, because only those say that Discord bound the link to its member's own
+browser. Proofs made between `0033` and `0039` were bound too, but nothing on the row says so, and
+they wait for one more `/link` with the rest. So does an account renamed since it was proved: GitHub
+is asked by the old name, its answer is about another account or none, and nothing is granted until
+`/link` is run again.
+
+**The last sign-in decides what GitHub lets somebody do.** A server keeps one proof per member, and
+a sign-in for `/register`, `/unregister` or `/board` replaces it. A member who authorises a board as
+another account is asked about as that account from then on, which may hold more or less than the
+first did. It is the rule `SHANNON_REQUIRE_PROVED_LINKS` already follows, and `/linked` says which
+account is held.
+
+**A member GitHub alone let in may not be able to stop a logged conversation.** `/stop_conversation`
+is there so that a thread told logging is on can always be made to stop. A member who ran
+`/log_conversation` on GitHub write and has since lost it is refused at the tier, like a member
+whose role was taken away, and so is one who tries while GitHub cannot be asked. Anybody else with
+the tier can still stop it; stopping is not exempt from the tier.
 
 ## License
 
