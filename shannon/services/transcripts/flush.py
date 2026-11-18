@@ -49,8 +49,8 @@ BODY_BUDGET = 40000
 # Also the retry cadence after a failure, because a failed flush keeps its claim.
 FLUSH_RETRY_AFTER = timedelta(minutes=5)
 
-# How many failures in a row before a batch is given up on. At the cadence above that is most of
-# an hour of GitHub refusing the same body, which is past an outage and into the batch itself.
+# How many failures in a row before a batch is given up on. At the cadence above that is at least
+# 25 minutes of GitHub refusing the same body, which is past an outage and into the batch itself.
 MOST_ATTEMPTS = 6
 
 GAVE_UP = (

@@ -1,9 +1,11 @@
 """Who a message is for, turned into what Discord needs to reach them.
 
-Two things ask this and get the same answer: a CI result, which tells whoever a broken build
-concerns, and a pull request leaving draft, which tells whoever it is now waiting on. Both need
-the same three reads, and each of those reads is done the way it is for a reason worth writing
-down once rather than twice.
+Three things ask this and get the same answer: a CI result, which tells whoever a build concerns;
+every requested review coming back approving, which tells the author and assignees; and a pull
+request switching into or out of draft, which tells its reviewers, assignees and author, bar
+whoever pressed the button, that the ask is made or withdrawn. All three need the same three
+reads, and each of those reads is done the way it is for a reason worth writing down once rather
+than three times.
 
 A review asking for changes asks only the first half, who made the code (issue #263). Its names
 reach Discord through the note mirror, which already names the reviewer without ringing them, but

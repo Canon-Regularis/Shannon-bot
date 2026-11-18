@@ -718,7 +718,7 @@ class HttpProjectBoards:
         if not isinstance(kind, str):
             # Loud once per owner, then quiet, for the reason the fields warning above is: the
             # guess is deliberately not remembered, so this path repeats on every poll, and issue
-            # #189 made that thirty times an hour into eighteen hundred. The request it repeats is
+            # #189 made that sixty times an hour into eighteen hundred. The request it repeats is
             # left alone - the comment above refuses to let a blip decide the prefix for the life
             # of the process, and that judgement is not this change's to overturn.
             level = logging.WARNING if owner not in self._unnamed else logging.DEBUG

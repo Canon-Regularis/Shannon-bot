@@ -844,7 +844,7 @@ class GitHubIdentityVerification:
 
         `consume` marks a link spent but leaves the row, and a link nobody follows is never
         touched at all, so nothing here shrinks this table. Called on the delivery worker's
-        hourly sweep, which is the only timer in the process that ticks regardless.
+        hourly sweep (`_sweep`), which also clears out finished webhook deliveries.
         """
         async with self._sessionmaker() as session, session.begin():
             return await IdentityVerificationStore(session).prune(keep_for=keep_for)

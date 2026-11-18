@@ -35,10 +35,11 @@ class Dispatch(Protocol):
 
 
 class SpentLinks(Protocol):
-    """The one-time `/unregister` links, which nothing else clears.
+    """The one-time links `/link`, `/register`, `/unregister` and `/board` hand out, which nothing
+    else clears.
 
-    Swept here because this loop is the only timer in the process that ticks whatever else is
-    happening, and an hour suits a table that gains a row per `/unregister` and loses none.
+    Swept on this loop's hourly prune, which suits a table that gains a row per link handed out
+    and loses none.
     """
 
     async def prune(self, *, keep_for: timedelta) -> int: ...
@@ -70,8 +71,8 @@ class WorkerSettings:
     # column is Text, so this is a readability limit and not a schema one.
     error_limit: int = 2000
     prune_interval: timedelta = timedelta(hours=1)
-    # A link is worth following for ten minutes. A day of spent ones is a short trail
-    # for anybody asking who tried to unbind a repository and when.
+    # A link is worth following for ten minutes. A day of spent ones is a short trail for anybody
+    # asking who asked to link, register, unregister or authorise a board, and when.
     link_retention: timedelta = timedelta(days=1)
 
     @classmethod

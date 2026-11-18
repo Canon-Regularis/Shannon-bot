@@ -240,8 +240,9 @@ class ItemSyncService:
         if snapshot.object_type is not self._policy.object_type:
             # Wiring, not input: a policy paired with the wrong kind of snapshot would file the
             # item under the wrong type and read fields the snapshot may not have. Nothing can
-            # make that succeed, so it fails once and loudly rather than sixteen times. MVP 4
-            # adds a third object type, which is when this becomes easy to get wrong.
+            # make that succeed, so it fails once and loudly rather than sixteen times. There are
+            # three object types (pull requests, issues and board tickets), each with its own
+            # policy, so pairing the wrong two is easy to do.
             raise WrongPolicyError(
                 f"{type(self._policy).__name__} was handed a {snapshot.object_type.value} "
                 f"snapshot for {snapshot.repository.full_name}#{snapshot.number}"

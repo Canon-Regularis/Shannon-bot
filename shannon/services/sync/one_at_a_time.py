@@ -89,8 +89,8 @@ class ItemLock:
         pooled connection holding it. `db.session` counts this hold in its ceiling.
 
         Taken before the row is read, so the waiting writer reads what the other wrote and the
-        staleness guard can turn it away. Re-entrant because `/set_status` re-renders through
-        the sync, which takes this lock again.
+        staleness guard can turn it away. Re-entrant because `/status` (`ItemWorkflow.set_status`)
+        re-renders through the sync, which takes this lock again.
         """
         if github_object_id in _ours.get():
             yield
