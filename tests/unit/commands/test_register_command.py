@@ -5,8 +5,11 @@ from unittest.mock import MagicMock
 import discord
 import pytest
 
+from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import words_for
 from shannon.commands.register import build_register_command
+from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.responses import REFUSED
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import DuplicateRegistrationError, UnparseableLinkError
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError, GitHubUnavailableError
@@ -15,11 +18,13 @@ from tests.fakes.discord_objects import (
     FakeInteraction,
     FakeMember,
 )
+from tests.fakes.grants import FakeGrants
 from tests.unit.commands.conftest import (
     FakeVerification,
     administrator,
     default_gate,
     developer,
+    gate_with,
     project_manager,
 )
 
@@ -52,10 +57,16 @@ class StubRegistration:
         return self.result
 
 
-def command(service: StubRegistration, verification: FakeVerification | None = None):
+def command(
+    service: StubRegistration,
+    verification: FakeVerification | None = None,
+    gate: PermissionGate | None = None,
+):
     """Proved by default, so every test that is not about #135 reads as it always did."""
     return build_register_command(
-        service, verification if verification is not None else FakeVerification(), default_gate()
+        service,
+        verification if verification is not None else FakeVerification(),
+        gate or default_gate(),
     )
 
 
@@ -313,5 +324,27 @@ class TestProvingYouAdministerIt:
 
         await run(service, developer(), verification=verification)
 
+        assert verification.links_handed_out == 0
+        assert service.calls == []
+
+
+class TestGitHubNeverStandsInForTheRole:
+    """Issue #94. A server that lets GitHub stand in for a role elsewhere does not let it here: it
+    could never apply, since GitHub is asked about the repository this server registered and
+    there is none until this has run."""
+
+    async def test_a_member_github_would_vouch_for_is_refused_as_before(self) -> None:
+        grants = FakeGrants(None)
+        service = StubRegistration()
+        verification = FakeVerification()
+        interaction = FakeInteraction(guild_id=1, channel_id=99, user=FakeMember())
+        await command(service, verification, gate_with(grants)).callback(interaction, LINK)
+
+        assert grants.asked == [], "GitHub was asked about a grant that could never apply"
+        assert interaction.response.deferred is False
+        assert interaction.response.messages == [
+            f"{REFUSED} {default_gate().denial('register', REGISTER_ROLES)}"
+        ]
+        assert interaction.followup.messages == []
         assert verification.links_handed_out == 0
         assert service.calls == []

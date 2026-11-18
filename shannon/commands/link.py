@@ -136,6 +136,11 @@ async def _ask_them(
     reply. It carries no link: a link is only ever issued for whoever ran the command, so they
     run /link and get their own.
     """
+    # The role alone, and not the tier guard, so GitHub never stands in for it here even where a
+    # server lets it elsewhere (issue #94). The note has to be this interaction's first response,
+    # since a public message can be nothing else, and asking GitHub means deferring first. After
+    # a private defer, sending the note raises `InteractionResponded`, which is not the
+    # `HTTPException` caught below, so the member would be told nothing at all.
     if not gate.allows(interaction.user, REGISTER_ROLES):
         await reply(interaction, refused(gate.denial("link", REGISTER_ROLES)))
         return
