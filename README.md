@@ -200,7 +200,8 @@ upserts rather than inserts, compare-and-swap on the thread pointer, claims take
 
 ## Install
 
-Python 3.12 or newer, Docker for the database, and [uv](https://docs.astral.sh/uv/).
+Python 3.12 or newer, Docker for the database, and [uv](https://docs.astral.sh/uv/). Or
+[Nix](https://nixos.org/download/) and a git clone of this repository: see [With Nix](#with-nix).
 
 ```bash
 uv sync --extra dev --locked        # runtime and dev dependencies
@@ -230,6 +231,59 @@ this exact tree has already been through the workflow and passed, and when it ha
 the audit and the publish. A merge commit is a new commit carrying content the pull request has
 already tested. The audit is never skipped, because whether a dependency has a known vulnerability
 is a question about today rather than about the tree.
+
+### With Nix
+
+`nix develop` is the whole install (#175). It opens a shell holding everything above at the
+versions `flake.lock` names: Python 3.14, uv at the version CI pins, PostgreSQL 17 in place of
+Docker, Node.js for pyright, and git, gitleaks, openssl, curl and jq. A fresh install from
+nixos.org has flakes switched off. Add `experimental-features = nix-command flakes` to
+`~/.config/nix/nix.conf` once, which every command after the first one below assumes, or put
+`--extra-experimental-features 'nix-command flakes'` after `nix` in each of them, as the first
+one does. It has to be a git clone: Nix reads a flake from the files git tracks, which leaves the
+ignored `.nix/` out, and in an unpacked archive it copies the whole tree into its store on every
+entry. The first entry downloads a few hundred megabytes; after that it takes about a second.
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' develop
+cp .env.example .env                # its database URL already names this shell's database
+shannon-db start                    # PostgreSQL 17 on localhost:5433; never started on entry
+uv run alembic upgrade head
+uv run shannon
+```
+
+Entering the shell runs `uv sync --extra dev --locked` and activates the result, so the checks
+above run exactly as written. It also sets `SHANNON_TEST_DATABASE_URL` to the database's
+`shannon_test`, so with the database started `uv run pytest -q --cov` runs the integration tier
+and reaches the floor. With it stopped that tier errors at setup rather than skipping, so run
+`shannon-db start` first, or set the variable to an empty string to skip the tier, as CI's
+no-database step does. `shannon-db stop` stops the database, `shannon-db status` says whether it
+is up, `shannon-db psql` opens a prompt on it (any psql arguments work, a database name too), and
+`shannon-db reset` throws its data away and starts again.
+
+Everything the shell writes stays under `.nix/`: an environment per Python version in
+`.nix/venv/`, uv's cache and the database. `.venv` is left to the steps above, so both ways work
+in one checkout. An environment built inside the shell runs only with the shell's libraries, which
+is why the two are kept apart.
+
+- **Other versions.** `nix develop .#py312`, `.#py313` and `.#py315` are the rest of the CI matrix,
+  each with an environment of its own.
+- **One database on the port.** The shell's database uses the port the compose one publishes, so
+  that the URL in `.env.example` reaches either. Only one can run at a time, and `shannon-db start`
+  says so rather than failing somewhere less obvious. Leaving the shell leaves its database
+  running, and nothing on the compose side says so, so stop it before going back to Docker:
+  `shannon-db stop` inside the shell, or `nix develop --command shannon-db stop` from outside it.
+- **Where it runs.** Linux on x86_64 and ARM, and macOS on Apple silicon. Not Intel Macs, which
+  nixpkgs stopped building for after 26.05. On Windows, from inside WSL 2, in a clone made there.
+- **Programs from outside the shell.** On Linux the shell puts its own libstdc++ ahead of the
+  system's, which is what lets PyPI's wheels import. A distribution's own C++ program started
+  inside the shell can then fail with a `GLIBC` version error on a release older than glibc 2.38,
+  such as Ubuntu 22.04 or Debian 12. Start those outside the shell.
+- **Moving the versions.** `nix flake update` moves every tool at once, and Dependabot does not
+  read `flake.lock`. `nix flake check` fails while the shell's uv is not the one `ci.yml` pins, so
+  the two move together.
+- **CI enters it as well.** A job runs every check above inside the shell, on Linux x86_64, Linux
+  ARM and macOS, as part of the `CI` check.
 
 ## Connecting it to GitHub and Discord
 
