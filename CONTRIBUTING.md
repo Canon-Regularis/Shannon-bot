@@ -1,7 +1,8 @@
 # Contributing to Shannon
 
 How to set the project up, make a change, check it and propose it, written down so nobody has to
-ask (#176). The [README](README.md) says what the bot does and how it is built;
+ask (#176). The [README](README.md) says what the bot does, [ARCHITECTURE.md](ARCHITECTURE.md)
+how it is built and why;
 [`requirements.md`](requirements.md) is the product it set out to be, amended whenever the code
 departs from it. Everybody taking part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
@@ -114,9 +115,10 @@ The branch is pushed to the fork, and the pull request goes from there to `main`
 
 ### How the code is written
 
-- **Where things live** is in the README's [Architecture](README.md#architecture), bottom up, and
-  imports only ever run down that list. Anything that crosses the network sits behind a narrow
-  protocol, so the services run in tests with Discord and GitHub replaced.
+- **Where things live** is in [ARCHITECTURE.md](ARCHITECTURE.md#where-the-code-lives), from the
+  bottom layer up, and a package only imports the ones listed before it. Almost everything that
+  crosses the network sits behind a narrow protocol, so the services run in tests with Discord and
+  GitHub replaced; ARCHITECTURE.md names the exceptions.
 - **Comments and docstrings say why**, in whole sentences, and name the issue they come from
   (`#147`). What the code does is the code's job to say.
 - **Types are strict.** mypy and pyright both run in strict mode, both for Python 3.12. Each
