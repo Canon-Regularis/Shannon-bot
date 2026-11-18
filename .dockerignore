@@ -36,3 +36,12 @@ Dockerfile
 
 .idea/
 .vscode/
+
+# What `nix develop` brings and leaves. The image never uses Nix, and `.nix/` holds an environment
+# per Python version, uv's cache and a live database, gigabytes the build would send as context.
+flake.nix
+flake.lock
+.nix/
+.direnv/
+result
+result-*
