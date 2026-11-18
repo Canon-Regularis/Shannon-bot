@@ -14,11 +14,18 @@ from shannon.discord_bot.roles import CommandRole
 
 
 class FakeTiers:
-    """Everybody holds every tier unless told otherwise, and every question is written down."""
+    """Everybody holds every tier unless told otherwise, and every question is written down.
 
-    def __init__(self, *, held: bool = True, fails: Exception | None = None) -> None:
+    GitHub could stand in for none of them unless told otherwise (issue #94), which is every
+    deployment that never turned that on.
+    """
+
+    def __init__(
+        self, *, held: bool = True, fails: Exception | None = None, github_counts: bool = False
+    ) -> None:
         self.held = held
         self.fails = fails
+        self.github_counts = github_counts
         self.asked: list[tuple[int, int, frozenset[CommandRole]]] = []
 
     async def holds(
@@ -28,3 +35,6 @@ class FakeTiers:
         if self.fails is not None:
             raise self.fails
         return self.held
+
+    def github_could_stand_in(self, tiers: Collection[CommandRole]) -> bool:
+        return self.github_counts
