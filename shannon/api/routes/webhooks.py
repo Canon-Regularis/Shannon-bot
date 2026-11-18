@@ -104,8 +104,9 @@ async def _accept(
     try:
         accepted = await queue.enqueue(delivery_id, event, payload)
     except NoConnectionToSpare as exc:
-        # 503 rather than the 500 an unhandled error would be: GitHub redelivers the first and
-        # never the second, so a pool that is briefly full would otherwise lose the delivery.
+        # 503 rather than the 500 an unhandled error would be: the delivery log then shows a full
+        # pool, not a crash. GitHub retries neither on its own, so the delivery is not recorded
+        # until someone presses Redeliver on it.
         logger.error("no connection to record delivery %s, asking GitHub to retry", delivery_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

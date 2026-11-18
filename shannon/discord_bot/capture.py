@@ -1,6 +1,6 @@
 """Deciding whether a Discord message belongs in a transcript, and reducing it to plain values.
 
-The only place in the project that touches `discord.Message`: the services take
+Where a `discord.Message` is reduced to plain values: the services take
 `CapturedMessage` and know nothing about discord.py.
 """
 

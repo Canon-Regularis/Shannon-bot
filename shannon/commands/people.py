@@ -137,9 +137,9 @@ def _said(outcome: PeopleOutcome, discord_user_id: int) -> str:
     return _did(outcome, discord_user_id) + unproved
 
 
-# Said under a change that went through on a link nobody ever proved. `/link` records a login an
-# admin typed and GitHub was never asked whose it is, so this may have acted on a real repository
-# as somebody who has nothing to do with the person named above.
+# Said under a change that went through on a link nobody ever proved: a row written before `/link`
+# asked GitHub whose the account was (issue #144), when it recorded a login somebody typed. So this
+# may have acted on a real repository as somebody who has nothing to do with the person named above.
 #
 # A note rather than a refusal, because every link in a server predates the command that would
 # fix it: refusing on the day this ships would stop `/assign` for everybody at once, which is the

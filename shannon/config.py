@@ -96,14 +96,15 @@ class Settings(BaseSettings):
     # The origin every OAuth `redirect_uri` is built from, Discord's and GitHub's. Empty makes every
     # command that hands out a link refuse rather than hand out one that goes nowhere.
     public_base_url: str = ""
-    # Whether a link nobody proved may be used to write to GitHub. `/link` records a login an
-    # admin typed and nobody checked, so a wrong one acts on a real repository under somebody
-    # else's name. Off by default, because turning it on before people have run `/link` refuses
-    # every assignment in the server; until then an unproved link still works and the reply says
-    # so. Ignored where the App's client id or secret, or the public URL, is unset, since no link
-    # could be proved there at all. Deliberately NOT ignored where only the Discord sign-in is
-    # missing: `/link` refuses there naming the settings it lacks, and leaving Discord unset must
-    # not be a way to switch enforcement off. See `services/access.py`.
+    # Whether a link nobody proved may be used to write to GitHub. Before issue #144, `/link`
+    # recorded a login an admin typed and nobody checked. A row left from then can still name the
+    # wrong account, so it acts on a real repository under somebody else's name. Off by default,
+    # because turning it on before people have run `/link` refuses every assignment in the server;
+    # until then an unproved link still works and the reply says so. Ignored where the App's client
+    # id or secret, or the public URL, is unset, since no link could be proved there at all.
+    # Deliberately NOT ignored where only the Discord sign-in is missing: `/link` refuses there
+    # naming the settings it lacks, and leaving Discord unset must not be a way to switch
+    # enforcement off. See `services/access.py`.
     require_proved_links: bool = False
     # Whether GitHub access may stand in for a Discord role. Issue #94: a contributor with write on
     # the registered repository who holds no Developer role was refused every command, however much
@@ -182,8 +183,10 @@ class Settings(BaseSettings):
     # untouched until this passes, so this is also how long that work waits.
     worker_lease_seconds: float = Field(default=900.0, gt=0)
     worker_delivery_timeout_seconds: float = Field(default=60.0, gt=0)
-    # How long shutdown waits for the delivery in hand. Well inside the ten seconds a container
-    # gets before SIGKILL.
+    # How long shutdown waits for the work in hand, once for each loop it stops: the worker, the
+    # board poller, the transcript flusher and the reminder sender. Each wait counts toward the 50
+    # seconds both compose files give a container before SIGKILL (`stop_grace_period`), and a test
+    # holds that above the sum.
     worker_shutdown_grace_seconds: float = Field(default=5.0, ge=0)
     # Payloads hold issue titles, comment bodies and author names, so finished deliveries are
     # not kept indefinitely.

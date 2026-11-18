@@ -1,7 +1,9 @@
 """Whether GitHub would take somebody being put on an item, worked out before it is asked.
 
-Nothing here talks to GitHub. Two of these refusals GitHub would make anyway with a 422, and are
-made here for the sentence: GitHub's own wording names the endpoint and the collaborator rule.
+Nothing here talks to GitHub. One refusal GitHub would make anyway with a 422, a review requested
+from the pull request's author, is made here for the sentence: GitHub's own wording names the
+endpoint and the collaborator rule. A repeat is not sent either, but it is answered here as no
+change rather than refused (#147).
 """
 
 from __future__ import annotations
