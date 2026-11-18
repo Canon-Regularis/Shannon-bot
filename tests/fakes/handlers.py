@@ -9,8 +9,9 @@ from shannon.github.webhooks.events import WebhookOutcome
 class RecordingHandler:
     """Stands in for a service so route tests stay about HTTP.
 
-    Here rather than in tests/support because it implements EventHandler, and the conformance
-    check only looks at this package.
+    Here rather than in tests/support because it implements EventHandler: the fakes the
+    conformance table checks against their protocols live in tests/fakes, and that table lists
+    each one by hand.
     """
 
     def __init__(self, outcome: WebhookOutcome = WebhookOutcome.PROCESSED) -> None:

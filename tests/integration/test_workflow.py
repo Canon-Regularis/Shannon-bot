@@ -134,10 +134,11 @@ class TestSettingAStatus:
     async def test_moving_a_pull_request_out_of_done_gives_its_thread_back(
         self, workflow: ItemWorkflow, thread_id: int, threads: FakeThreadGateway
     ) -> None:
-        """Nothing else was ever going to. `PullRequestPolicy.locked` returns None on every sync,
-        so the lock `/status Done` takes is the only one a pull request gets, and every command to
-        move it back out of DONE wrote the label, moved the stored status, reported success and
-        left the thread shut against the discussion it had just reopened.
+        """Nothing else would until the item next synced. `PullRequestPolicy.shut` answers None for
+        an open pull request at DONE and False once the row has left it, but the command's own sync
+        is told not to act on that False, so every command to move it back out of DONE wrote the
+        label, moved the stored status, reported success and left the thread shut against the
+        discussion it had just reopened.
         """
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
@@ -618,10 +619,12 @@ class TestWhatAReviewFound:
         """The other direction, which had nothing anywhere to try it a second time.
 
         The row says the new status by the time the unlock is attempted, so the branch that
-        touches the lock is not reached again, and `PullRequestPolicy.locked` returns None so no
-        sync, webhook or `/pr` ever unlocks a pull request's thread. One refusal shut a reopened
-        pull request against the discussion it had just been reopened for, for good, while every
-        later command answered that it was already where it was being put.
+        touches the lock is not reached again. `PullRequestPolicy.shut` answers False for an open
+        pull request below DONE, but the command's own sync is told not to act on it, and nothing
+        has to come along to run another.
+        One refusal shut a reopened pull request against the discussion it had just been reopened
+        for until something synced it again, while every later command answered that it was
+        already where it was being put.
         """
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
@@ -677,18 +680,18 @@ class TestWhatAReviewFound:
         threads: FakeThreadGateway,
         pr_event,
     ) -> None:
-        """The lock `/status Done` takes is the only one a pull request ever gets.
+        """On an open pull request, the lock `/status Done` took was once the only one it ever got.
 
-        `PullRequestPolicy.locked` answers None for every snapshot, deliberately, so no delivery
-        touches a pull request's lock. That leaves nothing to shut a replacement: somebody
-        deletes the thread of a finished pull request, the next event of any kind rebuilds it,
-        and the new one is open to replies above a block that reads DONE. Running `/status Done`
-        again does restore the lock and answers "is already DONE", which gives nobody a reason
-        to run it.
+        `PullRequestPolicy.shut` answers None for an open pull request at DONE, deliberately, so
+        the payload never asks a delivery to touch that lock. That left nothing to shut a
+        replacement: somebody deletes the thread of a finished pull request, the next event of
+        any kind rebuilds it, and the new one is open to replies above a block that reads DONE.
+        Running `/status Done` again does restore the lock and answers "is already DONE", which
+        gives nobody a reason to run it.
 
         The issue half of this was closed a while ago by deciding the lock from the row on the
-        rebuild path. A pull request has no such answer in the payload at all, so the answer has
-        to come from the row for the one call that opens a thread.
+        rebuild path. An open pull request at DONE has no such answer in the payload at all, so
+        the answer has to come from the row for the one call that opens a thread.
         """
         await workflow.set_status(thread_id=thread_id, status=Status.IN_REVIEW)
         await workflow.set_status(thread_id=thread_id, status=Status.DONE)
@@ -947,9 +950,9 @@ class TestHoldingTheItemWhileItSetsTheLock:
     Everything a sync says to Discord is held to one writer per item, and this sat outside it: an
     event for the same item could be in its own Discord phase right now, and locking is the step
     where interleaving shows, because it is last on both sides and each side decided from what it
-    read before it started. A pull request makes it permanent. `PullRequestPolicy.locked` answers
-    None on every sync, so the lock `/status Done` takes is the only one it ever gets, and nothing
-    but another command was ever going to lift it again.
+    read before it started. A pull request made it stick. `PullRequestPolicy.shut` answers None for
+    an open pull request at DONE, so on an open one nothing but another command, or a sync after
+    the row has left DONE, lifts the lock `/status Done` takes.
     """
 
     async def test_nothing_else_can_take_the_item_while_the_lock_is_being_set(
@@ -1074,9 +1077,11 @@ class TestAMergedPullRequestKeepsItsShutThread:
     `PullRequestPolicy.status_for` leaves the status alone - reached the repeat branch asking for a
     status that is not DONE, and had its thread handed back.
 
-    Nothing shuts it again: `PullRequestPolicy.locked` answers None on every sync and
-    `shut_for_state` wants a DONE the row does not hold. So the thread stayed open on merged work,
-    permanently, and every later command answered that it was already where it was being put.
+    Only a later sync or `/status Done` shuts it again. `PullRequestPolicy.shut` answers True for a
+    merged pull request, and `shut_for_state` agrees but is asked only of a delivery that arrived
+    late; nothing has to come along to ask either. So the thread stayed open on merged work, with
+    nothing due to shut it, and every later command answered that it was already where it was being
+    put.
     """
 
     async def test_a_repeat_on_a_merged_pull_request_does_not_give_the_thread_back(

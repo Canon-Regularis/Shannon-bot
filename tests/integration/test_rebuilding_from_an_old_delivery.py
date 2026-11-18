@@ -180,7 +180,7 @@ async def test_a_closed_issue_rebuilt_from_an_open_delivery_still_gets_a_shut_th
     refuses that payload about every one of them; the lock was read off the payload, so the
     replacement thread came back open on an issue the row records as closed and DONE.
 
-    Nothing else shuts it. `IssuePolicy.locked` is the only thing that locks an issue's thread,
+    Nothing else shuts it. `IssuePolicy.shut` is the only thing that locks an issue's thread,
     and it is reached once per delivery, so the next current event would have to arrive to put it
     right, and a closed issue has no reason to send one.
     """

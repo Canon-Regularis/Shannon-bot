@@ -1,8 +1,9 @@
 """The tier label, applied to the tier rather than to the files somebody remembered.
 
-`integration` is on all 63 of its files; `unit` was on 32 of 88. So `-m unit` quietly meant
-"about a third of the unit tests", which is worse than no selector at all: it reads as a gate and
-is not one. Marking here is what makes the two markers mean the same kind of thing.
+`integration` is on every one of its files; `unit` was on 32 of 88 when this hook went in. So
+`-m unit` quietly meant "about a third of the unit tests", which is worse than no selector at all:
+it reads as a gate and is not one. Marking here is what makes the two markers mean the same kind
+of thing.
 
 The hook is handed EVERY collected item, not only the ones under this directory, so the path test
 is load-bearing. Without it this would mark the integration tier `unit` as well.

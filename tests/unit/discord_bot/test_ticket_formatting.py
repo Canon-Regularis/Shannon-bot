@@ -6,10 +6,11 @@ why the duplication the issue complains about could sit here and drift - the lab
 out a second time in this renderer, and nothing was watching the two copies agree.
 
 The rows go through `_rows` now, which the pull request and issue blocks share. What a ticket SHOWS
-is still decided by what a draft card has, and most of this file is about that: the board read
-fetches Title and Status and nothing else, so the rows about people and labels are left out rather
-than rendered empty. An always-empty field reads as data missing rather than data absent, which is
-the same rule that keeps a reviewers line off an issue.
+is still decided by what a draft card has, and most of this file is about that: since issue #182
+the board read carries the card's creator, assignees, labels, body and board fields, and a row
+whose field the board lacks or the card leaves unset is left out rather than rendered empty. An
+always-empty field reads as data missing rather than data absent, which is the same rule that
+keeps a reviewers line off an issue.
 """
 
 from __future__ import annotations
@@ -31,9 +32,11 @@ REPO = RepositorySnapshot(
 UPDATED = datetime(2026, 8, 20, 10, 0, tzinfo=UTC)
 BOARD = "https://github.com/users/Canon-Regularis/projects/6"
 
-# What `snapshot_of` builds out of a board read, and only that. The author, assignees, labels and
-# body it inherits are left at their empty defaults deliberately: the board read never fills them,
-# so a fixture that did would be testing a card GitHub does not send.
+# A card read with only its Title and Status set, built the way `snapshot_of` builds one. The
+# author, assignees, labels and body it inherits are left at their empty defaults deliberately, and
+# so is `created_at`, though a real read nearly always has the author and `created_at`: they come
+# off the card itself rather than out of a field. Each row they feed is absent here and present in
+# CARRYING.
 TICKET = TicketSnapshot(
     repository=REPO,
     github_object_id=901,

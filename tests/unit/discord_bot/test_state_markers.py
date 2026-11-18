@@ -3,8 +3,8 @@
 A heading rather than a line, because an item closing is the one event in a thread worth finding
 by scrolling, and the tag lines beside it are deliberately quieter than this.
 
-Since issue #116 it is also the only card in a thread that carries GitHub's own state colours,
-which is what makes a merge findable by scrolling without reading anything.
+Since issue #116 it carries GitHub's own state colours, as the metadata block at the top of the
+thread does, which is what makes a merge findable by scrolling without reading anything.
 
 The exact strings are asserted rather than a substring of them, because these are the whole of
 what a reader sees and a mark quietly changing is the failure this file is for.

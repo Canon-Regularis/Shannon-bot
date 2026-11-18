@@ -962,8 +962,8 @@ class TestWhichCredentialACallCarries:
         assert seen == ["Bearer ghs_acme", "Bearer ghs_other"]
 
     async def test_a_write_carries_one_too(self) -> None:
-        """Labels are the only thing this bot writes to GitHub, and a write with no credential is
-        a write that silently does nothing on a private repository."""
+        """A write with no explicit credential carries the account's, as a read does, and a write
+        with no credential is refused on a private repository."""
         seen: list[str | None] = []
 
         def handler(request: httpx.Request) -> httpx.Response:

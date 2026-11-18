@@ -1,8 +1,9 @@
 """Mirroring a project board that nobody will send us events about.
 
 A board answers with every card every time it is asked, so the whole job is working out which of
-them moved. Getting that wrong is not a wrong thread, it is forty threads rewritten every minute
-until Discord starts refusing, which is why most of what is pinned here is what does NOT happen.
+them moved. Getting that wrong is not a wrong thread, it is forty threads rewritten on every poll,
+every couple of seconds, until Discord starts refusing, which is why most of what is pinned here is
+what does NOT happen.
 """
 
 from __future__ import annotations
@@ -207,9 +208,9 @@ class TestReadingABoard:
         `requirements.md` is amended rather than overruled in silence - the same way it already
         was for the pull request block, three times over.
 
-        Still only what a draft card HAS. No author, assignees or tags: the board read fetches
-        Title and Status and nothing else, so each of those would read `None` for ever. The unit
-        test beside this one says which rows are left out and why.
+        Still only what this card HAS. No author, assignees or tags: `card()` leaves the issue
+        #182 metadata empty by default, and the block leaves out a row with nothing in it rather
+        than showing `None`. The unit test beside this one says which rows are left out and why.
         """
         await poller_for(FakeBoard(card())).run_once()
 
@@ -511,7 +512,7 @@ class TestTheLoop:
         caplog: pytest.LogCaptureFixture,
         refusal: Exception,
     ) -> None:
-        """Left to the loop's catch-all this is a traceback a minute that never says what was
+        """Left to the loop's catch-all this is a traceback every poll that never says what was
         asked for.
 
         Both answers, because an operator cannot act on the difference between them: a token not
@@ -561,7 +562,7 @@ class TestTheLoop:
     ) -> None:
         """GitHub answers a spent limit with the moment the window reopens, and the client
         already works that out and hands it over. Nothing read it, so the poller went back every
-        interval for the whole window: a full board read a minute that cannot succeed, and for a
+        interval for the whole window: a full board read every poll that cannot succeed, and for a
         secondary limit GitHub lengthens the block for every request made during one.
 
         The sleep below is not waiting for something to happen, which is why it is a sleep. It
@@ -1545,7 +1546,7 @@ class TestASecondReviewFound:
 
 class TestABoardNobodyFinishedSettingUp:
     """Tickets have no channel fallback, so a board configured before `/set_channel` mirrors
-    nothing at all. What it must not do is say so once per card, once a minute, for ever."""
+    nothing at all. What it must not do is say so once per card, once a poll, for ever."""
 
     async def test_the_missing_channel_is_said_once_rather_than_once_per_card(
         self, registered: Repository, poller_for, caplog: pytest.LogCaptureFixture
@@ -1574,7 +1575,7 @@ class TestOneCardTakingTheWholeBoardWithIt:
     `run_once` half way, so the cards behind it and the wrapped half after them are skipped, and
     since nothing was recorded the next poll reads the same board and stops at the same card. It
     does not right itself and it does not degrade: the feature is off, for the life of the
-    process, and the only sign of it is one traceback a minute.
+    process, and the only sign of it is one traceback every poll.
     """
 
     @pytest.fixture
@@ -1846,7 +1847,7 @@ class TestProgressRecordedForAStepThatFailed:
         writes off a permanently refused lock a few lines down says why: nothing else advances
         the column, so a card whose move cannot be carried out comes round on every poll for as
         long as the refusal lasts, and every card the team finishes joins the set and never
-        leaves it. A GitHub read and a Discord call each, once a minute, growing with the team's
+        leaves it. A GitHub read and a Discord call each, once a poll, growing with the team's
         throughput, for a channel that is not coming back.
         """
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In Review"))
@@ -1872,8 +1873,8 @@ class TestProgressRecordedForAStepThatFailed:
         and only the label write is refused, so the poller reaches the card and fails on it.
 
         That is not a bad moment. Nothing else advances the column, so the card is asked about
-        every minute for as long as the token is wrong, and every card moved after it joins the
-        set and never leaves. Each one costs a GitHub read and a Discord call a minute, so a
+        on every poll for as long as the token is wrong, and every card moved after it joins the
+        set and never leaves. Each one costs a GitHub read and a Discord call a poll, so a
         handful of them spend the whole hour's quota on cards that cannot move, and then nothing
         needing GitHub works either.
 
@@ -1946,10 +1947,10 @@ class TestProgressRecordedForAStepThatFailed:
         Nothing else advances the column, so a card whose lock is refused comes round on every
         poll for as long as the refusal lasts. When the refusal is a permission, that is for
         ever, and every card the team ever finishes joins the set and never leaves it: a GitHub
-        read and a Discord call each, once a minute, growing with throughput.
+        read and a Discord call each, once a poll, growing with throughput.
 
         The move itself did land, so it is written off as carried through, which is what the
-        column records, and the reason is said once rather than once a minute.
+        column records, and the reason is said once rather than once a poll.
         """
         board = FakeBoard(wraps(ObjectType.PR, mirrored_pr, column="In review"))
         poller = poller_for(board)
@@ -2447,7 +2448,7 @@ class TestSayingWhatMovedOnACard:
         threads: FakeThreadGateway,
         db_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
-        """The guard, and that this is not once a minute. A board is read whole every poll, so a
+        """The guard, and that this is not once a poll. A board is read whole every poll, so a
         card nobody touched is offered again for ever - and stopped before any of this by the
         timestamp not having moved. That gate is what makes the rest cheap: a quiet board asks the
         database nothing and says nothing.
@@ -2496,7 +2497,7 @@ class TestSayingWhatMovedOnACard:
         GitHub always sends one, so that arm is a guard rather than a case and re-syncing is a
         wasted edit where skipping is a change nobody sees. The cost is that such a card reaches
         this comparison on EVERY poll, with a stored record and a thread to post in. Nothing moved,
-        so nothing is said; without the guard it would post an empty line once a minute for as long
+        so nothing is said; without the guard it would post an empty line once a poll for as long
         as the card existed, which is the worst failure available here.
         """
         timeless = replace(filled(), updated_at=None)
@@ -2734,7 +2735,7 @@ class TestHandingTheThreadOver:
     ) -> None:
         """A thread that simply stops is how somebody sits waiting in it.
 
-        Said once, not once a minute. The card stays on the board and is offered on every
+        Said once, not once a poll. The card stays on the board and is offered on every
         poll for ever, so the null pointer left behind is what stops a second visit saying
         it again - which is most of why the row is kept rather than deleted.
         """
@@ -2850,7 +2851,7 @@ class TestHandingTheThreadOver:
         self, mirrored_draft: int, poller_for, converted: FakeBoard, threads: FakeThreadGateway
     ) -> None:
         """The null pointer is what stops it. The card stays on the board and is offered on every
-        poll for ever, so without that this would say the same line once a minute."""
+        poll for ever, so without that this would say the same line once a poll."""
         poller = poller_for(converted)
 
         await poller.run_once()

@@ -7,8 +7,8 @@ the board belonged to, so rather than guess it stopped.
 
 The board is opened before it is stored, which is most of what is being tested here. A picker's
 suggestions are only suggestions, so what arrives may be typed, may be a digit out, and may name
-a board this token cannot see - and every one of those stored is a warning once a minute in a log
-rather than a sentence read by the person who caused it.
+a board the linker's authorisation cannot see - and every one of those stored is one warning in a
+log, then silence, rather than a sentence read by the person who caused it.
 
 Issue #201 added the rest: the board is opened and listed under the linker's OWN authorisation
 rather than the App's, a board is told apart by whose account it is under rather than by how its

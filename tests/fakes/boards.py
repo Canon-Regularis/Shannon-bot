@@ -5,8 +5,9 @@ on a timer, and `/refresh tickets` when somebody asks. These lived inside
 `tests/integration/test_project_polling.py`, a file long enough that a second copy of `card()` was
 the likelier outcome than an import.
 
-This file is on neither checker's ratchet in `pyproject.toml`, so it is held to mypy strict and
-pyright strict. That is deliberate: the rule there is that a file never goes back on the list.
+This file is on neither checker's ratchet in `pyproject.toml`, so both checkers gate it, at the
+relaxed level `pyproject.toml` sets for every test file. That is deliberate: the rule there is that
+a file never goes back on the list.
 """
 
 from __future__ import annotations

@@ -1,8 +1,9 @@
 """Every fake must offer everything the protocol it stands in for offers.
 
-No type checker runs here and Protocols are structural, so a fake that drifts narrower than the
-real thing fails nothing. It removes a path from what the suite can reach, and the suite keeps
-reporting green over the hole.
+Protocols are structural, and the type checkers compare a fake against one only where a checked
+file hands it over as that protocol, so a fake that drifts narrower than the real thing can fail
+nothing. It removes a path from what the suite can reach, and the suite keeps reporting green
+over the hole.
 
 Signatures are compared as well as names: a fake taking `thread` where the real one takes
 `thread_id` will accept a call production would reject.
@@ -150,7 +151,8 @@ from tests.fakes.threads import FakeThreadGateway
 from tests.fakes.tiers import FakeTiers
 
 # Both halves matter. The fakes are what the tests run against, and the real implementations are
-# what production runs against, and neither is checked by anything else.
+# what production runs against, and a type checker compares either against a protocol only where
+# something hands it over as one.
 IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ThreadGateway, FakeThreadGateway),
     (ThreadGateway, DiscordThreadGateway),

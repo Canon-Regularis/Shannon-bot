@@ -1,9 +1,10 @@
 """Every route this app serves is one the proxy in front of it will forward.
 
-Caddy is the only thing on that host facing the internet, and its config is an allowlist: two
-`handle` blocks reverse-proxy to the app and everything else is answered with a bare 404. That is
-the right shape — the docs endpoints are blocked deliberately and this asserts they stay blocked —
-but it means a route can exist, be wired, be tested, and still not be reachable by anybody.
+Caddy is the only thing on that host facing the internet, and its config is an allowlist: three
+`handle` blocks (`/health`, `/webhooks/*` and `/oauth/*`) reverse-proxy to the app and everything
+else is answered with a bare 404. That is the right shape — the docs endpoints are blocked
+deliberately and this asserts they stay blocked — but it means a route can exist, be wired, be
+tested, and still not be reachable by anybody.
 
 That is not hypothetical. `/oauth/github/callback` shipped, `/unregister` handed out links pointing
 at it, and every one of them was answered by Caddy with an empty 404 because the allowlist had
