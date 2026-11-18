@@ -105,6 +105,19 @@ class Settings(BaseSettings):
     # missing: `/link` refuses there naming the settings it lacks, and leaving Discord unset must
     # not be a way to switch enforcement off. See `services/access.py`.
     require_proved_links: bool = False
+    # Whether GitHub access may stand in for a Discord role. Issue #94: a contributor with write on
+    # the registered repository who holds no Developer role was refused every command, however much
+    # GitHub trusted them. A team only rings a role, so not even an organisation could grant one.
+    #
+    # On: GitHub write passes wherever Developer does, and GitHub admin wherever Project Manager
+    # does too. The Admin tier stays Discord only, and so do `/register` and `/link @someone`. It
+    # counts only for an account proved with `/link` since migration `0039`, and fails CLOSED:
+    # where GitHub cannot be asked, nothing is granted and the role alone decides.
+    #
+    # Off by default, because it widens who may act and is a server's choice to make. Off, every
+    # gate is exactly the role check it was, with no extra read. Independent of the setting above:
+    # a grant always needs a proof, and #158 still checks the proved account on every write.
+    github_access_grants_tiers: bool = False
     github_timeout_seconds: float = Field(default=10.0, gt=0)
 
     # Whether THIS process reads project boards at all. Polled rather than delivered: GitHub

@@ -119,6 +119,7 @@ from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import Mirror, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
+from shannon.services.tier_grants import GitHubTierGrants
 from shannon.services.tracking import ThreadTracking
 from shannon.services.transcripts.flush import TranscriptFlusher
 from shannon.services.transcripts.lines import not_a_transcript
@@ -951,7 +952,14 @@ def build_container(
     # One gate for every command and for the board link's second check. Found reviewing #201: a
     # board link asks Discord again, when it is followed, for the tier the command was gated on,
     # and it has to read that tier exactly as the command did.
-    gate = PermissionGate(ConfiguredRoles.from_settings(settings))
+    #
+    # Issue #94: where the deployment asks for it, the gate is handed GitHub as a second way in,
+    # so every command and the board link's check get it at once. Off, it is handed nothing, and
+    # every gate is the role check alone with no read behind it.
+    gate = PermissionGate(
+        ConfiguredRoles.from_settings(settings),
+        GitHubTierGrants(sessionmaker, github) if settings.github_access_grants_tiers else None,
+    )
     verification = GitHubIdentityVerification(
         sessionmaker,
         links,
@@ -980,6 +988,18 @@ def build_container(
             scope=DISCORD_SCOPE,
         ),
     )
+    # Issue #94. GitHub only stands in for the account a member proved through a link, so a
+    # deployment that cannot hand one out has turned the setting on for nobody who had not proved
+    # one already. Said once here, like the Discord half above, rather than found out by every
+    # member it refuses.
+    if settings.github_access_grants_tiers and not verification.can_prove_identity:
+        logger.error(
+            "SHANNON_GITHUB_ACCESS_GRANTS_TIERS is on, but /link cannot prove an account here, so "
+            "GitHub access lets in nobody who has not proved one already. Set "
+            "SHANNON_GITHUB_APP_CLIENT_ID, SHANNON_GITHUB_APP_CLIENT_SECRET, "
+            "SHANNON_PUBLIC_BASE_URL, SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET, "
+            "and restart."
+        )
 
     pr_sync, issue_sync = _sync_services(sessionmaker, threads)
     queue = WebhookDeliveryQueue(sessionmaker)
