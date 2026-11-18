@@ -328,10 +328,11 @@ class ProjectPoller:
             listed = await self._projects.list_board_items(board.board_owner, board.project_number)
         except UNREADABLE as unreadable:
             # Named rather than left to the loop's `logger.exception`, which answers a
-            # misconfiguration with a traceback once a minute. Both answers are caught together
-            # because an operator cannot act on the difference: GitHub hides a private board
-            # from an authorisation that cannot see it behind 404 as readily as 403, so telling
-            # the two apart in the message would be a confident guess rather than a diagnosis.
+            # misconfiguration with a traceback on every pass, every couple of seconds. Both
+            # answers are caught together because an operator cannot act on the difference:
+            # GitHub hides a private board from an authorisation that cannot see it behind 404
+            # as readily as 403, so telling the two apart in the message would be a confident
+            # guess rather than a diagnosis.
             #
             # Three things can be wrong and the log cannot tell which, so it names all three.
             # A board GitHub does not have, an owner it was asked under - the number is a
@@ -800,8 +801,9 @@ class ProjectPoller:
                 # Nothing about this card decided that: the sync refuses on the repository or on
                 # the channel, so every remaining card would be refused the same way and each one
                 # would open a session, run two queries and write the same warning. On a board of
-                # any size that is the whole log, once a minute, for as long as nobody has run
-                # /set_channel. One card is enough to learn it from.
+                # any size that is the whole log, on every pass - every couple of seconds, or
+                # every minute on the slow clock of `UNVALIDATED_POLL_SECONDS` - for as long as
+                # nobody has run /set_channel. One card is enough to learn it from.
                 logger.warning(
                     "no channel is mapped for %s, so none of this board's %s cards can be "
                     "mirrored; run /set_channel",
@@ -991,9 +993,9 @@ class ProjectPoller:
             # and a delivery has sixteen attempts over two hours precisely so it can sit out
             # something like that; making the error permanent would drop every delivery in the
             # window instead. The poller has no such budget: nothing else advances the column, so
-            # a card it cannot move is asked about every minute for as long as the token is
+            # a card it cannot move is asked about on every pass for as long as the token is
             # wrong, and every card moved after it joins that set and never leaves. Each one
-            # costs a GitHub read and a Discord call every minute, so a token narrowed to
+            # costs a GitHub read and a Discord call every pass, so a token narrowed to
             # read-only spends the hour's whole quota on cards it cannot move, and then nothing
             # that needs GitHub works either.
             #
@@ -1035,7 +1037,7 @@ class ProjectPoller:
             # A permission is not a bad moment. Coming round again cannot help, and this card is
             # never going to stop coming: nothing else advances the column, so every card ever
             # dragged to Done joins a set that is retried on every poll and never leaves it,
-            # costing a GitHub read and a Discord call each, once a minute, for as long as the
+            # costing a GitHub read and a Discord call each, on every pass, for as long as the
             # permission is missing. It grows with the team's throughput.
             #
             # So the move is written off as carried through, which is what the column means, and
@@ -1176,8 +1178,9 @@ class ProjectPoller:
         try:
             await self._threads.post(thread_id=thread_id, panel=format_card_changed(moved))
         except DiscordGatewayError as refusal:
-            # Swallowed, and the record already written. The alternative is saying it again every
-            # minute until somebody grants Manage Messages, which is worse than missing it once.
+            # Swallowed, and the record already written. The alternative is saying it again on
+            # every pass, every couple of seconds, until somebody grants Manage Messages, which
+            # is worse than missing it once.
             logger.warning("could not say what moved on the card %r: %s", item.title, refusal)
 
     async def _shown_fields(self, repository_id: int, card_id: int) -> JsonObject | None:
@@ -1322,8 +1325,9 @@ class ProjectPoller:
             except GitHubRateLimitError as limit:
                 # GitHub answers a spent limit with the moment the window reopens, and reading
                 # the board again inside that window cannot succeed. On the interval alone this
-                # is a full board read a minute for as long as the limit lasts, which is worse
-                # than wasted: GitHub lengthens a secondary limit for requests made during one.
+                # is a board read every couple of seconds for as long as the limit lasts, which is
+                # worse than wasted: GitHub lengthens a secondary limit for requests made during
+                # one.
                 # The longer of the two, so a header asking for no wait cannot talk the poller
                 # out of its own interval.
                 wait = max(wait, min(limit.retry_after or 0, RATE_LIMIT_CEILING))
@@ -1371,8 +1375,9 @@ class ProjectPoller:
     async def _wait(self, seconds: float) -> None:
         """Sleep, or wake at once if a stop arrives.
 
-        Waiting on the sleep alone would leave a shutdown sitting out the whole interval, and at
-        a minute that is far longer than the grace period allows.
+        Waiting on the sleep alone would leave a shutdown sitting out the whole wait, and the slow
+        clock of `UNVALIDATED_POLL_SECONDS` (a minute) or a rate-limit wait (up to an hour) is far
+        longer than the grace period allows.
         """
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
@@ -1524,7 +1529,7 @@ def _has_moved(item: BoardItem, stored: datetime | None, thread_id: int | None) 
 
     Strictly newer, because equal means untouched since the last read. The sync path treats
     equal timestamps as current on purpose, which is right for a delivery that may be a retry
-    and wrong for a poll that sees the same card every minute.
+    and wrong for a poll that sees the same card on every pass.
 
     A card with no thread is always synced, whatever its timestamp says. The row is written and
     committed before the Discord call that opens the thread, so a card can be recorded as

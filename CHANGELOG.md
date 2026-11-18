@@ -1,8 +1,14 @@
 # Changelog
 
-What has been built into Shannon Bot, and why. Each section is a stage of the plan, and most
-entries name the GitHub issue they close. Between stages there are checkpoints, where the work
-was going back over what already existed rather than adding anything new.
+What has been built into Shannon Bot, and why. Most entries name the GitHub issue they close.
+
+- The first sections are the stages of the plan, MVP 1 to MVP 5. Between stages there are
+  checkpoints, where the work went back over what already existed instead of adding anything new.
+- After that, each `##` section is either one change or one review pass (the "hunt", "look" and
+  "pass" sections), which lists its separate findings under `###` headings.
+- The newest entry is at the end of the file.
+- New entries follow the shape in [CONTRIBUTING.md](CONTRIBUTING.md#a-changelog-entry). Older
+  entries keep the shape they were written in.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
@@ -8493,3 +8499,25 @@ feature end to end rather than assuming a predecessor the file never recorded.
   short pointer under the same heading, and `CONTRIBUTING.md` points there as well.
 - **For whoever deploys it.** Nothing.
 - **Tests.** None new: nothing here is code.
+
+## The documentation says what the code does, in plain English
+
+- **The documents had drifted, and were hard to read** (#241). They mixed notes, long reasons and
+  asides, so a newcomer had to read a lot to find one fact. A sweep of every document, comment and
+  docstring found 124 places the code now contradicts. Examples: the README still set up a
+  per-repository webhook instead of the App's, said a server needs three secrets, and said a deploy
+  posts to Discord; `requirements.md` still listed the eight `/set_*` commands and
+  `READY_FOR_MERGE`; comments said GitHub redelivers a 503, which it never does.
+- **The README, `requirements.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md` and `scripts/README.md`
+  are rewritten in plain English.** Short sentences, terms explained where they first appear,
+  steps numbered, reference in tables. Every fact that was true is kept, and every drifted one is
+  corrected. `requirements.md` is amended to what was built, naming the issue for each departure.
+- **Comments and docstrings that the code contradicted are corrected,** in `shannon/`, `tests/`,
+  `scripts/deploy.sh` and the release workflow. Only those: the plain-English pass over code
+  comments comes with each package's refactor (#266 to #273). Nothing but comments and docstrings
+  changed in any code file.
+- **How to write documentation is written down.** `CONTRIBUTING.md` has the rules under
+  "How to write", and the shape of a CHANGELOG entry. This file's preamble points there, and older
+  entries keep the shape they were written in.
+- **For whoever deploys it.** Nothing.
+- **Tests.** None new. The README's own test still holds it to the code.

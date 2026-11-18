@@ -196,13 +196,14 @@ class IssuePolicy:
         return current
 
     def shut(self, snapshot: TrackedSnapshot, *, status: Status) -> bool | None:
-        """GitHub decides: an issue has no `/status Done`, and the command closes it on GitHub."""
+        """GitHub decides: an open issue is refused `/status Done`, so only closing it shuts it."""
         return snapshot.closed
 
     def shut_for_state(self, *, status: Status, github_state: str) -> bool:
         """The answer `shut` gives, read from the column the payload writes into.
 
-        Not the status: `/status Done` can put an open issue at DONE, and an open issue's thread is
+        Not the status, which only follows it: `/status Done` is refused for an open issue, and
+        the sync that writes the state turns an open issue's DONE back. An open issue's thread is
         one people are still meant to be talking in.
         """
         return github_state == "closed"

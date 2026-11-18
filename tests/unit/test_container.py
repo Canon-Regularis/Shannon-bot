@@ -186,8 +186,10 @@ class TestTheOneCredentialTheAppCannotReplace:
     """GitHub publishes no App permission for a USER-owned Projects v2 board.
 
     The Projects permission exists at organisation level only, and `HttpProjectBoards` reads
-    `/users/{owner}/projectsV2/...` because a personal account is what this runs against. So that
-    one feature keeps a token of its own, and everything else goes through an installation.
+    `/users/...` or `/orgs/...`, whichever the owner's account type calls for. A personal board
+    cannot be reached through an installation, so since #170 a board is read under the
+    authorisation of the person who linked it and written under the member who asked, and
+    everything else goes through an installation.
     """
 
     async def test_a_deployment_that_authorises_no_board_still_builds(self) -> None:

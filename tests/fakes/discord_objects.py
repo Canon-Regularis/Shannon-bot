@@ -270,9 +270,10 @@ class FakeInteraction:
                 view_channel=True, send_messages=True, send_messages_in_threads=True
             )
         )
-        # What this bot may do in the channel the command was run in. Defaults to the permission
-        # list the README asks for, which grants nothing beyond reading and writing threads, so a
-        # command that depends on more finds that out here rather than in front of a user.
+        # What this bot may do in the channel the command was run in. Defaults to exactly the
+        # permission list the README asks for (reading and posting, and opening and shutting
+        # threads), so a command that depends on anything more finds that out here rather than in
+        # front of a user.
         self.app_permissions = app_permissions or discord.Permissions(
             view_channel=True,
             send_messages=True,
@@ -341,8 +342,9 @@ class FakeInteraction:
     def said(self) -> str:
         """The one reply with its outcome mark taken off.
 
-        A wording assertion is about the sentence. Every reply now opens with one of three marks,
-        and repeating those three characters in a hundred assertions would say nothing that
-        `mark` does not say once, on its own, where it is the thing under test.
+        A wording assertion is about the sentence. Most replies open with one of three marks (the
+        read-back replies from `/mentions`, `/track` and `/linked` carry none), and repeating those
+        three characters in a hundred assertions would say nothing that `mark` does not say once,
+        on its own, where it is the thing under test.
         """
         return self.reply[len(self.mark) :].lstrip() if self.mark else self.reply

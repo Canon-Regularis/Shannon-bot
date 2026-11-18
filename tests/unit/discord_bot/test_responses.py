@@ -2,8 +2,9 @@
 
 Both functions here are guards more than they are work. `reply` picks the right of Discord's two
 send paths depending on whether the interaction has been answered; `defer` does nothing if it has.
-Neither guard is reached by any command, because each defers once and replies once, and both exist
-so that a command doing otherwise fails visibly rather than by leaving somebody at a spinner.
+`reply` takes the followup path on every command that defers before it answers. `defer`'s guard
+is reached whenever the tier guard has already deferred to ask GitHub (issue #94) and the command
+then defers again, so the second defer does nothing rather than raising `InteractionResponded`.
 
 Since issue #116 `reply` also picks between the two SHAPES a reply can take. A card carries no
 content at all, and discord.py takes the absence of content as the sentinel that selects the
@@ -13,8 +14,8 @@ And since issue #144 it pins that they are private. `EPHEMERAL` had been a const
 asserted: the fakes took the keyword into `**_` and threw it away, so flipping it to False would
 have published every command reply in this project and passed the entire suite.
 
-Issue #147 took the string away. `reply` accepts a `Panel` and nothing else, so a reply carrying
-no outcome mark is not a thing that can be written rather than a thing nobody happens to write,
+Issue #147 took the string away. `reply` accepts a `Panel` and nothing else, so a bare string
+is not a thing that can be written rather than a thing nobody happens to write,
 and both type checkers hold it. A panel with no accent still goes out as content, which is the
 one path a command takes when it reports rather than acts.
 

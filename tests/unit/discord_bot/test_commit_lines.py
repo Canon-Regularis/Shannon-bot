@@ -8,7 +8,9 @@ message would pass on a line that also said something nobody meant it to.
 
 The one thing here that is a rule rather than a rendering is that none of the three takes a
 mentions map, which is checked by introspection below. It is requirement 4 of the issue, and it
-holds by construction: `_person` is the only thing in `formatting` that builds a `<@id>`.
+holds by construction: every `<@id>` `formatting` writes into a message comes from a mapping or
+an id the caller passes in (`_person`, `_mention`, `format_reminder`), and none of the three
+takes either.
 """
 
 from __future__ import annotations

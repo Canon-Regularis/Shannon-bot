@@ -6,10 +6,11 @@ thread is for. This turns one kind on or off for the thread it is run in; with n
 every kind the item can get and where each stands, and with only a kind it says where that one
 stands.
 
-The tier every other command run inside a thread takes, because it changes what everybody in
-that thread is told. The answer is private and the thread is not told: a line saying the lines
-had changed would be the very noise this exists to take away, and anybody who wonders why a line
-stopped can ask the same command.
+The tier `/label`, `/assign`, `/regenerate` and `/log_conversation` take inside a thread
+(`/status` and `/priority` take the narrower Project Manager one), because it changes what
+everybody in that thread is told. The answer is private and the thread is not told: a line saying
+the lines had changed would be the very noise this exists to take away, and anybody who wonders
+why a line stopped can ask the same command.
 """
 
 from __future__ import annotations

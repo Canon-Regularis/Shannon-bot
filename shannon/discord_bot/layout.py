@@ -1,7 +1,8 @@
 """Turning a panel into something Discord will draw.
 
-The only module that imports `discord.ui`; `formatting` decides the wording and answers with a
-`Panel` carrying no UI library. A Hypothesis property asserts the law: the view's text displays
+The only module that builds `discord.ui` components (`responses` and `threads` import `ui` only
+to type the `LayoutView` they send); `formatting` decides the wording and answers with a `Panel`
+carrying no UI library. A Hypothesis property asserts the law: the view's text displays
 are exactly the panel's block texts, in the panel's order. A plain panel goes out as a string,
 because any `LayoutView` sets the components flag and Discord never lets it come off a message.
 """

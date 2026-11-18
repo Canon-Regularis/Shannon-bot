@@ -106,7 +106,9 @@ class FakeGitHubClient:
         # recording at all because an empty owner is an anonymous request: on a private
         # repository that is the difference between reading it and being told it does not exist.
         self.json_owners: list[str] = []
-        # What each login may do, for `/unregister`. Anything not named here is an admin.
+        # What each login may do, read by `permission_for` (registration, the access gate,
+        # `/unregister`, putting people on items) and by assignability. Anything not named
+        # here is an admin.
         self.permissions: dict[str, str] = {}
         self.permission_calls: list[tuple[str, str]] = []
         # What each login may do and which account GitHub says it is, for a grant. Kept apart from

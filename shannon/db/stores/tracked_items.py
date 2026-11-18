@@ -226,8 +226,10 @@ class TrackedItemStore:
     async def board_state(self, *, repository_id: int) -> dict[tuple[ObjectType, int], BoardRow]:
         """What the poller needs of every item a board card could wrap, in one query.
 
-        One query per board rather than one per card, because a board is read whole every minute
-        whether or not any card moved.
+        One query per board rather than one per card, because the poller reads every row of the
+        board's repository on every pass - every couple of seconds since issue #189, or every
+        minute on the slow clock of `UNVALIDATED_POLL_SECONDS` - whether or not any card moved. A
+        board GitHub answers with a 304 is served out of memory and still comes here.
         """
         rows = await self._session.execute(
             select(

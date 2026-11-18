@@ -265,7 +265,7 @@ class ItemAssignment(TimestampMixin, Base):
 
 
 class MirroredNote(TimestampMixin, Base):
-    """A comment or review already posted into an item's thread.
+    """A note, or a one-off line, already posted into an item's thread.
 
     The queue is at-least-once: a delivery whose status could not be written is handled again
     once its lease expires. Every other handler is idempotent under that on its own; posting a
@@ -281,8 +281,10 @@ class MirroredNote(TimestampMixin, Base):
     tracked_item_id: Mapped[int] = mapped_column(
         ForeignKey("tracked_items.id", ondelete="CASCADE"), nullable=False
     )
-    # `comment:123` or `review:123`. GitHub numbers the two separately and they collide, so the
-    # kind belongs in the key rather than in a column nothing would think to filter on.
+    # What was claimed, by kind and id: `comment:123`, `review:123`, `review-comment:123`, or a
+    # one-off line such as `commit:<sha>`, `label:<n>` or `approved:<sha>`. GitHub numbers
+    # comments and reviews separately and they collide, so the kind belongs in the key rather than
+    # in a column nothing would think to filter on.
     note_key: Mapped[str] = mapped_column(String(64), nullable=False)
     # The Discord message this note was posted as, so an edit on GitHub can be mirrored onto it
     # rather than posted again underneath (issue #165).

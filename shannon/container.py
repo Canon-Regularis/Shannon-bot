@@ -470,9 +470,12 @@ def _event_router(
     # does a close. Given to the item handlers rather than to the sync service: the sync runs for
     # commands and the board as well, and neither of those has a delivery to announce.
     #
-    # The commit line is last because it is the only one of the three that reads GitHub, which
-    # makes it the only one that can take a delivery down for a reason outside this process. The
-    # two above have already said their piece by the time it starts.
+    # The commit line is last because it reads GitHub on a `synchronize` (unless its thread has
+    # commits off), which lets it take a delivery down for a reason outside this process. Today
+    # that guards nothing: each line answers actions no other one does, so at most one speaks on
+    # a given delivery. Should two ever share an action, it keeps whether GitHub answers from
+    # deciding whether people were rung. The approval line reads GitHub too, but here only on
+    # `review_request_removed`, and it rings people, so it sits above.
     #
     # It goes to the issue handler as well, and does nothing there: an issue has no `synchronize`
     # action, which is the first thing it checks. The ready line is in the same position for the
@@ -971,7 +974,8 @@ def build_container(
         oauth_url=settings.github_oauth_url,
         public_base_url=settings.public_base_url,
         http=app_http,
-        # The second application, and the only one that asks for a scope. A deployment that has
+        # The second GitHub application, and the only one of the two that asks GitHub for a scope
+        # (the Discord application below asks Discord for `identify`). A deployment that has
         # registered no OAuth App gets `NO_APPLICATION` here, which makes `can_authorise_a_board`
         # false and the command refuse - rather than a link to an application that does not exist.
         board=OAuthClient(

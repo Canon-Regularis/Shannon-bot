@@ -32,9 +32,9 @@ class Priority(StrEnum):
 # `github/labels.py` still reads. SCREAMING_SNAKE is what those want and neither is a sentence, so
 # the display form has to be its own answer and never the same string.
 #
-# Written out for the reason `services/workflow._OWNED_BY` was written out: a derived form would
-# be right for seven of these and silently wrong for the eighth, and there is nowhere in a
-# `.replace().capitalize()` to put UNSET's word.
+# Written out for the reason the old command table in `services/workflow` once was (MEDIUM's
+# command was `set_med_priority`): a derived form would be right for seven of these and silently
+# wrong for the eighth, and there is nowhere in a `.replace().capitalize()` to put UNSET's word.
 _SPOKEN: dict[Status | Priority, str] = {
     Status.NOT_REVIEWED: "Not reviewed",
     Status.IN_REVIEW: "In review",

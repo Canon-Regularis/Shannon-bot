@@ -26,7 +26,8 @@ SPARE_CONNECTIONS = 10
 BURST_CONNECTIONS = 10
 
 # Under the ten seconds GitHub allows the endpoint, so a saturated pool answers 503 inside the
-# budget and the delivery is redelivered. SQLAlchemy's own default is thirty.
+# budget rather than timing out. GitHub retries neither on its own, so the delivery waits for
+# someone to press Redeliver on it. SQLAlchemy's own default is thirty.
 POOL_TIMEOUT_SECONDS = 5.0
 
 # A connection is not kept forever: an idle socket dropped by a NAT in between is reported to

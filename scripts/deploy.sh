@@ -40,7 +40,7 @@ REMOTE="${SHANNON_GIT_REMOTE:-origin}"
 
 # How long to wait for deliveries in flight to finish before replacing the container. Anything
 # still leased when the worker dies sits untouched until worker_lease_seconds lapses, so this is
-# the cheapest minute this script spends.
+# the cheapest two minutes this script spends.
 QUIET_WAIT_SECONDS="${SHANNON_QUIET_WAIT_SECONDS:-120}"
 # How long to wait for the new container to report the commit we asked for, healthy. A cold start
 # migrates, opens a gateway connection to Discord and sits out the image healthcheck start period.
@@ -275,8 +275,8 @@ SHANNON_IMAGE_TAG="$TARGET_TAG" compose pull app migrate ||
 #
 # A worker killed mid-batch leaves every delivery it has leased and not yet finished sitting in
 # PROCESSING until worker_lease_seconds (900) lapses: up to nine rows and up to fifteen minutes of
-# mirroring that silently does not happen. Waiting a minute for the batch in hand to drain is how
-# that bill is avoided, and there is no other way to avoid it.
+# mirroring that silently does not happen. Waiting up to two minutes for the batch in hand to
+# drain is how that bill is avoided, and there is no other way to avoid it.
 
 # The two settings psql needs, read the same way every other value here is read. Sourcing .env
 # would have been shorter and is wrong: it holds `SHANNON_ROLE_PROJECT_MANAGER=Project Manager`

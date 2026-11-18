@@ -693,8 +693,10 @@ class HttpGitHubClient:
     async def add_label(self, owner: str, name: str, number: int, label: str) -> None:
         """Put a label on an item.
 
-        GitHub creates a label the repository does not have rather than refusing, which is what
-        lets a server use the workflow without setting five labels up by hand first.
+        GitHub creates a label the repository does not have rather than refusing, so an ordinary
+        label needs no setup. The workflow's own status and priority labels are made to exist in
+        their colours first (`LabelDefinitions.ensure`, issue #246), because a label created here
+        comes out grey.
         """
         await self._send(
             "POST",

@@ -1,26 +1,38 @@
 # Deploying
 
-Two pieces, and the split between them is the whole design.
+Deploying has two pieces:
 
-`deploy.sh` is the runbook as one command. It does not decide when to run; a person does.
-`.github/workflows/deployed.yml` runs hourly, asks `/health` which commit is answering, compares
-it to the head of `main`, and opens an issue when they differ. The trigger stays human; the
-procedure and the noticing do not.
+| Piece | What it does |
+| --- | --- |
+| `deploy.sh` | Runs the whole deploy runbook as one command. A person decides when to run it. |
+| `.github/workflows/deployed.yml` | Runs every hour. It asks `/health` which commit is answering and compares it to the head of `main`. When they differ, it opens an issue. |
 
-That split is the answer to the objection this project already wrote down once. A pull loop or a
-push-to-deploy job restarts a live bot on a green merge with nobody watching, and a restart is not
-free here: a worker killed mid-batch leaves up to nine deliveries leased in `PROCESSING` until
-`worker_lease_seconds` (900) lapses, which is up to fifteen minutes of mirroring that silently
-does not happen. The reason not to automate the trigger was never that deploying is hard. It was
-that nobody would notice the deploy that did not happen. `/health` reporting the commit made that
-checkable, so it is checked, and the trigger can stay where it belongs.
+A person starts the deploy. The script does the steps, and the workflow notices when a deploy is
+missing.
 
-Nothing here holds a credential to the server. No SSH key, no password, no registry token is
-stored in GitHub. The workflow reads one public unauthenticated endpoint and writes an issue.
+### Why the trigger stays manual
+
+This project has already decided against a pull loop or a push-to-deploy job. Either one restarts
+the live bot after every green merge, with nobody watching. A restart has a cost here. A delivery
+is one queued event for the bot to post to Discord. The worker takes deliveries in batches and
+holds a lease on each one: a lock that marks it `PROCESSING`. A worker killed mid-batch leaves up
+to nine deliveries leased until `worker_lease_seconds` (900) runs out. Those deliveries are not
+posted for up to fifteen minutes, and nothing says so.
+
+Deploying is not hard. The risk is that nobody notices a deploy that did not happen. `/health`
+reports the commit, so the workflow can check it, and the trigger stays with a person.
+
+### No credentials in GitHub
+
+Nothing here holds a credential to the server. GitHub stores no SSH key, no password and no
+registry token. The workflow reads one public, unauthenticated endpoint and writes an issue.
 
 ## One-time setup
 
 ### On the server, as root
+
+These commands turn `/opt/shannon` into a git clone of this repository, then run the first
+deploy.
 
 ```bash
 apt-get update && apt-get install -y git jq curl
@@ -37,25 +49,29 @@ git checkout --detach origin/main
 ./scripts/deploy.sh
 ```
 
-`/opt/shannon` becomes a clone in place. Nothing moves and nothing stops: `.env` is gitignored so
-checkout leaves it alone, and the named volumes are keyed on the compose project name, which comes
-from the directory name. **Leave the directory called `shannon`.** Rename it and compose starts an
-empty Postgres beside the real one; `deploy.sh` refuses to run rather than let that happen.
+`/opt/shannon` becomes a clone in place. Nothing moves and nothing stops:
 
-`deploy.sh` arrives executable, because git carries the bit. A `chmod +x scripts/deploy.sh` used
-to stand in the block above, and it was the line that eventually stopped a deploy: the script was
-committed non-executable, so the chmod was a real modification to a tracked file and it sat in the
-clone for as long as the box existed. git will not overwrite a dirty file, so the first deploy that
-changed `deploy.sh` aborted at the checkout and said so in git's words rather than anybody's. Do
-not put it back.
+- `.env` is gitignored, so the checkout leaves it alone.
+- The named volumes are keyed on the compose project name. Compose takes that name from the
+  directory name.
 
-Making it a clone fixes a gap the manual process had: `compose.prod.yaml` and `Caddyfile` are
-versioned with the code, and `pull && up -d` never updated them. They were whatever was copied
-onto the box the day it was set up.
+**Leave the directory called `shannon`.** If you rename it, compose starts an empty Postgres beside
+the real one. `deploy.sh` refuses to run rather than let that happen.
 
-The first run writes `SHANNON_IMAGE_TAG=sha-<commit>` into `.env`, pinning the box to one
-immutable build instead of the moving `edge` tag. From then on a bare `docker compose up -d`, or a
-reboot, brings back the same build rather than whatever `edge` moved to overnight.
+**Do not add `chmod +x scripts/deploy.sh` to the steps.** git carries the executable bit, so
+`deploy.sh` arrives executable. The steps used to include that `chmod` while the script was
+committed non-executable. The `chmod` was then a change to a tracked file, and it stayed in the
+clone for as long as the box existed. git does not overwrite a changed file, so the first deploy
+that changed `deploy.sh` stopped at the checkout with only git's own error message.
+
+The clone also fixes a gap in the old manual process. `compose.prod.yaml` and `Caddyfile` are
+versioned with the code, but `pull && up -d` never updated them. They stayed as copied onto the
+box on the day it was set up.
+
+The first run writes `SHANNON_IMAGE_TAG=sha-<commit>` into `.env`. This pins the box to one
+build that never changes, instead of the moving `edge` tag. After that, a bare
+`docker compose up -d`, or a reboot, brings back the same build, not whatever `edge` moved to
+overnight.
 
 ### On GitHub, once
 
@@ -65,25 +81,33 @@ Add one repository secret:
 | --- | --- |
 | `SHANNON_HEALTH_URL` | `https://<hostname>/health` |
 
-A secret rather than a variable so it is masked in this public repository's run logs. It protects
-very little: the hostname is in a certificate transparency log and the endpoint is unauthenticated
-by design. It keeps the address of the box out of public logs and public issue bodies, which is
-worth one setup step. The `deployment` label the issues carry is created by the workflow itself,
-so there is nothing else to do.
+It is a secret, not a variable, so that it is masked in this public repository's run logs. That
+protects very little: the hostname is in a certificate transparency log, and the endpoint has no
+authentication by design. It does keep the address of the box out of public logs and public issue
+bodies, which is worth one setup step.
 
-Red in that workflow means the bot is not serving: `/health` did not answer, or answered 503.
-Green means it answered 200 and healthy. Whether it is running the head of `main` is said in the
-issue, not in the colour.
+`.github/workflows/deployed.yml` creates the `deployment` label its issues carry, so there is
+nothing else to set up. What its runs mean:
 
-Drift used to be red as well. It stopped being, because this deploy runs when a person decides and
-the box is normally behind `main` until they do, so red said two different things and neither
-could be acted on without reading which. **The issue is now the only signal for drift**, so watch
-the repository or the `deployment` label; an unwatched issue is no signal at all. Actions failure
-email (Settings → Notifications) still covers the two states that stayed red.
+| Run | Meaning |
+| --- | --- |
+| Red | The bot is not serving: `/health` did not answer, or answered 503. |
+| Green | `/health` answered 200 and healthy. |
+
+The colour does not say whether the box runs the head of `main`. The issue says that.
+
+"Drift" means the box runs an older commit than the head of `main`. Drift used to turn the run red
+as well. It no longer does: a person decides when to deploy, so the box is normally behind `main`
+until they do. Red then meant two different things, and you had to read which before you could
+act.
+
+**The issue is now the only signal for drift.** Watch the repository or the `deployment` label; an
+unwatched issue is no signal at all. Actions failure email (Settings → Notifications) still covers
+the two states that stay red.
 
 ## Deploying
 
-From the laptop, one command and one ssh password:
+Run it from your laptop. It is one command, and ssh asks for one password:
 
 ```bash
 ssh root@<host> /opt/shannon/scripts/deploy.sh              # head of main
@@ -91,47 +115,60 @@ ssh root@<host> /opt/shannon/scripts/deploy.sh <commit>     # a named commit
 ssh root@<host> /opt/shannon/scripts/deploy.sh --rollback   # the previous build
 ```
 
-In order, it:
+| Option | What it does |
+| --- | --- |
+| `--force` | Redeploys a commit that is already running and healthy. If deliveries are still leased after the two-minute wait (step 6), it carries on instead of refusing. |
+| `--no-wait` | Skips the wait in step 6 altogether. |
 
-1. Reads `/health` and records the commit that is running, and whether it is healthy.
-2. Resolves the target commit and stops if that is already what is running.
-3. Asks the registry whether `sha-<commit>` exists. **This is the check that pays for itself.**
-   No image means CI has not finished, CI was red and published nothing, or the GHCR token has
-   expired. All three used to look like "the deploy did not work"; none is a reason to touch a
-   running bot, and nothing has been changed when it stops here.
-4. Checks out that commit, so `compose.prod.yaml`, the `Caddyfile` and this script are all the
-   target commit's, then hands over to a copy of itself rather than reading on past its own edit.
-5. Pulls. A pull that fails has cost nothing.
-6. Waits up to two minutes for `webhook_events` to have nothing in `PROCESSING` with a live lease,
-   so the restart strands no deliveries. Refuses to go on if it does not go quiet, unless
+A delivery is one GitHub webhook event, stored as a row in `webhook_events`. While the worker
+handles a delivery it holds a lease on it: the row is marked `PROCESSING` and no other worker
+takes it until the lease runs out.
+
+The script does these steps in order:
+
+1. Reads `/health`. It records the commit that is running and whether it is healthy.
+2. Resolves the target commit. It stops if that commit is already running and healthy, unless
    `--force`.
-7. Pins the tag, then runs `alembic upgrade head` as its own step rather than as a dependency of
-   `up`. A migration that fails is one line, the `.env` tag goes back, and the old container is
-   still serving.
-8. `up -d`.
-9. Polls `/health` through the public URL for three minutes, and only calls it done when the
-   version matches the target commit **and** `healthy` is true. The public URL, so Caddy and the
-   certificate are proved too.
-10. On failure: saves the app logs to `/var/log/shannon-failed-<commit>.log`, prints the last
-    forty lines, puts the previous image back and verifies that.
-
-`--force` skips the quiet-queue wait and redeploys a commit already running. `--no-wait` skips
-only the wait.
+3. Asks the registry whether the image `sha-<commit>` exists. **This check prevents the most
+   common failure.** No image means one of three things: CI has not finished, CI was red and
+   published nothing, or the GHCR token has expired. Before this check, all three looked like "the
+   deploy did not work". None of them is a reason to touch a running bot. When the script stops
+   here, it has changed nothing.
+4. Checks out the target commit, so `compose.prod.yaml`, the `Caddyfile` and this script all come
+   from that commit. Then it hands over to a copy of itself, so it does not read on past its own
+   edited file.
+5. Pulls the image. If the pull fails, nothing has changed yet.
+6. Waits up to two minutes until `webhook_events` has nothing in `PROCESSING` with a live lease.
+   This way the restart strands no deliveries. If the queue does not go quiet, it refuses to go
+   on, unless `--force`.
+7. Pins the tag in `.env`, then runs `alembic upgrade head` as its own step, not as a dependency
+   of `up`. If the migration fails, the script says so in one line, puts the `.env` tag back, and
+   the old container keeps serving.
+8. Runs `up -d`, then recreates the `caddy` container on every deploy. A checkout replaces the
+   Caddyfile, and Docker still holds the old one, so recreating is what makes the target commit's
+   Caddyfile live. A Caddyfile edited by hand on the box also goes live at this point.
+9. Polls `/health` through the public URL for three minutes. It calls the deploy done only when
+   the version matches the target commit **and** `healthy` is true. It uses the public URL so
+   that Caddy and the certificate are checked too. It then requests `/oauth/github/callback`. If
+   that answers 404 (Caddy's catch-all), the deploy still counts as done, with a warning that every
+   one-time link is broken. It does not roll back.
+10. On failure, it saves the app logs to `/var/log/shannon-failed-<commit>.log`, prints the last
+    forty lines, puts the previous image back and checks that the previous image is healthy.
 
 ## What it cannot do
 
 **It cannot roll the database back.** A rollback restores the image and nothing else. The
-migration has been applied and `alembic downgrade` is not run, because a downgrade can drop a
-column and the data in it. The old code then runs against a newer schema, which is fine for an
-additive migration and is not fine for one that removed or renamed something the old code reads.
-The script says this in as many words when it rolls back, because it is the moment somebody needs
-to read it.
+migration stays applied. The script does not run `alembic downgrade`, because a downgrade can drop
+a column and the data in it. The old code then runs against a newer schema. That is fine for an
+additive migration. It is not fine for a migration that removed or renamed something the old code
+reads. The script prints this warning when it rolls back, because that is when somebody needs to
+read it.
 
-**It cannot watch a second box.** The workflow probes one `SHANNON_HEALTH_URL`, so a second
-deployment is not monitored by it and its drift is nobody's alert.
+**It cannot watch a second box.** The workflow checks one `SHANNON_HEALTH_URL`. It does not
+monitor a second deployment, so nobody is told when that one falls behind `main`.
 
-**It cannot roll back to nothing.** A first install, or a deploy attempted while the bot was
-already down, has no known-good commit to return to. It stops, leaves the stack as it is so the
-logs are live, and says so.
+**It cannot roll back when nothing ran before.** A first install, or a deploy started while the bot
+was already down, has no known-good commit to return to. The script stops, leaves the stack as it
+is so the logs you read are the live ones, and says so.
 
-**It cannot deploy without a person.** That is the design, not an omission.
+**It cannot deploy without a person.** This is on purpose: a person always starts the deploy.

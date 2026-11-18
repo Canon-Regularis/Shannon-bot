@@ -409,7 +409,8 @@ class RepositoryRefresh:
 
         Sequential rather than gathered: every sync holds a Postgres advisory lock, and holds the
         connection it took it on for the whole of its Discord phase, so running these at once
-        would put the pool's fifteen connections against however many items the cap allows.
+        would take two connections per item, for as many items as the cap allows, out of the
+        spare that `db.session` keeps for every slash command and webhook delivery between them.
         """
         mirrored = 0
         failed = 0

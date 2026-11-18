@@ -6,15 +6,17 @@ them. That is the right answer for a server that has not connected anybody's acc
 wrong one for a server that has, where GitHub already knows who may write here and was never
 asked.
 
-This asks it, and only where the question can be answered. A caller who has never proved an
-account is let through on the Discord role alone, which is what happened before this existed.
-The fallback is the whole posture rather than a corner of it: a second lock added on top of a
-working system must not become the reason the system stops.
+This asks it, and only where the question can be answered. By default a caller who has never
+proved an account is let through on the Discord role alone, which is what happened before this
+existed; `SHANNON_REQUIRE_PROVED_LINKS` refuses them instead, once the App's half of `/link` is
+configured. The fallback is the whole posture rather than a corner of it: a second lock added on
+top of a working system must not become the reason the system stops.
 
 What that costs is written down rather than glossed. Never running `/link` is a way to keep the
 old behaviour, so this raises the floor for everybody who has connected an account and does not
-close the door on anybody who has not. Closing it needs a setting that refuses an unproved
-caller outright, and that is a decision about a deployment rather than a default.
+close the door on anybody who has not. Closing it is `SHANNON_REQUIRE_PROVED_LINKS`, which
+refuses an unproved caller outright; it is off by default because that is a decision about a
+deployment rather than a default.
 """
 
 from __future__ import annotations

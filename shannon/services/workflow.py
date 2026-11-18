@@ -108,7 +108,7 @@ class WorkflowOutcome:
     # every command, and saying them would be a warning attached to nothing they can do.
     board_has_no_column: bool = False
     # The label this moved, as the REPOSITORY spells it rather than as it was typed. Empty
-    # for the seven commands that do not move an arbitrary one. The reply says it back, and
+    # for /status and /priority, which do not move an arbitrary one. The reply says it back, and
     # saying back what somebody typed would hide the one thing worth showing them: that
     # `/label BUG` wrote `bug`, because that is the label the repository actually has.
     label: str = ""
@@ -253,9 +253,11 @@ class ItemWorkflow:
         self._labels = repository_labels
         # Turns the member who asked into the credential a card is moved with. Issue #170.
         self._authorisations = authorisations
-        # None where this deployment has not turned board writes on, or has no project
-        # token to make them with. Wiring rather than a flag read here, so a deployment
-        # that has not opted in cannot reach the write at all.
+        # The board: moves cards and answers the column-order rule. The container always passes
+        # it. Whether it may WRITE is decided inside it (`may_write`, SHANNON_BOARD_MAY_MOVE_CARDS,
+        # issue #179), and each write goes out under the mover's own authorisation (issue #170),
+        # so the order rule still runs with writes off. None only for a caller built with no
+        # board at all.
         self._cards = cards
         # Puts a status or priority label on the repository in its colour before it is written,
         # and renames the one this bot used to write in its place. Issue #246.
@@ -905,10 +907,11 @@ class ItemWorkflow:
         Refusing there would leave the board and the row disagreeing for ever, with the card
         where the person put it and the status where it was.
 
-        Silent wherever there is nothing to ask: no writer, no card, no board, or a board whose
-        columns will not read. The rule comes from a list this bot did not write, so it fails
-        open the way every other board read on this path does - a GitHub outage must not take
-        `/status` down for everybody.
+        Silent wherever there is nothing to ask: no board client, no card, no board, or a board
+        whose columns will not read. Board writes being off does not silence it: the order is a
+        read, and only the write is gated. The rule comes from a list this bot did not write, so
+        it fails open the way every other board read on this path does - a GitHub outage must
+        not take `/status` down for everybody.
         """
         if self._cards is None or found.card is None:
             return
@@ -1054,8 +1057,9 @@ class ItemWorkflow:
         fixes an absence any other way. It matters most where nobody is watching. The board
         poller writes a move off as carried through on a permanent refusal, deliberately, so
         that one missing permission does not put every card ever dragged to Done into a set
-        retried once a minute for ever. Filed that way while the bot is out for five minutes,
-        the card is recorded as moved with its thread left open and no poll looks at it again.
+        retried on every board poll (every couple of seconds by default) for ever. Filed that way
+        while the bot is out for five minutes, the card is recorded as moved with its thread left
+        open and no poll looks at it again.
         """
         try:
             await self._threads.set_shut(thread_id=thread_id, shut=locked)
@@ -1142,14 +1146,16 @@ class ItemWorkflow:
         poller reads a refused lock as a bad moment worth another go, the column is what ends a
         retry and is deliberately not written, and the one thing that would have rebuilt the
         thread sits on the other side of the branch. A GitHub read, a thread fetch and two
-        warnings for that card, once a minute, with nothing able to clear it.
+        warnings for that card on every pass of the poller - every two seconds at the default
+        interval, or every minute while a board too big for one page holds it on the slow clock -
+        with nothing able to clear it.
         """
         rebuilt = await self._rerender(found, snapshot, change, settles_the_lock=False)
         # The one the command arrived on, where the render answered with nothing. It used to
-        # reach for a field `FoundItem` does not have, which nothing noticed because nothing here
-        # is type checked and every route to it is closed by an invariant somewhere else: a
-        # repository row is never deleted, a channel mapping is never deleted, and a ticket is
-        # refused before this. All true, and none of them stated anywhere near this line.
+        # reach for a field `FoundItem` does not have, which nothing noticed because nothing type
+        # checked this file at the time, and every route to it is closed by an invariant somewhere
+        # else: a repository row is never deleted, a channel mapping is never deleted, and a
+        # ticket is refused before this. All true, and none of them stated anywhere near this line.
         on = rebuilt or thread_id
         return on, await self._set_lock(on, wants_lock, guild_id=found.guild_id)
 

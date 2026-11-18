@@ -24,7 +24,8 @@ class ProcessLiveness:
     worker_task: asyncio.Task[None] | None = None
     # None means no token was configured (no-bot mode); a finished task means the gateway went.
     bot_task: asyncio.Task[None] | None = None
-    # None means no board was configured, the default; a finished task means it is not read.
+    # None means SHANNON_POLL_BOARDS is off, so this process does not poll; on is the default.
+    # A finished task means boards are no longer read.
     poller_task: asyncio.Task[None] | None = None
     flusher_task: asyncio.Task[None] | None = None
     # None means no token was configured, so there is nowhere to send a reminder. Issue #229.
@@ -72,11 +73,11 @@ class ProcessLiveness:
         return self.worker_task is not None and not self.worker_task.done()
 
     def poller_running(self) -> bool:
-        """Whether a configured board is still being read.
+        """Whether boards are still being read.
 
         Reported without counting towards the verdict: the poller has no halt wired to it, like the
         flusher and the reminder sender, so it dies quietly, but the process works on. True where
-        there is no board.
+        this process does not poll.
         """
         return self.poller_task is None or not self.poller_task.done()
 
