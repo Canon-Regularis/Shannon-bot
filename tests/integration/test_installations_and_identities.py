@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import GitHubInstallation, IdentityVerification
+from shannon.db.models import GitHubInstallation, IdentityVerification, VerifiedIdentity
 from shannon.db.stores.identities import (
     IdentityVerificationStore,
     PendingLink,
@@ -507,7 +507,9 @@ class TestWhatGitHubVouchedFor:
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
 
-        assert found == ProvedAccount(login="octocat", github_user_id=583231, verified_at=NOW)
+        assert found == ProvedAccount(
+            login="octocat", github_user_id=583231, verified_at=NOW, through_discord=True
+        )
 
     async def test_a_stale_proof_reads_as_none_rather_than_as_an_old_row(
         self, db_session: AsyncSession
@@ -553,7 +555,9 @@ class TestWhatGitHubVouchedFor:
         found = await store.proved(
             guild_id=GUILD, discord_user_id=ALICE, newer_than=NOW - timedelta(minutes=15)
         )
-        assert found == ProvedAccount(login="hubot", github_user_id=100, verified_at=NOW)
+        assert found == ProvedAccount(
+            login="hubot", github_user_id=100, verified_at=NOW, through_discord=True
+        )
 
     async def test_one_person_proving_says_nothing_about_another(
         self, db_session: AsyncSession
@@ -616,7 +620,10 @@ class TestAProofThatDoesNotGoStale:
         )
 
         assert await store.proved(guild_id=GUILD, discord_user_id=ALICE) == ProvedAccount(
-            login="octocat", github_user_id=583231, verified_at=NOW - timedelta(days=400)
+            login="octocat",
+            github_user_id=583231,
+            verified_at=NOW - timedelta(days=400),
+            through_discord=True,
         )
 
     async def test_the_same_row_reads_as_stale_when_a_window_is_given(
@@ -644,6 +651,87 @@ class TestAProofThatDoesNotGoStale:
         assert (
             await VerifiedIdentityStore(db_session).proved(guild_id=GUILD, discord_user_id=ALICE)
             is None
+        )
+
+
+class TestWhereAProofCameFrom:
+    """Whether a proof came back through a link Discord bound to the member's browser. Issue #94.
+
+    A proof that may let somebody in has to be theirs, and before migration `0033` a forwarded
+    link signed in whoever clicked it. Every proof this store writes came through Discord, since
+    its only writer is the round trip `0033` bound; a row from before `0039` cannot show that it
+    did, and reads as one that did not.
+    """
+
+    async def test_a_proof_remembered_now_came_through_discord(
+        self, db_session: AsyncSession
+    ) -> None:
+        store = VerifiedIdentityStore(db_session)
+        await store.remember(
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            github_login="octocat",
+            github_user_id=583231,
+            verified_at=NOW,
+        )
+
+        found = await store.proved(guild_id=GUILD, discord_user_id=ALICE)
+
+        assert found is not None
+        assert found.through_discord
+
+    async def test_a_proof_from_before_0039_reads_as_one_that_did_not(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Written as the migration left it, with the column at its default."""
+        db_session.add(
+            VerifiedIdentity(
+                discord_guild_id=GUILD,
+                discord_user_id=ALICE,
+                github_login="octocat",
+                github_user_id=583231,
+                verified_at=NOW,
+            )
+        )
+        await db_session.flush()
+
+        found = await VerifiedIdentityStore(db_session).proved(
+            guild_id=GUILD, discord_user_id=ALICE
+        )
+
+        assert found is not None
+        assert not found.through_discord
+        assert found == ProvedAccount(login="octocat", github_user_id=583231, verified_at=NOW)
+
+    async def test_proving_again_over_an_old_proof_makes_it_count(
+        self, db_session: AsyncSession
+    ) -> None:
+        """What one more `/link` does for a member whose proof predates `0039`: the round trip
+        writes over the row, flag and all, rather than leaving the old answer in place."""
+        db_session.add(
+            VerifiedIdentity(
+                discord_guild_id=GUILD,
+                discord_user_id=ALICE,
+                github_login="octocat",
+                github_user_id=583231,
+                verified_at=NOW - timedelta(days=400),
+            )
+        )
+        await db_session.flush()
+
+        store = VerifiedIdentityStore(db_session)
+        await store.remember(
+            guild_id=GUILD,
+            discord_user_id=ALICE,
+            github_login="octocat",
+            github_user_id=583231,
+            verified_at=NOW,
+        )
+
+        found = await store.proved(guild_id=GUILD, discord_user_id=ALICE)
+
+        assert found == ProvedAccount(
+            login="octocat", github_user_id=583231, verified_at=NOW, through_discord=True
         )
 
 

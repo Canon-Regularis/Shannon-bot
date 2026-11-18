@@ -152,6 +152,50 @@ def test_every_item_starts_with_no_choice_of_lines_made(migration_url: str) -> N
     assert default == "'{}'::jsonb"
 
 
+def test_a_proof_from_before_0039_did_not_come_through_discord(migration_url: str) -> None:
+    """0039's default, read out of the database: Alembic's comparison ignores server defaults.
+
+    Issue #94. A proof is about to be able to let somebody in, and before `0033` a forwarded link
+    signed in whoever clicked it, so nothing on an older row says whose account it really names.
+    A default that stopped being false would hand every one of those rows the benefit of a doubt
+    that only ever raises access.
+    """
+    command.upgrade(alembic_config(migration_url), "head")
+
+    nullable, default = asyncio.run(
+        _column(migration_url, "verified_identities", "through_discord")
+    )
+
+    assert nullable == "NO"
+    assert default == "false"
+
+
+def test_a_proof_already_kept_is_not_backfilled_as_one_that_came_through_discord(
+    migration_url: str,
+) -> None:
+    """The same decision for a row that was there when `0039` ran, which is the row it is for.
+
+    Rows written between `0033` and `0039` are genuine, and nothing on them says so either, so
+    they are treated as the older ones are: their members run `/link` once more.
+    """
+    config = alembic_config(migration_url)
+    command.upgrade(config, "0038")
+    asyncio.run(
+        _run(
+            migration_url,
+            "INSERT INTO verified_identities "
+            "(discord_guild_id, discord_user_id, github_login, github_user_id, verified_at) "
+            "VALUES (1, 42, 'octocat', 583231, now())",
+        )
+    )
+
+    command.upgrade(config, "head")
+
+    assert (
+        asyncio.run(_run(migration_url, "SELECT through_discord FROM verified_identities")) is False
+    )
+
+
 def test_migrations_roll_back(migration_url: str) -> None:
     config = alembic_config(migration_url)
     command.upgrade(config, "head")
@@ -205,6 +249,16 @@ async def _column(url: str, table: str, column: str) -> tuple[str, str]:
         ).one()
     await engine.dispose()
     return found[0], found[1]
+
+
+async def _run(url: str, statement: str) -> object:
+    """One statement in its own transaction, and the first column of what it answered, if any."""
+    engine = create_async_engine(url, poolclass=NullPool)
+    async with engine.begin() as connection:
+        result = await connection.execute(text(statement))
+        found = result.scalar() if result.returns_rows else None
+    await engine.dispose()
+    return found
 
 
 async def _recreate(admin_url: str, name: str) -> None:

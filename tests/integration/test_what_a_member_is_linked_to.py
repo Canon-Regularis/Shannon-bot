@@ -52,7 +52,11 @@ async def linked(
 async def signed_in(
     session: AsyncSession, login: str, github_user_id: int, *, guild_id: int = GUILD
 ) -> ProvedAccount:
-    """A round trip finished as this account, whatever it was for."""
+    """A round trip finished as this account, whatever it was for.
+
+    Through Discord, as every round trip since migration `0033` is, which is what the store now
+    writes down with it. Issue #94.
+    """
     await VerifiedIdentityStore(session).remember(
         guild_id=guild_id,
         discord_user_id=ALICE,
@@ -61,7 +65,9 @@ async def signed_in(
         verified_at=SIGNED_IN,
     )
     await session.commit()
-    return ProvedAccount(login=login, github_user_id=github_user_id, verified_at=SIGNED_IN)
+    return ProvedAccount(
+        login=login, github_user_id=github_user_id, verified_at=SIGNED_IN, through_discord=True
+    )
 
 
 class TestWhatAMemberIsToldAboutTheirLink:

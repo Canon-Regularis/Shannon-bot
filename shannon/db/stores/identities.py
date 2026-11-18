@@ -231,11 +231,19 @@ class ProvedAccount:
     The id as well as the login, because the id is the part that lasts: GitHub reassigns a freed
     name, so a proof answered by name alone cannot be held against a stored link without asking
     which account that name means today.
+
+    `through_discord` says whether the proof came back through a link Discord bound to the
+    member's own browser, which only proofs written since migration `0039` can show. Issue #94.
+    Anything that GRANTS on a proof has to check it, because before `0033` a forwarded link signed
+    in whoever clicked it, so an older row may name somebody else's account. What only refuses on
+    a proof, as #158 and `/linked` do, can ignore it. False by default, so a proof built anywhere
+    without saying reads as one that grants nothing.
     """
 
     login: str
     github_user_id: int
     verified_at: datetime
+    through_discord: bool = False
 
 
 class VerifiedIdentityStore:
@@ -253,7 +261,13 @@ class VerifiedIdentityStore:
         github_user_id: int,
         verified_at: datetime,
     ) -> None:
-        """Record a proof, replacing any earlier one for that person in that server."""
+        """Record a proof, replacing any earlier one for that person in that server.
+
+        Every proof recorded here came through Discord, so it is written as one. Issue #94. The
+        only writer is `redeem`, which since migration `0033` only the browser Discord bound to the
+        member can reach. Writing it over an older row is why one more `/link` is all a member
+        with a proof from before `0039` needs.
+        """
         login = github_login.strip()
         await self._session.execute(
             pg_insert(VerifiedIdentity)
@@ -263,6 +277,7 @@ class VerifiedIdentityStore:
                 github_login=login,
                 github_user_id=github_user_id,
                 verified_at=verified_at,
+                through_discord=True,
             )
             .on_conflict_do_update(
                 constraint="uq_verified_identities_guild_discord",
@@ -270,6 +285,7 @@ class VerifiedIdentityStore:
                     "github_login": login,
                     "github_user_id": github_user_id,
                     "verified_at": verified_at,
+                    "through_discord": True,
                 },
             )
         )
@@ -309,4 +325,5 @@ class VerifiedIdentityStore:
             login=row.github_login,
             github_user_id=row.github_user_id,
             verified_at=row.verified_at,
+            through_discord=row.through_discord,
         )

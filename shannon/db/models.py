@@ -578,6 +578,13 @@ class VerifiedIdentity(TimestampMixin, Base):
     # `GET /user` answering about the account that just authorised, which always carries an id.
     github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Whether this proof came back through a link Discord bound to the member's own browser, which
+    # every proof written since `0033` did and none before can be shown to have. Issue #94: a proof
+    # that may let somebody in has to be theirs, and a forwarded link before `0033` signed in
+    # whoever clicked it. False for every row from before `0039`, and read only by what grants.
+    through_discord: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
 
 class LoggedConversation(TimestampMixin, Base):
