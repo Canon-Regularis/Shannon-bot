@@ -8469,3 +8469,27 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **The README points at all three,** after its checks and in a section of its own.
 - **For whoever deploys it.** Nothing.
 - **Tests.** None new: nothing here is code. The README's own test still holds it to the code.
+
+## The architecture is written down
+
+- **How the code fits together was only half written down** (#243). The README's Architecture
+  section was a tree and three short paragraphs, the tree had fallen behind the code, and the
+  reasons for the big choices were spread across the README, `requirements.md`, this file and the
+  docstrings.
+- **`ARCHITECTURE.md`.**
+  - One diagram of the whole process, and the layers with what each package holds.
+  - A webhook's path from GitHub to its thread, and a slash command's, naming the module at each
+    step.
+  - The loops the process runs, which of them stop it when they die, and the order it starts and
+    stops in.
+  - How data, migrations and errors are handled.
+  - Why it is built this way, each reason taken from where it was already written.
+  - What comes next: known gaps, with a fix where the docs suggest one, the maintainer's planned
+    issues, the drafts awaiting a rewrite, and what was decided against.
+- **The README's Architecture section moves there,** corrected on the way: the tree now has
+  `services/transcripts/`, the GitHub App and board modules and the sign-in route; `config.py` is
+  the bottom layer, not near the top; the import rule is said to be kept by hand, since nothing
+  checks it yet (#203); and shutdown stops the poller and the flusher too. The README keeps a
+  short pointer under the same heading, and `CONTRIBUTING.md` points there as well.
+- **For whoever deploys it.** Nothing.
+- **Tests.** None new: nothing here is code.
