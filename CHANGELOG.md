@@ -8404,3 +8404,40 @@ feature end to end rather than assuming a predecessor the file never recorded.
   - The cooldowns' order, `/remind`, a board link followed later, `/register` and asking somebody
     else to `/link` never asking GitHub, the container's wiring and its startup error, and a member
     with GitHub write and no role running `/pr` and refused `/status`.
+
+## `nix develop` is the whole install
+
+- **Three things to install first** (#175). Working on this meant Python, uv and Docker, at
+  whatever versions the machine happened to have, and the README's own test command could not
+  reach the coverage floor on a fresh clone, because nothing said where the integration tier's
+  database comes from.
+- **Now one.** `flake.nix` opens a shell holding Python 3.14, uv, PostgreSQL 17, Node.js for
+  pyright, and git, gitleaks, openssl, curl and jq, at the versions `flake.lock` names. Entering
+  it runs `uv sync --extra dev --locked` and activates the result, so the README's checks run as
+  written. `.#py312`, `.#py313` and `.#py315` are the rest of CI's matrix.
+- **The database starts when asked.** `shannon-db start` brings up PostgreSQL 17 on the port the
+  compose database publishes, so `.env.example` reaches either, and creates `shannon` and
+  `shannon_test`; the shell already points `SHANNON_TEST_DATABASE_URL` at the second. `stop`,
+  `status`, `psql` and `reset` do what they say. Entering the shell never starts it and leaving it
+  never stops it, and `shannon-db start` with the compose database already on the port says so
+  and how to choose, rather than failing later. It listens on localhost only, with no Unix socket.
+- **A corner of its own.** Everything the shell writes is under `.nix/`. `.venv` is untouched,
+  because an environment built inside the shell runs only with the shell's libraries, and uv's
+  cache is separate for the same reason. Both ways of working fit in one checkout. The shell also
+  clears the variables Python's Nix setup hook exports for package builds, `PYTHONHASHSEED=0`
+  among them, so hash randomisation is on as it is everywhere else. On Linux it points the one
+  program a wheel brings, ruff's, at the shell's own loader, since the one it names is missing on
+  NixOS and ruff would not start there.
+- **One uv.** `nix flake check` fails while the shell's uv is not the version `ci.yml` pins, so
+  `nix flake update` and the pin move together. Dependabot does not read `flake.lock`.
+- **Where it runs.** Linux on x86_64 and ARM, and macOS on Apple silicon; on Windows, inside WSL 2.
+  Not Intel Macs, which nixpkgs stopped building for after 26.05.
+- **Nothing else changes.** The Docker path and its README steps are as they were. `flake.nix` and
+  `flake.lock` are LF in every checkout, since a carriage return breaks the shell's hook, and
+  `.nix/` is kept out of both git and the image's build context.
+- **For whoever deploys it.** Nothing. The image, the compose files and the deploy script do not
+  use Nix.
+- **Tests.** A new CI job, `nix`, inside the `CI` check, on Linux x86_64, Linux ARM and macOS. It
+  evaluates the flake for every system against the committed lock, builds every shell and checks
+  the formatting and the uv pin, then starts `shannon-db` and runs ruff, formatting, mypy, pyright,
+  the whole suite with coverage and the migrations, all inside `nix develop`.

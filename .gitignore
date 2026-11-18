@@ -39,3 +39,11 @@ requirements.audit.txt
 # hand them two untracked files that are not the problem.
 .deploy.lock
 .deploy-previous-tag
+
+# Left in the checkout by `nix develop`: its virtual environments, its uv cache and its database.
+# Plus direnv's cache, for anybody who enters the shell through one, and the links `nix build`
+# leaves behind.
+.nix/
+.direnv/
+result
+result-*

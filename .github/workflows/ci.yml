@@ -36,7 +36,7 @@ jobs:
     # and a version tag is a new ref on a commit main has already tested.
     #
     # A job rather than a step inside each of them, because the answer is one API conversation and
-    # three jobs want it.
+    # four jobs want it.
     name: Has this tree already passed
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -52,7 +52,7 @@ jobs:
     steps:
       - id: check
         # A commit rather than a tag. This is somebody else's code, it holds `github.token`, it
-        # stands in front of five of the six jobs here and it is inside the required check's
+        # stands in front of six of the seven jobs here and it is inside the required check's
         # `needs`, so a tag repointed overnight is a tag repointed in the one place nothing else
         # is watching. The version it names is the same thing a reader wants from `@v5`, without
         # `@v5` being free to mean something else tomorrow.
@@ -119,7 +119,9 @@ jobs:
       # says it supports.
       - uses: astral-sh/setup-uv@v7
         with:
-          # Pinned for the reason the matrix job below gives at length.
+          # Pinned for the reason the matrix job below gives at length. flake.nix reads every
+          # line here that is the bare `version:` key, and its check fails while the shell's uv
+          # is not that version, so the pins and flake.lock move together.
           version: "0.13.7"
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -384,12 +386,91 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1 \
             detect --source=. --redact --verbose --no-banner
 
+  nix:
+    # `nix develop` is one of the two documented ways into this project (#175), and a shell that
+    # stopped working would be found by the next newcomer rather than by anybody here. Dependabot
+    # cannot read flake.lock either, so nothing else would ever look. So CI enters the shell and
+    # runs what the jobs above run, against the database the shell brings rather than a service
+    # container: a developer's day, start to finish.
+    #
+    # Three runners because the flake offers three systems, and nobody working on this has a Mac
+    # or an ARM machine with Nix on it. This is the only place those two are ever tried.
+    #
+    # Coverage on every leg, unlike the matrix above. Here the floor is the evidence that the
+    # integration tier reached shannon-db's database, since a tier that skipped would still pass.
+    #
+    # No caches at all. Everything the shell holds comes from cache.nixos.org, which is faster
+    # than restoring a tarball of it. A uv cache saved from one pull request could never be
+    # restored by the next, and main never builds one, so it would only take room from the image
+    # job's layers.
+    name: Nix shell (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    needs: [duplicate]
+    # `!cancelled()` rather than a plain comparison, for the reason `quality` gives.
+    if: >-
+      !cancelled() &&
+      needs.duplicate.outputs.should_skip != 'true'
+    strategy:
+      # One system failing should not hide the result for the others.
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    defaults:
+      run:
+        # Every step below runs inside the shell, as a developer's would: its hook has synced
+        # .nix/venv, activated it and exported SHANNON_TEST_DATABASE_URL.
+        shell: nix develop --command bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      # A commit rather than a tag, for the reason the duplicate check gives: somebody else's
+      # code, which configures Nix with `github.token` so fetching nixpkgs is not on the shared
+      # anonymous rate limit.
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086  # v31.11.5
+
+      # Evaluating is pure and the lock is the same on every leg, so one runner speaks for all
+      # three systems, the fastest one. `--no-update-lock-file` because CI checks the lock that
+      # was committed: without it a missing flake.lock, or one older than an input change, would
+      # quietly be replaced with today's nixpkgs, and the steps below would test that instead.
+      - name: The flake evaluates on every system it offers
+        if: matrix.runner == 'ubuntu-latest'
+        shell: bash
+        run: nix flake check --all-systems --no-build --no-update-lock-file
+
+      # Builds every shell for this system, checks flake.nix's formatting, and holds the shell's
+      # uv to the version pinned above.
+      - name: Its checks pass here
+        shell: bash
+        run: nix flake check --print-build-logs --no-update-lock-file
+
+      - name: Start the database
+        run: shannon-db start
+
+      - name: Ruff
+        run: uv run ruff check --output-format=github .
+
+      - name: Formatting
+        run: uv run ruff format --check --diff .
+
+      - name: Types (mypy)
+        run: uv run mypy
+
+      - name: Types (pyright)
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest -q --durations=10 --cov
+
+      - name: Migrations reach head on the database the app defaults to
+        run: uv run alembic upgrade head
+
   ci:
     # Single required check to protect the branch with, so the matrix can grow without
     # anyone having to update branch protection.
     name: CI
     runs-on: ubuntu-latest
-    needs: [duplicate, quality, test, image, audit]
+    needs: [duplicate, quality, test, image, audit, nix]
     if: always()
     timeout-minutes: 2
     steps:
