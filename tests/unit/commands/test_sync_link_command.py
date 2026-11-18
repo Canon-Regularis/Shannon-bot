@@ -4,12 +4,14 @@ import pytest
 
 from shannon.commands.sync_link import build_issue_command, build_pr_command
 from shannon.discord_bot.errors import DiscordGatewayError
+from shannon.discord_bot.responses import REFUSED
 from shannon.domain.errors import (
     ItemNotReadyError,
     NotRegisteredError,
     RepositoryMismatchError,
     UnparseableLinkError,
 )
+from shannon.github import people
 from shannon.github.errors import GitHubNotFoundError, GitHubRateLimitError
 from shannon.services.sync.manual import ManualSyncOutcome, SyncFailedError
 from tests.fakes.discord_objects import (
@@ -17,7 +19,7 @@ from tests.fakes.discord_objects import (
     FakeInteraction,
     FakeMember,
 )
-from tests.unit.commands.conftest import default_gate, member_with
+from tests.unit.commands.conftest import GitHubGives, default_gate, gate_with, member_with
 
 # /pr and /issue share their whole body, so both are driven through the same tests. What used to
 # be two near-identical files could drift; this cannot. They keep their own parameter names,
@@ -51,8 +53,8 @@ class StubManualSync:
         return self.outcome
 
 
-def command(service: StubManualSync, build=build_pr_command):
-    return build(service, default_gate())
+def command(service: StubManualSync, build=build_pr_command, gate=None):
+    return build(service, gate or default_gate())
 
 
 async def run(
@@ -229,3 +231,31 @@ async def test_the_command_defers_before_doing_slow_work() -> None:
     await command(service).callback(interaction, "x")
 
     assert interaction.response.deferred is True
+
+
+class TestWhereGitHubStandsInForTheRole:
+    """Issue #94, through the real command: the level `/pr`'s own gate asks at is what decides."""
+
+    async def test_github_write_runs_it_with_no_role_at_all(self) -> None:
+        service = StubManualSync()
+        github = GitHubGives(people.WRITE)
+        interaction = FakeInteraction(guild_id=1, channel_id=99, user=FakeMember())
+        link = "https://github.com/Canon-Regularis/Shannon-bot/pull/7"
+
+        await command(service, gate=gate_with(github)).callback(interaction, link)
+
+        assert github.asked == [people.WRITE]
+        assert service.calls == [{"guild_id": 1, "link": link}]
+        assert interaction.said.startswith("Opened the thread for Canon-Regularis/Shannon-bot#7")
+        assert interaction.ephemerally == [True]
+
+    async def test_github_read_does_not(self) -> None:
+        service = StubManualSync()
+        interaction = FakeInteraction(guild_id=1, channel_id=99, user=FakeMember())
+
+        gate = gate_with(GitHubGives(people.READ_ONLY))
+
+        await command(service, gate=gate).callback(interaction, "x")
+
+        assert service.calls == []
+        assert interaction.mark == REFUSED

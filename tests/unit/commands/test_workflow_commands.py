@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 from discord import app_commands
 
+from shannon.commands._permissions import WORKFLOW_ROLES
 from shannon.commands.workflow import (
     MOST_CHOICES,
     OWN_NAMES,
@@ -31,9 +32,11 @@ from shannon.services.workflow import NotAnItemThreadError, WorkflowOutcome
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import (
     FakeAccess,
+    GitHubGives,
     administrator,
     default_gate,
     developer,
+    gate_with,
     member_with,
     project_manager,
 )
@@ -399,6 +402,38 @@ class TestWhatGitHubSays:
         )
 
         assert service.calls == []
+
+
+class TestWhereGitHubStandsInForTheRole:
+    """Issue #94, through the real command. `/status` is the project manager's alone, so the
+    GitHub that stands in for it is admin: write lets somebody run `/pr`, and not this."""
+
+    def status(self, github: GitHubGives, service: StubWorkflow, access: FakeAccess):
+        built = build_workflow_commands(service, gate_with(github), access, FakeColumns())
+        return {command.name: command for command in built}["status"]
+
+    async def test_github_write_is_refused(self) -> None:
+        service, access, github = StubWorkflow(), FakeAccess(), GitHubGives(people.WRITE)
+        interaction = FakeInteraction(user=FakeMember(), channel_id=THREAD_ID)
+
+        await self.status(github, service, access).callback(interaction, spoken(Status.DONE))
+
+        assert github.asked == [people.ADMIN]
+        assert service.calls == []
+        assert access.asked == [], "#158 was asked about somebody the gate had refused"
+        assert said(interaction) == (
+            f"{default_gate().denial('status', WORKFLOW_ROLES)} GitHub's admin permission would "
+            "let you in as well."
+        )
+
+    async def test_github_admin_moves_it_and_the_158_check_still_runs(self) -> None:
+        service, access, github = StubWorkflow(), FakeAccess(), GitHubGives(people.ADMIN)
+        interaction = FakeInteraction(user=FakeMember(), channel_id=THREAD_ID)
+
+        await self.status(github, service, access).callback(interaction, spoken(Status.IN_REVIEW))
+
+        assert service.calls == [("status", THREAD_ID, Status.IN_REVIEW)]
+        assert [asked[2] for asked in access.asked] == [people.WRITE]
 
 
 class TestWhenTheBoardHadNowhereToPutIt:
