@@ -24,6 +24,7 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
+from shannon.services.linking import NoTeamsHereError
 from shannon.services.reminders.book import TooManyRemindersError
 from tests.fakes.discord_objects import FakeInteraction
 
@@ -289,3 +290,22 @@ def test_it_is_matched_before_the_404_that_used_to_claim_it() -> None:
     kinds = [kind for kind, _ in _REPLIES]
 
     assert kinds.index(NotInstalledError) < kinds.index(GitHubNotFoundError)
+
+
+def test_a_personal_repository_s_refusal_says_why_instead_of_something_went_wrong() -> None:
+    """`/link_team` raised this with a whole sentence behind it and the table had no row, so the
+    person who ran it was told "Something went wrong here" and never heard that only an
+    organisation has teams. Red rather than amber: whose account owns the repository does not
+    change by waiting."""
+    error = NoTeamsHereError("octocat is a personal account, and only an organisation has teams.")
+
+    panel = reply_for(error, noun="team")
+
+    assert words_for(error, noun="team") == (
+        "octocat is a personal account, and only an organisation has teams."
+    )
+    assert panel.accent == Accent.FAILED
+    assert (
+        panel.text
+        == f"{REFUSED} octocat is a personal account, and only an organisation has teams."
+    )

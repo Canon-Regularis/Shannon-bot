@@ -28,7 +28,7 @@ from shannon.github.errors import (
     GitHubRefusedError,
 )
 from shannon.services.boards import BoardNotLinkedError, BoardUnreadableError
-from shannon.services.linking import InvalidGitHubTeamError
+from shannon.services.linking import InvalidGitHubTeamError, NoTeamsHereError
 from shannon.services.reminders.book import TooManyRemindersError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.sync.one_at_a_time import ItemBusyError
@@ -97,6 +97,10 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (BoardNotLinkedError, "{message}"),
     (BoardUnreadableError, "{message}"),
     (InvalidGitHubTeamError, "{message}"),
+    # It had no row, so `/link_team` on a personal repository told the person who ran it
+    # "Something went wrong here" instead of the sentence it raised to say why a team can never
+    # be asked for a review there. Red: an account's kind does not come right by itself.
+    (NoTeamsHereError, "{message}"),
     (NotAnItemThreadError, "{message}"),
     (WorkflowRefusedError, "{message}"),
     (ItemMovedError, "{message}"),
