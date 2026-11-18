@@ -10,3 +10,9 @@
 # guess about what counts as text.
 *.sh      text eol=lf
 Caddyfile text eol=lf
+
+# Nix reads the working tree as it is checked out, so a CRLF checkout (Windows, or WSL working in
+# a Windows clone) hands bash a carriage return at the end of every line of the shell hook and of
+# shannon-db, and bash rejects both. LF in every checkout, like the two above.
+*.nix      text eol=lf
+flake.lock text eol=lf
