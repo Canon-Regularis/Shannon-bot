@@ -1,0 +1,6 @@
+# Blank issues stay open: the maintainers file their own work that way.
+blank_issues_enabled: true
+contact_links:
+  - name: Security problem
+    url: https://github.com/Canon-Regularis/Shannon-bot/blob/main/CONTRIBUTING.md#security-problems
+    about: Not in a public issue. How to ask for a private channel instead.

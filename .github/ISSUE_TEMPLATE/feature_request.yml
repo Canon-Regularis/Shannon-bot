@@ -1,0 +1,60 @@
+name: Feature request
+description: Something Shannon should do that it does not do yet.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One change per issue, please, in the shape this repository's own issues use: the problem,
+        what should happen instead, how anyone can tell it is done, and where it stops. A maintainer
+        agrees the scope here before anybody starts on it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is missing or awkward today, and who it gets in the way of. Not the solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-outcome
+    attributes:
+      label: Expected outcome
+      description: What should be true once this is done, described from the outside.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: A list somebody could check one by one to say it is done, one `* [ ]` line each.
+      placeholder: |
+        * [ ] The first thing somebody can check
+        * [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this includes, and what it deliberately leaves out, under "Included:" and "Not included:".
+      placeholder: |
+        Included:
+
+        * ...
+
+        Not included:
+
+        * ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything else
+      description: Other ways it could be done, related issues, or the part of requirements.md it touches.
