@@ -20,6 +20,7 @@ from shannon.domain.models import (
 )
 from shannon.github.errors import GitHubNotFoundError, GitHubRefusedError
 from shannon.github.paging import PagedRead
+from shannon.github.people import NO_ACCESS, Standing
 
 # The same shape the real client uses, so one helper answers for both stores.
 _Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
@@ -108,6 +109,13 @@ class FakeGitHubClient:
         # What each login may do, for `/unregister`. Anything not named here is an admin.
         self.permissions: dict[str, str] = {}
         self.permission_calls: list[tuple[str, str]] = []
+        # What each login may do and which account GitHub says it is, for a grant. Kept apart from
+        # `permissions` on purpose, because the defaults point opposite ways: anything not named
+        # here has no access and no account. Issue #94. A grant must never be the default, and a
+        # test that forgot to stock this is then refused rather than let in by accident.
+        self.standings: dict[str, Standing] = {}
+        self.standing_calls: list[tuple[str, str]] = []
+        self.standing_error: Exception | None = None
         # Logins a test has declared to be people rather than organisations, and every
         # account this was asked about. Only `/link_team` asks.
         self.personal_accounts: set[str] = set()
@@ -519,6 +527,21 @@ class FakeGitHubClient:
         if self.error is not None:
             raise self.error
         return self.permissions.get(login.lower(), "admin")
+
+    async def collaborator_standing(self, owner: str, name: str, login: str) -> Standing:
+        """What one account may do to one repository and whose it is, out of a dictionary.
+
+        Answers no access and no account unless a test says otherwise, unlike `permission_for`
+        beside it. That one only ever restricts, so admin is the default that lets a test get on
+        with what it is about; this one grants, and a default that let people in would pass a
+        test that never meant to grant anything. Issue #94.
+        """
+        self.standing_calls.append((f"{owner}/{name}".lower(), login))
+        if self.standing_error is not None:
+            raise self.standing_error
+        if self.error is not None:
+            raise self.error
+        return self.standings.get(login.lower(), Standing(NO_ACCESS, None))
 
     async def get_json(
         self, path: str, *, owner: str = "", token: str = "", **params: str | int
