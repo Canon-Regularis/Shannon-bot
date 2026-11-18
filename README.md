@@ -232,6 +232,9 @@ the audit and the publish. A merge commit is a new commit carrying content the p
 already tested. The audit is never skipped, because whether a dependency has a known vulnerability
 is a question about today rather than about the tree.
 
+Before a first pull request, [CONTRIBUTING.md](CONTRIBUTING.md) covers the rest: the integration
+tier's own database, the conventions the tests hold a change to, commits and pull requests.
+
 ### With Nix
 
 `nix develop` is the whole install (#175). It opens a shell holding everything above at the
@@ -1048,6 +1051,15 @@ is there so that a thread told logging is on can always be made to stop. A membe
 `/log_conversation` on GitHub write and has since lost it is refused at the tier, like a member
 whose role was taken away, and so is one who tries while GitHub cannot be asked. Anybody else with
 the tier can still stop it; stopping is not exempt from the tier.
+
+## Contributing
+
+Every change starts from an issue: there are forms for a
+[bug report](https://github.com/Canon-Regularis/Shannon-bot/issues/new?template=bug_report.yml) and
+a [feature request](https://github.com/Canon-Regularis/Shannon-bot/issues/new?template=feature_request.yml).
+[CONTRIBUTING.md](CONTRIBUTING.md) is how to set the project up, make a change, check it and propose
+it, and what to do about a security problem, which never goes in a public issue. Everybody taking
+part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
