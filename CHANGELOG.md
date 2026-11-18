@@ -8441,3 +8441,31 @@ feature end to end rather than assuming a predecessor the file never recorded.
   evaluates the flake for every system against the committed lock, builds every shell and checks
   the formatting and the uv pin, then starts `shannon-db` and runs ruff, formatting, mypy, pyright,
   the whole suite with coverage and the migrations, all inside `nix develop`.
+
+## How to contribute is written down
+
+- **Nothing said how to take part** (#176). There was no guide, no issue form and no code of
+  conduct, so a newcomer had to work out the conventions from the history, and some of them are
+  nowhere else at all. On the Docker path the integration tier needs a database of its own that
+  nothing created, and pointing it at the development database throws that data away.
+- **`CONTRIBUTING.md`.**
+  - Before you start: an issue first, its scope agreed there.
+  - Setting up both ways, Docker and uv, or Nix, with the integration tier's `shannon_test` and its
+    variable.
+  - How the code and the tests are written.
+  - Everywhere a setting, a migration, a table, a command, a reply's wording, a protocol, a route,
+    a loop or a webhook event has to reach, and which of those places a test holds.
+  - Forks for anybody without write access, and what `main`'s review rules ask of a pull request.
+  - The checks CI runs, the CHANGELOG's shape, commits, dependencies and pull requests, each the
+    way the history already does them.
+- **A security problem's details stay out of public issues.** The guide says to open a blank issue
+  that only asks for a private channel, and the issue chooser links there.
+- **Issue forms.** A bug report asks for the version and where it runs, and warns that logs must
+  lose tokens, secrets and private repository content first. A feature request asks for the
+  problem, the expected outcome, acceptance criteria and the scope, the shape this repository's
+  own issues use. Blank issues stay open.
+- **A Code of Conduct.** The Contributor Covenant 2.1, with reports made the same private way as
+  security problems rather than to a published address.
+- **The README points at all three,** after its checks and in a section of its own.
+- **For whoever deploys it.** Nothing.
+- **Tests.** None new: nothing here is code. The README's own test still holds it to the code.

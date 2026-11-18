@@ -1,0 +1,87 @@
+name: Bug report
+description: Something Shannon does that it should not, or does not do that it should.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. One bug per issue, please. If an issue already describes it,
+        add what you know there instead.
+
+        **A security problem does not go here.** Anything that could let somebody read, change or
+        take over what they should not: see [Security problems](https://github.com/Canon-Regularis/Shannon-bot/blob/main/CONTRIBUTING.md#security-problems).
+
+  - type: checkboxes
+    id: not-security
+    attributes:
+      label: Not a security problem
+      options:
+        - label: This is not a security problem, and nothing below is a token, a secret or private repository content.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, in Discord, on GitHub or in the logs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead, and why you expected it (a README section, a command's description, how it behaved before).
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      description: |
+        The steps from the start: the command and its options, the webhook event (opening a pull
+        request, a review, a label), or the board action. Say whether it happens every time.
+      placeholder: |
+        1. Run /board link in #dev
+        2. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `version` that `GET /health` reports (a commit). Failing that, the image tag you run, where `sha-…` names one build and `edge` does not. A commit hash if you run it from a checkout, or "unknown" if you only use somebody else's bot.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runs-on
+    attributes:
+      label: Where it runs
+      options:
+        - The published image, with compose.prod.yaml
+        - An image built from a checkout
+        - A checkout, with uv
+        - A checkout, inside nix develop
+        - Something else (say below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The lines around the moment it went wrong. **Remove tokens, secrets, webhook signatures and
+        private repository content before pasting**: an issue is public, and what is posted here
+        stays in its history even after an edit.
+      render: text
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: Settings that differ from the defaults (names only, never values), the repository or board involved, screenshots.
