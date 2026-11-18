@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import SecretStr
@@ -11,6 +12,7 @@ from shannon.config import Settings
 from shannon.container import build_container
 from shannon.discord_bot.permissions import MemberTiers
 from shannon.services.sync.shutting import KeepsThreadsShut
+from shannon.services.tier_grants import GitHubTierGrants
 from shannon.services.verification import OAuthClient
 from tests.fakes.github import ClosingGitHub, FakeGitHubClient
 from tests.fakes.threads import FakeThreadGateway
@@ -354,6 +356,92 @@ class TestTheBoardLinksSecondQuestion:
         tiers = container.verification._tiers
         assert isinstance(tiers, MemberTiers)
         assert tiers._members is threads
+
+
+class TestGitHubStandingInForARole:
+    """Issue #94. One setting decides whether GitHub access may stand in for a Discord role, and
+    the gate it hands that to is the one every command and the board link's check read, so the
+    wiring is the whole of the switch."""
+
+    SIGNED_IN: ClassVar[Mapping[str, Any]] = {
+        "github_app_client_id": "Iv23liAbC",
+        "github_app_client_secret": SecretStr("shh"),
+        "public_base_url": "https://shannon.example.com",
+        "discord_client_id": "1180000000000000",
+        "discord_client_secret": SecretStr("placeholder-discord-client-secret"),
+    }
+
+    def booted(
+        self, caplog: pytest.LogCaptureFixture, github: FakeGitHubClient, **settings: Any
+    ) -> Any:
+        with caplog.at_level(logging.ERROR, logger="shannon.container"):
+            return container_with(
+                DisposableEngine(), github, Settings(github_webhook_secret="x", **settings)
+            )
+
+    def gate_of(self, container: Any) -> Any:
+        assert container.verification is not None
+        tiers = container.verification._tiers
+        assert isinstance(tiers, MemberTiers)
+        return tiers._gate
+
+    def test_it_is_off_unless_somebody_turns_it_on(self) -> None:
+        """Read off the field rather than a built `Settings`, which would read a local `.env`."""
+        assert Settings.model_fields["github_access_grants_tiers"].default is False
+
+    def test_off_the_gate_is_handed_nothing_to_ask(self, caplog: pytest.LogCaptureFixture) -> None:
+        container = self.booted(caplog, FakeGitHubClient(), **self.SIGNED_IN)
+
+        assert self.gate_of(container)._grants is None
+
+    def test_on_the_gate_asks_github_through_the_bot_s_own_client(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        github = FakeGitHubClient()
+        container = self.booted(caplog, github, github_access_grants_tiers=True, **self.SIGNED_IN)
+
+        grants = self.gate_of(container)._grants
+        assert isinstance(grants, GitHubTierGrants)
+        assert grants._github is github
+        assert grants._sessionmaker is container.sessionmaker
+
+    def test_on_with_nothing_to_prove_an_account_through_is_said_at_boot(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        container = self.booted(caplog, FakeGitHubClient(), github_access_grants_tiers=True)
+
+        assert "SHANNON_GITHUB_ACCESS_GRANTS_TIERS is on" in caplog.text
+        assert "SHANNON_DISCORD_CLIENT_SECRET" in caplog.text
+        assert "restart" in caplog.text
+        # Still wired, so a proof kept from before counts and the line is the only difference.
+        assert isinstance(self.gate_of(container)._grants, GitHubTierGrants)
+
+    def test_on_with_only_the_discord_half_missing_is_said_too(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        signed_in_to_github_only = {
+            key: value for key, value in self.SIGNED_IN.items() if not key.startswith("discord")
+        }
+        self.booted(
+            caplog, FakeGitHubClient(), github_access_grants_tiers=True, **signed_in_to_github_only
+        )
+
+        assert "SHANNON_GITHUB_ACCESS_GRANTS_TIERS is on" in caplog.text
+
+    def test_on_with_a_way_to_prove_one_says_nothing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self.booted(caplog, FakeGitHubClient(), github_access_grants_tiers=True, **self.SIGNED_IN)
+
+        assert "SHANNON_GITHUB_ACCESS_GRANTS_TIERS" not in caplog.text
+
+    def test_off_with_nothing_to_prove_one_says_nothing_about_it(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The default deployment, which must not be told about a setting it never turned on."""
+        self.booted(caplog, FakeGitHubClient())
+
+        assert "SHANNON_GITHUB_ACCESS_GRANTS_TIERS" not in caplog.text
 
 
 class TestTheReminderSender:

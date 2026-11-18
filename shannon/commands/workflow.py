@@ -209,6 +209,11 @@ async def _act(
     without it should be told that rather than told about a GitHub account they may
     never have connected. Then GitHub, and only after the defer: this one makes a
     network call, and Discord allows three seconds for a first response.
+
+    Where a server lets GitHub access stand in for a role (issue #94), the first check
+    can itself ask GitHub, for a member with no role, and defers before it does; the
+    defer here then finds that done and does nothing. That member is asked about twice,
+    once whether they may hold the tier and once, as everybody is, whether they may write.
     """
     where = await in_a_thread(interaction, name, gate, WORKFLOW_ROLES)
     if where is None:

@@ -19,6 +19,7 @@ from shannon.github.errors import (
     GitHubRefusedError,
     GitHubUnavailableError,
 )
+from shannon.github.people import Standing
 from tests.support import github_payloads as payloads
 
 
@@ -1912,6 +1913,110 @@ class TestWhatOneAccountMayDoToARepository:
         async with client_with(handler) as client:
             with pytest.raises(GitHubUnavailableError):
                 await client.permission_for("acme", "widget", "octocat")
+
+
+class TestAPermissionThatNamesItsAccount:
+    """The same answer with the account GitHub found under the login. Issue #94.
+
+    GitHub is asked by login, and a login is handed to somebody else once its holder renames. A
+    permission is only worth letting somebody in on if it is known whose it is, and the answer
+    already says: `user.id` rides along with `permission` in the one body, on the installation's
+    token, so there is no second call and no anonymous one.
+    """
+
+    def answering(self, body: object):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps(body))
+
+        return handler
+
+    async def test_it_reads_the_permission_and_the_account_it_is_about(self) -> None:
+        body = {"permission": "write", "user": {"login": "octocat", "id": 583231}}
+
+        async with client_with(self.answering(body)) as client:
+            standing = await client.collaborator_standing("acme", "widget", "octocat")
+
+        assert standing == Standing("write", 583231)
+
+    async def test_somebody_who_is_not_a_collaborator_has_nothing_and_is_nobody(self) -> None:
+        """A 404 names no account, so there is no id for a caller to match against."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+        async with client_with(handler) as client:
+            standing = await client.collaborator_standing("acme", "widget", "stranger")
+
+        assert standing == Standing("none", None)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"permission": "admin"},
+            {"permission": "admin", "user": None},
+            {"permission": "admin", "user": "octocat"},
+            {"permission": "admin", "user": {"login": "octocat"}},
+            {"permission": "admin", "user": {"id": "583231"}},
+        ],
+    )
+    async def test_a_body_that_does_not_name_the_account_names_nobody(self, body: object) -> None:
+        """No account rather than a guess, so a caller comparing ids is answered no. The
+        permission is still the one GitHub gave, for a caller that only asks that."""
+        async with client_with(self.answering(body)) as client:
+            standing = await client.collaborator_standing("acme", "widget", "octocat")
+
+        assert standing == Standing("admin", None)
+
+    async def test_a_body_that_does_not_say_what_they_may_do_reads_as_nothing(self) -> None:
+        body = {"permission": 7, "user": {"id": 583231}}
+
+        async with client_with(self.answering(body)) as client:
+            standing = await client.collaborator_standing("acme", "widget", "octocat")
+
+        assert standing == Standing("none", 583231)
+
+    async def test_every_part_of_the_path_is_escaped(self) -> None:
+        seen: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.raw_path)
+            return httpx.Response(200, content=json.dumps({"permission": "admin"}))
+
+        async with client_with(handler) as client:
+            await client.collaborator_standing("acme", "widget/..", "octo/cat")
+
+        assert seen == [b"/repos/acme/widget%2F../collaborators/octo%2Fcat/permission"]
+
+    async def test_it_goes_out_on_the_owner_s_installation_token(self) -> None:
+        """Not anonymously, as `user_id` would ask it: that is the hourly budget one address
+        gets, and a busy server asking about every member would spend it."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(200, content=json.dumps({"permission": "write"}))
+
+        tokens = FakeTokens(acme="ghs_acme")
+        async with client_with(handler, tokens=tokens) as client:
+            await client.collaborator_standing("acme", "widget", "octocat")
+
+        assert seen == ["Bearer ghs_acme"]
+        assert tokens.asked == ["acme"]
+
+    async def test_github_being_down_still_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        async with client_with(handler) as client:
+            with pytest.raises(GitHubUnavailableError):
+                await client.collaborator_standing("acme", "widget", "octocat")
+
+    async def test_permission_for_still_answers_as_it_did(self) -> None:
+        """It is the permission half of this now, and its four callers only ever restrict."""
+        body = {"permission": "write", "user": {"login": "octocat", "id": 583231}}
+
+        async with client_with(self.answering(body)) as client:
+            assert await client.permission_for("acme", "widget", "octocat") == "write"
 
 
 class TestWritingPeople:

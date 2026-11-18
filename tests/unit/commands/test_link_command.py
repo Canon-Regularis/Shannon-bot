@@ -18,11 +18,21 @@ from unittest.mock import MagicMock
 import discord
 import pytest
 
+from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands.link import CANNOT_POST, build_link_command
+from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.responses import REFUSED
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import VerificationPurpose
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.fakes.grants import FakeGrants
+from tests.unit.commands.conftest import (
+    administrator,
+    default_gate,
+    developer,
+    gate_with,
+    project_manager,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -59,9 +69,14 @@ async def fire(
     await command.callback(theirs, them)  # type: ignore[arg-type]  # pyright: ignore[reportCallIssue]
 
 
-def run_it(*, verification: FakeVerification | None = None, who: FakeMember | None = None):
+def run_it(
+    *,
+    verification: FakeVerification | None = None,
+    who: FakeMember | None = None,
+    gate: PermissionGate | None = None,
+):
     verification = verification or FakeVerification()
-    command = build_link_command(verification, default_gate())
+    command = build_link_command(verification, gate or default_gate())
     caller = who or developer()
     caller.id = ALICE
     return command, FakeInteraction(user=caller), verification
@@ -248,3 +263,32 @@ class TestAskingSomebodyElse:
 
         assert interaction.said == CANNOT_POST
         assert interaction.ephemerally == [True]
+
+
+class TestGitHubNeverStandsInForAskingSomebodyElse:
+    """Issue #94. A server that lets GitHub stand in for a role elsewhere does not let it here.
+    The note to the member named has to be this interaction's first response, since a public
+    message can be nothing else, and asking GitHub would mean deferring first."""
+
+    async def test_a_member_github_would_vouch_for_is_refused_as_before(self) -> None:
+        grants = FakeGrants(None)
+        command, interaction, verification = run_it(who=FakeMember(), gate=gate_with(grants))
+
+        await fire(command, interaction, somebody_else())
+
+        assert grants.asked == [], "GitHub was asked, which would have meant deferring first"
+        assert interaction.response.deferred is False
+        assert interaction.response.messages == [
+            f"{REFUSED} {default_gate().denial('link', REGISTER_ROLES)}"
+        ]
+        assert interaction.followup.messages == []
+        assert verification.issued_for == []
+
+    async def test_connecting_your_own_still_needs_nothing_and_asks_nobody(self) -> None:
+        grants = FakeGrants(None)
+        command, interaction, verification = run_it(who=FakeMember(), gate=gate_with(grants))
+
+        await fire(command, interaction)
+
+        assert grants.asked == []
+        assert verification.issued_for == [ALICE]

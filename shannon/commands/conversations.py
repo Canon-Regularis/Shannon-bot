@@ -79,6 +79,12 @@ def build_stop_conversation_command(
     and refusing them the stop would leave a thread publishing itself with nobody able to say
     when to finish. Stopping writes nothing to GitHub in any case: it closes the row, and the
     comment that has already been posted is already posted.
+
+    That holds for the role and not for GitHub standing in for it. Where a server lets GitHub
+    write stand in for the Developer role (issue #94), this has the same gate as the start and
+    no exemption: somebody let in only by GitHub who has since lost write, or who asks while
+    GitHub cannot be asked, is refused the stop, as somebody who lost the role always was. Anybody
+    else holding the tier, or GitHub write, can still stop the log.
     """
 
     @app_commands.command(

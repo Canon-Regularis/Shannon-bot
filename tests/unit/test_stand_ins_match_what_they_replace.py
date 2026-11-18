@@ -38,7 +38,7 @@ from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
 from shannon.discord_bot.client import CapturesMessages, ShannonBot
-from shannon.discord_bot.permissions import MemberTiers, RoleNames
+from shannon.discord_bot.permissions import GrantsTiers, MemberTiers, RoleNames
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.discord_bot.threads import (
     ArchivesThreads,
@@ -124,6 +124,7 @@ from shannon.services.sync.relocation import MovesThreadsBetweenChannels, Thread
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.sync.state_lines import StateLine
 from shannon.services.sync.threads import ItemThreads
+from shannon.services.tier_grants import GitHubTierGrants, ReadsStanding
 from shannon.services.tracking import ThreadTracking
 from shannon.services.transcripts.flush import TranscriptFlusher
 from shannon.services.transcripts.log import ConversationLog
@@ -141,6 +142,7 @@ from shannon.services.verification import (
 from shannon.services.workflow import ItemWorkflow, LabelsItems
 from tests.fakes.boards import FakeBoard
 from tests.fakes.github import FakeGitHubClient
+from tests.fakes.grants import FakeGrants
 from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
 from tests.fakes.queues import InMemoryDeliveryQueue
@@ -278,6 +280,13 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # and the one that hands links out says whether it can.
     (RemembersWhoIsLinked, UserLinkingService),
     (OffersLinks, GitHubIdentityVerification),
+    # Issue #94. GitHub standing in for a role: the gate asks whatever it was handed, and every
+    # guard test hands it the fake. The service asks GitHub one question, and both clients have
+    # to answer it with the account id, which is what the grant compares.
+    (GrantsTiers, GitHubTierGrants),
+    (GrantsTiers, FakeGrants),
+    (ReadsStanding, HttpGitHubClient),
+    (ReadsStanding, FakeGitHubClient),
 ]
 
 

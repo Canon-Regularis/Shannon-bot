@@ -38,6 +38,7 @@ from shannon.github.errors import (
     GitHubUnavailableError,
 )
 from shannon.github.paging import PagedRead
+from shannon.github.people import NO_ACCESS, Standing
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,8 @@ class GitHubClient(
     async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]: ...
 
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
+
+    async def collaborator_standing(self, owner: str, name: str, login: str) -> Standing: ...
 
     async def is_organisation(self, owner: str) -> bool: ...
 
@@ -606,6 +609,22 @@ class HttpGitHubClient:
         which records only a claim somebody made about themselves. GitHub maps `maintain` onto
         `write` and `triage` onto `read`, so these four are the whole ladder. A 404 means not a
         collaborator rather than an error.
+
+        The permission half of `collaborator_standing`, for the callers that only ever restrict
+        and so have no use for the account it names.
+        """
+        return (await self.collaborator_standing(owner, name, login)).permission
+
+    async def collaborator_standing(self, owner: str, name: str, login: str) -> Standing:
+        """What one account may do to one repository, and which account GitHub answered about.
+
+        Issue #94. The same endpoint and the same installation token as `permission_for`, read
+        once for both halves: GitHub names the collaborator it found in `user`, and that id is
+        what tells a proved account from whoever holds its old login now. Not `user_id`, which
+        would ask the same thing anonymously on the hourly budget one address gets.
+
+        A 404 is no access and no account rather than an error. A body that leaves either half
+        out answers none for that half: no permission refuses, and no account matches nobody.
         """
         path = (
             f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
@@ -614,10 +633,15 @@ class HttpGitHubClient:
         try:
             payload = await self._get(path, owner)
         except GitHubNotFoundError:
-            return "none"
+            return Standing(NO_ACCESS, None)
 
         permission = payload.get("permission")
-        return permission if isinstance(permission, str) else "none"
+        user = payload.get("user")
+        account_id = user.get("id") if is_json_object(user) else None
+        return Standing(
+            permission if isinstance(permission, str) else NO_ACCESS,
+            account_id if isinstance(account_id, int) else None,
+        )
 
     async def patch_json(self, path: str, *, owner: str, token: str = "", json: JsonObject) -> None:
         """Send JSON at a path with PATCH, for the one caller that writes to a board.

@@ -8321,3 +8321,86 @@ feature end to end rather than assuming a predecessor the file never recorded.
   edge, a missing date, unlinked, unproved and muted names, a login that changed hands, an edit,
   a deleted block posted again, both switches, a rebuild from an old delivery and a replacement
   thread.
+
+## `/link_team` on a personal repository says why it refused
+
+- **It said something went wrong.** `/link_team` refuses where the registered repository belongs
+  to a personal account, because only an organisation has teams and the mapping could never match
+  anything. The refusal was right and its reason never arrived: the table that turns a refusal into
+  a reply had no row for it, so whoever ran the command was told "Something went wrong here". Found
+  while working on #94, where a personal repository is the whole case.
+- **Now the sentence itself,** in red and marked refused, like the other refusals of a team: the
+  owner is a personal account, only an organisation has teams, and GitHub will never ask a team
+  for a review there.
+- **For whoever deploys it.** No migration, setting or new permission.
+- **Tests.** The command's reply to a repository owned by a person, and the row in the reply table.
+
+## GitHub access can stand in for a role
+
+- **GitHub could only refuse** (#94). Since #158, a member who proved their account with `/link`
+  is checked against their own permission on the repository, but that check only ever takes away:
+  a collaborator with write and no Developer role was still refused every command. On a personal
+  repository nothing could change that, and on an organisation's neither, because a team only
+  rings a role and grants none.
+- **Now it can let somebody in, where a server asks it to.** With the new setting on, a member the
+  Discord role turns away is asked about on GitHub: write on the registered repository passes
+  wherever Developer does, and admin wherever Project Manager does too. The Admin tier is never
+  granted, so GitHub admin is not a guild administrator. `/register` and asking somebody else to
+  `/link` stay on the role: no repository exists to ask about before `/register`, and the public
+  note `/link @member` posts has to be the command's first answer. A tier a server switched off by
+  emptying its role setting stays off. Reminding somebody else and following a board link later
+  count GitHub the same way.
+- **Only an account proved through Discord.** A proof made before links went through Discord
+  (`0033`) could have been finished by whoever a link was forwarded to, so a proof only counts if
+  it says it came back through a link Discord bound to its member's browser. Every proof kept from
+  now on does; none kept before can, so members run `/link` once more. GitHub is asked about the
+  proved account by name and the answer is held against its id, so a login somebody else took
+  after a rename lets nobody in, and the refusal says to run `/link` again.
+- **Fails closed.** Where #158 fails open, this fails the other way, because it only adds access:
+  an outage, a timeout or a rate limit grants nothing, the reply says GitHub could not be asked,
+  amber for a rate limit and red otherwise, and the Discord role works as it always did. The log
+  says so at warning level, and every grant is one line at info naming the permission, the
+  account, the repository and the member.
+- **Nothing more for a role holder.** The role is checked first and passes with no read at all,
+  so a member with the role sees no difference. A member it turns away is asked about after the
+  command has told Discord an answer is coming, so a refusal arrives a moment after Discord shows
+  "thinking", as a private follow-up. A command's own wait between runs is still checked after the
+  role, so a member GitHub turns away spends nobody's turn.
+- **Asked once a minute at most.** An answer that grants nothing is remembered for a minute per
+  proof, so somebody with no role cannot spend the installation's GitHub budget, which the webhook
+  sync and the board poller share, by asking over and over. Running `/link` again forgets it. An
+  answer that grants is never remembered, so access taken away on GitHub is gone here at once.
+- **What it means for a server.** GitHub folds an organisation's base permission and its owners
+  into its answer, so in an organisation whose base permission is write, every member who links
+  gets the Developer tier. GitHub admin counts as Project Manager, so an admin who wrote a pull
+  request can move it with `/status` themselves. A later sign-in for `/register`, `/unregister` or
+  `/board` as another account moves the grant to that account, which is the rule #158 already
+  follows. A member let in only by GitHub who has since lost write cannot `/stop_conversation`.
+  All four are in the README.
+- **#158 is unchanged.** A command it checks still asks GitHub after the grant, so a member let in
+  this way costs the same read twice there.
+- **`/link_team`'s refusal on a personal repository,** above, was found on the way.
+- **For whoever deploys it.**
+  - The setting is `SHANNON_GITHUB_ACCESS_GRANTS_TIERS`, **off by default**. Off, every gate is the
+    role check it was, with no extra read.
+  - Migration `0039` adds `verified_identities.through_discord`, false for every row already
+    there and written true by every proof from now on. Nothing is backfilled, so after turning the
+    setting on, members who want GitHub to count run `/link` once more.
+  - It needs what `/link` needs: the App's client id and secret, `SHANNON_PUBLIC_BASE_URL`, and
+    `SHANNON_DISCORD_CLIENT_ID` and `SHANNON_DISCORD_CLIENT_SECRET`. On without them, the bot says
+    so at startup.
+  - No new App permission, webhook event or reinstall, and no Manage Roles: it reads the
+    collaborator permission the App already reads for #158, and the bot never hands out a role.
+- **Tests.**
+  - The migration's default and that nothing is backfilled, and where a proof came from through
+    the store.
+  - The client reading which account a permission is about.
+  - The gate's route for every command's tiers, including an emptied one.
+  - A new file for every way the grant service grants or refuses, its audit line, failing closed
+    and the minute it remembers a refusal.
+  - A new file for the guard: a role holder never asked, the setting off answering exactly as
+    before, the defer before GitHub is asked, the refusal's words, red and amber, and the channel
+    check after the tier.
+  - The cooldowns' order, `/remind`, a board link followed later, `/register` and asking somebody
+    else to `/link` never asking GitHub, the container's wiring and its startup error, and a member
+    with GitHub write and no role running `/pr` and refused `/status`.

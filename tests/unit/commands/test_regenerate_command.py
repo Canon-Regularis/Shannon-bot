@@ -22,11 +22,13 @@ from shannon.github.errors import GitHubNotFoundError
 from shannon.services.sync.manual import SyncFailedError
 from shannon.services.sync.regenerate import RegenerateOutcome
 from shannon.services.workflow import NotAnItemThreadError, WorkflowRefusedError
-from tests.fakes.discord_objects import FakeInteraction, FakeResponse
+from tests.fakes.discord_objects import FakeInteraction, FakeMember, FakeResponse
+from tests.fakes.grants import FakeGrants
 from tests.unit.commands.conftest import (
     administrator,
     default_gate,
     developer,
+    gate_with,
     member_with,
     project_manager,
 )
@@ -399,3 +401,56 @@ class TestHowSoonItMayRunAgainInAThread:
 
     def test_the_wait_is_five_seconds(self) -> None:
         assert REGENERATE_SPACING_SECONDS == 5
+
+
+class TestACooldownAndTheGitHubRoute:
+    """Issue #94, as `/refresh` has it: GitHub standing in for the role changes nothing about who
+    spends a turn, and only where a granted member's amber lands."""
+
+    def taking_turns(self, service: StubRegeneration, grants: FakeGrants):
+        return build_regenerate_command(
+            service,
+            gate_with(grants),
+            cooldown=Cooldown(REGENERATE_SPACING_SECONDS, clock=Clock()),
+        )
+
+    async def fire(self, command, who) -> FakeInteraction:
+        interaction = FakeInteraction(user=who, channel_id=THREAD)
+        await command.callback(interaction)
+        return interaction
+
+    async def test_a_member_github_turns_away_spends_nobodys_turn(self) -> None:
+        service = StubRegeneration()
+        command = self.taking_turns(service, FakeGrants())
+        turned_away = await self.fire(command, FakeMember())
+
+        await self.fire(command, developer())
+
+        assert turned_away.mark == REFUSED
+        assert service.calls == [THREAD]
+
+    async def test_a_member_github_lets_in_hears_about_the_wait_in_a_private_followup(
+        self,
+    ) -> None:
+        service = StubRegeneration()
+        command = self.taking_turns(service, FakeGrants(None))
+        await self.fire(command, FakeMember())
+
+        interaction = await self.fire(command, FakeMember())
+
+        assert interaction.mark == OWED
+        assert interaction.said.startswith("/regenerate ran in this thread a moment ago.")
+        assert interaction.response.messages == []
+        assert interaction.ephemerally == [True]
+        assert service.calls == [THREAD]
+
+    async def test_a_role_holders_wait_is_still_the_first_response(self) -> None:
+        grants = FakeGrants(None)
+        command = self.taking_turns(StubRegeneration(), grants)
+        await self.fire(command, developer())
+
+        interaction = await self.fire(command, developer())
+
+        assert interaction.mark == OWED
+        assert interaction.response.deferred is False
+        assert grants.asked == []

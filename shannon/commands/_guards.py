@@ -1,6 +1,7 @@
 """The checks a slash command makes before it does anything.
 
-`None` means the guard has already answered the interaction and the caller must return.
+`None` means the guard has already answered the interaction and the caller must return, and so
+does `False`.
 """
 
 from __future__ import annotations
@@ -13,11 +14,20 @@ import discord
 
 from shannon.commands._cooldowns import Cooldown, NotYet
 from shannon.discord_bot.permissions import PermissionGate
-from shannon.discord_bot.responses import owed, refused, reply
+from shannon.discord_bot.responses import defer, owed, refused, reply
 from shannon.discord_bot.roles import CommandRole
+from shannon.github.errors import GitHubError, GitHubRateLimitError
 
 NOT_IN_A_SERVER = "Run this inside a server channel."
 NOT_IN_A_THREAD = "Run this inside the item's thread."
+
+# What follows the role's denial where GitHub could stand in for the role and could not be asked.
+# Issue #94. Its own sentence rather than the grant's, because the grant's sentences say what GitHub
+# answered, and here it answered nothing.
+COULD_NOT_ASK_GITHUB = (
+    "GitHub could not be asked what your account may do on this server's repository just now, so "
+    "only the role counted. Try again in a minute."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,13 +45,71 @@ async def in_a_server(
     roles: Collection[CommandRole],
 ) -> int | None:
     """The guild a permitted caller ran this in, or None having said why not."""
-    if interaction.guild_id is None:
+    guild_id = interaction.guild_id
+    if guild_id is None:
         await reply(interaction, refused(NOT_IN_A_SERVER))
         return None
-    if not gate.allows(interaction.user, roles):
-        await reply(interaction, refused(gate.denial(command, roles)))
+    if not await holds_the_tier(interaction, guild_id, command, gate, roles):
         return None
-    return interaction.guild_id
+    return guild_id
+
+
+async def holds_the_tier(
+    interaction: discord.Interaction,
+    guild_id: int,
+    command: str,
+    gate: PermissionGate,
+    roles: Collection[CommandRole],
+    *,
+    aside: str = "",
+) -> bool:
+    """Whether the caller holds one of `roles`, or GitHub stands in for one, having said why not.
+
+    Issue #94. The role first, exactly as before: whoever holds it is through with no defer and
+    no I/O, so whatever a command answers next is still its first response. Where the gate has
+    no GitHub route - the server never turned it on, or nothing `roles` allows is a tier GitHub
+    stands in for - the refusal is today's, word for word, and the first response too.
+
+    Only with a route is anything else asked, and the interaction is deferred BEFORE it is. The
+    question reads the database and then GitHub, and Discord drops an interaction left unanswered
+    for three seconds, which says nothing at all: worse than either answer. So a refusal from here
+    is a private followup rather than a first response, and the role's own denial still opens it,
+    because the role is the first thing that would have let them in.
+
+    GitHub not answering is a refusal, never a grant, since this raises access. Amber where it was
+    a rate limit, which comes right on its own, and red otherwise: the split `_COMES_RIGHT` makes
+    for every other reply.
+
+    `aside` is a sentence to end every refusal on, for a command with a half that needs no role.
+    The parts are joined with one space and an empty one is left out, so no refusal can end on a
+    space.
+    """
+    if gate.allows(interaction.user, roles):
+        return True
+    denial = gate.denial(command, roles)
+    route = gate.github_route(roles)
+    if route is None:
+        await reply(interaction, refused(_joined(denial, aside)))
+        return False
+
+    await defer(interaction)
+    try:
+        refusal = await route.refusal_for(guild_id=guild_id, discord_user_id=interaction.user.id)
+    except GitHubError as unanswered:
+        # Logged by the grant, which knows whose account it asked about and on what.
+        said = _joined(denial, COULD_NOT_ASK_GITHUB, aside)
+        comes_right = isinstance(unanswered, GitHubRateLimitError)
+        await reply(interaction, owed(said) if comes_right else refused(said))
+        return False
+    if refusal is None:
+        return True
+    await reply(interaction, refused(_joined(denial, refusal, aside)))
+    return False
+
+
+def _joined(*parts: str) -> str:
+    """The sentences that are there, one space apart."""
+    return " ".join(part for part in parts if part)
 
 
 async def its_turn(
@@ -56,6 +124,11 @@ async def its_turn(
     the answer is held in memory, so the refusal can be the interaction's first response. Amber,
     because it comes right on its own. True means the run has begun, and the caller owes
     `cooldown.finish(key)` in a `finally` that starts straight after this.
+
+    Still after the guard where GitHub stands in for the role (issue #94), so a member GitHub
+    turns away spends nobody's turn either, and no turn is held while GitHub is being asked. The
+    one difference is for a member GitHub let in: the guard deferred before asking, so their amber
+    arrives as a private followup rather than as the first response. A role holder's is unchanged.
     """
     not_yet = cooldown.begin(key)
     if not_yet is None:
@@ -107,6 +180,12 @@ async def github_allows(
 
     The role check comes first, so somebody without the Discord role is told that rather than
     being told about a GitHub account they may not have connected.
+
+    A member GitHub let in where the role did not (issue #94) has been asked about once already,
+    by the tier guard. This is the second question, and it is #158's: a restriction on whoever got
+    past the gate, kept as it was rather than folded into the grant, so turning the grant on
+    changes nothing about it. Every level the grant gives is at least write, so for those members
+    the two agree, at the cost of asking GitHub twice.
     """
     refusal = await access.refusal_for(
         guild_id=guild_id, discord_user_id=interaction.user.id, at_least=at_least

@@ -29,7 +29,7 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import NOT_IN_A_SERVER
+from shannon.commands._guards import NOT_IN_A_SERVER, holds_the_tier
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.db.models import REMINDER_MESSAGE_WIDTH
@@ -101,10 +101,18 @@ def build_remind_command(reminders: SetsReminders, gate: PermissionGate) -> Slas
             return
 
         # On identity rather than on who was typed, so naming yourself is a reminder for yourself.
+        # Through the tier guard, so a server that lets GitHub admin stand in for the role lets
+        # it stand in here too (issue #94); where it does not, the refusal is the one this always
+        # gave, as the first response. Reminding yourself never reaches it, and never asks GitHub.
         for_somebody_else = member.id != interaction.user.id
-        if for_somebody_else and not gate.allows(interaction.user, REGISTER_ROLES):
-            denial = gate.denial("remind", REGISTER_ROLES)
-            await reply(interaction, refused(f"{denial} Reminding yourself needs no role."))
+        if for_somebody_else and not await holds_the_tier(
+            interaction,
+            guild_id,
+            "remind",
+            gate,
+            REGISTER_ROLES,
+            aside="Reminding yourself needs no role.",
+        ):
             return
 
         if member.bot:

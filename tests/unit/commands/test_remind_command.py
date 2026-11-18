@@ -22,12 +22,21 @@ import pytest
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands.remind import A_BOT, NO_TIME, YOU_CANNOT_POST, build_remind_command
 from shannon.db.models import REMINDER_MESSAGE_WIDTH
+from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
+from shannon.github import people
 from shannon.services.reminders.book import TooManyRemindersError
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
-from tests.unit.commands.conftest import administrator, default_gate, developer, project_manager
+from tests.fakes.grants import FakeGrants
+from tests.unit.commands.conftest import (
+    administrator,
+    default_gate,
+    developer,
+    gate_with,
+    project_manager,
+)
 from tests.unit.conftest import Deletes
 
 pytestmark = pytest.mark.unit
@@ -113,9 +122,11 @@ def ran_by(caller: FakeMember | None = None) -> FakeInteraction:
     return FakeInteraction(user=who)
 
 
-def command(reminders: FakeReminders | None = None) -> tuple[SlashCommand, FakeReminders]:
+def command(
+    reminders: FakeReminders | None = None, *, gate: PermissionGate | None = None
+) -> tuple[SlashCommand, FakeReminders]:
     reminders = reminders or FakeReminders()
-    return build_remind_command(reminders, default_gate()), reminders
+    return build_remind_command(reminders, gate or default_gate()), reminders
 
 
 def a_thread(*, locked: bool = False) -> MagicMock:
@@ -208,6 +219,61 @@ class TestRemindingSomebodyElse:
             f"This bot will remind <@{BOB}> here {ON}, 1 hour after you set it."
         )
         assert (reminders.added[0]["member_id"], reminders.added[0]["set_by"]) == (BOB, ALICE)
+
+
+class TestRemindingSomebodyElseWhereGitHubCounts:
+    """Issue #94. A server that lets GitHub admin stand in for the Project Manager role lets it
+    stand in for this half too, as it does for every other command that tier may run."""
+
+    async def test_a_member_github_vouches_for_may(self) -> None:
+        grants = FakeGrants(None)
+        remind, reminders = command(gate=gate_with(grants))
+        interaction = ran_by(FakeMember())
+
+        await fire(remind, interaction, person(BOB), hours=1)
+
+        assert grants.asked == [(1, ALICE, people.ADMIN)]
+        assert interaction.mark == SUCCEEDED
+        assert reminders.added[0]["member_id"] == BOB
+
+    async def test_the_refusal_still_ends_on_reminding_yourself(self) -> None:
+        turned_away = (
+            "GitHub's admin permission on acme/widgets would let you in as well, but GitHub "
+            "gives octocat write access there."
+        )
+        remind, reminders = command(gate=gate_with(FakeGrants(turned_away)))
+        interaction = ran_by(FakeMember())
+
+        await fire(remind, interaction, person(BOB), hours=1)
+
+        assert interaction.mark == REFUSED
+        assert interaction.said == (
+            f"{default_gate().denial('remind', REGISTER_ROLES)} {turned_away} Reminding yourself "
+            "needs no role."
+        )
+        assert reminders.added == []
+
+    async def test_reminding_yourself_never_asks_github(self) -> None:
+        grants = FakeGrants(None)
+        remind, reminders = command(gate=gate_with(grants))
+
+        await fire(remind, ran_by(FakeMember()), person(ALICE), hours=1)
+
+        assert grants.asked == []
+        assert len(reminders.added) == 1
+
+    async def test_with_github_off_the_refusal_is_the_first_response(self) -> None:
+        """Word for word what it was before there was a route, and still not deferred."""
+        remind, _ = command()
+        interaction = ran_by(developer())
+
+        await fire(remind, interaction, person(BOB), hours=1)
+
+        assert interaction.response.deferred is False
+        assert interaction.response.messages == [
+            f"{REFUSED} {default_gate().denial('remind', REGISTER_ROLES)} Reminding yourself "
+            "needs no role."
+        ]
 
 
 class TestWhatCouldNeverArrive:

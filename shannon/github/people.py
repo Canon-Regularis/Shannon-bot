@@ -67,6 +67,20 @@ ADMIN: Final = "admin"
 _RANK: Final[dict[str, int]] = {NO_ACCESS: 0, READ_ONLY: 1, WRITE: 2, ADMIN: 3}
 
 
+@dataclass(frozen=True, slots=True)
+class Standing:
+    """What one account may do to one repository, and which account GitHub was answering about.
+
+    Issue #94. GitHub is asked by login, and a login is a label it hands to somebody else once its
+    holder renames: a permission is only worth granting on if it is known whose it is, and the id
+    is the part that lasts. None where GitHub named no account, which is every 404 and any body
+    that leaves it out, so a caller comparing ids is answered no rather than guessing.
+    """
+
+    permission: str
+    account_id: int | None
+
+
 def at_least(permission: str, wanted: str) -> bool:
     """Whether GitHub's answer reaches a level.
 

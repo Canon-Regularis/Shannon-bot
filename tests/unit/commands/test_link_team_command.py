@@ -13,8 +13,10 @@ import discord
 import pytest
 from discord import app_commands
 
+from shannon.commands._replies import UNEXPECTED
 from shannon.commands.link_team import build_link_team_command
-from shannon.services.linking import InvalidGitHubTeamError
+from shannon.discord_bot.responses import REFUSED
+from shannon.services.linking import InvalidGitHubTeamError, NoTeamsHereError
 from tests.fakes.discord_objects import FakeInteraction, FakeMember
 from tests.unit.commands.conftest import (
     administrator,
@@ -174,3 +176,25 @@ class TestARoleTheBotCannotActuallyPing:
         await command(service).callback(interaction, "backend", FakeRole(mentionable=False))
 
         assert "Nobody will be notified" not in said(interaction)
+
+
+class TestARepositoryOwnedByAPerson:
+    """A personal account has no teams, and the service says so in a sentence of its own.
+
+    The table of replies had no row for that error, so the sentence never reached anybody: the
+    person who ran the command was told "Something went wrong here", which the README does not
+    promise and which sends them to the log for something that is not a fault at all.
+    """
+
+    async def test_the_refusal_says_only_an_organisation_has_teams(self) -> None:
+        sentence = (
+            "octocat is a personal account, and only an organisation has teams. GitHub will never "
+            "ask a team for a review here, so this mapping would never match anything."
+        )
+        service = StubTeamLinking(error=NoTeamsHereError(sentence))
+
+        interaction = await run(service, project_manager())
+
+        assert said(interaction) == sentence
+        assert said(interaction) != UNEXPECTED
+        assert interaction.mark == REFUSED

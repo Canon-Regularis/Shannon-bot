@@ -81,6 +81,12 @@ def build_register_command(
         if interaction.guild_id is None or interaction.channel_id is None:
             await reply(interaction, refused(NOT_IN_A_SERVER))
             return
+        # The role alone, and not the tier guard, so GitHub never stands in for it here even
+        # where a server lets it elsewhere (issue #94). It could never apply: GitHub is asked
+        # about the repository this server registered, there is none before this runs, and once
+        # there is one this refuses as already registered. Sent through anyway, somebody would be
+        # asked to sign in to GitHub for nothing, and that sign-in replaces the proof every other
+        # grant they hold rests on. GitHub's own admin check below is what decides this command.
         if not gate.allows(interaction.user, REGISTER_ROLES):
             await reply(interaction, refused(gate.denial("register", REGISTER_ROLES)))
             return

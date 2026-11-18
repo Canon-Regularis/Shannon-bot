@@ -12,9 +12,10 @@ import pytest
 
 from shannon.config import Settings
 from shannon.db.stores.identities import ProvedAccount
-from shannon.discord_bot.permissions import PermissionGate
+from shannon.discord_bot.permissions import GrantsTiers, PermissionGate
 from shannon.discord_bot.roles import ConfiguredRoles
 from shannon.domain.enums import VerificationPurpose
+from shannon.github import people
 from tests.fakes.discord_objects import FakeGuildPermissions, FakeMember, FakeRole
 
 
@@ -56,6 +57,34 @@ def default_gate() -> PermissionGate:
     module-level helpers, which cannot ask for one.
     """
     return PermissionGate(ConfiguredRoles.from_settings(Settings()))
+
+
+def gate_with(grants: GrantsTiers) -> PermissionGate:
+    """The same gate on a server that lets GitHub stand in for a role. Issue #94.
+
+    `default_gate` is a server that never turned that on, which is every deployment's default and
+    the reason every refusal test written before it still reads as it did.
+    """
+    return PermissionGate(ConfiguredRoles.from_settings(Settings()), grants)
+
+
+class GitHubGives:
+    """GitHub answering with one permission, at whatever level a gate asks it about. Issue #94.
+
+    `FakeGrants` is told its answer outright, which is all a guard needs. A test driving a real
+    command needs the level that command's own gate asks at to be what decides, so this works the
+    answer out the way the real grant does once a proof and a repository are in hand.
+    """
+
+    def __init__(self, permission: str) -> None:
+        self.permission = permission
+        self.asked: list[str] = []
+
+    async def refusal_for(self, *, guild_id: int, discord_user_id: int, level: str) -> str | None:
+        self.asked.append(level)
+        if people.at_least(self.permission, level):
+            return None
+        return f"GitHub's {level} permission would let you in as well."
 
 
 @pytest.fixture

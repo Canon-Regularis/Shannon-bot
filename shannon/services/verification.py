@@ -62,6 +62,7 @@ from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard, board_owner
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import ShannonError
+from shannon.github.errors import GitHubError
 from shannon.github.responses import json_object
 from shannon.services.boards import BoardLink
 
@@ -140,11 +141,28 @@ NO_LONGER_ALLOWED = (
     "you can revoke it."
 )
 
+# The same, where GitHub access could have stood in for the role. Issue #94. Its own sentence
+# rather than a wider one for everybody, because on a deployment that never turned that on,
+# naming GitHub access sends a member looking for a way in that does not exist there.
+NO_LONGER_ALLOWED_OR_GITHUB = (
+    "You no longer hold a role in that server that may do this, or GitHub access standing in for "
+    "one, so nothing was kept and no board was linked. GitHub may still list this app under "
+    "Applications in your GitHub settings, where you can revoke it."
+)
+
 # Discord could not be asked whether they still hold it. A refusal all the same: "could not check"
 # is not "allowed".
 CANNOT_ASK = (
     "Discord could not be asked whether you still hold the role this needs, so nothing was kept. "
     "Try the command in Discord again in a minute."
+)
+
+# The same, for GitHub where it stood in for the role. Issue #94. Its own sentence, because telling
+# somebody Discord did not answer, or that they lost a role, when GitHub was the one that went
+# quiet, sends them to look in the wrong place.
+GITHUB_CANNOT_ASK = (
+    "GitHub could not be asked whether your access there still lets you do this, so nothing was "
+    "kept. Try the command in Discord again in a minute."
 )
 
 
@@ -246,17 +264,24 @@ class KeepsBoardAuthorisations(Protocol):
 
 
 class HoldsTiers(Protocol):
-    """Whether a member holds any of a set of tiers in a server, asked of Discord now.
+    """Whether a member holds any of a set of tiers in a server, asked of Discord now, and of
+    GitHub where the server lets GitHub access stand in for a role (issue #94).
 
     Declared here because this is where it is consumed, the pattern `BindsProvedAccounts` sets.
     Found reviewing #201: a board link is followed up to ten minutes after the command checked the
     role, and following it keeps a credential that acts as the member. Raises `DiscordGatewayError`
-    where Discord cannot be asked, which the caller treats as a refusal.
+    where Discord cannot be asked and `GitHubError` where GitHub cannot, each of which the caller
+    treats as a refusal.
     """
 
     async def holds(
         self, *, guild_id: int, discord_user_id: int, tiers: Collection[CommandRole]
     ) -> bool: ...
+
+    def github_could_stand_in(self, tiers: Collection[CommandRole]) -> bool:
+        """Whether GitHub access could let anybody hold any of `tiers` here, so a refusal names
+        it only where it could have counted. Asks nobody."""
+        ...
 
 
 class LinksTheBoardChosen(Protocol):
@@ -734,6 +759,12 @@ class GitHubIdentityVerification:
         at, which narrows the question towards administrators, who hold every tier; and a board
         link from before the tier was written down is asked about as administrators only, for the
         same reason and for ten minutes at most.
+
+        Where the server lets GitHub access stand in for a role (issue #94), GitHub is asked as
+        well, and the same holds: GitHub not answering is a refusal, said as GitHub's rather than
+        Discord's. It is judged on the proof stored before this sign-in, which is the one the
+        command was let in on; the account this sign-in proves replaces it only afterwards. The
+        refusal names GitHub access only there, so a deployment without it keeps its sentence.
         """
         tiers = _known_tiers(spent.tier or frozenset())
         try:
@@ -749,6 +780,15 @@ class GitHubIdentityVerification:
                 unreachable,
             )
             raise VerificationError(CANNOT_ASK) from unreachable
+        except GitHubError as unanswered:
+            # The grant has already logged what it asked and why it got no answer.
+            logger.warning(
+                "could not ask GitHub whether discord:%s may still finish a board link in guild "
+                "%s, so nothing was kept",
+                spent.discord_user_id,
+                spent.guild_id,
+            )
+            raise VerificationError(GITHUB_CANNOT_ASK) from unanswered
         if not held:
             logger.info(
                 "discord:%s no longer holds the tier a board link was handed out under in guild "
@@ -756,6 +796,8 @@ class GitHubIdentityVerification:
                 spent.discord_user_id,
                 spent.guild_id,
             )
+            if self._tiers.github_could_stand_in(tiers):
+                raise VerificationError(NO_LONGER_ALLOWED_OR_GITHUB)
             raise VerificationError(NO_LONGER_ALLOWED)
 
     async def _link_what_was_chosen(self, spent: SpentLink) -> BoardLinked | BoardNotLinked | None:

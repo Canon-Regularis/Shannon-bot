@@ -32,6 +32,7 @@ from shannon.discord_bot.errors import DiscordGatewayError
 from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
+from shannon.github.errors import GitHubUnavailableError
 from shannon.github.projects import ProjectListing
 from shannon.services.board_credentials import BoardCredentials
 from shannon.services.boards import BoardLinkingService, OwnerBoards
@@ -660,6 +661,52 @@ class TestTheRoleIsAskedForAgainWhenTheLinkIsFollowed:
         assert "expired or has already been used" in second.text
 
     @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_where_github_could_not_stand_in_the_refusal_names_only_the_role(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        """Issue #94. A deployment that never let GitHub access stand in for a role keeps the
+        sentence it had, rather than sending somebody to look for a way in it does not offer."""
+        async with verifying(
+            db_sessionmaker, FakeProjects(), tiers=FakeTiers(held=False)
+        ) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 400
+        assert (
+            "You no longer hold a role in that server that may do this, so nothing was kept"
+            in response.text
+        )
+        assert "GitHub access standing in" not in response.text
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_where_github_could_stand_in_the_refusal_names_it_as_well(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        """Issue #94. There the member may have been let in by GitHub rather than a role, and
+        losing that is the same refusal, so the sentence names both."""
+        async with verifying(
+            db_sessionmaker, FakeProjects(), tiers=FakeTiers(held=False, github_counts=True)
+        ) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 400
+        assert (
+            "You no longer hold a role in that server that may do this, or GitHub access standing "
+            "in for one, so nothing was kept"
+        ) in response.text
+        assert not await kept(db_sessionmaker)
+        assert (await stored(db_session, registered.id)).project_number is None
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
     async def test_discord_not_answering_keeps_nothing_either(
         self,
         db_sessionmaker: async_sessionmaker[AsyncSession],
@@ -684,6 +731,38 @@ class TestTheRoleIsAskedForAgainWhenTheLinkIsFollowed:
 
         assert response.status_code == 400
         assert "Discord could not be asked" in response.text
+        assert asked == [], "GitHub was asked to spend a code nobody could vouch for"
+        assert not await kept(db_sessionmaker)
+        assert (await stored(db_session, registered.id)).project_number is None
+
+    @pytest.mark.parametrize(("board", "tier"), BOTH_HALVES, ids=["link", "authorise"])
+    async def test_github_not_answering_keeps_nothing_and_says_it_was_github(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        registered: Repository,
+        board: ChosenBoard | None,
+        tier: frozenset[CommandRole],
+    ) -> None:
+        """Issue #94. Where GitHub stood in for the role and cannot be asked again, that is a
+        refusal as well, and it is not a role lost: telling them so would send them to look at
+        their roles when nothing about them changed."""
+        tiers = FakeTiers(fails=GitHubUnavailableError("GitHub is down"))
+        github = github_says()
+        asked: list[httpx.Request] = []
+
+        def recorded(request: httpx.Request) -> httpx.Response:
+            asked.append(request)
+            return github(request)
+
+        async with verifying(
+            db_sessionmaker, FakeProjects(), handler=recorded, tiers=tiers
+        ) as verification:
+            response = await follow(verification, board=board, tier=tier)
+
+        assert response.status_code == 400
+        assert "GitHub could not be asked whether your access there" in response.text
+        assert "no longer hold a role" not in response.text
         assert asked == [], "GitHub was asked to spend a code nobody could vouch for"
         assert not await kept(db_sessionmaker)
         assert (await stored(db_session, registered.id)).project_number is None

@@ -16,6 +16,11 @@ SYNC_ROLES = frozenset({CommandRole.DEVELOPER, CommandRole.PROJECT_MANAGER})
 # and `SHANNON_ROLE_REVIEWER` grant no command at all, and the tier is kept because the denial
 # message offers it. A board moves an item's status without passing through here, since nothing
 # GitHub sends says who dragged the card; `SHANNON_BOARD_MAY_SET_STATUS` decides whether it may.
+#
+# Where a server lets GitHub access stand in for a role (issue #94), GitHub admin counts as
+# Project Manager here, so that separation of duties then rests on who GitHub makes an admin: the
+# owner of a personal repository, an organisation's owners, anybody given admin. One of them who
+# authors a pull request can mark it ready, and nothing in the workflow service asks who wrote it.
 WORKFLOW_ROLES = frozenset({CommandRole.PROJECT_MANAGER})
 
 # The commands that take no gate at all, by name. `/mentions` decides only whether your own name
