@@ -827,41 +827,10 @@ is posted before anything is captured rather than after.
 
 ## Architecture
 
-Nothing below `container.py` builds its own collaborators, and everything crossing the network
-sits behind a protocol, so the services layer runs in tests with only Discord and GitHub replaced.
-
-```text
-shannon/
-  domain/       enums, snapshots, errors, timezone helpers. Imports nothing else
-  db/           models, session factory, one store per table
-  github/       REST client, URL parsing, signature check, payload parsers
-  discord_bot/  gateway client, thread gateway, permission gate, rendering, text safety
-                panels.py holds what a message says and imports no discord; layout.py is the
-                only module in the project that imports discord.ui; rich_text.py is the
-                only one that lets GitHub markup through, for the description block
-  services/     sync/      one item into its thread: policies, staleness, threads,
-                           notifications, and the same job driven by a command
-                delivery/  the queue and the worker that drains it
-                reminders/ writing a reminder down, and sending it when it falls due
-                notes, reviews, channels, linking, registration
-  api/          FastAPI app, webhook and health routes
-  commands/     the slash commands, which drive services the way the routes do
-  runtime/      liveness, task supervision, startup and shutdown
-  config.py     settings
-  container.py  the wiring
-  main.py       assembles the app and hands it to uvicorn
-```
-
-Listed bottom up, and imports only ever run down that list. `commands/` sits beside `api/`
-rather than inside `discord_bot/` for that reason: it drives services in response to a person,
-which makes it a delivery mechanism and not an adapter. The bot is handed its error translator
-instead of importing one, which is what keeps the adapter layer from reaching upward.
-
-Bot and API share a process. The worker waits for the gateway before its first batch, since a
-delivery attempted before Discord connects only burns an attempt. The reminder sender waits for it
-too, and runs only where there is a gateway at all. Shutdown stops the worker, hands its unstarted
-batch back, lets the reminder in hand finish, closes the gateway and disposes the pool, reporting
-any step that fails rather than abandoning the rest.
+One process runs the Discord bot, the webhook endpoint and every background loop, and the code is
+layered bottom up from `config.py` and `domain/` to `container.py` and `main.py`. [ARCHITECTURE.md](ARCHITECTURE.md) is where
+each part lives, the path a webhook takes to its thread, why it is built that way, and what is
+still to do.
 
 ## Data model
 
@@ -1058,8 +1027,9 @@ Every change starts from an issue: there are forms for a
 [bug report](https://github.com/Canon-Regularis/Shannon-bot/issues/new?template=bug_report.yml) and
 a [feature request](https://github.com/Canon-Regularis/Shannon-bot/issues/new?template=feature_request.yml).
 [CONTRIBUTING.md](CONTRIBUTING.md) is how to set the project up, make a change, check it and propose
-it, and what to do about a security problem, which never goes in a public issue. Everybody taking
-part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).
+it, and what to do about a security problem, which never goes in a public issue.
+[ARCHITECTURE.md](ARCHITECTURE.md) is how the code is laid out and why. Everybody taking part
+agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
