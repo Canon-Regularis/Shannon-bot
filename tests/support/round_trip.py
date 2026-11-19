@@ -161,7 +161,9 @@ async def round_trip(
 
 
 @asynccontextmanager
-async def browser_on(verification: object) -> AsyncIterator[httpx.AsyncClient]:
+async def browser_on(
+    verification: oauth.RunsTheRoundTrip | None,
+) -> AsyncIterator[httpx.AsyncClient]:
     """The three OAuth routes on a bare app, and one browser pointed at them.
 
     One client is one cookie jar, which is one browser. On https, because the round-trip cookie is
