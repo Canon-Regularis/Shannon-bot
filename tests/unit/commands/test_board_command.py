@@ -13,6 +13,7 @@ can hold, and has to be turned away with a sentence.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Collection
 from typing import Any, cast
 
@@ -20,10 +21,9 @@ import discord
 import pytest
 from discord import app_commands
 
+from shannon.commands._choices import MOST_CHARACTERS, MOST_CHOICES
 from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
 from shannon.commands.board import (
-    MOST_CHOICES,
-    MOST_LABEL,
     NOT_CONFIGURED,
     NOTHING_TO_WITHDRAW,
     _label_for,
@@ -36,10 +36,11 @@ from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
 from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
-from shannon.github.errors import GitHubUnavailableError
+from shannon.github.errors import GitHubRateLimitError, GitHubUnavailableError
 from shannon.github.projects import ProjectListing
 from shannon.services.boards import (
     BoardLink,
+    BoardMovedError,
     BoardStanding,
     BoardTakenError,
     BoardUnlinked,
@@ -558,8 +559,50 @@ class TestWhenLinkingIsRefused:
 
         await fire(built.sub("link"), interaction, "3")
 
+        assert interaction.mark == REFUSED
         assert interaction.said == "Another server already mirrors it"
         assert built.verification.issued_for == [], "signing in again cannot fix a taken board"
+
+    async def test_a_board_that_moved_while_it_was_opened(self) -> None:
+        """Its own words, exactly, through the reply table's row for it. Issue #267."""
+        moved = "acme/widget moved to newco while the board was opening. Run /board link again."
+        built = Built(boards=StubBoards(error=BoardMovedError(moved)))
+        interaction = FakeInteraction(user=administrator())
+
+        await fire(built.sub("link"), interaction, "3")
+
+        assert interaction.mark == REFUSED
+        assert interaction.said == moved
+        assert built.verification.issued_for == []
+
+    async def test_a_spent_rate_limit_reads_as_it_does_everywhere_else(self) -> None:
+        """Amber, with the wait, like every other command's. It used to be GitHub's raw sentence
+        in red, because this half answered its own refusals past the reply table. Issue #267."""
+        built = Built(
+            boards=StubBoards(
+                error=GitHubRateLimitError("GitHub rate limit reached", retry_after=120)
+            )
+        )
+        interaction = FakeInteraction(user=administrator())
+
+        await fire(built.sub("link"), interaction, "3")
+
+        assert interaction.mark == OWED
+        assert interaction.said == "GitHub's rate limit is spent. Try again in about 2 minutes."
+        assert built.verification.issued_for == []
+
+    async def test_a_refusal_is_logged_for_the_operator(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The line every other command writes when it is refused. Issue #267."""
+        built = Built(boards=StubBoards(error=BoardTakenError("Another server already mirrors it")))
+
+        with caplog.at_level(logging.WARNING, logger="shannon.commands.board"):
+            await fire(built.sub("link"), FakeInteraction(user=administrator()), "3")
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "/board link could not finish: Another server already mirrors it"
+        ]
 
 
 class TestWhatLinkingSaysBack:
@@ -644,7 +687,8 @@ class TestUnlinking:
 
         await fire(built.sub("unlink"), interaction)
 
-        assert "/register" in interaction.said
+        assert interaction.mark == REFUSED
+        assert interaction.said == "This server has no repository yet. Run /register first."
 
 
 class TestTheTierRidesWithTheLink:
@@ -887,12 +931,40 @@ class TestShowing:
         assert "/register" in interaction.said
 
     async def test_github_being_unavailable_is_said_rather_than_raised(self) -> None:
+        """In the reply table's words, the same as every other command's. Issue #267."""
         built = Built(boards=StubBoards(error=GitHubUnavailableError("Could not reach GitHub")))
         interaction = FakeInteraction(user=project_manager())
 
         await fire(built.sub("show"), interaction)
 
-        assert interaction.said == "Could not reach GitHub"
+        assert interaction.mark == REFUSED
+        assert interaction.said == "GitHub could not be reached. Could not reach GitHub"
+
+    async def test_a_spent_rate_limit_reads_as_it_does_everywhere_else(self) -> None:
+        """Amber, with the wait: it comes right on its own. Issue #267."""
+        built = Built(
+            boards=StubBoards(
+                error=GitHubRateLimitError("GitHub rate limit reached", retry_after=120)
+            )
+        )
+        interaction = FakeInteraction(user=project_manager())
+
+        await fire(built.sub("show"), interaction)
+
+        assert interaction.mark == OWED
+        assert interaction.said == "GitHub's rate limit is spent. Try again in about 2 minutes."
+
+    async def test_a_refusal_is_logged_for_the_operator(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        built = Built(boards=StubBoards(error=GitHubUnavailableError("Could not reach GitHub")))
+
+        with caplog.at_level(logging.WARNING, logger="shannon.commands.board"):
+            await fire(built.sub("show"), FakeInteraction(user=project_manager()))
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "/board show could not finish: Could not reach GitHub"
+        ]
 
 
 class TestThePicker:
@@ -995,7 +1067,7 @@ class TestThePickersLabels:
         nothing at all - so one long board title used to empty the whole picker."""
         label = _label_for(ProjectListing(number=6, title="A" * 300))
 
-        assert len(label) == MOST_LABEL
+        assert len(label) == MOST_CHARACTERS
         assert label.endswith("…")
 
     def test_a_short_title_is_left_alone(self) -> None:

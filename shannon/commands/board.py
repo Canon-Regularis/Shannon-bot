@@ -30,15 +30,16 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Collection, Coroutine, Sequence
-from typing import Any, Protocol
+from collections.abc import Collection, Sequence
+from typing import Protocol
 
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import NOT_IN_A_SERVER, in_a_server
+from shannon.commands._choices import MOST_CHARACTERS, MOST_CHOICES, Suggesting
+from shannon.commands._guards import in_a_server, server_of
 from shannon.commands._permissions import BOARD_ROLES, REGISTER_ROLES
-from shannon.commands._replies import words_for
+from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, owed, refused, reply
 from shannon.discord_bot.roles import CommandRole
@@ -57,12 +58,6 @@ from shannon.services.boards import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Discord's caps: twenty-five suggestions, and a hundred characters for each one's name. It sends a
-# longer list, or a longer name, back as an error rather than cutting it - and an autocomplete that
-# errors shows nothing at all, so one long board title emptied the whole picker.
-MOST_CHOICES = 25
-MOST_LABEL = 100
 
 # The largest board number there is room for. GitHub's numbers are small and the columns that hold
 # one are 32-bit integers, so a number past this used to reach Postgres - which refused it with an
@@ -174,10 +169,6 @@ WITHDRAWN = (
 NOTHING_TO_WITHDRAW = (
     "This bot has no authorisation from you in this server, so there was nothing to forget."
 )
-
-Suggesting = Callable[
-    [discord.Interaction, str], Coroutine[Any, Any, list[app_commands.Choice[str]]]
-]
 
 
 class LinksBoards(Protocol):
@@ -298,11 +289,13 @@ def build_board_command(
                 interaction, verification, guild_id, wanted, reason=unopenable.message
             )
             return
-        except NotRegisteredError as error:
-            await reply(interaction, refused(words_for(error, noun="repository")))
-            return
         except ShannonError as error:
-            await reply(interaction, refused(error.message))
+            # Through the reply table like every other command's. This used to answer with the
+            # bare message in red, so a spent rate limit read as GitHub's raw sentence with no
+            # wait, and nothing reached the log. The board's own refusals have rows of their own
+            # there, so their words are unchanged. Issue #267.
+            logger.warning("/board link could not finish: %s", error.message)
+            await reply(interaction, reply_for(error, noun="board"))
             return
 
         await reply(interaction, done(said(linked)))
@@ -322,7 +315,7 @@ def build_board_command(
         try:
             unlinked = await boards.unassign(guild_id=guild_id)
         except NotRegisteredError as error:
-            await reply(interaction, refused(words_for(error, noun="repository")))
+            await reply(interaction, reply_for(error, noun="repository"))
             return
 
         await reply(interaction, done(_unlinked(unlinked)))
@@ -353,16 +346,13 @@ def build_board_command(
         name="withdraw", description="Take back the GitHub authorisation you gave this bot"
     )
     async def withdraw(interaction: discord.Interaction) -> None:
-        # The guild check by hand rather than through `in_a_server`, which exists to apply a tier,
-        # and this half has none: see the module docstring.
-        if interaction.guild_id is None:
-            await reply(interaction, refused(NOT_IN_A_SERVER))
+        # The server check without a tier, because this half has none: see the module docstring.
+        guild_id = await server_of(interaction)
+        if guild_id is None:
             return
 
         # No deferral: one delete, and nothing that talks to GitHub.
-        gone = await authorisations.forget(
-            guild_id=interaction.guild_id, discord_user_id=interaction.user.id
-        )
+        gone = await authorisations.forget(guild_id=guild_id, discord_user_id=interaction.user.id)
         await reply(interaction, done(WITHDRAWN if gone else NOTHING_TO_WITHDRAW))
 
     @group.command(
@@ -376,11 +366,10 @@ def build_board_command(
         await defer(interaction)
         try:
             standing = await boards.standing(guild_id=guild_id, asking=interaction.user.id)
-        except NotRegisteredError as error:
-            await reply(interaction, refused(words_for(error, noun="repository")))
-            return
         except ShannonError as error:
-            await reply(interaction, refused(error.message))
+            # Through the reply table, for the reason `link` gives. Issue #267.
+            logger.warning("/board show could not finish: %s", error.message)
+            await reply(interaction, reply_for(error, noun="board"))
             return
 
         # Owed where the board is linked and is not being read, because that is something
@@ -528,8 +517,12 @@ def _label_for(one: ProjectListing) -> str:
 
 
 def _clipped(text: str) -> str:
-    """Text cut to what one Discord choice name will take, with the cut marked."""
-    return text if len(text) <= MOST_LABEL else f"{text[: MOST_LABEL - 1]}…"
+    """Text cut to what one Discord choice name will take, with the cut marked.
+
+    One long board title used to empty the whole picker, because Discord refuses a name past its
+    cap rather than cutting it.
+    """
+    return text if len(text) <= MOST_CHARACTERS else f"{text[: MOST_CHARACTERS - 1]}…"
 
 
 def _unlinked(unlinked: BoardUnlinked) -> str:
