@@ -8543,3 +8543,25 @@ feature end to end rather than assuming a predecessor the file never recorded.
   `.env.example` with the placeholder still in it should have that line emptied.
 - **Tests.** The README's test reads the webhook event list from `INSTALLATION.md`, where it now
   lives.
+
+## Four loose ends from the documentation work
+
+- **A big board slowed every board** (found reviewing #243). When one linked board was too big for
+  a single page, the poller waited sixty seconds between passes for all of them, so every small
+  board in every server lost its two-second cadence. The comment, the log line and the README all
+  said it was that board alone. Each board now keeps its own clock: a board that cannot be checked
+  cheaply is read every sixty seconds, and every other board goes on being read at the interval.
+  The poller's own default interval is now the two seconds the setting ships with, not sixty.
+- **The image was built with a different uv from CI's.** The Dockerfile copied uv 0.9.7 while CI
+  and the Nix shell pinned 0.13.7. It now copies 0.13.7, and a test holds the two together, the way
+  flake.nix already holds the shell to CI.
+- **Two stand-ins were never checked against what they replace.** `FakeBoardCredentials` and
+  `NoBoardLinks` are now in `IMPLEMENTATIONS`, with the real `BoardCredentials` and
+  `BoardLinkingService` beside them.
+- **The malformed-link guard had no test of its own.** An unbalanced `[` in a link was reached only
+  when a Hypothesis test happened to generate one, so a full coverage run could now and then land
+  at 99.99%. An explicit case covers it.
+- **For whoever deploys it.** Nothing to change. A deployment with one big board and other small
+  ones sees the small ones mirrored at the interval again.
+- **Tests.** Two poller tests for the per-board clock, one updated for it, the Dockerfile pin test,
+  six conformance rows and the malformed-link case.
