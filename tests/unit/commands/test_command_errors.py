@@ -7,7 +7,7 @@ import discord
 import pytest
 from discord import app_commands
 
-from shannon.commands._replies import UNEXPECTED, reply_for, words_for
+from shannon.commands._replies import UNEXPECTED, comes_right, reply_for, words_for
 from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.errors import (
     ChannelNotFoundError,
@@ -15,7 +15,7 @@ from shannon.discord_bot.errors import (
     DiscordPermissionError,
 )
 from shannon.discord_bot.panels import Accent
-from shannon.discord_bot.responses import REFUSED, done, refused, reply
+from shannon.discord_bot.responses import OWED, REFUSED, done, refused, reply
 from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.domain.errors import ItemNotReadyError, NotInstalledError, NotRegisteredError
 from shannon.github.errors import (
@@ -24,8 +24,10 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
+from shannon.services.boards import BoardMovedError, BoardTakenError
 from shannon.services.linking import NoTeamsHereError
 from shannon.services.reminders.book import TooManyRemindersError
+from shannon.services.sync.one_at_a_time import ItemBusyError
 from tests.fakes.discord_objects import FakeInteraction
 
 
@@ -162,6 +164,33 @@ class TestTheColourOfARefusal:
     def test_one_somebody_has_to_put_right_is_red(self, error: Exception) -> None:
         assert reply_for(error).accent == Accent.FAILED
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            GitHubRateLimitError("slow down", retry_after=60),
+            ItemNotReadyError("still being set up"),
+            ItemBusyError("Item 1 is being changed by something else."),
+            TooManyRemindersError("One has to go off before you can set another."),
+        ],
+    )
+    def test_one_that_comes_right_is_amber_when_discord_wrapped_it_too(
+        self, error: Exception
+    ) -> None:
+        """Issue #267. The words were read off the error inside the wrapper and the mark off the
+        wrapper, so one that escaped a command got the right sentence behind the red mark."""
+        assert comes_right(wrapped(error)) is True
+        assert reply_for(wrapped(error)).accent == Accent.MEDIUM
+
+    def test_a_wrapped_one_somebody_has_to_put_right_is_still_red(self) -> None:
+        assert comes_right(wrapped(GitHubAuthError("refused"))) is False
+        assert reply_for(wrapped(GitHubAuthError("refused"))).accent == Accent.FAILED
+
+    def test_the_rule_the_mark_follows_is_the_one_comes_right_gives(self) -> None:
+        """One rule, asked by the tier guard as well, so the two cannot come to disagree (#267)."""
+        assert comes_right(GitHubRateLimitError("slow down")) is True
+        assert comes_right(GitHubUnavailableError("timed out")) is False
+        assert comes_right(RuntimeError("boom")) is False
+
     def test_the_words_are_the_ones_the_table_gives_behind_the_mark(self) -> None:
         """The bar and the mark are the whole of what the card adds to the table's sentence.
 
@@ -191,6 +220,16 @@ class TestTheBackstop:
         await bot.tree.on_error(interaction, wrapped(NotRegisteredError("Run /register first.")))
 
         assert interaction.said == "Run /register first."
+
+    async def test_a_spent_quota_that_escaped_is_amber_with_the_wait(self) -> None:
+        """Issue #267: the backstop only ever sees a wrapped error, and this one used to be red."""
+        bot = ShannonBot(explain_error=reply_for)
+        interaction = FakeInteraction()
+
+        await bot.tree.on_error(interaction, wrapped(GitHubRateLimitError("x", retry_after=120)))
+
+        assert interaction.mark == OWED
+        assert interaction.said == "GitHub's rate limit is spent. Try again in about 2 minutes."
 
     async def test_an_interaction_that_has_gone_away_is_not_worth_raising_over(self) -> None:
         """The handler raising would log a second traceback and still tell nobody."""
@@ -309,3 +348,25 @@ def test_a_personal_repository_s_refusal_says_why_instead_of_something_went_wron
         panel.text
         == f"{REFUSED} octocat is a personal account, and only an organisation has teams."
     )
+
+
+class TestABoardSomethingElseHolds:
+    """`/board link` answered these two itself because the table had no row for them. The rows
+    keep the sentence each was raised with, word for word, so it can stop doing that (#267)."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            BoardTakenError("Board 3 already mirrors acme/other. Unlink it there first."),
+            BoardMovedError("acme/widgets moved to umbrella/widgets while its board was opening."),
+        ],
+        ids=["taken", "moved"],
+    )
+    def test_the_member_reads_the_sentence_it_was_raised_with_in_red(
+        self, error: BoardTakenError | BoardMovedError
+    ) -> None:
+        panel = reply_for(error, noun="board")
+
+        assert words_for(error, noun="board") == error.message
+        assert panel.accent == Accent.FAILED
+        assert panel.text == f"{REFUSED} {error.message}"

@@ -13,10 +13,11 @@ from typing import Protocol
 import discord
 
 from shannon.commands._cooldowns import Cooldown, NotYet
+from shannon.commands._replies import comes_right
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, owed, refused, reply
 from shannon.discord_bot.roles import CommandRole
-from shannon.github.errors import GitHubError, GitHubRateLimitError
+from shannon.github.errors import GitHubError
 
 NOT_IN_A_SERVER = "Run this inside a server channel."
 NOT_IN_A_THREAD = "Run this inside the item's thread."
@@ -38,6 +39,19 @@ class InAThread:
     channel_id: int
 
 
+async def server_of(interaction: discord.Interaction) -> int | None:
+    """The guild this was run in, or None having said why not. No tier is asked about.
+
+    For a command anybody may run, and for the half of one that needs no role. Each such command
+    used to write these lines out itself, with a comment on why it did not call `in_a_server`.
+    Issue #267.
+    """
+    guild_id = interaction.guild_id
+    if guild_id is None:
+        await reply(interaction, refused(NOT_IN_A_SERVER))
+    return guild_id
+
+
 async def in_a_server(
     interaction: discord.Interaction,
     command: str,
@@ -45,9 +59,8 @@ async def in_a_server(
     roles: Collection[CommandRole],
 ) -> int | None:
     """The guild a permitted caller ran this in, or None having said why not."""
-    guild_id = interaction.guild_id
+    guild_id = await server_of(interaction)
     if guild_id is None:
-        await reply(interaction, refused(NOT_IN_A_SERVER))
         return None
     if not await holds_the_tier(interaction, guild_id, command, gate, roles):
         return None
@@ -77,8 +90,8 @@ async def holds_the_tier(
     because the role is the first thing that would have let them in.
 
     GitHub not answering is a refusal, never a grant, since this raises access. Amber where it was
-    a rate limit, which comes right on its own, and red otherwise: the split `_COMES_RIGHT` makes
-    for every other reply.
+    a rate limit, which comes right on its own, and red otherwise: the split `comes_right` makes
+    for every other reply, asked here rather than copied (#267).
 
     `aside` is a sentence to end every refusal on, for a command with a half that needs no role.
     The parts are joined with one space and an empty one is left out, so no refusal can end on a
@@ -98,8 +111,7 @@ async def holds_the_tier(
     except GitHubError as unanswered:
         # Logged by the grant, which knows whose account it asked about and on what.
         said = _joined(denial, COULD_NOT_ASK_GITHUB, aside)
-        comes_right = isinstance(unanswered, GitHubRateLimitError)
-        await reply(interaction, owed(said) if comes_right else refused(said))
+        await reply(interaction, owed(said) if comes_right(unanswered) else refused(said))
         return False
     if refusal is None:
         return True
