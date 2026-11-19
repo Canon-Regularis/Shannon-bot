@@ -225,7 +225,7 @@ Beside the HTTP API, the process runs five long-lived tasks.
 | --- | --- | --- | --- |
 | Discord gateway | The bot's connection to Discord | Always | The process stops, so it is restarted |
 | Delivery worker | Works the webhook queue. Once an hour it also prunes (deletes) old deliveries and spent sign-in links | Every 2 s when idle | The process stops, so it is restarted |
-| Board poller ([services/projects.py](shannon/services/projects.py)) | Reads every linked project board and syncs card moves | Every 2 s, or every 60 s for all boards while any linked board is too big for one page | Logged, shown in `/health`, not restarted |
+| Board poller ([services/projects.py](shannon/services/projects.py)) | Reads every linked project board and syncs card moves | Every 2 s. A board too big for one page is read every 60 s, and the others keep 2 s | Logged, shown in `/health`, not restarted |
 | Transcript flusher ([services/transcripts/flush.py](shannon/services/transcripts/flush.py)) | Publishes logged Discord conversations to GitHub as one comment per batch | Checks every 5 s | Logged, shown in `/health`, not restarted |
 | Reminder sender ([services/reminders/send.py](shannon/services/reminders/send.py)) | Sends `/remind` reminders when they fall due | Checks every 5 s | Logged, shown in `/health`, not restarted |
 
@@ -427,17 +427,10 @@ yet, so open one and agree the approach there before you write code.
 - **`mirrored_notes` and `item_assignments` are never pruned.** Pruning is safe and easy to add once
   their size matters. It does not matter yet (CHANGELOG).
 - **`/priority` cannot clear a priority** back to none. The docs suggest no fix yet.
-- **A board with more than one page of cards** slows the whole poller, for every linked board, to a
-  60-second poll. An ETag (GitHub's fingerprint of one response) covers one page only, so it cannot
-  show that the other pages are unchanged.
 - **A board owned by an organisation** would let the bot use `projects_v2_item` webhooks and drop
   the poller. That is the board owner's choice, not only a code change: those events are still in
   preview, and a new App permission pauses deliveries until an admin accepts it
   ([requirements.md](requirements.md#what-anonymity-can-and-cannot-mean-here)).
-- **A test for a malformed link.** The `except ValueError` in
-  [github/urls.py](shannon/github/urls.py) handles an unbalanced `[`. Only a Hypothesis test (one
-  that generates random inputs) reaches it, and only when it happens to generate one. So a full
-  `--cov` run sometimes misses 100%. One explicit test fixes it. A good first change.
 
 All fourteen known limitations are in the README's [Known limitations](README.md#known-limitations).
 
