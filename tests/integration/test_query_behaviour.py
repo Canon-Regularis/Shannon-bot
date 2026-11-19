@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
+from shannon.db.base import Base
+from shannon.db.models import ChannelMapping, ItemAssignment, Repository, TrackedItem
 from shannon.db.stores.assignments import ItemAssignmentStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.db.stores.webhook_events import WebhookEventStore
@@ -75,6 +76,44 @@ async def test_reading_the_relationship_is_an_error_rather_than_a_silent_query(
         assert item is not None
         with pytest.raises(InvalidRequestError):
             _ = item.assignments
+
+
+@pytest.mark.parametrize(
+    ("model", "attribute"),
+    [
+        (Repository, "channel_mappings"),
+        (Repository, "tracked_items"),
+        (ChannelMapping, "repository"),
+        (TrackedItem, "repository"),
+        (TrackedItem, "assignments"),
+        (ItemAssignment, "tracked_item"),
+    ],
+)
+async def test_every_relationship_refuses_to_be_read_even_with_its_target_loaded(
+    registered: Repository,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    issue_event,
+    model: type[Base],
+    attribute: str,
+) -> None:
+    """Issue #268. Rows are fetched through their stores; the relationships are only for a delete.
+
+    Every row is loaded into one session first, so each many-to-one's parent is already in the
+    identity map. That is where the default lazy load answers with no SQL and hides the mistake
+    until a production path that never loaded the parent raises MissingGreenlet.
+    """
+    service = build_item_sync(db_sessionmaker, FakeThreadGateway(), IssuePolicy())
+    await service.sync(issue_event("opened"))
+
+    async with db_sessionmaker() as session:
+        loaded: dict[type[Base], Base] = {}
+        for each in (Repository, ChannelMapping, TrackedItem, ItemAssignment):
+            row = (await session.scalars(select(each).limit(1))).first()
+            assert row is not None, each.__name__
+            loaded[each] = row
+
+        with pytest.raises(InvalidRequestError):
+            getattr(loaded[model], attribute)
 
 
 async def test_finding_an_item_by_number_uses_an_index(

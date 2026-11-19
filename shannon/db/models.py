@@ -91,11 +91,24 @@ class Repository(TimestampMixin, Base):
 
     # passive_deletes hands cascading to the database FKs, so deleting a repository does not
     # need every child row loaded into the session first.
+    #
+    # These relationships, and the ones on the models below, exist only for an ORM
+    # `session.delete`. Production never does one: /unregister issues a Core DELETE and relies
+    # on each FK's ON DELETE CASCADE. Rows are fetched through their stores, so nothing reads
+    # these attributes, and `raise` makes a read fail every time. The default lazy load would
+    # quietly return a parent already in the identity map, which a test that added it would see,
+    # and raise MissingGreenlet in production, where it was never loaded. Issue #268.
     channel_mappings: Mapped[list[ChannelMapping]] = relationship(
-        back_populates="repository", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        lazy="raise",
+        passive_deletes=True,
     )
     tracked_items: Mapped[list[TrackedItem]] = relationship(
-        back_populates="repository", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        lazy="raise",
+        passive_deletes=True,
     )
 
 
@@ -114,7 +127,8 @@ class ChannelMapping(TimestampMixin, Base):
     )
     discord_channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
-    repository: Mapped[Repository] = relationship(back_populates="channel_mappings")
+    # Never read: see the comment on Repository's relationships.
+    repository: Mapped[Repository] = relationship(back_populates="channel_mappings", lazy="raise")
 
 
 class TrackedItem(TimestampMixin, Base):
@@ -217,9 +231,10 @@ class TrackedItem(TimestampMixin, Base):
     # the day a repository carries two.
     project_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    repository: Mapped[Repository] = relationship(back_populates="tracked_items")
-    # Nothing reads this: assignments are fetched through ItemAssignmentStore, one role at a
-    # time. `raise` keeps the mapping for the cascade and turns accidental use into an error.
+    # Never read: see the comment on Repository's relationships.
+    repository: Mapped[Repository] = relationship(back_populates="tracked_items", lazy="raise")
+    # Nothing reads this either: assignments are fetched through ItemAssignmentStore, one role
+    # at a time.
     assignments: Mapped[list[ItemAssignment]] = relationship(
         back_populates="tracked_item",
         cascade="all, delete-orphan",
@@ -261,7 +276,8 @@ class ItemAssignment(TimestampMixin, Base):
     # ping somebody to review what they just approved. Cleared by a request newer than the review.
     fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    tracked_item: Mapped[TrackedItem] = relationship(back_populates="assignments")
+    # Never read: see the comment on Repository's relationships.
+    tracked_item: Mapped[TrackedItem] = relationship(back_populates="assignments", lazy="raise")
 
 
 class MirroredNote(TimestampMixin, Base):

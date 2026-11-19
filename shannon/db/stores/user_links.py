@@ -5,9 +5,10 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shannon.db.locks import hold_guild
 from shannon.db.models import UserLink
 from shannon.db.stores.identities import ProvedAccount
 
@@ -186,7 +187,7 @@ class UserLinkStore:
         otherwise. Taken here rather than around the GitHub call that found the new name: holding
         a lock across a network round trip would serialise a guild on somebody else's latency.
         """
-        await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
+        await hold_guild(self._session, guild_id)
         username = login.lower()
 
         row = await self._session.scalar(
@@ -274,17 +275,20 @@ class UserLinkStore:
         github_username: str,
         github_user_id: int | None,
         discord_user_id: int,
-    ) -> UserLink:
+    ) -> None:
         """Bind a GitHub login to a Discord account, replacing whatever either side had.
 
         Both halves are unique within a guild and can be held by two different rows, so editing one
         in place collides with the other: clear both and insert, as one step. An upsert cannot do it
         — a row can conflict on either constraint and `ON CONFLICT` names one — and nor can a retry
-        loop, since the retries collide with each other. Hence the advisory lock, keyed per guild;
-        the bare guild id is safe because the project's other lock passes Postgres two integers
-        rather than one bigint, and those spaces stay apart.
+        loop, since the retries collide with each other. Hence the advisory lock, keyed per guild
+        (`shannon.db.locks` says why that key cannot collide with the others).
+
+        Flushed on both paths, so a read later in the same transaction sees the id whichever one
+        ran. Only the insert used to, and with autoflush off the other answered the old id until
+        the commit (#268). Nothing is returned, because no caller reads the row.
         """
-        await self._session.execute(select(func.pg_advisory_xact_lock(guild_id)))
+        await hold_guild(self._session, guild_id)
 
         username = github_username.lower()
 
@@ -300,24 +304,22 @@ class UserLinkStore:
             # re-running `/link` is the only way one is ever filled in, since GitHub can say what a
             # login is called now and not what it was called when somebody bound it.
             existing.github_user_id = github_user_id
-            return existing
-
-        await self._session.execute(
-            delete(UserLink).where(
-                UserLink.discord_guild_id == guild_id,
-                or_(
-                    UserLink.github_username == username,
-                    UserLink.discord_user_id == discord_user_id,
-                ),
+        else:
+            await self._session.execute(
+                delete(UserLink).where(
+                    UserLink.discord_guild_id == guild_id,
+                    or_(
+                        UserLink.github_username == username,
+                        UserLink.discord_user_id == discord_user_id,
+                    ),
+                )
             )
-        )
-
-        link = UserLink(
-            discord_guild_id=guild_id,
-            github_username=username,
-            github_user_id=github_user_id,
-            discord_user_id=discord_user_id,
-        )
-        self._session.add(link)
+            self._session.add(
+                UserLink(
+                    discord_guild_id=guild_id,
+                    github_username=username,
+                    github_user_id=github_user_id,
+                    discord_user_id=discord_user_id,
+                )
+            )
         await self._session.flush()
-        return link

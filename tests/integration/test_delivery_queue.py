@@ -7,14 +7,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from shannon.db.models import WebhookEvent
+from shannon.db.session import build_sessionmaker
 from shannon.domain.enums import DeliveryStatus
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 
@@ -223,10 +219,7 @@ async def test_two_workers_never_lease_the_same_delivery(
 
     engines: list[AsyncEngine] = [create_async_engine(prepared_database) for _ in range(2)]
     try:
-        rivals = [
-            WebhookDeliveryQueue(async_sessionmaker(engine, expire_on_commit=False))
-            for engine in engines
-        ]
+        rivals = [WebhookDeliveryQueue(build_sessionmaker(engine)) for engine in engines]
         batches = await asyncio.gather(*(rival.lease(limit=6, lease_for=LEASE) for rival in rivals))
     finally:
         for engine in engines:

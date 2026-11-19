@@ -12,12 +12,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shannon.db.base import rows_changed
+from shannon.db.locks import ONE_ACCOUNT_AT_A_TIME
 from shannon.db.models import GitHubInstallation
-
-# The first key of the per-account advisory lock. Postgres keeps two-integer keys apart
-# from single-bigint ones, and `UserLinkStore` uses the latter; the other two-integer
-# space in this project leads with `_ONE_ITEM_AT_A_TIME`, so all three stay apart.
-_ONE_ACCOUNT_AT_A_TIME = 8_532
 
 
 class InstallationStore:
@@ -45,7 +41,7 @@ class InstallationStore:
         installation_id: int,
         account_login: str,
         account_id: int | None = None,
-        suspended: bool = False,
+        suspended: bool | None = None,
     ) -> None:
         """Write down what GitHub just said, replacing whatever was there.
 
@@ -55,6 +51,11 @@ class InstallationStore:
         this caller has one, since it is the only thing that tells a rename apart from somebody
         taking a freed name.
 
+        `suspended` follows the same rule, None being a caller that does not know. It used to
+        default to False, so a caller with no word on it cleared a suspension, and the map then
+        minted against an App GitHub had paused, on every call (#268). A new row nobody said was
+        suspended takes the column's default, which is not suspended.
+
         Two steps against two constraints cannot be made atomic by `ON CONFLICT`, which
         names one of them, and a retry loop only has the retries colliding instead. So an
         advisory lock per account, exactly as `UserLinkStore.link` takes one per guild and
@@ -63,7 +64,7 @@ class InstallationStore:
         """
         login = account_login.strip().lower()
         await self._session.execute(
-            select(func.pg_advisory_xact_lock(_ONE_ACCOUNT_AT_A_TIME, func.hashtext(login)))
+            select(func.pg_advisory_xact_lock(ONE_ACCOUNT_AT_A_TIME, func.hashtext(login)))
         )
         await self._session.execute(
             delete(GitHubInstallation).where(
@@ -76,13 +77,15 @@ class InstallationStore:
             "installation_id": installation_id,
             "account_login": login,
             "account_id": account_id,
-            "suspended": suspended,
         }
-        # Declared because the conditional key below is an int, and the literal alone would fix
-        # the value type at `str | bool`.
-        settled: dict[str, object] = {"account_login": login, "suspended": suspended}
+        # Declared because the conditional keys below are an int and a bool, and the literal
+        # alone would fix the value type at `str`.
+        settled: dict[str, object] = {"account_login": login}
         if account_id is not None:
             settled["account_id"] = account_id
+        if suspended is not None:
+            values["suspended"] = suspended
+            settled["suspended"] = suspended
 
         await self._session.execute(
             pg_insert(GitHubInstallation)

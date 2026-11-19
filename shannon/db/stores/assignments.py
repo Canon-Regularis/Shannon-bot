@@ -4,7 +4,7 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,18 +61,19 @@ class ItemAssignmentStore:
 
         # Deleting first frees these names, before any rename below is allowed to take one.
         kept = {row.id for row in mine.values() if row is not None}
-        removed = sorted(
-            row.github_username
-            for row in rows
-            if row.id not in kept and not self._already_told_and_newer(row, as_of)
-        )
+        removed = sorted(row.github_username for row in rows if row.id not in kept)
         if removed:
             await self._session.execute(
-                delete(ItemAssignment).where(
+                delete(ItemAssignment)
+                .where(
                     ItemAssignment.tracked_item_id == tracked_item_id,
                     ItemAssignment.role_type == role,
                     ItemAssignment.github_username.in_(removed),
+                    self._not_told_since(as_of),
                 )
+                # The ORM's own copy of a row the guard spares is still unstamped, so letting it
+                # evaluate the WHERE in Python would mark a row that is still there as deleted.
+                .execution_options(synchronize_session=False)
             )
 
         for login, row in mine.items():
@@ -110,22 +111,31 @@ class ItemAssignmentStore:
             )
 
     @staticmethod
-    def _already_told_and_newer(row: ItemAssignment, as_of: datetime | None) -> bool:
-        """Whether this payload is too old to be asked to remove this row.
+    def _not_told_since(as_of: datetime | None) -> ColumnElement[bool]:
+        """Which rows this payload is new enough to remove.
 
         GitHub stamps `pull_request.updated_at` to the second, so two deliveries milliseconds
         apart carry the same one, and the worker can run them newest first: a transient Discord
         error puts a delivery behind the one after it, since the lease skips a row whose next
         attempt is in the future. The older payload would then delete the row the newer one made,
         taking `notified_at` with it, and the next ordinary event puts the person back and pings
-        them for a review nobody asked for twice. Only rows somebody has been pinged from, since
-        one nobody was told about is re-added by the next delivery and pinged once. Equal counts
-        as too old, at the cost of a reviewer removed in that same second staying until the next
-        event.
+        them for a review nobody asked for twice. Only rows somebody has been pinged from are
+        spared, since one nobody was told about is re-added by the next delivery and pinged once.
+        Equal counts as too old, at the cost of a reviewer removed in that same second staying
+        until the next event.
+
+        Decided by the DELETE, not from the rows `replace` read (#268). The notifier stamps in its
+        own transaction with no item lock, so a stamp can commit between the read and the delete;
+        Postgres re-checks this WHERE on the row it waited for, and a check made in Python from
+        the read did not see the stamp and deleted the row.
         """
-        if row.notified_at is None or as_of is None or row.requested_at is None:
-            return False
-        return as_utc(row.requested_at) >= as_utc(as_of)
+        if as_of is None:
+            return true()
+        return or_(
+            ItemAssignment.notified_at.is_(None),
+            ItemAssignment.requested_at.is_(None),
+            ItemAssignment.requested_at < as_utc(as_of),
+        )
 
     @staticmethod
     def _match(
@@ -284,7 +294,8 @@ class ItemAssignmentStore:
         reaches this bot on the next `pull_request` event, and submitting a review sends none.
         Never onto a request made since the review, since this handler runs again on every retry
         of the delivery and would otherwise close a re-request made during the backoff. Both
-        stamps are on GitHub's clock, not ours.
+        stamps are on GitHub's clock, except when the payload carries no `submitted_at`: then the
+        database's clock stands in for it.
         """
         submitted = when or func.now()
         by_name = ItemAssignment.github_username == github_username.lower()

@@ -193,12 +193,20 @@ class TestWhoAMessageTagged:
         self, log: ConversationLog, logging_thread: int, db_session: AsyncSession
     ) -> None:
         """Capture is the only writer, so any other shape could only be a hand edit, and a whole
-        transcript refusing to publish over one is the worse failure."""
+        transcript refusing to publish over one is the worse failure.
+
+        A superscript passes `isdigit` and `int` raises on it; fullwidth digits pass both and
+        `int` reads them as an id nobody wrote. Both are stepped over (#268)."""
         await log.capture(
             said(logging_thread, content="hi", mentions={111111111111111111: "Alice"})
         )
         rows = await held(db_session)
-        rows[0].mentions = {"111111111111111111": "Alice", "not-an-id": "Nobody"}
+        rows[0].mentions = {
+            "111111111111111111": "Alice",
+            "not-an-id": "Nobody",
+            "\u00b2": "Superscript",
+            "\uff11\uff12\uff13": "Fullwidth",
+        }
         await db_session.commit()
 
         db_session.expire_all()

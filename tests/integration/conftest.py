@@ -24,6 +24,7 @@ from sqlalchemy.pool import NullPool
 
 from shannon.db.base import Base
 from shannon.db.models import Repository
+from shannon.db.session import build_sessionmaker
 from shannon.discord_bot.formatting import format_assignee_ping, format_reviewer_ping
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.github.webhooks.issues import parse_issue_event
@@ -100,13 +101,18 @@ async def db_engine(prepared_database: str) -> AsyncIterator[AsyncEngine]:
 
 @pytest_asyncio.fixture
 async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    async with AsyncSession(db_engine, expire_on_commit=False) as session:
+    """A session built the way production builds them (#268).
+
+    With SQLAlchemy's default of autoflush on, a store that forgot a flush it needs would pass
+    here and read stale rows in production.
+    """
+    async with build_sessionmaker(db_engine)() as session:
         yield session
 
 
 @pytest.fixture
 def db_sessionmaker(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
+    return build_sessionmaker(db_engine)
 
 
 @pytest.fixture

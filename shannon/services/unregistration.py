@@ -11,10 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.errors import (
     NotProvenError,
@@ -113,10 +111,7 @@ class RepositoryUnregistrationService:
         re-proving all of it would cost every member a browser visit for nothing.
         """
         async with self._sessionmaker() as session, session.begin():
-            orphaned = await session.scalar(
-                select(func.count())
-                .select_from(TrackedItem)
-                .where(TrackedItem.repository_id == repository_id)
-            )
-            await session.execute(delete(Repository).where(Repository.id == repository_id))
-        return orphaned or 0
+            repositories = RepositoryStore(session)
+            orphaned = await repositories.count_items(repository_id)
+            await repositories.remove(repository_id)
+        return orphaned

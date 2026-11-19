@@ -43,8 +43,12 @@ class MirroredNoteStore:
         by a test: every implementation of `post` answers with an id, so a caller that branched on
         the absence of one would carry a branch nothing could ever take.
 
-        Guarded on the key rather than blind, so a claim that was handed back and taken again by
-        another worker is not overwritten by the loser's message id.
+        An update rather than an upsert, so a claim that was handed back stays gone. The key is
+        the only handle a caller holds, and it cannot tell one claim from a later one on the same
+        note (see `_hand_back` in services/notes.py). Nothing here keeps two writers apart; the
+        caller does, because only a post that landed reaches this write and a failed post hands
+        its claim back without it. Telling claims apart would need a claim id passed on from
+        `claim` (#268).
         """
         await self._session.execute(
             update(MirroredNote)

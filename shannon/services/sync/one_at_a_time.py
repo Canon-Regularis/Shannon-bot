@@ -11,13 +11,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from shannon.db.locks import ONE_ITEM_AT_A_TIME
 from shannon.domain.errors import ShannonError
 
 logger = logging.getLogger(__name__)
-
-# The first key of the per-item advisory lock. Postgres keeps two-integer keys apart from
-# single-bigint ones, and `UserLinkStore` uses the latter, so the two spaces cannot collide.
-_ONE_ITEM_AT_A_TIME = 8_531
 
 # Which items this task holds, rebound rather than mutated so a task cannot alter another's.
 # Keyed on the GitHub id rather than the folded key below, so two items that fold together
@@ -116,7 +113,7 @@ class ItemLock:
         )
         try:
             await session.execute(
-                select(func.pg_advisory_xact_lock(_ONE_ITEM_AT_A_TIME, _lock_key(github_object_id)))
+                select(func.pg_advisory_xact_lock(ONE_ITEM_AT_A_TIME, _lock_key(github_object_id)))
             )
         except DBAPIError as error:
             # Read off the driver's own exception: SQLAlchemy wraps asyncpg's

@@ -27,7 +27,8 @@ class DuplicateRegistrationError(ShannonError):
 
 
 class NotInstalledError(ShannonError):
-    """This bot cannot see a repository because the GitHub App is not installed on it.
+    """This bot cannot see a repository: the GitHub App is not installed on it, or the
+    installation is suspended (#268).
 
     GitHub answers 404 both for a repository that does not exist and for one the caller may not
     see, so a plain `GitHubNotFoundError` reports a private repository as missing.

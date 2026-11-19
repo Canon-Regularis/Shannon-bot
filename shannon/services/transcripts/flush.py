@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -57,6 +58,18 @@ GAVE_UP = (
     "**This conversation could not be published to GitHub.** {reason}\n"
     "The {count} messages waiting to go out have been dropped. Logging is still on."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _Claim:
+    """The batch a pass holds: the claim it took it under, and how far along the rows it reaches.
+
+    The flush id travels with the batch so the pass lets go of, and counts failures against, only
+    the claim it took (#268). Another pass may have taken the conversation over meanwhile.
+    """
+
+    flush_id: str
+    through: int
 
 
 def should_flush(
@@ -153,14 +166,14 @@ class TranscriptFlusher:
     async def _one(self, batch: PendingBatch) -> None:
         now = self._now()
         if batch.flush_id is not None:
-            through = await self._take_over(batch, now)
+            claim = await self._take_over(batch, now)
         else:
-            through = await self._take(batch, now)
-        if through is None:
+            claim = await self._take(batch, now)
+        if claim is None:
             return
-        await self._publish(batch, through)
+        await self._publish(batch, claim)
 
-    async def _take_over(self, batch: PendingBatch, now: datetime) -> int | None:
+    async def _take_over(self, batch: PendingBatch, now: datetime) -> _Claim | None:
         """Pick up a claim whose holder is gone; the batch finished is the one it claimed.
 
         Anything said since waits for the next pass and its own decision.
@@ -170,18 +183,19 @@ class TranscriptFlusher:
             return None
         if now - started < FLUSH_RETRY_AFTER:
             return None
+        claim = _Claim(flush_id=uuid4().hex, through=through)
         async with self._sessionmaker() as session, session.begin():
             seized = await ConversationStore(session).seize(
-                batch.conversation_id, flush_id=uuid4().hex, held=held, now=now
+                batch.conversation_id, flush_id=claim.flush_id, held=held, now=now
             )
         if not seized:
             return None
         logger.info(
             "conversation %s had a flush nobody finished, taking it on", batch.conversation_id
         )
-        return through
+        return claim
 
-    async def _take(self, batch: PendingBatch, now: datetime) -> int | None:
+    async def _take(self, batch: PendingBatch, now: datetime) -> _Claim | None:
         ready = should_flush(
             count=batch.count,
             characters=batch.characters,
@@ -193,13 +207,14 @@ class TranscriptFlusher:
         )
         if not ready:
             return None
+        claim = _Claim(flush_id=uuid4().hex, through=batch.through_id)
         async with self._sessionmaker() as session, session.begin():
             claimed = await ConversationStore(session).claim(
-                batch.conversation_id, flush_id=uuid4().hex, through_id=batch.through_id, now=now
+                batch.conversation_id, flush_id=claim.flush_id, through_id=claim.through, now=now
             )
-        return batch.through_id if claimed else None
+        return claim if claimed else None
 
-    async def _publish(self, batch: PendingBatch, through: int) -> None:
+    async def _publish(self, batch: PendingBatch, claim: _Claim) -> None:
         try:
             found = await locate(self._sessionmaker, batch.discord_thread_id)
         except NotAnItemThreadError:
@@ -209,22 +224,22 @@ class TranscriptFlusher:
                 "conversation %s has no item any more, dropping what it was holding",
                 batch.conversation_id,
             )
-            await self._done(batch, through)
+            await self._done(batch, claim)
             return
 
-        lines = await self._lines(found.guild_id, batch.conversation_id, through)
+        lines = await self._lines(found.guild_id, batch.conversation_id, claim.through)
         if not lines:
             # Everything claimed was deleted in Discord before it went out: what the delete
             # handler exists to produce.
-            await self._done(batch, through)
+            await self._done(batch, claim)
             return
 
         try:
             await self._publisher.publish(found, lines, thread_id=batch.discord_thread_id)
         except ShannonError as error:
-            await self._failed(batch, through, error)
+            await self._failed(batch, claim, error)
             return
-        await self._done(batch, through)
+        await self._done(batch, claim)
 
     async def _lines(
         self, guild_id: int, conversation_id: int, through: int
@@ -258,24 +273,41 @@ class TranscriptFlusher:
                 for message, named in zip(held, tagged, strict=True)
             ]
 
-    async def _done(self, batch: PendingBatch, through: int) -> None:
+    async def _done(self, batch: PendingBatch, claim: _Claim) -> None:
         """Drop the batch and let the claim go, in one transaction.
 
         A process that dies between the comment landing on GitHub and this running leaves the rows
         and the claim, so the batch publishes twice once the claim reads as abandoned. Deliberate:
         a duplicate comment can be deleted, a silently missing chunk cannot be noticed.
+
+        The rows go even when the claim has been taken over meanwhile, and only the release is
+        held to it (#268). They are this pass's batch, all at or before `claim.through`, so they
+        have been posted or dropped by now, and kept they would only be posted a second time.
         """
         async with self._sessionmaker() as session, session.begin():
-            await LoggedMessageStore(session).delete_through(batch.conversation_id, through)
-            await ConversationStore(session).release(batch.conversation_id)
+            await LoggedMessageStore(session).delete_through(batch.conversation_id, claim.through)
+            await ConversationStore(session).release(batch.conversation_id, flush_id=claim.flush_id)
 
-    async def _failed(self, batch: PendingBatch, through: int, error: ShannonError) -> None:
+    async def _failed(self, batch: PendingBatch, claim: _Claim, error: ShannonError) -> None:
         """Count the failure, and give up on the batch once there have been enough of them.
 
         The claim is kept, so the retry waits out `FLUSH_RETRY_AFTER` rather than the next tick.
         """
         async with self._sessionmaker() as session, session.begin():
-            failures = await ConversationStore(session).note_failure(batch.conversation_id)
+            failures = await ConversationStore(session).note_failure(
+                batch.conversation_id, flush_id=claim.flush_id
+            )
+        if failures is None:
+            # The claim is no longer this pass's (#268): taken over while it waited on GitHub,
+            # or cleared because its whole batch was deleted. Retrying or giving up is for
+            # whoever holds the conversation next, on their own count.
+            logger.info(
+                "could not publish the transcript for conversation %s, and the claim is no longer "
+                "this pass's (taken over, or its batch was deleted): %s",
+                batch.conversation_id,
+                error.message,
+            )
+            return
         logger.warning(
             "could not publish the transcript for conversation %s (%s of %s): %s",
             batch.conversation_id,
@@ -288,7 +320,7 @@ class TranscriptFlusher:
 
         # The people whose words were captured are the only ones who will see that they were
         # not published.
-        await self._done(batch, through)
+        await self._done(batch, claim)
         with_reason = GAVE_UP.format(reason=error.message, count=batch.count)
         try:
             await self._threads.post(

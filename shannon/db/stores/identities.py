@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from shannon.db.base import interval, rows_changed
 from shannon.db.models import IdentityVerification, VerifiedIdentity
@@ -59,6 +60,19 @@ class PendingLink:
     guild_id: int
     discord_user_id: int
     purpose: VerificationPurpose
+
+
+def _followable(state: str) -> tuple[ColumnElement[bool], ...]:
+    """The link a state names, while it can still be followed: unspent and unexpired.
+
+    The one definition `pending`, `bind` and `consume` share, so the read on the way in and the
+    two writes on the way out cannot come to disagree about which links are live. Issue #268.
+    """
+    return (
+        IdentityVerification.state == state,
+        IdentityVerification.consumed_at.is_(None),
+        IdentityVerification.expires_at > func.now(),
+    )
 
 
 class IdentityVerificationStore:
@@ -127,11 +141,7 @@ class IdentityVerificationStore:
                     IdentityVerification.discord_guild_id,
                     IdentityVerification.discord_user_id,
                     IdentityVerification.purpose,
-                ).where(
-                    IdentityVerification.state == state,
-                    IdentityVerification.consumed_at.is_(None),
-                    IdentityVerification.expires_at > func.now(),
-                )
+                ).where(*_followable(state))
             )
         ).first()
         if found is None:
@@ -153,10 +163,8 @@ class IdentityVerificationStore:
             self._session,
             update(IdentityVerification)
             .where(
-                IdentityVerification.state == state,
+                *_followable(state),
                 IdentityVerification.discord_user_id == discord_user_id,
-                IdentityVerification.consumed_at.is_(None),
-                IdentityVerification.expires_at > func.now(),
             )
             .values(bound_browser=binding),
         )
@@ -178,10 +186,8 @@ class IdentityVerificationStore:
         spent = await self._session.execute(
             update(IdentityVerification)
             .where(
-                IdentityVerification.state == state,
+                *_followable(state),
                 IdentityVerification.bound_browser == binding,
-                IdentityVerification.consumed_at.is_(None),
-                IdentityVerification.expires_at > func.now(),
             )
             .values(consumed_at=func.now())
             .returning(
@@ -214,14 +220,18 @@ class IdentityVerificationStore:
         )
 
     async def prune(self, *, keep_for: timedelta) -> int:
-        """Drop links that are long past being usable."""
-        changed = await rows_changed(
+        """Drop links that are long past being usable.
+
+        Written the way `WebhookEventStore.prune` is. Issue #268: the interval cast by
+        `interval()`, and no session sync, because `func.now()` cannot be evaluated in Python so
+        the ORM would fall back to fetching every deleted key for objects nothing here holds.
+        """
+        return await rows_changed(
             self._session,
-            delete(IdentityVerification).where(
-                IdentityVerification.expires_at < func.now() - keep_for
-            ),
+            delete(IdentityVerification)
+            .where(IdentityVerification.expires_at < func.now() - interval(keep_for))
+            .execution_options(synchronize_session=False),
         )
-        return changed or 0
 
 
 @dataclass(frozen=True, slots=True)
