@@ -221,7 +221,7 @@ they do. The rest follow the convention the code already uses.
 - **A webhook event.**
   - Add it to `SUPPORTED_EVENTS` in `shannon/github/webhooks/events.py`.
   - Add its name to `WEBHOOK_NAMES` in `tests/unit/test_the_readme_describes_this_repository.py`.
-  - Add it to the README's list of events to choose.
+  - Add it to the list of events to tick in [INSTALLATION.md](INSTALLATION.md#2-make-the-github-app).
 
 ## Running the checks
 
@@ -266,9 +266,10 @@ A change is not finished until the documents agree with it. Update these in the 
 
 | Document | What to do |
 | --- | --- |
-| `README.md` | Keep it true. Its own test, `tests/unit/test_the_readme_describes_this_repository.py`, checks it against the code: every table, every setting, the migration range and the webhook events. |
+| `README.md` | Keep it true. Its own test, `tests/unit/test_the_readme_describes_this_repository.py`, checks it against the code: every table, every setting and the migration range. |
 | `CHANGELOG.md` | Add one entry at the **end** of the file. The newest entry is last. The shape is below. |
 | `ARCHITECTURE.md` | Update it when a layer, a background loop or one of the big decisions changes. |
+| `INSTALLATION.md` | Update it when a setup step, a required setting, a permission, a redirect or a webhook event changes. Its webhook event list is checked by the README's test. |
 | `requirements.md` | This is the technical requirements document. Where a change departs from it, amend it. Say what was built instead and name the issue, so the two do not disagree. |
 
 ### How to write
