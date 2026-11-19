@@ -19,6 +19,7 @@ from shannon.domain.errors import (
 )
 from shannon.domain.models import RepositorySnapshot
 from shannon.github.errors import GitHubNotFoundError
+from shannon.github.installations import Installation
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.services.registration import RepositoryRegistrationService
 from shannon.services.sync.items import build_item_sync
@@ -332,14 +333,19 @@ def _at_the_old_name(*, at: str):
 class FakeInstallations:
     """Stands in for the token minter, answering only what registration asks of it."""
 
-    def __init__(self, *, installation: int | None = 42, slug: str = "shannon-bot") -> None:
+    def __init__(
+        self, *, installation: int | None = 42, suspended: bool = False, slug: str = "shannon-bot"
+    ) -> None:
         self.installation = installation
+        self.suspended = suspended
         self.slug = slug
         self.asked: list[tuple[str, str]] = []
 
-    async def installed_on(self, owner: str, name: str) -> int | None:
+    async def installed_on(self, owner: str, name: str) -> Installation | None:
         self.asked.append((owner, name))
-        return self.installation
+        if self.installation is None:
+            return None
+        return Installation(installation_id=self.installation, suspended=self.suspended)
 
     async def app_slug(self) -> str:
         return self.slug
@@ -485,6 +491,75 @@ class TestARepositoryTheAppCanSee:
         result = await service.register(guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK)
 
         assert result.full_name == "Canon-Regularis/Shannon-bot"
+
+
+class TestWhatGitHubSaysAboutASuspension:
+    """`/register` writes the installation down, and used to write it down as running whatever
+    GitHub said. Issue #268.
+
+    It never passed a suspension, and the store read that silence as "not suspended", so a
+    `/register` against a paused App cleared the row the suspend webhook had written. Every call
+    for that owner then tried a mint GitHub refuses. GitHub says which it is in the same answer
+    that names the installation, so the row now carries that. And a suspended installation is
+    refused in so many words, after it is written down: nothing it does as the App can work.
+    """
+
+    def _service(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], *, suspended: bool
+    ) -> RepositoryRegistrationService:
+        return RepositoryRegistrationService(
+            db_sessionmaker,
+            FakeGitHubClient(repositories={"canon-regularis/shannon-bot": SNAPSHOT}),
+            FakeInstallations(installation=42, suspended=suspended),
+        )
+
+    async def _suspended_here(self, db_session: AsyncSession) -> bool:
+        db_session.expire_all()
+        found = await InstallationStore(db_session).for_owner("Canon-Regularis")
+        assert found is not None
+        return found.suspended
+
+    async def test_a_known_suspension_survives_registering(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        async with db_sessionmaker() as session, session.begin():
+            await InstallationStore(session).remember(
+                installation_id=42, account_login="Canon-Regularis", suspended=True
+            )
+
+        with pytest.raises(NotInstalledError, match="is suspended"):
+            await self._service(db_sessionmaker, suspended=True).register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK
+            )
+
+        assert await self._suspended_here(db_session) is True
+        assert await RepositoryStore(db_session).get_by_guild(1) is None, "it bound one anyway"
+
+    async def test_a_suspension_github_reports_is_recorded(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        """A suspend webhook this bot missed, learnt from the answer `/register` asks for."""
+        with pytest.raises(NotInstalledError, match="is suspended"):
+            await self._service(db_sessionmaker, suspended=True).register(
+                guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK
+            )
+
+        assert await self._suspended_here(db_session) is True
+
+    async def test_an_installation_github_says_is_running_clears_a_stale_suspension(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+    ) -> None:
+        """The other stale direction: an unsuspend webhook this bot missed."""
+        async with db_sessionmaker() as session, session.begin():
+            await InstallationStore(session).remember(
+                installation_id=42, account_login="Canon-Regularis", suspended=True
+            )
+
+        await self._service(db_sessionmaker, suspended=False).register(
+            guild_id=1, channel_id=99, login=OCTOCAT, link=REPO_LINK
+        )
+
+        assert await self._suspended_here(db_session) is False
 
 
 class TestOnlySomebodyWhoAdministersItMayBindIt:

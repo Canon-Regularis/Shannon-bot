@@ -15,9 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from shannon.db.locks import ONE_ITEM_AT_A_TIME
 from shannon.services.sync import one_at_a_time
 from shannon.services.sync.one_at_a_time import (
-    _ONE_ITEM_AT_A_TIME,
     ItemBusyError,
     ItemLock,
     _lock_key,
@@ -46,7 +46,7 @@ async def postgres_holds(sessionmaker: async_sessionmaker[AsyncSession], item: i
                 "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
                 "AND classid = :first AND objid = :second AND objsubid = 2 AND granted"
             ),
-            {"first": _ONE_ITEM_AT_A_TIME, "second": _lock_key(item) & 0xFFFF_FFFF},
+            {"first": ONE_ITEM_AT_A_TIME, "second": _lock_key(item) & 0xFFFF_FFFF},
         )
     return bool(held)
 
