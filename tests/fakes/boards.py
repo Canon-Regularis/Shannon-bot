@@ -121,6 +121,9 @@ class FakeBoard:
         # what nearly every test wants. `cheap=False` is the board that has outgrown a page, and
         # the only thing that changes is how long the poller waits before reading it again.
         self.cheap = cheap
+        # Boards, as (owner, number), that cannot be re-read cheaply whatever `cheap` says, for
+        # the tests that put one big board beside small ones and check each keeps its own clock.
+        self.expensive: set[tuple[str, int]] = set()
         # Issue #198. Cards GitHub still has that the listing leaves out - an archived card, where
         # the listing leaves the archive out, or one a capped read never reached. `read_card`
         # answers for them and the listing never does.
@@ -145,4 +148,4 @@ class FakeBoard:
         return next((one for one in (*self.items, *self.unlisted) if one.item_id == card_id), None)
 
     def can_recheck_cheaply(self, owner: str, project_number: int) -> bool:
-        return self.cheap
+        return self.cheap and (owner, project_number) not in self.expensive
