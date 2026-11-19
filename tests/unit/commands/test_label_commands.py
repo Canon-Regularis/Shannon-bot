@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from shannon.commands._choices import MOST_CHOICES
 from shannon.commands.labels import (
-    MOST_CHOICES,
     _suggesting,
     build_label_command,
     build_unlabel_command,

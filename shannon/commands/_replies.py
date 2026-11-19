@@ -1,6 +1,11 @@
+"""What the member who ran a command is told when it fails, by error type, and with which mark.
+
+The mark says whether the refusal comes right on its own (amber) or somebody has to put it right
+(red). The failure itself is logged in `discord_bot/client.py`, not here. Issue #267.
+"""
+
 from __future__ import annotations
 
-import logging
 import math
 
 from shannon.discord_bot.errors import (
@@ -27,7 +32,12 @@ from shannon.github.errors import (
     GitHubRateLimitError,
     GitHubRefusedError,
 )
-from shannon.services.boards import BoardNotLinkedError, BoardUnreadableError
+from shannon.services.boards import (
+    BoardMovedError,
+    BoardNotLinkedError,
+    BoardTakenError,
+    BoardUnreadableError,
+)
 from shannon.services.linking import InvalidGitHubTeamError, NoTeamsHereError
 from shannon.services.reminders.book import TooManyRemindersError
 from shannon.services.sync.manual import SyncFailedError
@@ -38,8 +48,6 @@ from shannon.services.transcripts.log import (
     NotLoggingError,
 )
 from shannon.services.workflow import ItemMovedError, NotAnItemThreadError, WorkflowRefusedError
-
-logger = logging.getLogger(__name__)
 
 # What the person who ran the command is told, by error type. Ordered most specific first,
 # because the first match wins and several of these share a base class.
@@ -92,10 +100,16 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
     (SyncFailedError, "{message}"),
     # Both name the board and the command that puts it right, so a template could add nothing.
     # `BoardUnreadableError` had no row at all until `/refresh` learned to read a board: it is
-    # raised inside `/board link`, which answers its own refusals, so nothing had ever asked this
-    # table about one and it came out as "Something went wrong here."
+    # raised inside `/board link`, which used to answer every refusal itself, so nothing had ever
+    # asked this table about one and it came out as "Something went wrong here." Since #267 only
+    # this one and an authorisation nobody granted are answered there; the rest come through here.
     (BoardNotLinkedError, "{message}"),
     (BoardUnreadableError, "{message}"),
+    # Both name the board and what holds it, so a template could add nothing here either. Rows
+    # of their own so that `/board link` can hand them to `reply_for` with every other error and
+    # keep its words exactly, rather than answering them itself. Issue #267.
+    (BoardTakenError, "{message}"),
+    (BoardMovedError, "{message}"),
     (InvalidGitHubTeamError, "{message}"),
     # It had no row, so `/link_team` on a personal repository told the person who ran it
     # "Something went wrong here" instead of the sentence it raised to say why a team can never
@@ -140,22 +154,33 @@ _COMES_RIGHT: tuple[type[ShannonError], ...] = (
 )
 
 
+def comes_right(error: BaseException) -> bool:
+    """Whether a refusal comes right on its own, and so is amber rather than red.
+
+    The one place the rule is kept. The tier guard asks it too, so a GitHub error added to
+    `_COMES_RIGHT` turns amber there as well as here. Issue #267.
+
+    Unwrapped first, as `words_for` is. The backstop in `discord_bot/client.py` only ever sees a
+    CommandInvokeError, so a spent quota that escaped a command used to get the right words
+    behind the red mark. Issue #267.
+    """
+    return isinstance(_unwrapped(error), _COMES_RIGHT)
+
+
 def reply_for(error: BaseException, *, noun: str = "item") -> Panel:
     """The refusal for an error, or the catch-all if it is not one we know about.
 
-    Which of the two marks it carries is the split `_COMES_RIGHT` already makes: an error that
-    comes right on its own is something still owed rather than something refused, and telling
-    those apart before either sentence is read is the whole point of the pair.
+    Which of the two marks it carries is the split `comes_right` makes: an error that comes right
+    on its own is something still owed rather than something refused, and telling those apart
+    before either sentence is read is the whole point of the pair.
     """
     said = words_for(error, noun=noun)
-    return owed(said) if isinstance(error, _COMES_RIGHT) else refused(said)
+    return owed(said) if comes_right(error) else refused(said)
 
 
 def words_for(error: BaseException, *, noun: str = "item") -> str:
     """The message for an error, or the catch-all if it is not one we know about."""
-    # discord.py hands its error handler whatever a command raised wrapped in a
-    # CommandInvokeError; unwrapped, everything arriving that way reads as the catch-all.
-    error = getattr(error, "original", error)
+    error = _unwrapped(error)
 
     for kind, template in _REPLIES:
         if isinstance(error, kind):
@@ -165,3 +190,13 @@ def words_for(error: BaseException, *, noun: str = "item") -> str:
                 wait=_wait_for(getattr(error, "retry_after", None)),
             )
     return UNEXPECTED
+
+
+def _unwrapped(error: BaseException) -> BaseException:
+    """The error a command raised, out of the wrapper discord.py may have put it in.
+
+    discord.py hands its error handler whatever a command raised wrapped in a CommandInvokeError.
+    Left wrapped, everything arriving that way reads as the catch-all.
+    """
+    original: BaseException = getattr(error, "original", error)
+    return original

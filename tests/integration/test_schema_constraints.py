@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -196,15 +196,51 @@ def test_every_table_is_truncated_between_tests() -> None:
 class TestLettingGoOfARepository:
     """What the database takes with a repository, and what it deliberately keeps.
 
-    Nothing deletes one yet. These pin the cascades anyway, because the command that will is only
-    safe if they hold: it does one DELETE and trusts the schema for the rest, and a cascade that
-    quietly stopped cascading would leave rows pointing at a repository that is gone.
+    /unregister deletes one with a single Core DELETE and trusts the schema for the rest, so it is
+    only safe while these cascades hold: one that quietly stopped cascading would leave rows
+    pointing at a repository that is gone. The Core case below runs that same statement, with no
+    ORM in between, so it is the FKs' `ondelete` and nothing else that does the work.
 
-    This tests the DATABASE rather than the session, which is what makes it worth writing. The
-    relationships carry `passive_deletes=True`, so SQLAlchemy does not load the children and
-    delete them itself; it leaves them to PostgreSQL. Without that flag the same assertions would
-    pass with no `ondelete` anywhere and prove nothing at all.
+    The ORM `session.delete` cases test the DATABASE too, not the session. The relationships carry
+    `passive_deletes=True`, so SQLAlchemy does not load the children and delete them itself; it
+    leaves them to PostgreSQL. Without that flag those assertions would pass with no `ondelete`
+    anywhere. They stay because the relationships exist only for such a delete (issue #268), and
+    `lazy="raise"` on them must not start failing it.
     """
+
+    async def test_the_core_delete_unregister_issues_takes_its_items_with_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        repository = make_repository()
+        db_session.add(repository)
+        await db_session.commit()
+        db_session.add(
+            ChannelMapping(
+                repository_id=repository.id,
+                object_type=ObjectType.PR,
+                discord_channel_id=99,
+            )
+        )
+        item = make_tracked_item(repository.id)
+        db_session.add(item)
+        await db_session.commit()
+        db_session.add(
+            ItemAssignment(
+                tracked_item_id=item.id,
+                github_username="octocat",
+                role_type=ActorRole.AUTHOR,
+            )
+        )
+        await db_session.commit()
+
+        await db_session.execute(delete(Repository).where(Repository.id == repository.id))
+        await db_session.commit()
+        db_session.expire_all()
+
+        assert await db_session.scalar(select(func.count()).select_from(Repository)) == 0
+        assert await db_session.scalar(select(func.count()).select_from(ChannelMapping)) == 0
+        assert await db_session.scalar(select(func.count()).select_from(TrackedItem)) == 0
+        assert await db_session.scalar(select(func.count()).select_from(ItemAssignment)) == 0
 
     async def test_deleting_a_repository_takes_its_items_with_it(
         self, db_session: AsyncSession

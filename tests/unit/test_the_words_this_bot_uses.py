@@ -216,21 +216,41 @@ def test_nothing_a_person_reads_is_quoted_with_repr() -> None:
     It renders `'bug'` with straight quotes in the middle of English prose, and for a link or a
     label — which is every one of these — the project's own answer is a code span its own
     backticks cannot break out of.
-    """
-    reprs: dict[str, str] = {}
-    for path, tree in _modules(*SPOKEN_TO, "github"):
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Raise) or node.exc is None:
-                continue
-            raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
-            name = getattr(raised, "id", getattr(raised, "attr", ""))
-            if not name.endswith("Error") or name in ("ValueError", "RuntimeError"):
-                continue
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.FormattedValue) and inner.conversion == ord("r"):
-                    reprs[_where(path, inner)] = name
 
-    assert not reprs, f"a refusal quotes with !r rather than a code span: {reprs}"
+    Every `!r` is looked at, not only one written inside a `raise`. `/status` built its refusal in
+    a helper and raised what the helper returned, so a check that read only the `raise` never saw
+    the `!r` a member was then shown. Issue #267. What is left out is what no person reads: a
+    `ValueError` or `RuntimeError`, which is a programming mistake, and a log line.
+    """
+    reprs: list[str] = []
+    for path, tree in _modules(*SPOKEN_TO, "github"):
+        unread = _read_by_nobody(tree)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FormattedValue)
+                and node.conversion == ord("r")
+                and id(node) not in unread
+            ):
+                reprs.append(_where(path, node))
+
+    assert not reprs, f"a sentence quotes with !r rather than a code span: {reprs}"
+
+
+def _read_by_nobody(tree: ast.Module) -> set[int]:
+    """Every node inside a `raise ValueError`, a `raise RuntimeError` or a `logger` call."""
+    unread: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if getattr(raised, "id", getattr(raised, "attr", "")) in ("ValueError", "RuntimeError"):
+                unread.update(id(inner) for inner in ast.walk(node))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and getattr(node.func.value, "id", "") == "logger"
+        ):
+            unread.update(id(inner) for inner in ast.walk(node))
+    return unread
 
 
 @pytest.mark.parametrize("state", ["status", "priority"])

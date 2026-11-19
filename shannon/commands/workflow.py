@@ -23,13 +23,14 @@ only a suggestion.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import DecidesGitHubAccess, github_allows, in_a_thread
+from shannon.commands._choices import MOST_CHARACTERS, MOST_CHOICES, Suggesting
+from shannon.commands._guards import DecidesGitHubAccess, InAThread, github_allows, in_a_thread
 from shannon.commands._permissions import WORKFLOW_ROLES
 from shannon.commands._replies import reply_for
 from shannon.discord_bot.permissions import PermissionGate
@@ -38,21 +39,12 @@ from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.errors import ShannonError
+from shannon.domain.text import code_span, listed
 from shannon.github import people
 from shannon.github.projects import BoardColumn
 from shannon.services.workflow import WorkflowOutcome, WorkflowRefusedError
 
 logger = logging.getLogger(__name__)
-
-# Discord's own ceilings on a picker. It sends a longer list back as an error rather than
-# truncating it, and rejects a choice whose value runs past a hundred characters - either way the
-# whole list goes, so the picker fails rather than one entry.
-MOST_CHOICES = 25
-MOST_CHARACTERS = 100
-
-Suggesting = Callable[
-    [discord.Interaction, str], Coroutine[Any, Any, list[app_commands.Choice[str]]]
-]
 
 # What the picker falls back to, and what it offers behind a board's own columns. Written out
 # rather than comprehended over the enum, and each list for its own reason.
@@ -137,30 +129,27 @@ def _status_command(
         # autocomplete offers suggestions: what arrives may have been typed, may be a column
         # from the board this repository mirrored last week, or may be prose.
         wanted = status_from_column(to)
+        typed = to.strip()
 
-        async def move(thread_id: int) -> WorkflowOutcome:
+        async def move(where: InAThread) -> WorkflowOutcome:
             # A column this bot has no status for is one all the same where the board has it,
             # since issue #246: `Ready To Merge` moves the card and the label, and the item keeps
-            # its status. Asked here, after the defer, because it can be a GitHub read. The guild
-            # is there by now, since `_act` refuses anywhere else, and None is no board.
-            guild_id = interaction.guild_id
-            if wanted is None and (
-                guild_id is None or await columns.column_named(guild_id, to) is None
-            ):
-                raise WorkflowRefusedError(_not_a_status(to))
+            # its status. Asked here, after the defer, because it can be a GitHub read.
+            if wanted is None and await columns.column_named(where.guild_id, typed) is None:
+                raise WorkflowRefusedError(_not_a_status(typed))
             # The text goes down as the column too. The status decides the lock and the block in
             # Discord; the column decides the label and which of the board's own columns the card
             # lands in, which are not the same question on a board with two columns for one
             # status.
             return await service.set_status(
-                thread_id=thread_id,
+                thread_id=where.channel_id,
                 status=wanted,
-                column=to.strip(),
+                column=typed,
                 # Whoever ran it, so the card is moved as them. Issue #170.
                 acting=interaction.user.id,
             )
 
-        await _act(interaction, "status", gate, access, move, said=to.strip())
+        await _act(interaction, "status", gate, access, move, said=typed, nowhere=_no_column(typed))
 
     run.autocomplete("to")(_suggesting(columns))
 
@@ -183,10 +172,11 @@ def _priority_command(
             "priority",
             gate,
             access,
-            lambda thread_id: service.set_priority(
-                thread_id=thread_id, priority=wanted, acting=interaction.user.id
+            lambda where: service.set_priority(
+                thread_id=where.channel_id, priority=wanted, acting=interaction.user.id
             ),
             said=f"{spoken(wanted)} priority",
+            nowhere=_no_option(spoken(wanted)),
         )
 
     # `app_commands.command()` leaves the command's binding type unknown; `discord_bot/slash.py`
@@ -199,11 +189,17 @@ async def _act(
     name: str,
     gate: PermissionGate,
     access: DecidesGitHubAccess,
-    call: Callable[[int], Awaitable[WorkflowOutcome]],
+    call: Callable[[InAThread], Awaitable[WorkflowOutcome]],
     *,
     said: str,
+    nowhere: str,
 ) -> None:
     """The half both of them share: check, defer, call, answer.
+
+    `call` is handed the place the guards approved, guild and thread both, so it never reads them
+    back off the interaction and re-checks what the guards already refused. Issue #267. `nowhere`
+    is the sentence for a board with no place for this: a column for a status, and an option of
+    the Priority field for a priority.
 
     Two checks, in this order on purpose. The Discord role first, because somebody
     without it should be told that rather than told about a GitHub account they may
@@ -223,7 +219,7 @@ async def _act(
     if not await github_allows(interaction, access, where.guild_id, at_least=people.WRITE):
         return
     try:
-        outcome = await call(where.channel_id)
+        outcome = await call(where)
     except ShannonError as error:
         # The value as well as the name. With eight commands the name said what was asked
         # for; with two it does not, and "/status could not finish" names neither the item
@@ -231,11 +227,28 @@ async def _act(
         logger.warning("/%s %s could not finish: %s", name, said, error.message)
         await reply(interaction, reply_for(error))
     else:
-        await reply(interaction, done(_said(outcome, said)))
+        await reply(interaction, done(_said(outcome, said, nowhere)))
 
 
-def _said(outcome: WorkflowOutcome, said: str) -> str:
+def _said(outcome: WorkflowOutcome, said: str, nowhere: str) -> str:
+    """What happened, then `nowhere` where the board had no place to put it.
+
+    That caveat is the only board refusal a person is told about, and it is told as a caveat on a
+    success rather than as a failure, because that is what it is: the labels are on GitHub, the row
+    is written and the thread is redrawn. The same shape the refused lock takes, for the same
+    reason - reporting only the half that did not land reads as nothing having happened.
+
+    The other three ways a card can stay put say nothing. Board writes turned off and a board that
+    cannot be read at all are invisible and identical for every command until an operator changes
+    something; a warning attached to a fix the caller cannot make is noise. This one they will see
+    for themselves the moment they open the board.
+
+    It does not claim which column the card IS in. Nothing here read the card.
+    """
     item = f"{outcome.full_name}#{outcome.number}"
+    # On every sentence, the refused lock's too. The service sets the two flags apart, so
+    # `/status Done` with no Done column and no Manage Threads used to lose this one. Issue #267.
+    caveat = f" {nowhere}" if outcome.board_has_no_column else ""
     if outcome.lock_refused:
         # The move landed and the lock did not, so reporting only the refusal would read as
         # nothing having happened. Which way it was going matters: a thread that would not
@@ -248,36 +261,34 @@ def _said(outcome: WorkflowOutcome, said: str) -> str:
         return (
             f"{item} is {said}, but {left}. Discord refused that, which is usually the bot "
             "missing Manage Threads. Run this again once it has it and the lock gets another go."
+            f"{caveat}"
         )
     if not outcome.changed:
         # A repeat is not a failure: the requirements say a duplicate takes no action.
-        return f"{item} is already {said}.{_no_column(outcome, said)}"
+        return f"{item} is already {said}.{caveat}"
     if outcome.locked:
-        return f"{item} is now {said}, and this thread is locked.{_no_column(outcome, said)}"
-    return f"{item} is now {said}.{_no_column(outcome, said)}"
+        return f"{item} is now {said}, and this thread is locked.{caveat}"
+    return f"{item} is now {said}.{caveat}"
 
 
-def _no_column(outcome: WorkflowOutcome, said: str) -> str:
-    """Say the board had nowhere to put this, or say nothing.
-
-    The only board refusal a person is told about, and it is told as a caveat on a success
-    rather than as a failure, because that is what it is: the labels are on GitHub, the row
-    is written and the thread is redrawn. The same shape the refused lock above takes, for
-    the same reason - reporting only the half that did not land reads as nothing having
-    happened.
-
-    The other three ways a card can stay put say nothing. Board writes turned off and a board
-    that cannot be read at all are invisible and identical for every command until an operator
-    changes something; a warning attached to a fix the caller cannot make is noise. This one
-    they will see for themselves the moment they open the board.
-
-    It does not claim which column the card IS in. Nothing here read the card.
-    """
-    if not outcome.board_has_no_column:
-        return ""
+def _no_column(column: str) -> str:
+    """The caveat for `/status` on a board with no column of this name."""
     return (
-        f" Its board has no column called {said}, so the card was left where it was - "
+        f"Its board has no column called {column}, so the card was left where it was - "
         "rename a column to match, or move it by hand."
+    )
+
+
+def _no_option(option: str) -> str:
+    """The caveat for `/priority` on a board whose Priority field has no option for it.
+
+    Not a column, and not `High priority`: the card is written to the board's Priority field, and
+    the option it looks for is called what the priority is called. The column sentence sent a
+    member to rename a column, which fixes nothing. Issue #267.
+    """
+    return (
+        f"Its board's Priority field has no option called {option}, so the card's priority was "
+        "left as it was - add or rename an option to match, or set it by hand."
     )
 
 
@@ -287,11 +298,19 @@ def _not_a_status(typed: str) -> str:
     Names this bot's four, because those work on every board and in every server, and a person
     whose picker came back empty - a board that would not read, three seconds gone - has otherwise
     been handed a text box and no vocabulary.
+
+    What was typed goes in a code span, never through `!r`, by the #147 rule. It is cut at the
+    longest name the picker offers, since anything longer was typed rather than picked: Discord
+    takes six thousand characters in a text option and a reply carries two thousand, so a long
+    paste echoed whole pushed the four names off the end. Nothing typed gets a sentence without a
+    code span, because an empty one shows as two bare backticks. Issue #267.
     """
-    return (
-        f"{typed.strip()!r} is not a status this bot knows. Pick one from the list, or use "
-        f"{', '.join(OWN_NAMES[:-1])} or {OWN_NAMES[-1]}."
-    )
+    if not typed:
+        opening = "That is not a status this bot knows."
+    else:
+        shown = typed if len(typed) <= MOST_CHARACTERS else f"{typed[: MOST_CHARACTERS - 1]}…"
+        opening = f"{code_span(shown)} is not a status this bot knows."
+    return f"{opening} Pick one from the list, or use {listed(OWN_NAMES, last='or')}."
 
 
 def _suggesting(columns: OffersColumns) -> Suggesting:

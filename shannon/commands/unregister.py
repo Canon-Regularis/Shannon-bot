@@ -15,6 +15,7 @@ from discord import app_commands
 from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
+from shannon.commands._words import SIGN_IN_SETTINGS
 from shannon.db.stores.identities import ProvedAccount
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, owed, refused, reply
@@ -24,6 +25,11 @@ from shannon.domain.errors import ShannonError
 from shannon.services.unregistration import UnregisterOutcome
 
 logger = logging.getLogger(__name__)
+
+NOT_CONFIGURED = (
+    "This bot cannot verify who you are on GitHub, so it will not unregister anything. "
+    f"{SIGN_IN_SETTINGS}"
+)
 
 
 class VerifiesIdentity(Protocol):
@@ -74,43 +80,37 @@ def build_unregister_command(
         if not verification.can_prove_identity:
             # The role check is above this, so somebody who could not run the command anyway is
             # not told how the deployment is configured.
+            await reply(interaction, refused(NOT_CONFIGURED))
+            return
+
+        await defer(interaction)
+        # Outside the try for `/register`'s reason: only the service raises a `ShannonError`.
+        proved = await verification.proved_just_now(
+            guild_id=guild_id, discord_user_id=interaction.user.id
+        )
+        if proved is None:
+            link = await verification.link_for(
+                guild_id=guild_id,
+                discord_user_id=interaction.user.id,
+                purpose=VerificationPurpose.UNREGISTER,
+            )
             await reply(
                 interaction,
-                refused(
-                    "This bot cannot verify who you are on GitHub, so it will not "
-                    "unregister anything. An admin needs to set the GitHub App's client "
-                    "secret, this deployment's public URL, SHANNON_DISCORD_CLIENT_ID and "
-                    "SHANNON_DISCORD_CLIENT_SECRET."
+                owed(
+                    "First, prove to GitHub that you can administer this repository. "
+                    "Open this link in your browser and sign in - Discord checks that it is "
+                    f"you first - then run /unregister again:\n{link}"
                 ),
             )
             return
 
-        await defer(interaction)
         try:
-            proved = await verification.proved_just_now(
-                guild_id=guild_id, discord_user_id=interaction.user.id
-            )
-            if proved is None:
-                link = await verification.link_for(
-                    guild_id=guild_id,
-                    discord_user_id=interaction.user.id,
-                    purpose=VerificationPurpose.UNREGISTER,
-                )
-                await reply(
-                    interaction,
-                    owed(
-                        "First, prove to GitHub that you can administer this repository. "
-                        "Open this link in your browser and sign in - Discord checks that it is "
-                        f"you first - then run /unregister again:\n{link}"
-                    ),
-                )
-                return
-
             outcome = await service.unregister(
                 guild_id=guild_id, full_name=repository, login=proved.login
             )
         except ShannonError as error:
-            logger.warning("unregister failed: %s", error.message)
+            # Worded as every other command words it, so one search finds them all (#267).
+            logger.warning("/unregister could not finish: %s", error.message)
             await reply(interaction, reply_for(error, noun="repository"))
         else:
             await reply(interaction, done(_said(outcome)))

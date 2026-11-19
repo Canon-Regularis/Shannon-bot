@@ -68,4 +68,13 @@ def build_probe_engine(engine: AsyncEngine) -> AsyncEngine:
 
 
 def build_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """Build the sessions every service and every integration test runs on (#268).
+
+    `autoflush` is off so a write reaches the database only where a store flushes on purpose: to
+    take a row lock now, to get a generated id back, or because a later query in the same
+    transaction depends on it. Never as a side effect of a read.
+
+    `expire_on_commit` is off because services read the rows they wrote after the commit, and an
+    expired attribute would lazy load, which an async session cannot do.
+    """
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)

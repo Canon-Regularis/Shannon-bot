@@ -8,7 +8,7 @@ from discord import app_commands
 
 from shannon.commands._guards import in_a_server
 from shannon.commands._permissions import REGISTER_ROLES
-from shannon.commands._replies import words_for
+from shannon.commands._replies import reply_for, words_for
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
@@ -85,8 +85,9 @@ def build_set_channel_command(
         except NotRegisteredError as error:
             # Through the reply table like every other error rather than around it, which is
             # what reading `error.message` here had been doing: the same refusal arrived red
-            # from /refresh and uncoloured from here.
-            await reply(interaction, refused(words_for(error, noun="repository")))
+            # from /refresh and uncoloured from here. `reply_for` rather than the pair written
+            # out, so the mark comes from the one rule every other command asks. Issue #267.
+            await reply(interaction, reply_for(error, noun="repository"))
             return
 
         head = (
@@ -143,15 +144,22 @@ def _said(outcome: RelocationOutcome) -> str:
 
     Discord cannot move a thread, so "moved" means a replacement was opened in the new channel
     with the old one linked to it and locked.
+
+    A run can move nothing and still leave threads behind: every move failed, or the lookups ran
+    out first. That case says so on its own, because "0 threads moved there too; each old one now
+    links to its replacement" claimed replacements and locks that never happened. Issue #267.
     """
     if outcome.moved == 0 and outcome.left == 0:
         return " No threads were left in another channel."
 
-    threads = "thread" if outcome.moved == 1 else "threads"
-    said = (
-        f" {outcome.moved} {threads} already open moved there too; each old one now links to its "
-        "replacement and is locked."
-    )
+    if outcome.moved == 0:
+        said = " None of the threads already open moved."
+    else:
+        threads = "thread" if outcome.moved == 1 else "threads"
+        said = (
+            f" {outcome.moved} {threads} already open moved there too; each old one now links to "
+            "its replacement and is locked."
+        )
     if outcome.left:
         is_are = "is" if outcome.left == 1 else "are"
         said += (

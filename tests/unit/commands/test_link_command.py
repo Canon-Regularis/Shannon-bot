@@ -173,6 +173,21 @@ class TestConnectingYourOwn:
         assert "SHANNON_DISCORD_CLIENT_SECRET" in interaction.reply
         assert verification.issued_for == []
 
+    async def test_the_refusal_reads_as_it_did_before_its_list_of_settings_was_shared(
+        self,
+    ) -> None:
+        """Written out whole. Its list of settings is the one `/register` and `/unregister` end
+        on since #267, and the two sentences have to join on exactly one space."""
+        command, interaction, _ = run_it(verification=FakeVerification(can_prove_identity=False))
+
+        await fire(command, interaction)
+
+        assert interaction.said == (
+            "This bot cannot check who you are on GitHub, so there is nothing to connect to. An "
+            "admin needs to set the GitHub App's client secret, this deployment's public URL, "
+            "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
+        )
+
 
 class TestAskingSomebodyElse:
     async def test_it_hands_out_no_link_at_all(self) -> None:

@@ -68,6 +68,17 @@ class MapSays:
     installation_id: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class Installation:
+    """The installation GitHub says covers a repository, and whether it is paused.
+
+    Both, because the map keeps both, and a writer handed only the id has to guess the other.
+    """
+
+    installation_id: int
+    suspended: bool
+
+
 class ResolvesInstallations(Protocol):
     """Which installation covers a GitHub account, and somewhere to keep a new answer.
 
@@ -338,13 +349,17 @@ class InstallationTokens:
         )
         return None
 
-    async def installed_on(self, owner: str, name: str) -> int | None:
+    async def installed_on(self, owner: str, name: str) -> Installation | None:
         """Which installation covers one repository, asked of GitHub rather than of the cache.
 
         A repository nobody has registered has no row, and no row means ask GitHub rather than
         not installed. A JWT, because there is no token until this has answered. GitHub 404s both
         for a repository that does not exist and for one the App was never installed on, and
         separating the two would say whether a private repository exists.
+
+        Whether it is suspended comes back too, read off the same answer, because whoever writes
+        this down would otherwise have to guess: answering with the id alone is how `/register`
+        came to clear a suspension the map had been told about (#268).
         """
         if not self.app_token():
             return None
@@ -363,7 +378,12 @@ class InstallationTokens:
 
         payload = json_object(response)
         installation = payload.get("id")
-        return installation if isinstance(installation, int) else None
+        if not isinstance(installation, int):
+            return None
+        # A timestamp or null, and only its presence matters here, as in `_covering`.
+        return Installation(
+            installation_id=installation, suspended=payload.get("suspended_at") is not None
+        )
 
     async def app_slug(self) -> str:
         """The App's own slug, for building the "install me" link, read once and kept.

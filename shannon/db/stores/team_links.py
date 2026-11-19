@@ -42,14 +42,18 @@ class TeamLinkStore:
         ).all()
         return {row.github_team: row.discord_role_id for row in rows}
 
-    async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> TeamLink:
+    async def link(self, *, guild_id: int, github_team: str, discord_role_id: int) -> None:
         """Point a team at a role, replacing whatever that team pointed at before.
 
         Only the team half is unique: two teams sharing a role is allowed, so there is nothing to
         race on and no advisory lock to take, unlike linking a person.
+
+        Answers with nothing, on purpose (#268). Nobody read the row this used to return, and an
+        upsert's RETURNING hands back whatever copy the session already holds, unrefreshed, so the
+        first caller to read it could have been told the role it had just replaced.
         """
         slug = github_team.strip().lstrip("@").lower()
-        row: TeamLink | None = await self._session.scalar(
+        await self._session.execute(
             pg_insert(TeamLink)
             .values(
                 discord_guild_id=guild_id,
@@ -62,10 +66,4 @@ class TeamLinkStore:
                 # an UPDATE it built, not for the `set_` of an upsert.
                 set_={"discord_role_id": discord_role_id, "updated_at": func.now()},
             )
-            .returning(TeamLink)
         )
-        await self._session.flush()
-        # An upsert that updates on conflict always returns its row, which `scalar`'s return
-        # type cannot say. Asserted rather than branched on, as `db.base.rows_changed` explains.
-        assert row is not None
-        return row

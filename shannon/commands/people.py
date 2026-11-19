@@ -153,11 +153,15 @@ _UNPROVED = (
 
 # What a repeat says, keyed by whether it is a review request and whether it was adding. A
 # table rather than nested ifs: four sentences, four keys, and no arm that cannot be reached.
+#
+# Each opens on a word and not on `{who}`, the #147 rule: a mention renders lowercase, or as raw
+# brackets when Discord cannot resolve the id. These are `str.format` templates, which the wording
+# test does not read, so all four opened on the mention until #267 caught it.
 _NOTHING_CHANGED = {
-    (True, True): "{who} has already been asked for a review on {item}, so nothing changed.",
-    (True, False): "{who} has not been asked for a review on {item}, so nothing changed.",
-    (False, True): "{who} is already on {item}, so nothing changed.",
-    (False, False): "{who} is not on {item}, so nothing changed.",
+    (True, True): "Nothing changed: {who} has already been asked for a review on {item}.",
+    (True, False): "Nothing changed: {who} has not been asked for a review on {item}.",
+    (False, True): "Nothing changed: {who} is already on {item}.",
+    (False, False): "Nothing changed: {who} is not on {item}.",
 }
 
 

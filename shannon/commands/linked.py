@@ -30,10 +30,10 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import NOT_IN_A_SERVER
+from shannon.commands._guards import server_of
 from shannon.discord_bot.formatting import as_date
 from shannon.discord_bot.panels import Panel
-from shannon.discord_bot.responses import defer, refused, reply
+from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.services.linking import LinkStanding
 
@@ -75,9 +75,8 @@ def build_linked_command(service: RemembersWhoIsLinked, linking: OffersLinks) ->
     )
     @app_commands.guild_only()
     async def linked(interaction: discord.Interaction) -> None:
-        guild_id = interaction.guild_id
+        guild_id = await server_of(interaction)
         if guild_id is None:
-            await reply(interaction, refused(NOT_IN_A_SERVER))
             return
 
         await defer(interaction)

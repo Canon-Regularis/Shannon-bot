@@ -38,6 +38,7 @@ from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, refused, reply, reply_then_delete
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.errors import ShannonError
+from shannon.domain.text import listed
 
 # The longest wait whose answer counts down and is deleted at zero. Issue #240. A bot may delete its
 # answer to a command only while the command's token lives, fifteen minutes from when it was run,
@@ -93,8 +94,8 @@ def build_remind_command(reminders: SetsReminders, gate: PermissionGate) -> Slas
         minutes: app_commands.Range[int, 0, 59] = 0,
         message: app_commands.Range[str, None, REMINDER_MESSAGE_WIDTH] | None = None,
     ) -> None:
-        # The guild check by hand rather than through `in_a_server`, which exists to apply a tier
-        # and there is only a tier on one branch of this. `/link` does the same.
+        # By hand rather than through `server_of`, because this needs the channel as well, and not
+        # through `in_a_server`, because only one branch of this has a tier.
         guild_id, channel_id = interaction.guild_id, interaction.channel_id
         if guild_id is None or channel_id is None:
             await reply(interaction, refused(NOT_IN_A_SERVER))
@@ -148,7 +149,7 @@ def build_remind_command(reminders: SetsReminders, gate: PermissionGate) -> Slas
         if missing := _cannot_post(
             interaction.app_permissions, in_a_thread=in_a_thread, locked=locked
         ):
-            lacking = _listed(missing, last="or")
+            lacking = listed(missing, last="or")
             await reply(
                 interaction,
                 refused(
@@ -229,11 +230,4 @@ def _how_long(*, days: int, hours: int, minutes: int) -> str:
         for count, unit in ((days, "day"), (hours, "hour"), (minutes, "minute"))
         if count
     ]
-    return _listed(counted, last="and")
-
-
-def _listed(names: list[str], *, last: str) -> str:
-    """`A`, `A or B`, `A, B or C`, joined with `last`: a list read as a sentence."""
-    if len(names) < 3:
-        return f" {last} ".join(names)
-    return f"{', '.join(names[:-1])} {last} {names[-1]}"
+    return listed(counted)

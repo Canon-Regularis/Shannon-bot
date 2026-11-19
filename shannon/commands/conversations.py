@@ -59,7 +59,13 @@ def build_log_conversation_command(
     @app_commands.guild_only()
     async def log_conversation(interaction: discord.Interaction) -> None:
         await _act(
-            interaction, "log_conversation", gate, service, access=access, capturing=capturing
+            interaction,
+            "log_conversation",
+            gate,
+            service,
+            starting=True,
+            capturing=capturing,
+            access=access,
         )
 
     # discord.py's decorator leaves the binding parameter unsolved for a module-level command.
@@ -92,7 +98,9 @@ def build_stop_conversation_command(
     )
     @app_commands.guild_only()
     async def stop_conversation(interaction: discord.Interaction) -> None:
-        await _act(interaction, "stop_conversation", gate, service, capturing=True)
+        # Not the deployment's flag: `True` is the "always works" above, spelled where the capture
+        # check reads it, so a stop gets past that check whatever capture is set to (#267).
+        await _act(interaction, "stop_conversation", gate, service, starting=False, capturing=True)
 
     return stop_conversation  # pyright: ignore[reportUnknownVariableType]
 
@@ -103,13 +111,15 @@ async def _act(
     gate: PermissionGate,
     service: LogsConversations,
     *,
-    access: DecidesGitHubAccess | None = None,
+    starting: bool,
     capturing: bool,
+    access: DecidesGitHubAccess | None = None,
 ) -> None:
     """The half both commands share: check, defer, call, answer.
 
-    `access` is None for the stop, which is the one asymmetry between them and is the factory's
-    own argument rather than an oversight.
+    `starting` is handed in by each factory rather than read off `command`, so renaming a
+    command can never turn the start into a stop (#267). `access` is None for the stop, which
+    is the one asymmetry between them and is the factory's own argument rather than an oversight.
     """
     where = await in_a_thread(interaction, command, gate, SYNC_ROLES)
     if where is None:
@@ -118,7 +128,6 @@ async def _act(
         await reply(interaction, refused(NOT_CAPTURING))
         return
 
-    starting = command == "log_conversation"
     await defer(interaction)
     # After the defer and after the role, both of which `github_allows` documents: it makes a
     # network call and Discord allows three seconds for a first response, and somebody without

@@ -15,15 +15,12 @@ from __future__ import annotations
 import pytest
 from discord import app_commands
 
+from shannon.commands._choices import MOST_CHARACTERS, MOST_CHOICES
 from shannon.commands._permissions import WORKFLOW_ROLES
-from shannon.commands.workflow import (
-    MOST_CHOICES,
-    OWN_NAMES,
-    PRIORITY_CHOICES,
-    build_workflow_commands,
-)
+from shannon.commands.workflow import OWN_NAMES, PRIORITY_CHOICES, build_workflow_commands
 from shannon.domain.board import status_from_column
 from shannon.domain.enums import Priority, Status, spoken
+from shannon.domain.text import code_span
 from shannon.github import people
 from shannon.github.errors import GitHubUnavailableError
 from shannon.github.labels import PRIORITY_LABELS
@@ -502,14 +499,38 @@ class TestWhenTheBoardHadNowhereToPutIt:
 
         assert said(interaction) == "Canon-Regularis/Shannon-bot#7 is now In review."
 
-    async def test_priority_says_it_too(self) -> None:
+    async def test_a_refused_lock_does_not_hide_it(self) -> None:
+        """Issue #267. The two are set apart from each other, so `/status Done` on a board with no
+        Done column, by a bot without Manage Threads, comes back with both. The lock used to be
+        said alone, and the card that stayed put is the half the member will see on the board."""
+        service = StubWorkflow(outcome=self.nowhere(lock_refused=True, wanted_locked=True))
+
+        interaction = await run(
+            "status", service, member_with("Project Manager"), spoken(Status.DONE)
+        )
+
+        answer = said(interaction)
+        assert "could not be locked" in answer
+        assert answer.endswith(
+            " Its board has no column called Done, so the card was left where it was - rename a "
+            "column to match, or move it by hand."
+        )
+
+    async def test_priority_speaks_of_the_priority_field(self) -> None:
+        """Issue #267. A priority is an option in the board's Priority field, not a column, and the
+        board wants it called `High`, not `High priority`. The caveat used to say "no column called
+        High priority" and "rename a column", which a member could follow and fix nothing."""
         service = StubWorkflow(outcome=self.nowhere())
 
         interaction = await run(
             "priority", service, member_with("Project Manager"), Priority.HIGH.value
         )
 
-        assert "no column called High" in said(interaction)
+        assert said(interaction) == (
+            "Canon-Regularis/Shannon-bot#7 is now High priority. Its board's Priority field has no "
+            "option called High, so the card's priority was left as it was - add or rename an "
+            "option to match, or set it by hand."
+        )
 
 
 class TestThePicker:
@@ -706,6 +727,38 @@ class TestWhatArrivesInTheStatusField:
         await run("status", StubWorkflow(), project_manager(), "Done", columns=columns)
 
         assert columns.asked == []
+
+    async def test_the_refusal_quotes_what_was_typed_in_a_code_span(self) -> None:
+        """Issue #267, under the #147 rule. It was quoted with `!r`, which shows Python's straight
+        quotes in a sentence and lets a typed backtick through as markdown."""
+        interaction = await run("status", StubWorkflow(), project_manager(), " Needs design input ")
+
+        assert said(interaction).startswith(
+            "`Needs design input` is not a status this bot knows. Pick one from the list"
+        )
+
+    async def test_a_typed_backtick_stays_inside_the_code_span(self) -> None:
+        interaction = await run("status", StubWorkflow(), project_manager(), "Needs `design`")
+
+        assert said(interaction).startswith(f"{code_span('Needs `design`')} is not a status")
+
+    @pytest.mark.parametrize("typed", ["", "   "])
+    async def test_nothing_typed_is_not_quoted_as_an_empty_code_span(self, typed: str) -> None:
+        """Two backticks with nothing between them are shown as two backticks."""
+        interaction = await run("status", StubWorkflow(), project_manager(), typed)
+
+        assert said(interaction).startswith("That is not a status this bot knows. Pick one")
+
+    async def test_a_long_paste_is_cut_and_leaves_room_for_what_always_works(self) -> None:
+        """Discord takes up to six thousand characters in a text option and a reply carries two
+        thousand, so a long paste echoed whole used to push the names that always work off the
+        end."""
+        interaction = await run("status", StubWorkflow(), project_manager(), "x" * 3000)
+
+        answer = said(interaction)
+        assert answer.startswith(f"`{'x' * (MOST_CHARACTERS - 1)}…` is not a status")
+        for name in OWN_NAMES:
+            assert name in answer
 
     async def test_the_refusal_names_what_always_works(self) -> None:
         """Somebody whose picker came back empty has otherwise been handed a text box and no

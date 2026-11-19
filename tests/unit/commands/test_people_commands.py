@@ -341,7 +341,7 @@ class TestARepeatThatChangedNothing:
         await command.callback(interaction, member)
 
         assert interaction.mark == SUCCEEDED, "a repeat was answered as a failure"
-        assert interaction.said == f"<@{WHO}> is already on acme/widget#7, so nothing changed."
+        assert interaction.said == f"Nothing changed: <@{WHO}> is already on acme/widget#7."
 
     async def test_somebody_who_was_never_on_it(self) -> None:
         command, interaction, _, member = run_it(
@@ -351,7 +351,7 @@ class TestARepeatThatChangedNothing:
 
         await command.callback(interaction, member)
 
-        assert interaction.said == f"<@{WHO}> is not on acme/widget#7, so nothing changed."
+        assert interaction.said == f"Nothing changed: <@{WHO}> is not on acme/widget#7."
 
     async def test_a_review_already_asked_for(self) -> None:
         command, interaction, _, member = run_it(
@@ -362,7 +362,7 @@ class TestARepeatThatChangedNothing:
         await command.callback(interaction, member)
 
         assert interaction.said == (
-            f"<@{WHO}> has already been asked for a review on acme/widget#7, so nothing changed."
+            f"Nothing changed: <@{WHO}> has already been asked for a review on acme/widget#7."
         )
 
     async def test_a_review_that_was_never_asked_for(self) -> None:
@@ -376,8 +376,34 @@ class TestARepeatThatChangedNothing:
         await command.callback(interaction, member)
 
         assert interaction.said == (
-            f"<@{WHO}> has not been asked for a review on acme/widget#7, so nothing changed."
+            f"Nothing changed: <@{WHO}> has not been asked for a review on acme/widget#7."
         )
+
+    @pytest.mark.parametrize(
+        ("role", "added", "command_name"),
+        [
+            (ActorRole.ASSIGNEE, True, "assign"),
+            (ActorRole.ASSIGNEE, False, "unassign"),
+            (ActorRole.REVIEWER, True, "request_review"),
+            (ActorRole.REVIEWER, False, "unrequest_review"),
+        ],
+    )
+    async def test_no_repeat_opens_with_the_mention(
+        self, role: ActorRole, added: bool, command_name: str
+    ) -> None:
+        """Issue #267, the #147 rule. These four are `str.format` templates rather than f-strings,
+        so `test_no_sentence_opens_with_a_mention` never reads them, and all four opened on
+        `<@id>`: a sentence that renders lowercase, or as raw brackets when Discord cannot resolve
+        the id. Held here on the rendered reply, which is what a person actually reads."""
+        command, interaction, _, member = run_it(
+            service=StubAssignment(result=outcome(role=role, added=added, changed=False)),
+            command_name=command_name,
+        )
+
+        await command.callback(interaction, member)
+
+        assert not interaction.said.startswith(("<@", "<#")), interaction.said
+        assert interaction.said[0].isupper(), interaction.said
 
     async def test_nothing_is_said_about_an_unproved_link(self) -> None:
         """The note reads "this went out on somebody's word for it", and nothing went out."""

@@ -249,6 +249,26 @@ class TestWhatOneMemberClaimed:
 
         assert found == LinkedAccount(login="monalisa", github_user_id=222)
 
+    async def test_a_relink_of_the_same_login_is_written_before_it_returns(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Both paths through `link` flush, so a column read later in the same transaction sees
+        the new id whichever path ran. The keep-the-row path used to leave the write to the
+        caller, and with autoflush off a read here answered the old id. Issue #268."""
+        store = UserLinkStore(db_session)
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=None, discord_user_id=42
+        )
+
+        await store.link(
+            guild_id=1, github_username="octocat", github_user_id=111, discord_user_id=42
+        )
+
+        stored = await db_session.scalar(
+            select(UserLink.github_user_id).where(UserLink.discord_user_id == 42)
+        )
+        assert stored == 111
+
     async def test_two_members_do_not_collide(self, db_session: AsyncSession) -> None:
         store = UserLinkStore(db_session)
         await store.link(
@@ -302,11 +322,9 @@ class TestWhenAMemberWasLinked:
     async def read_back(self, store: UserLinkStore, session: AsyncSession) -> LinkRecord:
         """What the database holds now, rather than whatever the session remembers.
 
-        Flushed first, as `UserLinkingService` commits after `link`: the same-login path changes
-        the row in memory and leaves the write to the caller, and expiring before it is written
-        would throw the change away rather than read it back.
+        `link` flushes on both of its paths (#268), so expiring here throws nothing away; the
+        `update` in `linked_long_ago` is a plain statement and needs no flush either.
         """
-        await session.flush()
         session.expire_all()
         found = await store.record_for(guild_id=1, discord_user_id=42)
         assert found is not None

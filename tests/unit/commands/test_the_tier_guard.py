@@ -25,6 +25,7 @@ from shannon.commands._guards import (
     holds_the_tier,
     in_a_server,
     in_a_thread,
+    server_of,
 )
 from shannon.commands._permissions import REGISTER_ROLES, SYNC_ROLES, WORKFLOW_ROLES
 from shannon.config import Settings
@@ -286,3 +287,26 @@ class TestWhereItWasRun:
 
         assert found is None
         assert interaction.followup.messages == [f"{REFUSED} {NOT_IN_A_THREAD}"]
+
+
+class TestTheGuardThatAsksNoTier:
+    """`server_of`, for the commands anybody may run. Issue #267."""
+
+    async def test_outside_a_server_it_refuses_as_the_first_response(self) -> None:
+        interaction = ran_by()
+        interaction.guild_id = None
+
+        found = await server_of(cast(discord.Interaction, interaction))
+
+        assert found is None
+        assert interaction.response.messages == [f"{REFUSED} {NOT_IN_A_SERVER}"]
+        assert interaction.response.deferred is False
+
+    async def test_inside_one_it_hands_back_the_guild_and_says_nothing(self) -> None:
+        interaction = ran_by()
+
+        found = await server_of(cast(discord.Interaction, interaction))
+
+        assert found == GUILD
+        assert interaction.replies == []
+        assert interaction.response.deferred is False

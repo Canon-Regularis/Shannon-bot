@@ -120,8 +120,8 @@ async def test_a_reassignment_reaches_the_metadata_and_the_database(
 ) -> None:
     # The later timestamp is required now and was not before, which is worth saying rather than
     # leaving as a magic string. Issue #105 gave pull request assignees the notifier issues have
-    # always had, so their rows carry a `notified_at`, and `_already_told_and_newer` will not let
-    # a payload that is not strictly newer delete a row somebody has already been pinged from.
+    # always had, so their rows carry a `notified_at`, and `_not_told_since` will not let a
+    # payload that is not strictly newer delete a row somebody has already been pinged from.
     # The issue sibling of this test has carried the same stamp for the same reason all along.
     await deliver(
         tracked,

@@ -10,6 +10,7 @@ from shannon.commands._cooldowns import Cooldown, NotYet, seconds_in_words
 from shannon.commands._guards import in_a_server, its_turn
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
+from shannon.commands._words import NOBODY_PINGED
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
@@ -50,11 +51,6 @@ _CHOICES = [
     app_commands.Choice(name="issues", value=RefreshScope.ISSUES.value),
     app_commands.Choice(name="tickets", value=RefreshScope.TICKETS.value),
 ]
-
-# True because the sync services behind this have no notifier, and every block they write
-# reaches Discord with an empty allow-list: it names linked people as real mentions, and a block
-# that is posted rings none of them. Issue #185 moved it off plain-text names.
-_QUIET = "Nobody was pinged."
 
 # One run per server at a time, and the next a minute after the last one finished. Issue #185:
 # a run sweeps the whole repository, so asking for one twice in a row costs everything twice.
@@ -144,7 +140,7 @@ def _said(outcome: RefreshOutcome, kinds: tuple[str, str]) -> str:
     """
     said = _opened(outcome, kinds) + _redrawn(outcome, kinds)
     if outcome.mirrored or outcome.redrawn or outcome.rebuilt:
-        said += f" {_QUIET}"
+        said += f" {NOBODY_PINGED}"
     if outcome.tickets_missed is not None:
         said += f" {_MISSED[outcome.tickets_missed]}"
     return said

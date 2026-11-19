@@ -177,6 +177,34 @@ class TestWhichInstallationCoversAnOwner:
         assert found is not None
         assert found.suspended is True
 
+    async def test_a_caller_that_does_not_know_leaves_a_suspension_alone(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Not saying is not "not suspended", the rule `account_id` already follows. A writer that
+        had no word on it used to clear it, and the map then minted against an App GitHub has
+        turned off, on every call. Issue #268."""
+        store = InstallationStore(db_session)
+        await store.remember(installation_id=42, account_login="octocat", suspended=True)
+
+        await store.remember(installation_id=42, account_login="octocat")
+
+        found = await store.for_owner("octocat")
+        assert found is not None
+        assert found.suspended is True
+
+    async def test_a_new_row_nobody_said_was_suspended_is_not(
+        self, db_session: AsyncSession
+    ) -> None:
+        """The other half of not knowing: with nothing stored to keep, the row starts usable,
+        which is what the column's own default says."""
+        store = InstallationStore(db_session)
+
+        await store.remember(installation_id=42, account_login="octocat")
+
+        found = await store.for_owner("octocat")
+        assert found is not None
+        assert found.suspended is False
+
 
 class TestTwoWritersOfOneAccount:
     """A reinstall and a transfer can land together, and neither may lose to the other.

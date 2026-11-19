@@ -187,6 +187,55 @@ async def test_failures_are_named_as_part_of_what_is_left() -> None:
     assert "3 could not be moved just now and are among those" in interaction.reply
 
 
+class TestARunThatMovedNothing:
+    """Every candidate failed, or the lookups ran out before a move. Issue #267.
+
+    The reply used to say "0 threads already open moved there too; each old one now links to its
+    replacement and is locked", which claims replacements and locks that never happened.
+    """
+
+    async def test_every_move_failing_says_none_moved_and_to_run_it_again(self) -> None:
+        relocation = StubRelocation(RelocationOutcome(moved=0, failed=2, left=2))
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(StubChannels(), relocation).callback(
+            interaction, choice("ISSUE"), text_channel(4242)
+        )
+
+        assert interaction.said == (
+            "Issues for Canon-Regularis/Shannon-bot will now appear in <#4242>. None of the "
+            "threads already open moved. 2 are still in another channel, so run /set_channel "
+            "again to carry on. 2 could not be moved just now and are among those; the log says "
+            "why."
+        )
+
+    async def test_lookups_running_out_says_none_moved_and_to_run_it_again(self) -> None:
+        relocation = StubRelocation(RelocationOutcome(moved=0, failed=0, left=3))
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(StubChannels(), relocation).callback(
+            interaction, choice("ISSUE"), text_channel(4242)
+        )
+
+        assert interaction.said == (
+            "Issues for Canon-Regularis/Shannon-bot will now appear in <#4242>. None of the "
+            "threads already open moved. 3 are still in another channel, so run /set_channel "
+            "again to carry on."
+        )
+
+    async def test_one_left_is_not_told_it_are_still_anywhere(self) -> None:
+        relocation = StubRelocation(RelocationOutcome(moved=0, failed=1, left=1))
+        interaction = FakeInteraction(guild_id=1, user=project_manager())
+
+        await command(StubChannels(), relocation).callback(
+            interaction, choice("ISSUE"), text_channel()
+        )
+
+        assert "None of the threads already open moved. 1 is still" in interaction.reply
+        assert "1 could not be moved just now and is among those" in interaction.reply
+        assert "locked" not in interaction.reply
+
+
 async def test_a_relocation_that_failed_still_reports_the_mapping_as_written() -> None:
     """The mapping is written before the threads are touched. Saying nothing about the half that
     worked is how somebody runs the command again and changes nothing."""

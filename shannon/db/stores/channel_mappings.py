@@ -30,6 +30,10 @@ class ChannelMappingStore:
 
         The insert settles the conflict itself: two people running /set_channel at once would
         both find nothing and both insert, and the second would hit the unique constraint.
+
+        `populate_existing` because `/set_channel` reads this same row first to say what it
+        replaced. Without it the RETURNING row resolves to that copy in the session, unrefreshed,
+        and the answer would still name the old channel (#268).
         """
         statement = (
             pg_insert(ChannelMapping)
@@ -44,6 +48,7 @@ class ChannelMappingStore:
                 set_={"discord_channel_id": discord_channel_id, "updated_at": func.now()},
             )
             .returning(ChannelMapping)
+            .execution_options(populate_existing=True)
         )
         return (await self._session.scalars(statement)).one()
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import timedelta
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import Update, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,22 @@ from shannon.db.base import interval, rows_changed
 from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus
 from shannon.domain.json import JsonObject
+
+
+def _held(event_id: int) -> Update:
+    """An update of a delivery, only while it is still PROCESSING: the row this worker holds.
+
+    The one guard `finish`, `retry_later` and `give_up` share. Issue #268. Why the guard is there
+    at all is on `finish`.
+    """
+    return (
+        update(WebhookEvent)
+        .where(
+            WebhookEvent.id == event_id,
+            WebhookEvent.status == DeliveryStatus.PROCESSING,
+        )
+        .execution_options(synchronize_session=False)
+    )
 
 
 class WebhookEventStore:
@@ -145,23 +161,15 @@ class WebhookEventStore:
         a worker writing an outcome onto a delivery another replica has already taken.
         """
         await self._session.execute(
-            update(WebhookEvent)
-            .where(
-                WebhookEvent.id == event_id,
-                WebhookEvent.status == DeliveryStatus.PROCESSING,
+            _held(event_id).values(
+                status=status, processed_at=func.now(), locked_until=None, last_error=None
             )
-            .values(status=status, processed_at=func.now(), locked_until=None, last_error=None)
         )
 
     async def retry_later(self, event_id: int, *, error: str, delay: timedelta) -> None:
         """Send it round again, on the row this worker still holds. See `finish`."""
         await self._session.execute(
-            update(WebhookEvent)
-            .where(
-                WebhookEvent.id == event_id,
-                WebhookEvent.status == DeliveryStatus.PROCESSING,
-            )
-            .values(
+            _held(event_id).values(
                 status=DeliveryStatus.PENDING,
                 attempts=WebhookEvent.attempts + 1,
                 next_attempt_at=func.now() + interval(delay),
@@ -173,12 +181,7 @@ class WebhookEventStore:
     async def give_up(self, event_id: int, *, error: str) -> None:
         """Stop trying, on the row this worker still holds. See `finish`."""
         await self._session.execute(
-            update(WebhookEvent)
-            .where(
-                WebhookEvent.id == event_id,
-                WebhookEvent.status == DeliveryStatus.PROCESSING,
-            )
-            .values(
+            _held(event_id).values(
                 status=DeliveryStatus.FAILED,
                 attempts=WebhookEvent.attempts + 1,
                 processed_at=func.now(),
@@ -193,7 +196,7 @@ class WebhookEventStore:
         The bodies hold issue titles and comment text from private repositories. Anything still
         pending is left alone however old it is.
         """
-        changed = await rows_changed(
+        return await rows_changed(
             self._session,
             delete(WebhookEvent)
             .where(
@@ -204,4 +207,3 @@ class WebhookEventStore:
             # so it can tell which loaded objects the DELETE hit. Nothing here holds those rows.
             .execution_options(synchronize_session=False),
         )
-        return changed or 0

@@ -22,6 +22,7 @@ from shannon.commands._cooldowns import Cooldown, NotYet, seconds_in_words
 from shannon.commands._guards import in_a_thread, its_turn
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
+from shannon.commands._words import NOBODY_PINGED
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
@@ -29,10 +30,6 @@ from shannon.domain.errors import ShannonError
 from shannon.services.sync.regenerate import RegenerateOutcome
 
 logger = logging.getLogger(__name__)
-
-# The same sentence `/refresh` ends on, and for the same reason since issue #185: both resolve
-# everybody and then tell Discord to ring none of them.
-_QUIET = "Nobody was pinged."
 
 # One run per thread at a time, and the next this long after the last finished. Issue #185.
 REGENERATE_SPACING_SECONDS = 5.0
@@ -117,4 +114,4 @@ def _said(outcome: RegenerateOutcome) -> str:
             " This thread could not be closed again afterwards, which is usually the bot "
             "missing Manage Threads."
         )
-    return f"{said} {_QUIET}"
+    return f"{said} {NOBODY_PINGED}"

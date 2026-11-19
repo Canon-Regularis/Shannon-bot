@@ -31,6 +31,7 @@ from shannon.github.errors import (
 from shannon.github.installations import (
     MAX_INSTALLATION_PAGES,
     REFRESH_MARGIN,
+    Installation,
     InstallationTokens,
     Knows,
     MapSays,
@@ -1087,7 +1088,34 @@ class TestAskingWhetherTheAppIsInstalled:
             return httpx.Response(200, content=json.dumps({"id": 42}))
 
         async with minting(handler) as tokens:
-            assert await tokens.installed_on("acme", "widget") == 42
+            assert await tokens.installed_on("acme", "widget") == Installation(
+                installation_id=42, suspended=False
+            )
+
+    async def test_a_suspension_github_reports_comes_back_with_it(self) -> None:
+        """Read off the same answer, so `/register` writes down what GitHub says rather than
+        clearing a suspension the map was told about. Issue #268."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=json.dumps({"id": 42, "suspended_at": "2026-09-17T12:00:00Z"})
+            )
+
+        async with minting(handler) as tokens:
+            assert await tokens.installed_on("acme", "widget") == Installation(
+                installation_id=42, suspended=True
+            )
+
+    async def test_a_null_suspension_is_a_running_installation(self) -> None:
+        """GitHub sends the key with null rather than leaving it out, and only presence counts."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=json.dumps({"id": 42, "suspended_at": None}))
+
+        async with minting(handler) as tokens:
+            assert await tokens.installed_on("acme", "widget") == Installation(
+                installation_id=42, suspended=False
+            )
 
     async def test_it_asks_the_right_path(self) -> None:
         seen: list[httpx.Request] = []

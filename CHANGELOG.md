@@ -8598,3 +8598,81 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Tests.** Characterisation tests for all three routes and the lifespan, the access-log filter
   and its installation, the filter against real uvicorn with both of its HTTP parsers, the
   Caddyfile's log filter, and a sender that leaves mid-body.
+
+## The commands module, held to the checklist
+
+- **`shannon/commands/` was checked against #266's checklist** (#267). An audit kept thirty-seven
+  findings and dropped seventeen. Most were repetition across commands and behaviour nobody had
+  pinned. Eight were real defects in what a member or an operator sees.
+- **What the commands do is pinned before anything moved.** Every command's registered name,
+  description and options; the warning each one logs when it is refused; and the order of the
+  checks: GitHub is asked only after the reply is deferred, and for `/label` the role is checked
+  before GitHub.
+- **What several commands repeated has one home.** Discord's picker limits and the autocomplete
+  type are in `commands/_choices.py`. "A, B or C" is `domain.text.listed`, which `/track`,
+  `/remind` and `/status` share. Sentences more than one command says are in
+  `commands/_words.py`, so no command imports another, and the commands with no tier share one
+  check for a server. Seven protocols the commands declare are now held to their real classes in
+  `IMPLEMENTATIONS`.
+- **Error replies.** `/board link` and `/board show` answered GitHub's errors in its raw words, in
+  red, with no wait for a rate limit. They now go through the reply table like every other
+  command, and log `/board link could not finish:` and `/board show could not finish:` as the
+  others do. The catch-all decided amber or red before unwrapping the error, so a rate limit there
+  was red too.
+- **Wrong or missing words.** A `/status` refused the lock dropped the "board has no column"
+  note. `/priority` spoke of a column where a priority is a board field. `/set_channel` said
+  "0 threads moved, each now locked" when none had moved.
+- **The #147 rules.** `/status` echoed a typed value in Python's quotes instead of a code span,
+  and the test that holds the rule now looks at replies, not only at errors. The value is cut at
+  Discord's 100-character limit for a choice, so a long paste cannot push the reply past what
+  Discord accepts, and a blank one gets a sentence with no code span. The replies about
+  somebody already on an item opened the sentence with a mention.
+- **For whoever deploys it.** `/register` and `/unregister` now log `/register could not finish:`
+  and `/unregister could not finish:` like every other command, instead of `register failed:`.
+  Anything that searches the log for the old words needs the new ones. No setting or migration.
+- **Coverage follows SQLAlchemy's greenlets.** The async layer runs each query on a greenlet, and
+  coverage.py lost the frame across that switch, so the lines after a query that raised were
+  recorded on some runs and not others. `registration.py`'s losing race passed every time and was
+  reported missed on two runs in three, which failed the 100% floor at random, on CI as well.
+  `pyproject.toml` now sets `concurrency = ["greenlet", "thread"]`.
+- **Tests.** Characterisation tests for registration, refusal logs and check order; a test that
+  fails on the old code for each of the eight fixes; eight conformance rows.
+
+## The db module, held to the checklist
+
+- **`shannon/db/` was checked against the same checklist** (#268). An audit kept thirty-two
+  findings and dropped fourteen. Most were repetition, comments that had stopped being true and
+  store behaviour no test pinned; three were real defects. Nothing here changes the schema.
+- **What the stores guard is pinned first.** A write about a thread an item has left is ignored;
+  a queue outcome lands only on a delivery still being worked; a lost claim on a thread answers
+  with the winner's ids; and the partial index that allows one open logged conversation per item
+  is checked against the migrated schema, which Alembic's comparison cannot see.
+- **Test sessions are built the way production builds them.** The integration fixtures left
+  autoflush on where production turns it off, so a store missing a flush could pass its tests.
+  The whole integration tier passes with it off.
+- **Smaller and clearer stores.** The relationships nobody reads now raise instead of loading. The
+  three advisory-lock key spaces live in `db/locks.py`, with a test that they cannot collide. A
+  won thread claim answers from `RETURNING`, one statement instead of two, after every write. The
+  rule for a one-time link that can still be followed is written once. The repository delete that
+  `/unregister` wrote by hand is `RepositoryStore`'s now (#204).
+- **`/register` no longer clears an App suspension.** It wrote the installation down as running
+  whatever GitHub said, so every call for that owner then tried a token GitHub refuses. The
+  suspension GitHub reports is kept, and `/register` says the installation is suspended instead
+  of something untrue about why it failed. The refusal does not guess who suspended it.
+- **A transcript claim is let go only by whoever holds it.** With two replicas, a pass whose claim
+  had been taken over could release or count a failure against the new holder's claim, and a
+  batch could be published twice. An emptied claim also kept its old failure count.
+- **A ping that lands mid-sync keeps its row.** A sync read the row before the ping committed, saw
+  nobody pinged, and deleted it by name, stamp and all, so the person was pinged again on the next
+  event. The check is now part of the delete itself.
+- **A mention key that is not plain digits is skipped.** In a logged message's stored mentions, a
+  superscript digit used to fail the whole flush and full-width digits were read as an id. Only a
+  row edited by hand can hold one; it is now skipped, as the docstring always said.
+- **Coverage is held on Python 3.14 again.** #267 told coverage.py to follow greenlets, which
+  forces its older tracer; on 3.14 that lost an async loop's exit arc and failed every coverage
+  leg of CI. The setting is gone, with a comment on why. On 3.12 and 3.13 the old tracer can still
+  miss `registration.py`'s race lines on a local run; the floor that gates a merge is 3.14's.
+- **For whoever deploys it.** Nothing to change: no setting, no migration.
+- **Tests.** Characterisation tests for the stores' guards and the partial index; a test that
+  fails on the old code for each of the three fixes; a unit test that the lock key spaces stay
+  apart.

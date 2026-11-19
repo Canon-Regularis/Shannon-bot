@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from shannon.db.models import Repository
+from shannon.db.models import Repository, TrackedItem
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,32 @@ class RepositoryStore:
         for column in ("project_number", "project_owner", "project_linked_by"):
             flag_modified(repository, column)
         await self._session.flush()
+
+    async def count_items(self, repository_id: int) -> int:
+        """How many tracked items, each one a Discord thread, sit under one repository.
+
+        Asked by /unregister before `remove`, in the same transaction, because the rows cascade
+        away with the binding and the reply says how many threads were left behind. Here rather
+        than written by hand in the service, so every query on a repository goes through its
+        store. Issue #204, done under #268.
+        """
+        counted = await self._session.scalar(
+            select(func.count())
+            .select_from(TrackedItem)
+            .where(TrackedItem.repository_id == repository_id)
+        )
+        return counted or 0
+
+    async def remove(self, repository_id: int) -> None:
+        """Delete one repository, and with it everything keyed by it.
+
+        The foreign keys cascade in the database, not the ORM: `channel_mappings` and
+        `tracked_items`, and from those the assignments, mirrored notes and logged conversations.
+        So whatever has to be known about those rows, such as `count_items`, is asked first. An
+        id that matches nothing deletes nothing. Never commits; the caller owns the transaction.
+        Issue #204, done under #268.
+        """
+        await self._session.execute(delete(Repository).where(Repository.id == repository_id))
 
     async def get_by_github_id(self, github_repo_id: int) -> Repository | None:
         found: Repository | None = await self._session.scalar(

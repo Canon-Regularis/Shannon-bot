@@ -228,24 +228,35 @@ class ConversationStore:
         )
         return seized is not None
 
-    async def release(self, conversation_id: int) -> None:
+    async def release(self, conversation_id: int, *, flush_id: str) -> None:
         """Let go of the claim, and forget any failures behind it.
 
         Run whether the batch was published or given up on, so an outage costs nothing once over.
+        Guarded on the claim still being `flush_id` (#268), as `claim` and `seize` are. A pass
+        that outlived `FLUSH_RETRY_AFTER` has had its claim seized, and one whose whole batch was
+        deleted under it has had it cleared by `release_empty_claims`. Freeing whoever holds it
+        now would let the next tick claim the following batch beside them.
         """
         await self._session.execute(
             update(LoggedConversation)
-            .where(LoggedConversation.id == conversation_id)
+            .where(
+                LoggedConversation.id == conversation_id,
+                LoggedConversation.flush_id == flush_id,
+            )
             .values(flush_id=None, flush_started_at=None, flush_through_id=None, failed_flushes=0)
         )
 
     async def release_empty_claims(self) -> None:
-        """Let go of a claim on a batch that no longer has anything in it.
+        """Let go of claims on batches with nothing left in them, forgetting their failures too.
 
-        Happens when a process dies holding a claim and the batch is then deleted in Discord:
-        `pending` skips a conversation with no rows, so the claim would stand until the next
-        message arrives and cost it the whole retry window. Rows are deleted only in the same
-        transaction that releases the claim, so a batch actually in flight still has its rows.
+        Happens when everything in a claimed batch is deleted in Discord: `pending` skips a
+        conversation with no rows, so the claim would stand until the next message arrives and
+        cost it the whole retry window. The failures go with it because the batch they were
+        counted against is over (#268); kept, they would drop the next batch early.
+
+        The holder may still be running: `forget` deletes rows without touching the claim. That is
+        safe because `release` and `note_failure` act only on the claim they were given, so a pass
+        whose claim was cleared here cannot free or count against whoever claims next (#268).
         """
         await self._session.execute(
             update(LoggedConversation)
@@ -255,20 +266,26 @@ class ConversationStore:
                 .where(LoggedMessage.conversation_id == LoggedConversation.id)
                 .exists(),
             )
-            .values(flush_id=None, flush_started_at=None, flush_through_id=None)
+            .values(flush_id=None, flush_started_at=None, flush_through_id=None, failed_flushes=0)
         )
 
-    async def note_failure(self, conversation_id: int) -> int:
+    async def note_failure(self, conversation_id: int, *, flush_id: str) -> int | None:
         """Count a flush that did not land, answering how many in a row that now is.
 
         The claim is left standing: releasing it would retry the same batch on the next tick, a
         write a second at GitHub during an outage. Held, the batch is retried once the claim
         reads as abandoned.
+
+        None when the claim is no longer `flush_id` (#268): the batch belongs to whoever took it
+        over, and a failure counted against their claim could give it up from under them.
         """
-        failures = await self._session.scalar(
+        failures: int | None = await self._session.scalar(
             update(LoggedConversation)
-            .where(LoggedConversation.id == conversation_id)
+            .where(
+                LoggedConversation.id == conversation_id,
+                LoggedConversation.flush_id == flush_id,
+            )
             .values(failed_flushes=LoggedConversation.failed_flushes + 1)
             .returning(LoggedConversation.failed_flushes)
         )
-        return failures or 0
+        return failures

@@ -30,6 +30,7 @@ from shannon.discord_bot.responses import defer, done, refused, reply
 from shannon.discord_bot.slash import SlashCommand
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import ShannonError
+from shannon.domain.text import listed
 from shannon.domain.tracking import HAPPENS_TO, TrackedEvent
 from shannon.services.tracking import ThreadLines
 
@@ -157,7 +158,7 @@ def _answer(lines: ThreadLines, kind: TrackedEvent | None, wanted: bool | None) 
         return Panel.of_text(_every_kind(lines))
     covers = _COVERS[lines.kind].get(kind)
     if covers is None:
-        choices = _either([f"`{each.value}`" for each in HAPPENS_TO[lines.kind]])
+        choices = listed([f"`{each.value}`" for each in HAPPENS_TO[lines.kind]], last="or")
         return refused(
             f"{_AN[lines.kind]} never gets that kind of line. Here you can pick {choices}."
         )
@@ -185,8 +186,3 @@ def _every_kind(lines: ThreadLines) -> str:
 def _capitalised(words: str) -> str:
     """The first letter up and the rest left alone, so "CI" stays "CI"."""
     return words[:1].upper() + words[1:]
-
-
-def _either(names: list[str]) -> str:
-    """`A or B`, `A, B or C`: what may be picked, read as a sentence. Never fewer than two."""
-    return f"{', '.join(names[:-1])} or {names[-1]}"
