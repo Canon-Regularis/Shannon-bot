@@ -8598,3 +8598,42 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Tests.** Characterisation tests for all three routes and the lifespan, the access-log filter
   and its installation, the filter against real uvicorn with both of its HTTP parsers, the
   Caddyfile's log filter, and a sender that leaves mid-body.
+
+## The commands module, held to the checklist
+
+- **`shannon/commands/` was checked against #266's checklist** (#267). An audit kept thirty-seven
+  findings and dropped seventeen. Most were repetition across commands and behaviour nobody had
+  pinned. Eight were real defects in what a member or an operator sees.
+- **What the commands do is pinned before anything moved.** Every command's registered name,
+  description and options; the warning each one logs when it is refused; and the order of the
+  checks: GitHub is asked only after the reply is deferred, and for `/label` the role is checked
+  before GitHub.
+- **What several commands repeated has one home.** Discord's picker limits and the autocomplete
+  type are in `commands/_choices.py`. "A, B or C" is `domain.text.listed`, which `/track`,
+  `/remind` and `/status` share. Sentences more than one command says are in
+  `commands/_words.py`, so no command imports another, and the commands with no tier share one
+  check for a server. Seven protocols the commands declare are now held to their real classes in
+  `IMPLEMENTATIONS`.
+- **Error replies.** `/board link` and `/board show` answered GitHub's errors in its raw words, in
+  red, with no wait for a rate limit. They now go through the reply table like every other
+  command, and log `/board link could not finish:` and `/board show could not finish:` as the
+  others do. The catch-all decided amber or red before unwrapping the error, so a rate limit there
+  was red too.
+- **Wrong or missing words.** A `/status` refused the lock dropped the "board has no column"
+  note. `/priority` spoke of a column where a priority is a board field. `/set_channel` said
+  "0 threads moved, each now locked" when none had moved.
+- **The #147 rules.** `/status` echoed a typed value in Python's quotes instead of a code span,
+  and the test that holds the rule now looks at replies, not only at errors. The value is cut at
+  Discord's 100-character limit for a choice, so a long paste cannot push the reply past what
+  Discord accepts, and a blank one gets a sentence with no code span. The replies about
+  somebody already on an item opened the sentence with a mention.
+- **For whoever deploys it.** `/register` and `/unregister` now log `/register could not finish:`
+  and `/unregister could not finish:` like every other command, instead of `register failed:`.
+  Anything that searches the log for the old words needs the new ones. No setting or migration.
+- **Coverage follows SQLAlchemy's greenlets.** The async layer runs each query on a greenlet, and
+  coverage.py lost the frame across that switch, so the lines after a query that raised were
+  recorded on some runs and not others. `registration.py`'s losing race passed every time and was
+  reported missed on two runs in three, which failed the 100% floor at random, on CI as well.
+  `pyproject.toml` now sets `concurrency = ["greenlet", "thread"]`.
+- **Tests.** Characterisation tests for registration, refusal logs and check order; a test that
+  fails on the old code for each of the eight fixes; eight conformance rows.
