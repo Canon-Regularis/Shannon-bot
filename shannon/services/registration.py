@@ -17,6 +17,7 @@ from shannon.domain.errors import (
     NotProvenError,
 )
 from shannon.domain.models import RepositorySnapshot
+from shannon.github.installations import Installation
 from shannon.github.urls import parse_repository_url
 
 # Where somebody is sent to install the App. The slug is read from GitHub rather than
@@ -48,7 +49,7 @@ class ReadsRepositories(Protocol):
 class FindsInstallations(Protocol):
     """Asking GitHub whether the App is installed on a repository, and what it is called."""
 
-    async def installed_on(self, owner: str, name: str) -> int | None: ...
+    async def installed_on(self, owner: str, name: str) -> Installation | None: ...
 
     async def app_slug(self) -> str: ...
 
@@ -82,8 +83,9 @@ class RepositoryRegistrationService:
         """Register a repository against a guild, for somebody GitHub says administers it.
 
         Raises UnparseableLinkError for a bad link, NotInstalledError when the GitHub App is not
-        installed, NotProvenError when `login` does not administer the repository,
-        GitHubNotFoundError when it is installed and the repository still cannot be read, and
+        installed on the repository or its installation is suspended, NotProvenError when `login`
+        does not administer the repository, GitHubNotFoundError when it is installed and the
+        repository still cannot be read, and
         DuplicateRegistrationError when either side of the binding is taken. The installation is
         checked before the repository is read: read first, a private repository answers 404 and
         the person goes and checks a link that was perfectly correct.
@@ -95,6 +97,14 @@ class RepositoryRegistrationService:
         ref = parse_repository_url(link)
         installation = await self._installation_for(ref.owner, ref.name)
         await self._remember(installation, ref.owner)
+        if installation is not None and installation.suspended:
+            # Said here, after the suspension is written down and before anything asks GitHub as
+            # the App: a suspended installation mints no token, so every question after this one
+            # would fail and the member would be told something untrue about why (#268).
+            raise NotInstalledError(
+                f"The GitHub App's installation on {ref.owner} is suspended, so this bot can read "
+                "nothing there. Run /register again once it has been unsuspended on GitHub."
+            )
         await self._refuse_anybody_who_does_not_administer_it(ref.owner, ref.name, login)
         snapshot = await self._github.get_repository(ref.owner, ref.name)
 
@@ -147,7 +157,7 @@ class RepositoryRegistrationService:
         )
         return result
 
-    async def _remember(self, installation: int | None, owner: str) -> None:
+    async def _remember(self, installation: Installation | None, owner: str) -> None:
         """Write the installation down before anything asks GitHub a question as this bot.
 
         Before, and in its own transaction, because every token-bearing call below resolves its
@@ -159,12 +169,17 @@ class RepositoryRegistrationService:
         The permission check added for #135 makes that worse rather than better — an anonymous
         collaborators call is a guaranteed 404, which reads as `none`, so every first registration
         for a fresh owner would refuse somebody who does administer it.
+
+        Whether it is suspended is written as GitHub said it, rather than left to the store's
+        default. Passing nothing used to clear a suspension the map already held (#268).
         """
         if installation is None:
             return
         async with self._sessionmaker() as session, session.begin():
             await InstallationStore(session).remember(
-                installation_id=installation, account_login=owner
+                installation_id=installation.installation_id,
+                account_login=owner,
+                suspended=installation.suspended,
             )
 
     async def _refuse_anybody_who_does_not_administer_it(
@@ -187,7 +202,7 @@ class RepositoryRegistrationService:
             "somebody who can administer the repository can mirror it into a Discord server."
         )
 
-    async def _installation_for(self, owner: str, name: str) -> int | None:
+    async def _installation_for(self, owner: str, name: str) -> Installation | None:
         """Which installation covers this repository, refusing if none does."""
         if self._installations is None:
             return None
