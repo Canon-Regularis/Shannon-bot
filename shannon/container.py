@@ -798,8 +798,9 @@ def _commands(
         # Gated on one of its halves, as `/link` is: reminding yourself takes no role, reminding
         # somebody else does.
         build_remind_command(ReminderBook(sessionmaker), gate),
-        # The one pair that writes a PERSON to GitHub rather than a label. Both are given the same
-        # service, which decides from the thread whether that means a reviewer or an assignee.
+        # The four that write a PERSON to GitHub rather than a label: a pair for assignees and a
+        # pair for reviewers. All four are given the same service, and each command picks its own
+        # role by the method it calls, so the service never guesses one from the thread. #267.
         build_assign_command(people, gate, access),
         build_unassign_command(people, gate, access),
         build_request_review_command(people, gate, access),

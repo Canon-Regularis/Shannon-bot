@@ -203,13 +203,19 @@ Take `/pr <link>` ([commands/sync_link.py](shannon/commands/sync_link.py)):
      to Discord roles.
    - [commands/_permissions.py](shannon/commands/_permissions.py) lists the tier each command
      needs.
-   - Commands that change things on GitHub also ask GitHub whether the member can write to the
-     repository ([services/access.py](shannon/services/access.py)). GitHub is asked only about a
-     member who has proved their GitHub account with `/link`.
-   - For a member who has not proved an account, the role alone decides. If
-     `SHANNON_REQUIRE_PROVED_LINKS` is on, that member is refused instead.
-   - If GitHub cannot be reached, the role decides.
-   - `/pr` does not ask GitHub.
+   - If the member lacks the role and `SHANNON_GITHUB_ACCESS_GRANTS_TIERS` is on, the gate asks
+     GitHub instead ([services/tier_grants.py](shannon/services/tier_grants.py)). For `/pr`,
+     write access to the server's repository stands in for the Developer role. GitHub is asked
+     only about an account the member proved with `/link`. If GitHub cannot be reached, the
+     member is refused (#94).
+   - The guard defers the reply before it asks GitHub, because Discord drops a command that gets
+     no answer within three seconds (#94).
+   - Commands that change things on GitHub, such as `/label`, then ask GitHub a second question:
+     can the member's proved account write to the repository
+     ([services/access.py](shannon/services/access.py))? A member who has not proved an account
+     is let through on the role, unless `SHANNON_REQUIRE_PROVED_LINKS` is on. If GitHub cannot
+     be reached, the role decides (#158).
+   - `/pr` changes nothing on GitHub, so it skips the second question.
 2. The command calls a service. Here, `ManualSync`
    ([services/sync/manual.py](shannon/services/sync/manual.py)) reads the item from GitHub's REST
    API. Then it calls the same `ItemSyncService.sync` as the worker.
