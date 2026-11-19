@@ -1,3 +1,9 @@
+"""`/pr` and `/issue`: mirroring the GitHub item a pasted link points at into its thread.
+
+The two are one command under two names, so each keeps the option name somebody types in Discord
+(`pr_link`, `issue_link`) and the noun a 404 is worded with, and shares everything else in `_act`.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -18,7 +24,13 @@ from shannon.services.sync.manual import ManualSyncOutcome
 logger = logging.getLogger(__name__)
 
 
-async def run_sync_link(
+class SyncsByLink(Protocol):
+    """Mirroring the item a link points at."""
+
+    async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome: ...
+
+
+async def _act(
     interaction: discord.Interaction,
     link: str,
     *,
@@ -52,20 +64,12 @@ async def run_sync_link(
         )
 
 
-class SyncsByLink(Protocol):
-    """Mirroring the item a link points at."""
-
-    async def sync_link(self, *, guild_id: int, link: str) -> ManualSyncOutcome: ...
-
-
 def build_pr_command(service: SyncsByLink, gate: PermissionGate) -> SlashCommand:
     @app_commands.command(name="pr", description="Sync a GitHub pull request into Discord")
     @app_commands.describe(pr_link="Link to the GitHub pull request")
     @app_commands.guild_only()
     async def pr(interaction: discord.Interaction, pr_link: str) -> None:
-        await run_sync_link(
-            interaction, pr_link, name="pr", noun="pull request", service=service, gate=gate
-        )
+        await _act(interaction, pr_link, name="pr", noun="pull request", service=service, gate=gate)
 
     # `app_commands.command()` leaves the command's binding type unknown, and
     # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
@@ -77,9 +81,7 @@ def build_issue_command(service: SyncsByLink, gate: PermissionGate) -> SlashComm
     @app_commands.describe(issue_link="Link to the GitHub issue")
     @app_commands.guild_only()
     async def issue(interaction: discord.Interaction, issue_link: str) -> None:
-        await run_sync_link(
-            interaction, issue_link, name="issue", noun="issue", service=service, gate=gate
-        )
+        await _act(interaction, issue_link, name="issue", noun="issue", service=service, gate=gate)
 
     # `app_commands.command()` leaves the command's binding type unknown, and
     # `discord_bot/slash.py` argues `Any` is the only truthful thing to put in.
