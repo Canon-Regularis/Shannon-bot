@@ -126,13 +126,14 @@ async def test_a_full_pool_asks_github_to_send_the_delivery_again(
 ) -> None:
     """503, not the 500 an unhandled error would be.
 
-    GitHub redelivers the first and never the second, so a pool that is full for a moment would
-    otherwise lose the delivery outright.
+    GitHub's delivery log then shows a pool that was full, not a crash. GitHub resends neither on
+    its own, so the delivery is recorded once somebody presses Redeliver on it.
     """
     async with build_client(handler, queue=SaturatedQueue()) as client:
         with caplog.at_level(logging.ERROR, logger="shannon.api.routes.webhooks"):
             response = await post(client, "pull_request", PR_OPENED, delivery="delivery-a")
 
     assert response.status_code == 503
+    assert response.json()["detail"] == "No database connection to spare, retry this delivery"
     assert "delivery-a" in caplog.text
     assert handler.calls == []
