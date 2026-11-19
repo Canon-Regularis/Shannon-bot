@@ -39,7 +39,9 @@ async def test_a_working_process_reports_healthy() -> None:
     }
 
 
-async def test_a_dead_board_poller_is_reported_without_failing_the_check() -> None:
+async def test_a_dead_board_poller_is_reported_without_failing_the_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The one thing here that is said without being counted.
 
     This process is still doing its job without the board: webhooks arrive, threads are written,
@@ -50,15 +52,19 @@ async def test_a_dead_board_poller_is_reported_without_failing_the_check() -> No
     task with nothing wired to halt the process when it dies, so it goes with one line in the log
     and everything afterwards answers that all is well.
     """
-    async with client_with(FakeLiveness(poller=False)) as client:
-        response = await client.get("/health")
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(poller=False)) as client:
+            response = await client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["healthy"] is True, "a dead board restarted a working process"
     assert response.json()["poller"] is False, "a dead board was not reported at all"
+    assert "the board is no longer being read" in caplog.text
 
 
-async def test_a_dead_transcript_flusher_is_reported_without_failing_the_check() -> None:
+async def test_a_dead_transcript_flusher_is_reported_without_failing_the_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The second thing said without being counted, and its own line rather than folded into the
     board's: they fail for unrelated reasons and mean unrelated things. Issue #103.
 
@@ -70,22 +76,41 @@ async def test_a_dead_transcript_flusher_is_reported_without_failing_the_check()
     Said at all because nothing halts the process when this task dies, so without a line here it
     goes with one log entry while what people said piles up in a table for ever.
     """
-    async with client_with(FakeLiveness(flusher=False)) as client:
-        response = await client.get("/health")
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(flusher=False)) as client:
+            response = await client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["healthy"] is True, "a dead flusher restarted a working process"
     assert response.json()["flusher"] is False, "a dead flusher was not reported at all"
+    assert "captured conversations are no longer being published" in caplog.text
 
 
-async def test_an_unhealthy_process_does_not_also_complain_about_the_flusher() -> None:
+async def test_an_unhealthy_process_does_not_also_complain_about_the_flusher(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """One line about what is actually wrong. A process whose database has gone reports that; the
     flusher being down as well is a consequence, not a second thing to go and look at."""
-    async with client_with(FakeLiveness(database=False, flusher=False)) as client:
-        response = await client.get("/health")
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(database=False, flusher=False)) as client:
+            response = await client.get("/health")
 
     assert response.status_code == 503
     assert response.json()["flusher"] is False
+    assert "captured conversations are no longer being published" not in caplog.text
+
+
+async def test_an_unhealthy_process_does_not_also_complain_about_the_board(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same rule for the board as for the flusher and the reminder sender (#266)."""
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(bot=False, poller=False)) as client:
+            response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["poller"] is False
+    assert "the board is no longer being read" not in caplog.text
 
 
 async def test_a_dead_reminder_sender_is_reported_without_failing_the_check(
@@ -120,13 +145,24 @@ async def test_an_unhealthy_process_does_not_also_complain_about_reminders(
     assert "reminders are no longer being sent" not in caplog.text
 
 
-async def test_a_dead_worker_makes_the_process_unhealthy() -> None:
-    """The whole point: the port is open and deliveries are accepted, but nothing acts on them."""
-    async with client_with(FakeLiveness(worker=False)) as client:
-        response = await client.get("/health")
+async def test_a_dead_worker_makes_the_process_unhealthy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole point: the port is open and deliveries are accepted, but nothing acts on them.
+
+    The log line is the one that says which of the counted checks failed, so it is pinned too.
+    """
+    with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
+        async with client_with(FakeLiveness(worker=False)) as client:
+            response = await client.get("/health")
 
     assert response.status_code == 503
     assert response.json()["worker"] is False
+    assert (
+        "shannon.api.routes.health",
+        logging.WARNING,
+        "reporting unhealthy: database=True worker=False bot=True",
+    ) in caplog.record_tuples
 
 
 async def test_an_unreachable_database_makes_the_process_unhealthy() -> None:
@@ -143,6 +179,16 @@ async def test_with_nothing_wired_in_it_only_claims_to_be_listening() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
+    assert response.json() == {
+        "healthy": True,
+        "database": True,
+        "worker": True,
+        "bot": True,
+        "poller": True,
+        "flusher": True,
+        "reminders": True,
+        "version": "unknown",
+    }
 
 
 class TestWhichBuildIsAnswering:
