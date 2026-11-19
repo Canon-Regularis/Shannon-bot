@@ -207,6 +207,18 @@ class TestStartingUp:
             await asyncio.wait_for(worker.ran.wait(), timeout=2)
             assert app.state.liveness.bot_connected() is True
 
+    async def test_the_sign_in_routes_are_handed_the_verification_service(
+        self, migrated: AsyncEngine
+    ) -> None:
+        """The OAuth routes are entered from a browser rather than called, so they read the service
+        off app state, and only this puts it there. Every route test sets it by hand, so a lost
+        line here left the suite green and every /oauth/* request answering 500 (#266)."""
+        container = container_for(migrated, FakeWorker(), ClosingGitHub())
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+
+        async with lifespan:
+            assert app.state.verification is container.verification
+
     async def test_with_a_token_the_worker_waits_for_the_gateway(
         self, migrated: AsyncEngine
     ) -> None:

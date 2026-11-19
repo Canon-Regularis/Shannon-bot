@@ -6,6 +6,8 @@ from typing import Protocol
 from fastapi import APIRouter, Request, Response, status
 from pydantic import BaseModel
 
+from shannon.api.dependencies import SettingsDep
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
@@ -41,17 +43,17 @@ class HealthResponse(BaseModel):
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(request: Request, response: Response) -> HealthResponse:
+async def health(request: Request, response: Response, settings: SettingsDep) -> HealthResponse:
     """Whether this process is doing its job, not merely listening.
 
     A stopped worker or an unreachable database leaves the webhook route accepting deliveries and
     answering 200 to every one of them, with nothing behind it that will ever act on them.
     """
-    # No fallback, because `create_app` sets it unconditionally and a default would be a
-    # branch nothing can reach.
-    build: str = request.app.state.settings.build
+    build = settings.build
 
-    liveness: Liveness | None = getattr(request.app.state, "liveness", None)
+    # Read without a default: `create_app` always sets it, to None until the lifespan has built
+    # the worker it reports on.
+    liveness: Liveness | None = request.app.state.liveness
     if liveness is None:
         # Nothing was wired in, which is how the route-level tests run: listening is all that
         # can honestly be claimed.
@@ -82,17 +84,18 @@ async def health(request: Request, response: Response) -> HealthResponse:
     if not healthy:
         logger.warning("reporting unhealthy: database=%s worker=%s bot=%s", database, worker, bot)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    elif not poller:
-        logger.warning("the board is no longer being read, though everything else is working")
-
-    # Each its own line, so the log says which of the uncounted tasks went.
-    if healthy and not flusher:
-        logger.warning(
-            "captured conversations are no longer being published, though everything else "
-            "is working"
-        )
-    if healthy and not reminders:
-        logger.warning("reminders are no longer being sent, though everything else is working")
+    else:
+        # Only while the rest is working: in an unhealthy process these are consequences, not
+        # more things to go and look at. Each its own line, so the log says which task went.
+        if not poller:
+            logger.warning("the board is no longer being read, though everything else is working")
+        if not flusher:
+            logger.warning(
+                "captured conversations are no longer being published, though everything else "
+                "is working"
+            )
+        if not reminders:
+            logger.warning("reminders are no longer being sent, though everything else is working")
 
     return HealthResponse(
         healthy=healthy,

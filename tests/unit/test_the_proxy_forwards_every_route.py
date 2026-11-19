@@ -112,3 +112,25 @@ def test_nothing_is_forwarded_that_the_app_does_not_serve() -> None:
 
 def _covers(matcher: str, path: str) -> bool:
     return path.startswith(matcher[:-1]) if matcher.endswith("*") else path == matcher
+
+
+class TestWhatCaddysAccessLogKeeps:
+    """Caddy logs every request it forwards, and a sign-in carries a live `code` and a sealed
+    `state` in its query string, then answers with a redirect whose Location carries the next
+    sealed `state`. The app keeps them out of its own access log; this holds Caddy's (#266).
+
+    Read from the file, so a log block rewritten without the filter fails here rather than in a
+    production log nobody reads until it matters.
+    """
+
+    def test_the_query_loses_the_code_and_the_state(self) -> None:
+        query = re.search(r"request>uri\s+query\s*\{([^}]*)\}", caddyfile())
+
+        assert query is not None, "Caddy's access log keeps the whole request URI"
+        assert re.search(r"\bdelete\s+code\b", query.group(1))
+        assert re.search(r"\bdelete\s+state\b", query.group(1))
+
+    def test_the_redirect_location_is_not_kept(self) -> None:
+        assert re.search(r"resp_headers>Location\s+delete\b", caddyfile()), (
+            "Caddy's access log keeps the Location a sign-in redirects to, sealed state and all"
+        )

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Final
+from typing import Final, Protocol
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -30,7 +30,6 @@ from shannon.services.verification import (
     LINK_LIFETIME,
     BoardLinked,
     BoardNotLinked,
-    GitHubIdentityVerification,
     VerificationError,
     Verified,
 )
@@ -107,7 +106,25 @@ UNLINKABLE: Final = (
 )
 
 
-def _verification(request: Request) -> GitHubIdentityVerification:
+class RunsTheRoundTrip(Protocol):
+    """What these routes ask of the verification service, and nothing more (#266).
+
+    The routes' own slice of it, declared here as the commands declare theirs (`ProvesIdentity`,
+    `AuthorisesBoards`, `OffersLinks`): handing out links and recording proofs belong to the
+    service and are no business of a page a browser lands on.
+    """
+
+    @property
+    def can_sign_in_with_discord(self) -> bool: ...
+
+    async def start(self, *, state: str, browser: str) -> str: ...
+
+    async def prove_on_discord(self, *, state: str, code: str, browser: str) -> str: ...
+
+    async def redeem(self, *, state: str, code: str, browser: str) -> Verified: ...
+
+
+def _verification(request: Request) -> RunsTheRoundTrip:
     """The verification service, where this deployment can run a round trip at all.
 
     All three stops ask the same thing. Without the Discord half no browser can ever be bound to
@@ -115,9 +132,7 @@ def _verification(request: Request) -> GitHubIdentityVerification:
     what was chosen. The commands refuse to hand a link out in that state, so arriving here anyway
     means a link from before the settings went, and a 500 says plainly it is the deployment's fault.
     """
-    verification: GitHubIdentityVerification | None = getattr(
-        request.app.state, "verification", None
-    )
+    verification: RunsTheRoundTrip | None = getattr(request.app.state, "verification", None)
     if verification is None or not verification.can_sign_in_with_discord:
         logger.error("an oauth request arrived but this deployment cannot run the round trip")
         raise HTTPException(

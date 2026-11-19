@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.exc import TimeoutError as NoConnectionToSpare
+from starlette.requests import ClientDisconnect
 
 from shannon.api.dependencies import (
     DeliveryQueueDep,
@@ -142,12 +143,22 @@ async def _read_within_limit(request: Request) -> bytes:
 
     chunks: list[bytes] = []
     size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > MAX_BODY_BYTES:
-            logger.warning("rejecting a delivery still arriving past %s bytes", MAX_BODY_BYTES)
-            raise _too_large()
-        chunks.append(chunk)
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_BODY_BYTES:
+                logger.warning("rejecting a delivery still arriving past %s bytes", MAX_BODY_BYTES)
+                raise _too_large()
+            chunks.append(chunk)
+    except ClientDisconnect as gone:
+        # A sender that hangs up mid-body is not this process failing. Left to propagate, it
+        # became an ERROR traceback in the log, which anybody could write by starting a POST and
+        # dropping it (#266). One line, and nothing is recorded. The 400 only ends the request
+        # cleanly: uvicorn sends nothing to a sender that has already gone.
+        logger.warning("abandoning a delivery whose sender left after %s bytes", size)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="The body did not arrive whole"
+        ) from gone
     return b"".join(chunks)
 
 

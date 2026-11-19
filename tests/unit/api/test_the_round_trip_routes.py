@@ -8,6 +8,8 @@ database in `tests/integration/test_a_link_is_bound_to_its_member.py`.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 
@@ -17,61 +19,17 @@ from shannon.api.routes.oauth import (
     ROUND_TRIP_COOKIE,
     ROUND_TRIP_SECONDS,
 )
-from shannon.domain.enums import VerificationPurpose
-from shannon.services.verification import (
-    BROWSER_SHAPE,
-    LINK_LIFETIME,
-    VerificationError,
-    Verified,
-)
+from shannon.services.verification import BROWSER_SHAPE, LINK_LIFETIME
+from tests.fakes.verification import DISCORD, GITHUB, FakeVerification
 from tests.support.round_trip import BROWSER, browser_on
 
 pytestmark = pytest.mark.unit
-
-DISCORD = "https://discord.com/oauth2/authorize?state=sealed"
-GITHUB = "https://github.com/login/oauth/authorize?state=sealed-again"
 
 # A browser presenting the cookie a link left in it, written as the header it sends.
 HOLDING = {"Cookie": f"{ROUND_TRIP_COOKIE}={BROWSER}"}
 
 # A value somebody else chose and put in a browser.
 PLANTED = "p" * 43
-
-
-class FakeVerification:
-    """What the routes ask of the service, and what each stop handed it."""
-
-    def __init__(self, *, can: bool = True, refusal: str | None = None) -> None:
-        self.can_sign_in_with_discord = can
-        self.refusal = refusal
-        self.started: list[tuple[str, str]] = []
-        self.proved: list[tuple[str, str, str]] = []
-        self.redeemed: list[tuple[str, str, str]] = []
-
-    def refuse_if_told_to(self) -> None:
-        if self.refusal is not None:
-            raise VerificationError(self.refusal)
-
-    async def start(self, *, state: str, browser: str) -> str:
-        self.started.append((state, browser))
-        self.refuse_if_told_to()
-        return DISCORD
-
-    async def prove_on_discord(self, *, state: str, code: str, browser: str) -> str:
-        self.proved.append((state, code, browser))
-        self.refuse_if_told_to()
-        return GITHUB
-
-    async def redeem(self, *, state: str, code: str, browser: str) -> Verified:
-        self.redeemed.append((state, code, browser))
-        self.refuse_if_told_to()
-        return Verified(
-            guild_id=1,
-            discord_user_id=555,
-            login="octocat",
-            github_user_id=583231,
-            purpose=VerificationPurpose.LINK,
-        )
 
 
 def attributes_of(response: httpx.Response) -> tuple[str, set[str]]:
@@ -258,6 +216,38 @@ class TestFinishingAtGitHub:
         assert response.text.startswith("Signed in as octocat.")
         assert verification.redeemed == [("sealed-again", "c", BROWSER)]
 
+    async def test_the_page_is_plain_text(self) -> None:
+        """Plain text is the defence: a login or a board's title is somebody's free text, and a
+        page that is never HTML has nowhere to run it (#266)."""
+        async with browser_on(FakeVerification()) as client:
+            response = await client.get(
+                "/oauth/github/callback", params={"code": "c", "state": "s"}, headers=HOLDING
+            )
+
+        assert response.headers["content-type"].startswith("text/plain")
+
+    @pytest.mark.parametrize("params", [{}, {"code": "c"}, {"state": "sealed-again"}])
+    async def test_an_incomplete_return_is_refused(self, params: dict[str, str]) -> None:
+        verification = FakeVerification()
+
+        async with browser_on(verification) as client:
+            response = await client.get("/oauth/github/callback", params=params)
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == INCOMPLETE
+        assert verification.redeemed == []
+
+    async def test_a_refusal_is_a_page(self) -> None:
+        verification = FakeVerification(refusal="That link has expired.")
+
+        async with browser_on(verification) as client:
+            response = await client.get(
+                "/oauth/github/callback", params={"code": "c", "state": "s"}
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "That link has expired."
+
     async def test_a_browser_with_no_cookie_is_handed_over_as_one(self) -> None:
         verification = FakeVerification()
 
@@ -343,6 +333,8 @@ class TestReadingTheCookie:
         assert verification.proved[0][2] == BROWSER
 
 
+NOT_CONFIGURED = "Identity verification is not configured on this deployment."
+
 STOPS = [
     ("/oauth/start", {"state": "S"}),
     ("/oauth/discord/callback", {"code": "c", "state": "sealed"}),
@@ -355,14 +347,29 @@ class TestADeploymentThatCannotSignInWithDiscord:
     hand a link out here, so a browser arriving anyway has one from before the settings went."""
 
     @pytest.mark.parametrize(("path", "params"), STOPS)
-    async def test_every_stop_refuses(self, path: str, params: dict[str, str]) -> None:
+    async def test_every_stop_refuses(
+        self, path: str, params: dict[str, str], caplog: pytest.LogCaptureFixture
+    ) -> None:
         verification = FakeVerification(can=False)
 
-        async with browser_on(verification) as client:
-            response = await client.get(path, params=params, headers=HOLDING)
+        with caplog.at_level(logging.ERROR, logger="shannon.api.routes.oauth"):
+            async with browser_on(verification) as client:
+                response = await client.get(path, params=params, headers=HOLDING)
 
         assert response.status_code == 500
+        assert response.json()["detail"] == NOT_CONFIGURED
+        assert "cannot run the round trip" in caplog.text
         assert (verification.started, verification.proved, verification.redeemed) == ([], [], [])
+
+    @pytest.mark.parametrize("path", [path for path, _ in STOPS])
+    async def test_it_says_so_before_it_looks_at_the_request(self, path: str) -> None:
+        """A request missing everything still hears that the deployment is at fault, not that the
+        link is incomplete: the one thing nobody following a link can fix comes first."""
+        async with browser_on(FakeVerification(can=False)) as client:
+            response = await client.get(path)
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == NOT_CONFIGURED
 
     @pytest.mark.parametrize(("path", "params"), STOPS)
     async def test_so_does_one_with_no_service_at_all(
@@ -372,3 +379,4 @@ class TestADeploymentThatCannotSignInWithDiscord:
             response = await client.get(path, params=params)
 
         assert response.status_code == 500
+        assert response.json()["detail"] == NOT_CONFIGURED

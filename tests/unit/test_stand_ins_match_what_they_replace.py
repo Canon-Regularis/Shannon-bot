@@ -18,6 +18,7 @@ import pytest
 
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
+from shannon.api.routes.oauth import RunsTheRoundTrip
 from shannon.commands.board import AuthorisesBoards
 from shannon.commands.conversations import LogsConversations
 from shannon.commands.link import ProvesIdentity
@@ -153,6 +154,7 @@ from tests.fakes.liveness import FakeLiveness
 from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.fakes.threads import FakeThreadGateway
 from tests.fakes.tiers import FakeTiers
+from tests.fakes.verification import FakeVerification
 
 # Both halves matter. The fakes are what the tests run against, and the real implementations are
 # what production runs against, and a type checker compares either against a protocol only where
@@ -301,6 +303,10 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (WhoIsMovingTheCard, FakeBoardCredentials),
     (LinksTheBoardChosen, BoardLinkingService),
     (LinksTheBoardChosen, NoBoardLinks),
+    # Issue #266. The OAuth routes' slice of the verification service, declared where the routes
+    # use it, and the stand-in their tests run against.
+    (RunsTheRoundTrip, GitHubIdentityVerification),
+    (RunsTheRoundTrip, FakeVerification),
 ]
 
 

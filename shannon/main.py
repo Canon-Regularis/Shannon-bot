@@ -5,6 +5,7 @@ import logging
 import uvicorn
 from fastapi import FastAPI
 
+from shannon.api.access_log import keep_oauth_queries_out_of_the_access_log
 from shannon.api.app import create_app
 from shannon.commands._replies import reply_for
 from shannon.config import Settings, get_settings
@@ -51,6 +52,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
 def run() -> None:
     settings = get_settings()
     configure_logging(settings)
+    keep_oauth_queries_out_of_the_access_log()
     uvicorn.run(build_app(settings), host=settings.api_host, port=settings.api_port)
 
 

@@ -256,6 +256,20 @@ class TestFollowingTheLinkLinksTheBoard:
         assert response.status_code == 200
         assert "Q3 {login} {0}" in response.text
 
+    async def test_a_title_with_markup_is_never_served_as_html(
+        self, db_sessionmaker: async_sessionmaker[AsyncSession], registered: Repository
+    ) -> None:
+        """The title reaches the page as written, so the page must be one a browser never runs:
+        plain text is what keeps `<script>` in a board's name inert (#266)."""
+        projects = FakeProjects(ProjectListing(number=PROJECT, title="<script>alert(1)</script>"))
+
+        async with verifying(db_sessionmaker, projects) as verification:
+            response = await follow(verification)
+
+        assert response.status_code == 200
+        assert "<script>alert(1)</script>" in response.text
+        assert response.headers["content-type"].startswith("text/plain")
+
 
 class TestARepositoryThatMovesBeforeTheLinkIsFollowed:
     """Found reviewing #201. A bare number is the repository's own owner's board, worked out when
