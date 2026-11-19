@@ -71,8 +71,22 @@
 		respond 404
 	}
 
+	# The access log keeps everything but the two things a sign-in carries that must never come to
+	# rest anywhere (#266). The `/oauth/*` routes take a live `code` and a sealed `state` in the
+	# query string, and two of them answer with a redirect whose Location carries the next sealed
+	# `state`. The app keeps them out of its own access log; this keeps them out of Caddy's.
+	# Caddy already redacts the cookie and authorisation headers by itself.
 	log {
 		output stdout
-		format console
+		format filter {
+			wrap console
+			fields {
+				request>uri query {
+					delete code
+					delete state
+				}
+				resp_headers>Location delete
+			}
+		}
 	}
 }
