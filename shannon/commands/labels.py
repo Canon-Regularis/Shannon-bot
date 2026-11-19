@@ -8,12 +8,12 @@ are only suggestions, so the service's check, not the picker, stops a typo becom
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Coroutine
-from typing import Any, Protocol
+from typing import Protocol
 
 import discord
 from discord import app_commands
 
+from shannon.commands._choices import MOST_CHOICES, Suggesting
 from shannon.commands._guards import DecidesGitHubAccess, github_allows, in_a_thread
 from shannon.commands._permissions import SYNC_ROLES
 from shannon.commands._replies import reply_for
@@ -25,15 +25,6 @@ from shannon.github import people
 from shannon.services.workflow import WorkflowOutcome
 
 logger = logging.getLogger(__name__)
-
-# Discord's cap; it sends a longer list back as an error rather than truncating it.
-MOST_CHOICES = 25
-
-# What discord.py wants of an autocomplete: a coroutine taking the interaction and what has been
-# typed so far. The two `Any`s are the coroutine's send and throw types, which nothing supplies.
-Suggesting = Callable[
-    [discord.Interaction, str], Coroutine[Any, Any, list[app_commands.Choice[str]]]
-]
 
 
 class SetsLabels(Protocol):
