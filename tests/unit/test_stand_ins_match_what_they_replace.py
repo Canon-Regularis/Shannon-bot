@@ -69,7 +69,7 @@ from shannon.github.installations import (
     InstallationTokens,
     ResolvesInstallations,
 )
-from shannon.github.projects import HttpProjectBoards, ReadsJson
+from shannon.github.projects import HttpProjectBoards, ReadsJson, WhoTheBoardIsReadAs
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import (
@@ -82,6 +82,7 @@ from shannon.runtime.lifespan import (
 )
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.board_credentials import BoardCredentials
+from shannon.services.boards import BoardLinkingService
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -139,8 +140,11 @@ from shannon.services.verification import (
     GitHubIdentityVerification,
     HoldsTiers,
     KeepsBoardAuthorisations,
+    LinksTheBoardChosen,
 )
-from shannon.services.workflow import ItemWorkflow, LabelsItems
+from shannon.services.workflow import ItemWorkflow, LabelsItems, WhoIsMovingTheCard
+from tests.fakes.board_credentials import FakeBoardCredentials
+from tests.fakes.board_links import NoBoardLinks
 from tests.fakes.boards import FakeBoard
 from tests.fakes.github import FakeGitHubClient
 from tests.fakes.grants import FakeGrants
@@ -289,6 +293,14 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (GrantsTiers, FakeGrants),
     (ReadsStanding, HttpGitHubClient),
     (ReadsStanding, FakeGitHubClient),
+    # Missing until #243's review: two stand-ins in tests/fakes that nothing here checked. The two
+    # board questions from #170 and the one-click link from #201, both halves of each.
+    (WhoTheBoardIsReadAs, BoardCredentials),
+    (WhoTheBoardIsReadAs, FakeBoardCredentials),
+    (WhoIsMovingTheCard, BoardCredentials),
+    (WhoIsMovingTheCard, FakeBoardCredentials),
+    (LinksTheBoardChosen, BoardLinkingService),
+    (LinksTheBoardChosen, NoBoardLinks),
 ]
 
 
