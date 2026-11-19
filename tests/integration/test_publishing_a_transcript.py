@@ -387,6 +387,135 @@ class TestWhenSomethingDies:
         db_session.expire_all()
         assert (await conversation(db_session)).flush_id is None
 
+    async def test_an_emptied_claim_starts_the_next_batch_at_no_failures(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        clock: list[datetime],
+    ) -> None:
+        """Issue #268. A batch failed all but once during an outage, and then everything in it was
+        deleted in Discord. Clearing that claim is the batch being over, as publishing it or
+        giving up on it is, so its failures must not be counted against the next batch, which
+        would otherwise be dropped after a single refusal."""
+        await say(log, logging_thread, "one")
+        row = await conversation(db_session)
+        row.flush_id = "failing through an outage"
+        row.flush_started_at = AT
+        row.flush_through_id = 10_000
+        row.failed_flushes = MOST_ATTEMPTS - 1
+        await db_session.commit()
+        await log.forget([500])
+
+        clock[0] = AT + FLUSH_RETRY_AFTER
+        await flusher.flush_once()
+
+        db_session.expire_all()
+        assert (await conversation(db_session)).failed_flushes == 0
+
+        await say(log, logging_thread, "said after the outage", minute=10)
+        github.write_error = GitHubRateLimitError("spent", retry_after=60)
+        clock[0] = AT + timedelta(minutes=10) + QUIET
+        await flusher.flush_once()
+
+        said = [what for where, what in threads.posts if where == logging_thread]
+        assert not any("could not be published to GitHub" in what for what in said)
+        db_session.expire_all()
+        assert await waiting(db_session) == 1, "the next batch was dropped after one refusal"
+
+
+def seized_while_publishing(
+    flusher: TranscriptFlusher,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Have another pass take the claim over while this one is waiting on GitHub.
+
+    What a publish that outlives `FLUSH_RETRY_AFTER` looks like from a second replica: the claim
+    reads as abandoned and is seized, and the first pass finishes afterwards all the same.
+    """
+    published = flusher._publisher.publish
+
+    async def publish_after_another_pass_took_over(found, lines, *, thread_id):
+        async with sessionmaker() as session, session.begin():
+            row = await conversation(session)
+            assert row.flush_id is not None
+            seized = await ConversationStore(session).seize(
+                row.id, flush_id="the new holder", held=row.flush_id, now=AT + 2 * FLUSH_RETRY_AFTER
+            )
+            assert seized
+        await published(found, lines, thread_id=thread_id)
+
+    monkeypatch.setattr(flusher._publisher, "publish", publish_after_another_pass_took_over)
+
+
+class TestAPassWhoseClaimWasTakenOver:
+    """Issue #268. A claim is taken by flush id, so it is let go and counted against by it too."""
+
+    async def test_finishing_leaves_the_new_holders_claim_standing(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        clock: list[datetime],
+    ) -> None:
+        """Released by conversation alone, the slow pass would free a claim that is not its own,
+        and the next tick could claim the following batch beside the pass still holding this one.
+        What it published is still deleted: those rows are on GitHub now, and keeping them would
+        only have the new holder post them a second time."""
+        await say(log, logging_thread, "one")
+        seized_while_publishing(flusher, db_sessionmaker, monkeypatch)
+        clock[0] = AT + QUIET
+
+        await flusher.flush_once()
+
+        assert len(github.comments) == 1
+        db_session.expire_all()
+        row = await conversation(db_session)
+        assert row.flush_id == "the new holder", "the slow pass released somebody else's claim"
+        assert await waiting(db_session) == 0
+
+    async def test_a_refusal_is_not_counted_against_the_new_holder(
+        self,
+        log: ConversationLog,
+        flusher: TranscriptFlusher,
+        logging_thread: int,
+        github: FakeGitHubClient,
+        threads: FakeThreadGateway,
+        db_session: AsyncSession,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        clock: list[datetime],
+    ) -> None:
+        """One failure short of giving up, so a count landing on the wrong claim would drop the
+        new holder's batch out from under it and tell the thread so."""
+        await say(log, logging_thread, "one")
+        row = await conversation(db_session)
+        row.flush_id = "an earlier pass"
+        row.flush_started_at = AT
+        row.flush_through_id = 10_000
+        row.failed_flushes = MOST_ATTEMPTS - 1
+        await db_session.commit()
+        seized_while_publishing(flusher, db_sessionmaker, monkeypatch)
+        github.write_error = GitHubRateLimitError("spent", retry_after=60)
+        clock[0] = AT + FLUSH_RETRY_AFTER
+
+        await flusher.flush_once()
+
+        said = [what for where, what in threads.posts if where == logging_thread]
+        assert not any("could not be published to GitHub" in what for what in said)
+        db_session.expire_all()
+        row = await conversation(db_session)
+        assert (row.flush_id, row.failed_flushes) == ("the new holder", MOST_ATTEMPTS - 1)
+        assert await waiting(db_session) == 1, "the new holder's batch was dropped"
+
 
 class TestWhenGitHubSaysNo:
     async def test_the_claim_is_kept_so_the_retry_waits(
