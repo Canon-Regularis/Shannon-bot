@@ -7,6 +7,7 @@ Discord's markdown and GitHub's are different languages, and `discord_bot.safe_t
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 # Used by both dialects to break a construct GitHub or Discord would otherwise act on: a
 # mention, a reference, a link join. Named because a mistyped one is invisible in a diff.
@@ -63,3 +64,15 @@ def code_span(text: str) -> str:
     # one space from each end when rendering.
     padding = " " if text.startswith("`") or text.endswith("`") else ""
     return f"{fence}{padding}{text}{padding}{fence}"
+
+
+def listed(names: Sequence[str], *, last: str = "and") -> str:
+    """`A`, `A and B`, `A, B and C`: a list read as a sentence, its last two joined with `last`.
+
+    Issue #267. `/remind`, `/track` and the workflow commands each wrote this join by hand, so a
+    rule such as the Oxford comma could have come to differ between them. No comma before `last`,
+    and two names take none at all.
+    """
+    if len(names) < 3:
+        return f" {last} ".join(names)
+    return f"{', '.join(names[:-1])} {last} {names[-1]}"
