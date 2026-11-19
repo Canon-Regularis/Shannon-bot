@@ -91,6 +91,12 @@ source = ["shannon"]
 # Statements alone say every line ran, which a suite manages easily while never taking a branch
 # the other way. With this on, the figure below covers both.
 branch = true
+# SQLAlchemy's async layer runs each query on a greenlet, and coverage.py loses the frame it was
+# tracing across that switch unless it is told to follow greenlets. The lines after an awaited
+# query that raised were then recorded on some runs and not others: `registration.py`'s losing
+# race passed every time and was reported missed on two runs in three, failing the floor below
+# at random (#267). Threads stay followed, which is coverage's default.
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 # A floor rather than a target: both are complete today, so anything under it is a regression.
