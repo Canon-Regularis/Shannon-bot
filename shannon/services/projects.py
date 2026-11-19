@@ -230,7 +230,7 @@ class ProjectPoller:
         threads: SaysAndShuts,
         *,
         polling: bool = True,
-        interval: float = 60.0,
+        interval: float = 2.0,
         may_set_status: bool = False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -260,11 +260,11 @@ class ProjectPoller:
         self._unreadable: set[tuple[str, int]] = set()
         self._stopping = False
         self._stopped = asyncio.Event()
-        # Whether every board the last pass read can be re-read for a conditional request. Set
-        # per pass by `run_once`, so this initial value is only ever read by a poller that is
-        # switched off - and True is the right answer there, because a pass that returns without
-        # reading anything has nothing expensive in it to slow down for.
-        self._cheap_to_recheck = True
+        # When each board that cannot be re-read cheaply may be read again, on `clock`, keyed like
+        # `_unreadable`. Per board, so one board too big for a page slows itself and nobody else:
+        # this was a single flag for the whole pass, and one big board put every small one in
+        # every server on the slow clock with it. A board not in here is read on every pass.
+        self._read_again_at: dict[tuple[str, int], float] = {}
         # The boards already named in the log as too big to check cheaply, so the line is said
         # once each rather than once a pass. Discarded again if a board shrinks back under a page.
         self._expensive: set[tuple[str, int]] = set()
@@ -312,18 +312,18 @@ class ProjectPoller:
         if not self.enabled:
             return 0
 
-        # Reset per pass, and read by `run_forever` afterwards to pick the next wait. True until
-        # a board says otherwise, so a deployment with nothing linked keeps the fast cadence and
-        # pays one indexed query for it.
-        self._cheap_to_recheck = True
         moved = 0
         for board in await self._boards():
+            # A board on the slow clock sits this pass out until its time comes; every other
+            # board goes on being read at the interval. See `UNVALIDATED_POLL_SECONDS`.
+            if self._clock() < self._read_again_at.get(_key(board), 0.0):
+                continue
             moved += await self._poll(board)
         return moved
 
     async def _poll(self, board: _Board) -> int:
         """One board: read it, and sync the cards that have moved since the last read."""
-        key = (board.board_owner.casefold(), board.project_number)
+        key = _key(board)
         try:
             listed = await self._projects.list_board_items(board.board_owner, board.project_number)
         except UNREADABLE as unreadable:
@@ -1314,12 +1314,9 @@ class ProjectPoller:
         while not self._stopping:
             wait = self._interval
             try:
+                # A board too big to check cheaply is held back inside the pass, on a clock of
+                # its own, so the wait between passes is the interval whatever any board costs.
                 await self.run_once()
-                # After the pass, because only the pass knows. A board that cannot be checked with
-                # a conditional request costs its whole body every read, and reading a megabyte
-                # every couple of seconds is the one way this interval could cost more than it
-                # saves. See `UNVALIDATED_POLL_SECONDS`.
-                wait = max(wait, self._wait_for_an_expensive_board())
             except asyncio.CancelledError:
                 raise
             except GitHubRateLimitError as limit:
@@ -1349,9 +1346,10 @@ class ProjectPoller:
         key = (board.board_owner, board.project_number)
         if self._projects.can_recheck_cheaply(*key):
             self._expensive.discard(key)
+            self._read_again_at.pop(_key(board), None)
             return
 
-        self._cheap_to_recheck = False
+        self._read_again_at[_key(board)] = self._clock() + UNVALIDATED_POLL_SECONDS
         if key not in self._expensive:
             self._expensive.add(key)
             logger.info(
@@ -1363,21 +1361,11 @@ class ProjectPoller:
                 self._interval,
             )
 
-    def _wait_for_an_expensive_board(self) -> float:
-        """The floor the last pass earned: nothing, or the slow clock if a board needs it.
-
-        A one-line conditional rather than an `if`. Coverage records arcs between line numbers,
-        so written as a branch this would be two arms to reach where the sentence is the same
-        either way.
-        """
-        return 0.0 if self._cheap_to_recheck else UNVALIDATED_POLL_SECONDS
-
     async def _wait(self, seconds: float) -> None:
         """Sleep, or wake at once if a stop arrives.
 
-        Waiting on the sleep alone would leave a shutdown sitting out the whole wait, and the slow
-        clock of `UNVALIDATED_POLL_SECONDS` (a minute) or a rate-limit wait (up to an hour) is far
-        longer than the grace period allows.
+        Waiting on the sleep alone would leave a shutdown sitting out the whole wait, and a
+        rate-limit wait (up to an hour) is far longer than the grace period allows.
         """
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
@@ -1581,6 +1569,12 @@ def _on_this_board(board: _Board, row: TicketThread) -> bool:
     it is the whole answer. See `domain.board.is_board_page`.
     """
     return is_board_page(row.board_url, owner=board.board_owner, number=board.project_number)
+
+
+def _key(board: _Board) -> tuple[str, int]:
+    """One board, the way the poller's memory files it: owner casefolded, because GitHub logins
+    are case-insensitive and a relink that types the owner differently is still the same board."""
+    return (board.board_owner.casefold(), board.project_number)
 
 
 @dataclass(frozen=True, slots=True)

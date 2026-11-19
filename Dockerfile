@@ -5,7 +5,9 @@ FROM python:3.15-slim AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
+# The uv CI tests with, so the image is built by the same resolver and exporter CI ran. A test holds
+# this tag to every `version:` pin on a setup-uv step in ci.yml, so a bump moves both together.
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"

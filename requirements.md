@@ -392,10 +392,9 @@ thread, exactly as often as before.
 
 **Boards with more than one page of cards.** A validator (the ETag that a conditional request
 sends back) hashes one response body. So the bot cannot check such a board without downloading all
-of it. While any linked board is like that, the poller waits sixty seconds between passes. This
-slows **every** board on the deployment, not only the large one. It is slower rather than more
-expensive, which is the right way for a surprise to fail. The bot logs it once per board when it
-happens. The current board has eighty cards, and a page holds a hundred, so this will happen
+of it. Such a board is read every sixty seconds instead, on a clock of its own: every other board
+on the deployment keeps the fast interval. It is slower rather than more expensive, which is the
+right way for a surprise to fail. The bot logs it once per board when it happens. The current board has eighty cards, and a page holds a hundred, so this will happen
 eventually.
 
 **Cards missing from the read.** On a quiet board, one thing spends budget, and only while a card

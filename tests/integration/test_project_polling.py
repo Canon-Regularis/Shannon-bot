@@ -39,6 +39,7 @@ from shannon.services.projects import (
     ARCHIVED_CARD_RECHECK_SECONDS,
     CARD_READ_SPACING_SECONDS,
     MISSED_CARD_RECHECK_SECONDS,
+    UNVALIDATED_POLL_SECONDS,
     BoardItem,
     ProjectPoller,
 )
@@ -683,12 +684,17 @@ class TestHowOftenTheBoardIsRead:
         """The other arm, and not a hypothetical: the fields a read asks for change when somebody
         adds a column, which changes the request, which is a board that could not be validated
         becoming one that can. Nothing here should be a one-way door.
+
+        The clock is moved past the slow wait by hand: only a read can find out the board has
+        become cheap, and the board is not read again until its slow wait is over.
         """
+        now = [1000.0]
         board = FakeBoard(cheap=False)
-        poller = poller_for(board)
+        poller = poller_for(board, clock=lambda: now[0])
 
         await poller.run_once()
         board.cheap = True
+        now[0] += UNVALIDATED_POLL_SECONDS
 
         running = asyncio.create_task(poller.run_forever())
         await until(lambda: len(board.reads) >= 5)
@@ -696,6 +702,47 @@ class TestHowOftenTheBoardIsRead:
         await asyncio.wait_for(running, timeout=5)
 
         assert len(board.reads) >= 5
+
+    async def test_a_big_board_slows_itself_and_no_other_board(
+        self, board_channel: None, poller_for, db_session: AsyncSession, registered: Repository
+    ) -> None:
+        """Each board keeps its own clock. The wait used to be one flag for the whole pass, so one
+        board too big for a page put every small board, in every server, on the slow clock too,
+        while the log line said it was that board alone."""
+        other = await register_repository(
+            db_session, guild_id=2, channel_id=500, github_repo_id=999, repo_name="other/repo"
+        )
+        registered.project_number = PROJECT
+        other.project_number = 77
+        await db_session.commit()
+        board = FakeBoard()
+        board.expensive = {("other", 77)}
+        now = [1000.0]
+        poller = poller_for(board, clock=lambda: now[0])
+
+        for _ in range(3):
+            await poller.run_once()
+            now[0] += 2.0
+
+        assert board.reads.count(("Canon-Regularis", PROJECT)) == 3, "the small board was slowed"
+        assert board.reads.count(("other", 77)) == 1, "the big board was read at the fast interval"
+
+    async def test_a_big_board_is_read_again_once_its_slow_wait_is_over(
+        self, board_channel: None, poller_for
+    ) -> None:
+        """Held back, not forgotten: the slow clock is a minute between reads, not a stop."""
+        board = FakeBoard(cheap=False)
+        now = [1000.0]
+        poller = poller_for(board, clock=lambda: now[0])
+
+        await poller.run_once()
+        now[0] += UNVALIDATED_POLL_SECONDS - 1
+        await poller.run_once()
+        assert len(board.reads) == 1, "it was read before its slow wait was over"
+
+        now[0] += 1
+        await poller.run_once()
+        assert len(board.reads) == 2, "it was not read again once its slow wait was over"
 
 
 class TestABoardThatMayNotSetAStatus:
