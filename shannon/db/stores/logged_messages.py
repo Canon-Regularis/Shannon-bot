@@ -18,8 +18,13 @@ def mentioned_in(message: LoggedMessage) -> dict[int, str]:
     The column holds a JSON object and JSON has no integer keys, so the ids go in as decimal
     strings. A key that is not one is skipped rather than raised on, since a whole transcript
     refusing to publish over one hand edit is the worse failure.
+
+    ASCII digits only, as `github.urls` checks them (#268). `isdigit` alone passes superscripts,
+    which `int` then raises on, and fullwidth digits, which `int` reads as an id nobody wrote.
     """
-    return {int(who): name for who, name in message.mentions.items() if who.isdigit()}
+    return {
+        int(who): name for who, name in message.mentions.items() if who.isascii() and who.isdigit()
+    }
 
 
 class LoggedMessageStore:

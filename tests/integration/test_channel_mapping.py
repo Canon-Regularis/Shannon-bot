@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import ChannelMapping, Repository
+from shannon.db.stores.channel_mappings import ChannelMappingStore
 from shannon.domain.enums import ObjectType
 from shannon.domain.errors import NotRegisteredError
 from shannon.services.channels import ChannelMappingService, PinnedKind
@@ -73,6 +74,23 @@ async def test_the_types_do_not_move_each_other(
     )
     assert pr_mapping is not None
     assert pr_mapping.discord_channel_id == 99
+
+
+async def test_setting_a_mapping_the_session_already_read_answers_with_the_new_channel(
+    registered: Repository, db_session: AsyncSession
+) -> None:
+    """`/set_channel` reads the row before it moves it, so the session already holds a copy.
+    The row `set` answers with is the stored one, not that copy left as it was read (#268)."""
+    mappings = ChannelMappingStore(db_session)
+    before = await mappings.get(registered.id, ObjectType.ISSUE)
+    assert before is not None
+    assert before.discord_channel_id == 98
+
+    after = await mappings.set(
+        repository_id=registered.id, object_type=ObjectType.ISSUE, discord_channel_id=502
+    )
+
+    assert after.discord_channel_id == 502
 
 
 async def test_a_guild_with_no_repository_is_told_to_register_first(
