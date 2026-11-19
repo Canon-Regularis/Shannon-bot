@@ -91,12 +91,13 @@ source = ["shannon"]
 # Statements alone say every line ran, which a suite manages easily while never taking a branch
 # the other way. With this on, the figure below covers both.
 branch = true
-# SQLAlchemy's async layer runs each query on a greenlet, and coverage.py loses the frame it was
-# tracing across that switch unless it is told to follow greenlets. The lines after an awaited
-# query that raised were then recorded on some runs and not others: `registration.py`'s losing
-# race passed every time and was reported missed on two runs in three, failing the floor below
-# at random (#267). Threads stay followed, which is coverage's default.
-concurrency = ["greenlet", "thread"]
+# No `concurrency` setting, on purpose. The floor below is held on Python 3.14, where coverage.py
+# uses the `sysmon` core and follows SQLAlchemy's greenlet switches correctly. Asking for
+# `concurrency = ["greenlet"]` forces the older `ctrace` core instead, and on 3.14 that lost the
+# exit arc of an async loop in `services/projects.py`, failing every 3.14 and Nix leg (#267's CI).
+# On 3.12 and 3.13 `ctrace` is the default, and there it can miss the lines after an awaited
+# query that raised: `registration.py`'s losing race is reported missed on some local runs. That
+# is a local reading only; the floor that gates a merge is 3.14's.
 
 [tool.coverage.report]
 # A floor rather than a target: both are complete today, so anything under it is a regression.
