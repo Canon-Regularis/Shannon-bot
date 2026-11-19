@@ -11,6 +11,10 @@ happens). The bot checks each webhook, saves it, and answers at once. A queue do
 work later. The reason: GitHub waits only ten seconds for an answer, and it never sends again a
 delivery it recorded as failed.
 
+**To install it,** follow [INSTALLATION.md](INSTALLATION.md): from this repository to a working
+bot in your Discord server, step by step. The rest of this README explains what the bot does and
+every setting.
+
 ## What it does
 
 Words used in this section:
@@ -352,6 +356,9 @@ wins. An older delivery cannot undo a newer one.
 
 ## Install
 
+This section sets up a checkout to work on the code. To run the bot for yourself, follow
+[INSTALLATION.md](INSTALLATION.md) instead.
+
 You need Python 3.12 or newer, Docker for the database, and [uv](https://docs.astral.sh/uv/). Or
 you need [Nix](https://nixos.org/download/) and a git clone of this repository: see
 [With Nix](#with-nix).
@@ -472,58 +479,33 @@ shell runs only with the shell's libraries.
 ## Connecting it to GitHub and Discord
 
 This repository does not configure GitHub or Discord, and the bot cannot do either for you.
+[INSTALLATION.md](INSTALLATION.md) has every step: the Discord application, the GitHub App, the
+optional board OAuth App, the invite and the first commands. This section explains the parts that
+need more than a step.
 
 ### The GitHub webhook
 
-The webhook is the GitHub App's own. In the App's settings:
+The webhook is the GitHub App's own, signed with `SHANNON_GITHUB_APP_WEBHOOK_SECRET`. The six
+events it subscribes to are listed in [INSTALLATION.md](INSTALLATION.md#2-make-the-github-app). The
+bot answers any other event `ignored` and writes no row for it.
 
-1. Set the webhook URL to wherever this is deployed plus `/webhooks/github`. The content type is
-   `application/json`.
-2. Set the secret to the same string as `SHANNON_GITHUB_APP_WEBHOOK_SECRET`.
-3. Subscribe to the six events below.
-
-A per-repository webhook (Repository settings, Webhooks, Add webhook) signed with
-`SHANNON_GITHUB_WEBHOOK_SECRET` is still accepted while a deployment moves across to the App. A new
-deployment leaves it empty: delete the placeholder `.env.example` puts there, because the endpoint
-accepts any delivery signed with it. Delete the per-repository webhook once the App is installed. Until you do, GitHub sends everything twice and every commit
-line posts twice (see [One bot, several servers](#one-bot-several-servers)).
-
-On the App, tick the events under **Subscribe to events**. On a per-repository webhook, pick
-Choose individual events. Either way, choose these six:
-
-```text
-Pull requests
-Issues
-Issue comments
-Pull request reviews
-Pull request review comments
-Check suites
-```
-
-The bot answers any other event `ignored` and writes no row for it, so subscribing to more only
-adds noise.
+A per-repository webhook signed with `SHANNON_GITHUB_WEBHOOK_SECRET` is still accepted while a
+deployment moves across to the App. A new deployment leaves that setting empty. Delete the
+per-repository webhook once the App is installed. Until you do, GitHub sends everything twice and
+every commit line posts twice (see [One bot, several servers](#one-bot-several-servers)).
 
 The endpoint checks each delivery's signature against both secrets. If neither is set, it fails
 closed: every delivery answers 500 rather than being waved through, so a missing secret shows up
-at once.
-
-When nothing appears in Discord, look first at GitHub's Recent Deliveries page:
+at once. On GitHub's Recent Deliveries page:
 
 - **401**: the delivery matches no configured secret. Either the secret is wrong, or the one it
   was signed with is not set here while the other one is.
 - **500**: neither secret is set.
 - **200 answering `ignored`**: the event arrived, and this bot does not act on it.
 
-### What the App may read
-
-- `Issues: Read and write`: labels, assignees and comments.
-- `Pull requests: Read and write`: reviewers.
-- `Checks: Read`: the CI results that #112 puts in a thread.
-
 Adding a permission to an installed App suspends its event delivery until somebody accepts the
-change. Until then no check suite arrives at all, and
-the feature looks broken rather than pending. When the first check suite does arrive, the log
-says so.
+change. Until then no check suite arrives at all, and the feature looks broken rather than
+pending. When the first check suite does arrive, the log says so.
 
 ### The Discord bot
 
@@ -535,19 +517,9 @@ nothing to turn on and nothing for Discord to approve:
 - Reading somebody's roles uses what Discord sends with the command itself.
 - Following a board link asks Discord for that one member over REST. That needs no intent either.
 
-**Invite.** Invite the bot with the `bot` and `applications.commands` scopes and these
-permissions:
-
-```text
-View Channels
-Send Messages
-Send Messages in Threads
-Create Public Threads
-Manage Threads
-Read Message History
-```
-
-Two of those are easy to miss, and without either one things fail after everything looks fine.
+**Permissions.** [INSTALLATION.md](INSTALLATION.md#6-invite-the-bot-to-your-server) lists the six
+the invite asks for. Two of them are easy to miss, and without either one things fail after
+everything looks fine.
 
 **`Read Message History`** lets the bot edit the metadata block. The metadata block is one
 message. The bot writes it when the thread opens and rewrites it on every later event. To rewrite
@@ -591,32 +563,15 @@ which usually shortens the wait.
 
 Every one-time link goes through Discord before GitHub, so only the member who ran the command can
 finish it. A link that went straight to GitHub was finished by whoever clicked it, and GitHub
-skips its consent page for an application somebody has authorised before.
+skips its consent page for an application somebody has authorised before. The sign-in uses the
+bot's own application as an OAuth client; [INSTALLATION.md](INSTALLATION.md#1-make-the-discord-application)
+sets it up. Until its client id and secret are set, every command that hands out a link refuses,
+and the bot says so at startup.
 
-The sign-in uses the bot's own application as an OAuth client. In the Developer Portal, under
-OAuth2:
+### Then, in the server
 
-1. Add `<SHANNON_PUBLIC_BASE_URL>/oauth/discord/callback` as a redirect.
-2. Copy the Client ID into `SHANNON_DISCORD_CLIENT_ID`.
-3. Reset the Client Secret and put it in `SHANNON_DISCORD_CLIENT_SECRET`. The bot token is a
-   separate credential, and this does not touch it.
-4. Leave Public Client off.
-
-Until both are set, every command that hands out a link refuses, and the bot says so at startup.
-
-### Then, in the server, in this order
-
-```text
-/register <github_repo_link>          in the PR channel: once to prove you administer it, again to bind it
-/set_channel issues #channel          where issue threads go
-/board link <board>                   only if a board is being mirrored: one link, one click
-/set_channel project tickets #channel and where its tickets go
-/link                                 each person, once: open the link and that is it
-/linked                               any time after, to see that it took
-/link_team <team> @role               so a review asked of a team reaches somebody
-```
-
-Only `/register` has to come first. The channel you run it in becomes the pull request channel;
+[INSTALLATION.md](INSTALLATION.md#7-set-it-up-in-discord) gives the commands in order. Only
+`/register` has to come first. The channel you run it in becomes the pull request channel;
 `/set_channel pull requests #channel` moves it later. Each kind of item goes to its own channel:
 
 - Issues fall back to the pull request channel until they are given one of their own.
@@ -670,49 +625,17 @@ Like the laptop stack, the server stack runs `alembic upgrade head` to completio
 starts. Nothing else would catch a deploy that skipped it: the startup check proves only that the
 database was migrated at all, not that it reached the revision this code expects.
 
-### First start
+### First start and upgrades
 
-1. Point an A record at the machine. Without it, Caddy cannot get a certificate.
-2. On the machine, as root, clone this repository into `/opt/shannon`, and run every later step
-   there. Keep the directory name `shannon`: compose names the database volume after the
-   directory, and `scripts/deploy.sh` refuses any other path or name.
-3. Write `.env` with these settings. `.env.example` explains each one.
-
-   | For | Settings |
-   | --- | --- |
-   | The stack | `SHANNON_HOSTNAME`, `ACME_EMAIL`, `POSTGRES_USER`, `POSTGRES_PASSWORD` |
-   | The Discord bot | `SHANNON_DISCORD_TOKEN`, `SHANNON_DISCORD_CLIENT_ID`, `SHANNON_DISCORD_CLIENT_SECRET` |
-   | The GitHub App | `SHANNON_GITHUB_APP_CLIENT_ID`, `SHANNON_GITHUB_APP_PRIVATE_KEY`, `SHANNON_GITHUB_APP_CLIENT_SECRET`, `SHANNON_GITHUB_APP_WEBHOOK_SECRET` |
-   | One-time links | `SHANNON_PUBLIC_BASE_URL` |
-   | Project boards | `SHANNON_GITHUB_BOARD_CLIENT_ID`, `SHANNON_GITHUB_BOARD_CLIENT_SECRET`, `SHANNON_BOARD_CREDENTIAL_KEY` |
-
-   Without the Discord client settings or `SHANNON_PUBLIC_BASE_URL`, every command that hands out
-   a link refuses. Postgres reads `POSTGRES_USER` and `POSTGRES_PASSWORD` only once, when it
-   creates the volume. Leave `SHANNON_GITHUB_WEBHOOK_SECRET` empty (see
-   [The GitHub webhook](#connecting-it-to-github-and-discord)).
-4. Log in to the registry and start the stack:
-
-   ```bash
-   echo "$GHCR_TOKEN" | docker login ghcr.io -u <user> --password-stdin   # classic PAT, read:packages
-   docker compose -f compose.prod.yaml up -d
-   ```
-
-5. Point the GitHub App's webhook at `https://<hostname>/webhooks/github`.
+[INSTALLATION.md](INSTALLATION.md#5a-on-a-server) has the first start, and
+[Keeping it up to date](INSTALLATION.md#keeping-it-up-to-date) has how to deploy a new version
+with `scripts/deploy.sh`. [scripts/README.md](scripts/README.md) has the full deploy
+procedure.
 
 Only one copy may run at a time. Two copies would both hold the Discord gateway, and both would
 lease deliveries from the queue (take them to work on).
 
-### Upgrades
-
-Run `scripts/deploy.sh` from a laptop. It is one command and one ssh password:
-
-```bash
-ssh root@<host> /opt/shannon/scripts/deploy.sh              # head of main
-ssh root@<host> /opt/shannon/scripts/deploy.sh <commit>     # a named commit
-ssh root@<host> /opt/shannon/scripts/deploy.sh --rollback   # the previous build
-```
-
-What the script does:
+What the deploy script does:
 
 - It pins the image to `sha-<commit>`, not to a moving tag such as `edge`. So you know exactly
   what is running.
@@ -721,8 +644,6 @@ What the script does:
 - It reports what it did in the ssh session it was run from.
 - It cannot roll the database back. The migration has been applied, and the script does not run
   `alembic downgrade`. `scripts/README.md` says so plainly.
-
-`scripts/README.md` has the full procedure.
 
 **A person decides when to deploy, not the script.** A pull loop would restart a live bot on a
 green merge with nobody watching, for example on a Friday evening. The cost is that the server
@@ -807,12 +728,10 @@ What is shared, and what that costs:
 
 ### Adding a server
 
-1. Invite the bot with the `bot` and `applications.commands` scopes and the permissions listed in
-   [Connecting it to GitHub and Discord](#connecting-it-to-github-and-discord).
-2. Make sure the GitHub App is installed on the repository. `/register` refuses, with a link, if
-   it is not. The App's webhook already covers the repository. Do not add a per-repository
-   webhook, and delete any that exists, or every event arrives twice.
-3. In the new server, run `/register`, then `/set_channel`.
+Invite the bot, install the GitHub App on the new server's repository, and run the commands in
+the new server: [INSTALLATION.md](INSTALLATION.md#keeping-it-up-to-date) has the steps. The App's
+webhook already covers the repository. Do not add a per-repository webhook, and delete any that
+exists, or every event arrives twice.
 
 A global command takes up to an hour to appear the first time. That looks like a broken deploy,
 but it is not.
@@ -1633,6 +1552,7 @@ Every change starts from an issue. Use the form for a
   it. It also says what to do about a security problem. A security problem never goes in a public
   issue.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the code is laid out, and why.
+- [INSTALLATION.md](INSTALLATION.md): how to set the bot up, from GitHub to Discord.
 - [Code of Conduct](CODE_OF_CONDUCT.md): everybody who takes part agrees to it.
 
 ## License

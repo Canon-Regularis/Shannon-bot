@@ -7,7 +7,7 @@
 #     ssh root@<host> /opt/shannon/scripts/deploy.sh <commit>    # deploy a named commit
 #     ssh root@<host> /opt/shannon/scripts/deploy.sh --rollback  # back to the previous image
 #
-# Nothing here is new work. It is the runbook in the README, in the order the README gives it,
+# Nothing here is new work. It is the runbook in scripts/README.md, in the order it gives it,
 # with the three checks a person does by eye done by the machine instead: that an image for this
 # commit exists at all, that nothing is mid-delivery when the container is replaced, and that what
 # came up is the commit that was asked for and is answering healthy.
@@ -86,7 +86,7 @@ done
 cd "$STACK_DIR" 2>/dev/null || die "$STACK_DIR does not exist"
 [ -f "$COMPOSE_FILE" ] || die "no $COMPOSE_FILE in $STACK_DIR"
 [ -f "$ENV_FILE" ]     || die "no $ENV_FILE in $STACK_DIR; it holds the secrets and is never in git"
-[ -d .git ]            || die "$STACK_DIR is not a git clone. See 'Deploying' in the README."
+[ -d .git ]            || die "$STACK_DIR is not a git clone. See INSTALLATION.md, or scripts/README.md for a box set up before."
 
 for tool in git curl jq docker flock; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed (apt-get install -y $tool)"

@@ -8521,3 +8521,25 @@ feature end to end rather than assuming a predecessor the file never recorded.
   entries keep the shape they were written in.
 - **For whoever deploys it.** Nothing.
 - **Tests.** None new. The README's own test still holds it to the code.
+
+## Setting the bot up is one document, step by step
+
+- **Installing it meant reading the README** (#242). The steps were spread over two long README
+  sections, `scripts/README.md` and the comments in `.env.example`, and some were written down
+  nowhere: creating the Discord application, and creating the GitHub App with its callback URL.
+- **`INSTALLATION.md`.** Numbered steps from this repository to a working bot: the Discord
+  application, the GitHub App, the optional board OAuth App, `.env`, starting it on a server or
+  trying it on a laptop through an HTTPS tunnel, the invite, the first commands, how to check it
+  works, a table of what to do when something is wrong, and how to deploy a new version.
+- **The README points there.** The step-by-step parts of "Connecting it to GitHub and Discord" and
+  "Running it on a server" moved out. What stays explains why: the two webhook secrets, the
+  permissions that are easy to miss, the issue fallback, deploying by hand. Every heading another
+  file links to is kept.
+- **`.env.example` no longer fills in `SHANNON_GITHUB_WEBHOOK_SECRET`.** Its placeholder was public,
+  and the endpoint accepts any delivery signed with it, so a new install had to remember to blank
+  it. A refused deploy now points at INSTALLATION.md and `scripts/README.md` instead of a README
+  section that no longer holds the steps.
+- **For whoever deploys it.** Nothing changes on a running server. A `.env` copied from the old
+  `.env.example` with the placeholder still in it should have that line emptied.
+- **Tests.** The README's test reads the webhook event list from `INSTALLATION.md`, where it now
+  lives.
