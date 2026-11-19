@@ -8565,3 +8565,36 @@ feature end to end rather than assuming a predecessor the file never recorded.
   ones sees the small ones mirrored at the interval again.
 - **Tests.** Two poller tests for the per-board clock, one updated for it, the Dockerfile pin test,
   six conformance rows and the malformed-link case.
+
+## The api module, held to the refactoring checklist
+
+- **The api module was checked against #266's checklist** (#266). An audit of `shannon/api/` kept
+  eighteen findings and dropped ten as taste. Most were behaviour nobody had pinned, so a refactor
+  could have changed it unnoticed. Two were real defects.
+- **What the routes do is pinned before anything moved.** Every refusal's detail and log line, both
+  webhook secrets (only the old one was ever tested), what `/health` logs and when it stays quiet,
+  the last OAuth stop's refusals, its plain-text page, and that the lifespan hands the sign-in
+  routes their service. Without that last one, a lost line left the suite green and every
+  `/oauth/*` request answering 500.
+- **The OAuth routes depend on what they use.** `RunsTheRoundTrip` is their slice of the
+  verification service, declared where they use it, as the commands declare theirs. Their
+  stand-in moved to `tests/fakes/verification.py`, and `IMPLEMENTATIONS` now checks both halves.
+- **`/health` reads its collaborators the way the other routes do.** Its settings come through
+  `SettingsDep`. The rule that a dead board, flusher or reminder sender is only mentioned while
+  the rest works is now written once instead of three ways. Nothing it answers or logs changed.
+- **The OAuth `code` and `state` no longer reach the logs.** Two access logs wrote every
+  request's URI with its query string, so each sign-in left both in the production logs, against
+  `oauth.py`'s own promise: uvicorn's, and Caddy's in front of it, which also kept the 303's
+  Location and the next sealed `state` in it. A filter on uvicorn's access logger drops the query
+  from `/oauth/` lines, and the Caddyfile's log block deletes `code`, `state` and the Location.
+  Every other access line is as it was.
+- **A webhook sender that hangs up mid-body is one warning.** It used to be an ERROR traceback,
+  which anybody could write by starting a POST and dropping it. It is now dropped with one
+  warning, and nothing is recorded.
+- **For whoever deploys it.** The Caddyfile changed. `scripts/deploy.sh` recreates the `caddy`
+  container, so a deploy picks it up. By hand it is
+  `docker compose -f compose.prod.yaml up -d --force-recreate caddy`. Old log lines already
+  written keep what they had.
+- **Tests.** Characterisation tests for all three routes and the lifespan, the access-log filter
+  and its installation, the filter against real uvicorn with both of its HTTP parsers, the
+  Caddyfile's log filter, and a sender that leaves mid-body.
