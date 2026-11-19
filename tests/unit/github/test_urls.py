@@ -69,6 +69,9 @@ def test_issue_link_is_rejected_by_name() -> None:
         ("https://github.com/owner/repo/pull/-1", "has no valid number"),
         ("https://github.com/-bad/repo/pull/1", "is not a valid GitHub owner"),
         ("not a link at all", "is not a github.com link"),
+        # An unbalanced `[` reads as a broken IPv6 host, and urlparse raises instead of parsing.
+        # Only the property tests reached this before, when Hypothesis happened to make one.
+        ("https://[github.com/owner/repo/pull/7", "is not a usable link"),
     ],
 )
 def test_invalid_links_are_rejected(link: str, message: str) -> None:
