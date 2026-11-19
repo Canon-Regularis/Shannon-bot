@@ -19,13 +19,16 @@ import pytest
 from shannon.api.dependencies import EventIntake
 from shannon.api.routes.health import Liveness
 from shannon.api.routes.oauth import RunsTheRoundTrip
-from shannon.commands.board import AuthorisesBoards
+from shannon.commands._guards import DecidesGitHubAccess
+from shannon.commands.board import AuthorisesBoards, ForgetsAuthorisations, LinksBoards
 from shannon.commands.conversations import LogsConversations
+from shannon.commands.labels import SetsLabels, SuggestsLabels
 from shannon.commands.link import ProvesIdentity
 from shannon.commands.link_team import LinksTeams
 from shannon.commands.linked import OffersLinks, RemembersWhoIsLinked
 from shannon.commands.mentions import RemembersWhoWantsPinging
 from shannon.commands.people import PutsSomebodyOnAnItem
+from shannon.commands.refresh import RefreshesARepository
 from shannon.commands.regenerate import RedrawsAnItem
 from shannon.commands.register import RegistersRepositories
 from shannon.commands.register import VerifiesIdentity as ProvesBeforeRegistering
@@ -34,7 +37,7 @@ from shannon.commands.set_channel import MapsChannels, RelocatesThreads
 from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.track import ChoosesWhatAThreadIsTold
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
-from shannon.commands.workflow import MovesItems
+from shannon.commands.workflow import MovesItems, OffersColumns
 from shannon.container import Container
 from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
@@ -82,8 +85,9 @@ from shannon.runtime.lifespan import (
     SendsReminders,
 )
 from shannon.runtime.liveness import ProcessLiveness
+from shannon.services.access import GitHubAccess
 from shannon.services.board_credentials import BoardCredentials
-from shannon.services.boards import BoardLinkingService
+from shannon.services.boards import BoardColumns, BoardLinkingService
 from shannon.services.channels import ChannelMappingService
 from shannon.services.delivery.queue import (
     DeliveryInbox,
@@ -122,6 +126,7 @@ from shannon.services.sync.policies import (
     SyncPolicy,
     TicketPolicy,
 )
+from shannon.services.sync.refresh import RepositoryRefresh
 from shannon.services.sync.regenerate import ItemRegeneration
 from shannon.services.sync.relocation import MovesThreadsBetweenChannels, ThreadRelocation
 from shannon.services.sync.shutting import KeepsThreadsShut
@@ -155,6 +160,7 @@ from tests.fakes.queues import InMemoryDeliveryQueue
 from tests.fakes.threads import FakeThreadGateway
 from tests.fakes.tiers import FakeTiers
 from tests.fakes.verification import FakeVerification
+from tests.unit.commands.conftest import FakeAccess
 
 # Both halves matter. The fakes are what the tests run against, and the real implementations are
 # what production runs against, and a type checker compares either against a protocol only where
@@ -307,6 +313,19 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # use it, and the stand-in their tests run against.
     (RunsTheRoundTrip, GitHubIdentityVerification),
     (RunsTheRoundTrip, FakeVerification),
+    # Missing until #267: the last protocols declared in shannon/commands with no row, each against
+    # the class `container._commands` hands it. `ItemWorkflow` twice, because the label picker
+    # holds it behind the handle that can only suggest.
+    (LinksBoards, BoardLinkingService),
+    (ForgetsAuthorisations, BoardCredentials),
+    (OffersColumns, BoardColumns),
+    (RefreshesARepository, RepositoryRefresh),
+    (SetsLabels, ItemWorkflow),
+    (SuggestsLabels, ItemWorkflow),
+    (DecidesGitHubAccess, GitHubAccess),
+    # Four commands ask GitHub through it, and every test of them asks this stand-in instead. It
+    # lives in the commands' conftest rather than tests/fakes, since nothing outside them uses it.
+    (DecidesGitHubAccess, FakeAccess),
 ]
 
 
