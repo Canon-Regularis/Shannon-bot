@@ -7,7 +7,9 @@ another sync has since replaced.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
+from typing import Final
 
 from sqlalchemy import Text, Update, func, select, update
 from sqlalchemy.dialects.postgresql import array
@@ -18,6 +20,24 @@ from shannon.db.models import TrackedItem
 
 # The coalesce default: a row that remembers nothing has shown no labels.
 _NOTHING = array((), type_=Text())
+
+# What belongs to one thread rather than to the item: a replacement thread starts open, and has
+# shown its reader nothing until its own block lands. Letting go of a thread and moving to a
+# different one both clear these, so a column added here is cleared by both (#268).
+_A_THREADS_OWN: Final[Mapping[str, None]] = MappingProxyType(
+    {"discord_thread_locked": None, "shown_labels": None}
+)
+
+# Letting go of a thread: the pointer, where it was, and everything that went with it. Read-only
+# so no caller can change it for the others (#268).
+_LET_GO: Final[Mapping[str, None]] = MappingProxyType(
+    {
+        "discord_thread_id": None,
+        "discord_message_id": None,
+        "discord_channel_id": None,
+        **_A_THREADS_OWN,
+    }
+)
 
 
 def _guarded(tracked_item_id: int, thread_id: int) -> Update:
@@ -44,22 +64,7 @@ class ThreadPointerStore:
         the pointer then would strand the new one.
         """
         changed = await rows_changed(
-            self._session,
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id == dead_thread_id,
-            )
-            # The lock and the shown set go with the pointer: a replacement thread starts open,
-            # and has shown its reader nothing until its own block lands.
-            .values(
-                discord_thread_id=None,
-                discord_message_id=None,
-                discord_thread_locked=None,
-                discord_channel_id=None,
-                shown_labels=None,
-            )
-            .execution_options(synchronize_session=False),
+            self._session, _guarded(tracked_item_id, dead_thread_id).values(**_LET_GO)
         )
         return bool(changed)
 
@@ -77,13 +82,7 @@ class ThreadPointerStore:
             await self._session.scalars(
                 update(TrackedItem)
                 .where(TrackedItem.discord_channel_id == channel_id)
-                .values(
-                    discord_thread_id=None,
-                    discord_message_id=None,
-                    discord_thread_locked=None,
-                    discord_channel_id=None,
-                    shown_labels=None,
-                )
+                .values(**_LET_GO)
                 .returning(TrackedItem.id)
                 .execution_options(synchronize_session=False)
             )
@@ -174,21 +173,31 @@ class ThreadPointerStore:
             # Only when the thread is different. The write path swaps a thread for itself after
             # every ordinary update, to put back a metadata message id Discord moved, and
             # clearing the lock there re-shuts a thread already shut and lets every superseded
-            # delivery for a finished item past the staleness guard.
-            moving["discord_thread_locked"] = None
-            # The block that names the new thread's labels is posted a moment later and records
-            # them itself.
-            moving["shown_labels"] = None
+            # delivery for a finished item past the staleness guard. The block that names the new
+            # thread's labels is posted a moment later and records them itself.
+            #
+            # Not the whole of `_LET_GO`: the pointer is being set, not cleared, and a channel the
+            # caller did not name is kept rather than forgotten.
+            moving.update(_A_THREADS_OWN)
 
-        await self._session.execute(
-            update(TrackedItem)
-            .where(
-                TrackedItem.id == tracked_item_id,
-                TrackedItem.discord_thread_id.is_not_distinct_from(replacing),
+        won = (
+            await self._session.execute(
+                update(TrackedItem)
+                .where(
+                    TrackedItem.id == tracked_item_id,
+                    TrackedItem.discord_thread_id.is_not_distinct_from(replacing),
+                )
+                .values(**moving)
+                .returning(TrackedItem.discord_thread_id, TrackedItem.discord_message_id)
+                .execution_options(synchronize_session=False)
             )
-            .values(**moving)
-            .execution_options(synchronize_session=False)
-        )
+        ).one_or_none()
+        if won is not None:
+            # What this UPDATE wrote, which a SELECT in this transaction would read back: the
+            # row stays locked until commit. One statement on the hot path, where the write path
+            # swaps a thread for itself after every delivery (#268).
+            return (won[0], won[1])
+        # Lost, or the item is gone: the row as the winner left it, or nothing.
         row = (
             await self._session.execute(
                 select(TrackedItem.discord_thread_id, TrackedItem.discord_message_id).where(
