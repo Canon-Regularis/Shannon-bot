@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 import shannon.main
+from shannon.api.access_log import ACCESS_LOGGER, StripOAuthQuery
 from shannon.config import Settings
 from shannon.container import Container
 from shannon.discord_bot.client import ShannonBot
@@ -171,6 +172,27 @@ class TestStartingTheProcess:
         assert served["host"] == SETTINGS.api_host
         assert served["port"] == SETTINGS.api_port
         assert isinstance(served["app"], FastAPI)
+
+    def test_the_access_log_is_kept_free_of_oauth_secrets_before_serving(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Installed before uvicorn starts, so the first sign-in is covered as well (#266)."""
+        access = logging.getLogger(ACCESS_LOGGER)
+        monkeypatch.setattr(access, "filters", [])
+        installed_when_served: list[bool] = []
+
+        def fake_run(app: object, **kwargs: object) -> None:
+            installed_when_served.append(
+                any(isinstance(found, StripOAuthQuery) for found in access.filters)
+            )
+
+        monkeypatch.setattr("shannon.main.uvicorn.run", fake_run)
+        monkeypatch.setattr("shannon.main.get_settings", lambda: SETTINGS)
+        monkeypatch.setattr("shannon.main.configure_logging", lambda settings: None)
+
+        run()
+
+        assert installed_when_served == [True]
 
     def test_running_the_module_as_a_script_starts_the_same_thing(
         self, monkeypatch: pytest.MonkeyPatch
