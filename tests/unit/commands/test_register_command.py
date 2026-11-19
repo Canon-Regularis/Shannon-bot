@@ -316,6 +316,23 @@ class TestProvingYouAdministerIt:
         assert "client secret" in interaction.said
         assert "SHANNON_DISCORD_CLIENT_SECRET" in interaction.said
 
+    async def test_the_refusal_reads_as_it_did_before_its_list_of_settings_was_shared(
+        self,
+    ) -> None:
+        """Written out whole. Its second sentence is `/link`'s list of settings since #267, and the
+        two have to join on exactly one space for the reply to read as it did before."""
+        interaction = await run(
+            StubRegistration(),
+            project_manager(),
+            verification=FakeVerification(can_prove_identity=False),
+        )
+
+        assert interaction.said == (
+            "This bot cannot check who you are on GitHub, so it will not bind a repository to "
+            "this server. An admin needs to set the GitHub App's client secret, this deployment's "
+            "public URL, SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
+        )
+
     async def test_it_refuses_before_handing_out_a_link_to_somebody_without_the_role(self) -> None:
         """The role gate stays first. Minting a link writes an unauthenticated row, so an ungated
         command lets any member make the bot mint them at will."""

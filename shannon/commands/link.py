@@ -31,8 +31,9 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import NOT_IN_A_SERVER
+from shannon.commands._guards import server_of
 from shannon.commands._permissions import REGISTER_ROLES
+from shannon.commands._words import SIGN_IN_SETTINGS
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, in_the_channel, owed, refused, reply
 from shannon.discord_bot.slash import SlashCommand
@@ -41,9 +42,8 @@ from shannon.domain.enums import VerificationPurpose
 logger = logging.getLogger(__name__)
 
 NOT_CONFIGURED = (
-    "This bot cannot check who you are on GitHub, so there is nothing to connect to. An admin "
-    "needs to set the GitHub App's client secret, this deployment's public URL, "
-    "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
+    "This bot cannot check who you are on GitHub, so there is nothing to connect to. "
+    f"{SIGN_IN_SETTINGS}"
 )
 
 CANNOT_POST = (
@@ -89,11 +89,8 @@ def build_link_command(verification: ProvesIdentity, gate: PermissionGate) -> Sl
     @app_commands.describe(member="Ask somebody else to connect theirs, in this channel")
     @app_commands.guild_only()
     async def link(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
-        # The guild check by hand rather than through `in_a_server`, which exists to apply a tier
-        # and there is only a tier on one branch of this. `/mentions` does the same.
-        guild_id = interaction.guild_id
+        guild_id = await server_of(interaction)
         if guild_id is None:
-            await reply(interaction, refused(NOT_IN_A_SERVER))
             return
 
         # Above the branch, because neither half works without it: a deployment that cannot run

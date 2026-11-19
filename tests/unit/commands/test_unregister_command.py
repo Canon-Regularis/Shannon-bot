@@ -89,6 +89,23 @@ class TestWhoMayEvenAsk:
         assert "SHANNON_DISCORD_CLIENT_ID" in interaction.reply
         assert service.calls == []
 
+    async def test_the_refusal_reads_as_it_did_before_its_list_of_settings_was_shared(
+        self,
+    ) -> None:
+        """Written out whole, "verify" and all. Its second sentence is `/link`'s list of settings
+        since #267, and the two have to join on exactly one space for it to read as before."""
+        command, interaction, _, _, repo = run_it(
+            verification=FakeVerification(can_prove_identity=False)
+        )
+
+        await command.callback(interaction, repo)
+
+        assert interaction.said == (
+            "This bot cannot verify who you are on GitHub, so it will not unregister anything. "
+            "An admin needs to set the GitHub App's client secret, this deployment's public URL, "
+            "SHANNON_DISCORD_CLIENT_ID and SHANNON_DISCORD_CLIENT_SECRET."
+        )
+
 
 class TestTheFirstRun:
     async def test_somebody_who_has_not_proved_anything_gets_a_link(self) -> None:

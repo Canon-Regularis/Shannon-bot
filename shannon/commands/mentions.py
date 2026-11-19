@@ -5,9 +5,9 @@ from typing import Protocol
 import discord
 from discord import app_commands
 
-from shannon.commands._guards import NOT_IN_A_SERVER
+from shannon.commands._guards import server_of
 from shannon.discord_bot.panels import Panel
-from shannon.discord_bot.responses import defer, done, refused, reply
+from shannon.discord_bot.responses import defer, done, reply
 from shannon.discord_bot.slash import SlashCommand
 
 
@@ -19,7 +19,7 @@ class RemembersWhoWantsPinging(Protocol):
     async def set_mentions(self, *, guild_id: int, discord_user_id: int, wanted: bool) -> None: ...
 
 
-# Discord shows the description; the value is what reaches the callback.
+# Discord shows the name; the value is what reaches the callback.
 _CHOICES = [
     app_commands.Choice(name="on", value="on"),
     app_commands.Choice(name="off", value="off"),
@@ -65,19 +65,19 @@ def build_mentions_command(service: RemembersWhoWantsPinging) -> SlashCommand:
     async def mentions(
         interaction: discord.Interaction, state: app_commands.Choice[str] | None = None
     ) -> None:
-        if interaction.guild_id is None:
-            await reply(interaction, refused(NOT_IN_A_SERVER))
+        guild_id = await server_of(interaction)
+        if guild_id is None:
             return
 
         await defer(interaction)
         if state is None:
             wanted = await service.wants_mentions(
-                guild_id=interaction.guild_id, discord_user_id=interaction.user.id
+                guild_id=guild_id, discord_user_id=interaction.user.id
             )
         else:
             wanted = state.value == "on"
             await service.set_mentions(
-                guild_id=interaction.guild_id,
+                guild_id=guild_id,
                 discord_user_id=interaction.user.id,
                 wanted=wanted,
             )
