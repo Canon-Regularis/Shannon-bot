@@ -274,11 +274,6 @@ class ItemNoteMirror:
         # post has landed by now, so a failure to write this down must not undo it or re-raise. What
         # it costs is the ability to mirror a later edit of this one comment, which is why it is
         # recorded at all rather than read back from somewhere - there is nowhere to read it from.
-        #
-        # Written whatever came back, including None. The gateway's return is typed `int | None` and
-        # every implementation of it answers with an id, so guarding here would add a branch no test
-        # could reach; and None is a truthful answer anyway - a null column already means "nobody
-        # knows which message holds this note", which an edit handles by saying so.
         await self._remember_the_message(
             target.tracked_item_id, snapshot.note_key, message_id=message_id
         )

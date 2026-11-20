@@ -11,12 +11,14 @@ import asyncio
 from collections.abc import Sequence
 from types import SimpleNamespace
 
+import aiohttp
 import discord
 import pytest
 from discord import app_commands
 
 from shannon.discord_bot.client import ShannonBot, build_intents
-from tests.fakes.discord_objects import FakeAuthor, FakeChannel, a_message
+from shannon.discord_bot.responses import refused
+from tests.fakes.discord_objects import FakeAuthor, FakeChannel, FakeInteraction, a_message
 
 THREAD = 9001
 
@@ -209,14 +211,26 @@ class TestBeingToldAChannelHasGone:
     async def test_nothing_wired_in_is_not_an_error(self) -> None:
         await ShannonBot(explain_error=lambda error: "no").on_guild_channel_delete(_channel(1))
 
-    async def test_a_failure_letting_go_does_not_reach_discord(self) -> None:
+    async def test_a_failure_letting_go_does_not_reach_discord(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Logged in one line and never raised. Issue #269: it used to vanish without a word, and
+        a draft card whose thread went with the channel is then mirrored nowhere for good."""
+
         async def refuses(channel_id: int) -> None:
             raise RuntimeError("the database went away")
 
         bot = ShannonBot(explain_error=lambda error: "no")
         bot.tell_when_a_channel_goes(refuses)
 
-        await bot.on_guild_channel_delete(_channel(4242))
+        with caplog.at_level("WARNING", logger="shannon.discord_bot.client"):
+            await bot.on_guild_channel_delete(_channel(4242))
+
+        [record] = caplog.records
+        assert record.levelname == "WARNING"
+        assert "channel 4242" in record.getMessage()
+        assert "the database went away" in record.getMessage()
+        assert record.exc_info is None, "a traceback per channel is noise nobody can act on"
 
     async def test_it_is_held_to_the_same_limit_as_a_thread_going(self) -> None:
         """Housekeeping, and never the reason a delivery is late. A server tidying up several
@@ -245,6 +259,30 @@ class TestBeingToldAChannelHasGone:
         await asyncio.gather(*letting_go)
 
         assert running <= 2, f"a tidy-up ran {running} of these at once"
+
+
+class TestTheBackstopItself:
+    async def test_discord_going_away_mid_reply_is_one_line_not_a_raise(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue #269. discord.py re-raises a dropped connection raw rather than as one of its
+        own errors. Raised from here it was a stray-task traceback; swallowed, nothing would say
+        the person never got an answer. So one warning, and no traceback."""
+        bot = ShannonBot(explain_error=lambda error: refused("no"))
+        interaction = FakeInteraction()
+
+        async def disconnected(*_args: object, **_kwargs: object) -> None:
+            raise aiohttp.ServerDisconnectedError()
+
+        interaction.response.send_message = disconnected
+
+        with caplog.at_level("WARNING", logger="shannon.discord_bot.client"):
+            await bot.tree.on_error(interaction, app_commands.AppCommandError("boom"))
+
+        [warning] = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert "could not reach Discord to answer the failed slash command" in warning.getMessage()
+        assert "ServerDisconnectedError" in warning.getMessage()
+        assert warning.exc_info is None
 
 
 def _channel(channel_id: int):
@@ -281,17 +319,29 @@ class TestBeingToldAThreadHasGone:
         """The client is built before the thing that owns the rows exists."""
         await ShannonBot(explain_error=lambda error: "no").on_raw_thread_delete(_deleted(4242))
 
-    async def test_a_failure_letting_go_does_not_reach_discord(self) -> None:
+    async def test_a_failure_letting_go_does_not_reach_discord(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """discord.py logs an event handler that raises and carries on, which is a traceback per
-        deleted thread in a busy server for something nobody can act on."""
+        deleted thread in a busy server. So one line and no traceback, but not silence: a draft
+        card's pointer that is not let go of is never repaired, and issue #269 found nothing
+        recorded that it had happened."""
 
         async def refuses(thread_id: int) -> None:
-            raise RuntimeError("the database went away")
+            raise TimeoutError
 
         bot = ShannonBot(explain_error=lambda error: "no")
         bot.tell_when_a_thread_goes(refuses)
 
-        await bot.on_raw_thread_delete(_deleted(4242))
+        with caplog.at_level("WARNING", logger="shannon.discord_bot.client"):
+            await bot.on_raw_thread_delete(_deleted(4242))
+
+        [record] = caplog.records
+        assert record.levelname == "WARNING"
+        assert "thread 4242" in record.getMessage()
+        # A bare TimeoutError reads as nothing at all through str(), so its type is named.
+        assert "TimeoutError" in record.getMessage()
+        assert record.exc_info is None
 
     async def test_a_whole_channel_going_does_not_run_all_at_once(self) -> None:
         """Deleting a channel deletes every thread in it, and discord.py dispatches one of these
@@ -456,8 +506,9 @@ class TestReadingAThread:
     async def test_a_capture_that_fails_is_logged_rather_than_swallowed(
         self, bot: ShannonBot, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Unlike the two deletion handlers, which suppress because the item heals itself on the
-        next webhook. A transcript line dropped here is gone and nothing rebuilds it."""
+        """At ERROR with its traceback, where the two deletion handlers log one WARNING line: they
+        can fire once per thread in a deleted channel, and a traceback each would bury the log. A
+        transcript line dropped here is gone and nothing rebuilds it."""
         capture = RecordingCapture(error=RuntimeError("the database went away"))
         bot.tell_when_a_message_arrives(capture)
 

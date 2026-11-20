@@ -481,7 +481,7 @@ class RefusesOnePost(FakeThreadGateway):
         self._refuse = refuse
         self._posts = 0
 
-    async def post(self, *, thread_id: int, panel: Panel, notify=None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify=None) -> int:
         self._posts += 1
         if self._posts == self._refuse:
             raise DiscordGatewayError("Discord would not take that message")

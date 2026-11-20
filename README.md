@@ -518,8 +518,8 @@ nothing to turn on and nothing for Discord to approve:
 - Following a board link asks Discord for that one member over REST. That needs no intent either.
 
 **Permissions.** [INSTALLATION.md](INSTALLATION.md#6-invite-the-bot-to-your-server) lists the six
-the invite asks for. Two of them are easy to miss, and without either one things fail after
-everything looks fine.
+the invite asks for. Two of them are easy to miss. `/register` and `/set_channel` check both, but
+one taken away later makes things fail after everything looks fine.
 
 **`Read Message History`** lets the bot edit the metadata block. The metadata block is one
 message. The bot writes it when the thread opens and rewrites it on every later event. To rewrite
@@ -549,10 +549,10 @@ the permission can be revoked at any time. So a refused close says so in the thr
 the log.
 
 **What `/register` and `/set_channel` check.** Both refuse a channel where the bot lacks View
-Channels, Send Messages in Threads or Manage Threads. They also refuse a text channel where it
-lacks Create Public Threads, and a forum where it lacks Send Messages. Read Message History is
-the one of these not checked at the door. They also refuse a forum channel set to **Require
-Tags**, because nothing here picks a tag and Discord rejects every post without one.
+Channels, Send Messages in Threads, Manage Threads or Read Message History. They also refuse a
+text channel where it lacks Create Public Threads, and a forum where it lacks Send Messages. They
+also refuse a forum channel set to **Require Tags**, because nothing here picks a tag and Discord
+rejects every post without one.
 
 **The first start.** The bot registers its commands globally on its very first start. Discord
 serves global commands from a cache that can take up to an hour to catch up, and the log says so.

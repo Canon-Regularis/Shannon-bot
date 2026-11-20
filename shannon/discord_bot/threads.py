@@ -15,8 +15,10 @@ from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
     DiscordPermissionError,
+    DiscordUnreachableError,
     ThreadNotFoundError,
     ThreadStartedEmptyError,
+    ThreadStartedWithoutPermissionError,
 )
 from shannon.discord_bot.layout import as_message
 from shannon.discord_bot.panels import Panel
@@ -43,6 +45,13 @@ POSTABLE = (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, dis
 # request runs on to its own end, for the reason `DiscordThreadGateway.member` gives. Found
 # reviewing #201.
 MEMBER_LOOKUP_SECONDS = 5
+
+# Discord not reached at all, as distinct from Discord answering no. discord.py retries a reset
+# connection itself and then re-raises the transport error raw rather than as one of its own: an
+# `OSError`, which a `TimeoutError` is, or an aiohttp error that is not one, such as a server
+# disconnecting. One tuple for every place that maps or catches them, `client` included, so they
+# cannot drift apart. Issue #269.
+UNREACHABLE = (aiohttp.ClientError, OSError)
 
 
 class _Notified(TypedDict):
@@ -123,14 +132,19 @@ def _missing_thread_permission(channel: discord.abc.GuildChannel) -> str | None:
     because Discord will offer an administrator a channel this bot cannot see. Manage Threads shuts
     a finished item's thread and reopens one for a late comment, and the runtime path steps over a
     refusal so the mirror survives it, so a server without it would notice only that nothing had
-    closed; the closing header says so too, for a permission taken away later. Nothing is checked
-    where the guild is not cached, which is a client still starting.
+    closed; the closing header says so too, for a permission taken away later. Read Message
+    History is what rewriting the metadata block or a mirrored comment needs, so a server without
+    it would see each thread appear once and never change. Nothing is checked where the guild is
+    not cached, which is a client still starting.
     """
     me = getattr(getattr(channel, "guild", None), "me", None)
     if me is None:
         return None
 
     allowed = channel.permissions_for(me)
+    # Read Message History in both: rewriting the metadata block or a mirrored comment fetches it
+    # first, and Discord counts that fetch as reading history. Without it every rewrite is a
+    # permanent refusal, which is the failure this check exists to catch at the door. Issue #269.
     if isinstance(channel, discord.ForumChannel):
         # A forum post is a thread, and creating one is Send Messages in the forum itself.
         wanted = (
@@ -138,6 +152,7 @@ def _missing_thread_permission(channel: discord.abc.GuildChannel) -> str | None:
             ("Send Messages", allowed.send_messages),
             ("Send Messages in Threads", allowed.send_messages_in_threads),
             ("Manage Threads", allowed.manage_threads),
+            ("Read Message History", allowed.read_message_history),
         )
     else:
         # Opening the thread and writing in it are separate permissions in a text channel.
@@ -146,6 +161,7 @@ def _missing_thread_permission(channel: discord.abc.GuildChannel) -> str | None:
             ("Create Public Threads", allowed.create_public_threads),
             ("Send Messages in Threads", allowed.send_messages_in_threads),
             ("Manage Threads", allowed.manage_threads),
+            ("Read Message History", allowed.read_message_history),
         )
 
     missing = [name for name, held in wanted if not held]
@@ -187,7 +203,7 @@ class OpensThreads(Protocol):
 
 
 class PostsToThread(Protocol):
-    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None: ...
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int: ...
 
 
 class PostsInChannels(Protocol):
@@ -283,7 +299,8 @@ def _translated(what: str) -> Generator[None]:
     """Discord's refusals as this project's errors, named by what the bot was trying to do.
 
     Forbidden is a subclass of HTTPException, so catching the general one first would file a missing
-    permission as a temporary refusal and retry it for two hours.
+    permission as a temporary refusal and retry it for two hours. Discord not being reached at all
+    is a gateway error too, worded as what it is rather than as a refusal.
     """
     try:
         yield
@@ -291,6 +308,10 @@ def _translated(what: str) -> Generator[None]:
         raise DiscordPermissionError(f"Discord will not let the bot {what}: {exc}") from exc
     except discord.HTTPException as exc:
         raise DiscordGatewayError(f"Discord refused to {what}: {exc}") from exc
+    except UNREACHABLE as exc:
+        raise DiscordUnreachableError(
+            f"could not reach Discord to {what}: {type(exc).__name__} {exc}"
+        ) from exc
 
 
 class DiscordThreadGateway:
@@ -344,6 +365,12 @@ class DiscordThreadGateway:
                     # `TextChannel.create_thread` takes neither the content nor an allow-list:
                     # it opens an empty thread and the first message is a separate call.
                     message = await _post(thread, content, view, notify)
+            except DiscordPermissionError as error:
+                # Still permanent, or the worker retries a refusal that waiting never mends; the
+                # error's own class is all it reads, never `__cause__`. Issue #269.
+                raise ThreadStartedWithoutPermissionError(
+                    str(error), thread_id=thread.id
+                ) from error
             except DiscordGatewayError as error:
                 raise ThreadStartedEmptyError(str(error), thread_id=thread.id) from error
             return ThreadHandle(thread_id=thread.id, message_id=message.id)
@@ -373,7 +400,7 @@ class DiscordThreadGateway:
 
         return ThreadHandle(thread_id=thread.id, message_id=resolved_message_id)
 
-    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int:
         content, view = as_message(panel)
         thread = await self._thread(thread_id)
         with _translated("post to the thread"):
@@ -546,7 +573,7 @@ class DiscordThreadGateway:
             return lookup.result()
         except discord.NotFound:
             return None
-        except (discord.HTTPException, aiohttp.ClientError, OSError, TimeoutError) as exc:
+        except (discord.HTTPException, *UNREACHABLE) as exc:
             # Forbidden lands here as well, deliberately: a member the bot is not allowed to look
             # up is one it cannot vouch for, which is not the same as one who has left.
             raise DiscordGatewayError(
@@ -624,29 +651,14 @@ class DiscordThreadGateway:
                 "the Discord gateway is not connected, so nothing can be read or written yet"
             )
 
-    async def _channel(
-        self, channel_id: int
+    async def _resolve(
+        self,
+        snowflake: int,
+        *,
+        noun: str,
+        missing: type[ChannelNotFoundError] | type[ThreadNotFoundError],
     ) -> discord.abc.GuildChannel | discord.Thread | discord.abc.PrivateChannel:
-        self._require_a_connection()
-        channel = self._client.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self._client.fetch_channel(channel_id)
-            except discord.NotFound as exc:
-                raise ChannelNotFoundError(f"Channel {channel_id} is not there") from exc
-            except discord.Forbidden as exc:
-                raise DiscordPermissionError(
-                    f"Discord will not let the bot see channel {channel_id}"
-                ) from exc
-            except discord.HTTPException as exc:
-                raise DiscordGatewayError(
-                    f"Discord refused to look up channel {channel_id}: {exc}"
-                ) from exc
-        # Whatever Discord has under the id, which each caller narrows to what it can use.
-        return channel
-
-    async def _thread(self, thread_id: int) -> discord.Thread:
-        """The thread behind an id, keeping a refusal, an outage and a missing thread apart.
+        """Whatever Discord has under an id, keeping a refusal, an outage and absence apart.
 
         Callers rebuild on a missing thread and give up on a refusal, so reporting a refusal as
         missing would have a temporary loss of access delete the item's record of its thread and
@@ -654,24 +666,38 @@ class DiscordThreadGateway:
         the moment it archives, so the fetch is the only route to the archived thread `_wake` exists
         to reopen, and a 503 lands in it: raw, it passes through `delete`, which suppresses this
         project's gateway error, and reaches the command replies, which match on this project's
-        errors.
+        errors. One body for channels and threads, so that rule is kept in one place. Issue #269.
         """
         self._require_a_connection()
-        channel = self._client.get_channel(thread_id)
-        if channel is None:
-            try:
-                channel = await self._client.fetch_channel(thread_id)
-            except discord.NotFound as exc:
-                raise ThreadNotFoundError(f"Thread {thread_id} is not there") from exc
-            except discord.Forbidden as exc:
-                raise DiscordPermissionError(
-                    f"Discord will not let the bot see thread {thread_id}"
-                ) from exc
-            except discord.HTTPException as exc:
-                raise DiscordGatewayError(
-                    f"Discord refused to look up thread {thread_id}: {exc}"
-                ) from exc
+        found = self._client.get_channel(snowflake)
+        if found is not None:
+            return found
+        try:
+            return await self._client.fetch_channel(snowflake)
+        except discord.NotFound as exc:
+            raise missing(f"{noun.capitalize()} {snowflake} is not there") from exc
+        except discord.Forbidden as exc:
+            raise DiscordPermissionError(
+                f"Discord will not let the bot see {noun} {snowflake}"
+            ) from exc
+        except discord.HTTPException as exc:
+            raise DiscordGatewayError(
+                f"Discord refused to look up {noun} {snowflake}: {exc}"
+            ) from exc
+        except UNREACHABLE as exc:
+            raise DiscordUnreachableError(
+                f"could not reach Discord to look up {noun} {snowflake}: {type(exc).__name__} {exc}"
+            ) from exc
 
+    async def _channel(
+        self, channel_id: int
+    ) -> discord.abc.GuildChannel | discord.Thread | discord.abc.PrivateChannel:
+        # Whatever Discord has under the id, which each caller narrows to what it can use.
+        return await self._resolve(channel_id, noun="channel", missing=ChannelNotFoundError)
+
+    async def _thread(self, thread_id: int) -> discord.Thread:
+        """The thread behind an id; anything else Discord has under it reads as no thread."""
+        channel = await self._resolve(thread_id, noun="thread", missing=ThreadNotFoundError)
         if not isinstance(channel, discord.Thread):
             raise ThreadNotFoundError(f"{thread_id} is not a thread")
         return channel

@@ -13,6 +13,7 @@ from shannon.discord_bot.capture import CapturedMessage, captured, from_a_person
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.responses import reply
 from shannon.discord_bot.slash import Installable
+from shannon.discord_bot.threads import UNREACHABLE
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,6 @@ class ShannonBot(discord.Client):
         self,
         *,
         explain_error: ExplainError,
-        thread_gone: ThreadGone | None = None,
         capture_messages: bool = False,
     ) -> None:
         # GitHub bodies are mirrored verbatim, so `everyone` stays off. Roles stay on for
@@ -90,7 +90,8 @@ class ShannonBot(discord.Client):
         # Assignment is how discord.py documents installing this, and mypy has no way to say so.
         self.tree.on_error = self._command_failed  # type: ignore[method-assign]
         self._explain_error = explain_error
-        self._thread_gone = thread_gone
+        # Handed in after construction, as the command list is: what they call needs this client.
+        self._thread_gone: ThreadGone | None = None
         self._channel_gone: ChannelGone | None = None
         self._letting_go = asyncio.Semaphore(LETTING_GO_AT_ONCE)
         self._capturing: CapturesMessages | None = None
@@ -117,9 +118,17 @@ class ShannonBot(discord.Client):
         )
         # An error handler that raises is worse than not having one: discord.py logs a second
         # traceback and the person is still left waiting. The interaction may also have expired
-        # or already been answered, and neither is worth a stack trace.
-        with contextlib.suppress(discord.HTTPException):
-            await reply(interaction, self._explain_error(error))
+        # or already been answered, and neither is worth a stack trace. A dropped connection,
+        # which discord.py re-raises raw after its own retries, is one line rather than the
+        # stray-task traceback it used to be: the person never got an answer, and the log should
+        # say so (#269).
+        try:
+            with contextlib.suppress(discord.HTTPException):
+                await reply(interaction, self._explain_error(error))
+        except UNREACHABLE as unreachable:
+            logger.warning(
+                "could not reach Discord to answer the failed slash command: %r", unreachable
+            )
 
     def install(self, *commands: Installable) -> None:
         self._pending.extend(commands)
@@ -181,8 +190,8 @@ class ShannonBot(discord.Client):
         """One of these for every message in every channel of every server this bot is in.
 
         The order of the checks below is the design: the set lookup rules out almost everything. A
-        dropped transcript line is gone and nothing rebuilds it, so a failure here is logged rather
-        than suppressed as it is in the handlers below.
+        dropped transcript line is gone and nothing rebuilds it, so a failure here is logged with
+        its traceback rather than in one line as it is in the deletion handlers below.
         """
         if self._capturing is None:
             return
@@ -244,8 +253,21 @@ class ShannonBot(discord.Client):
         if self._channel_gone is None:
             return
         async with self._letting_go:
-            with contextlib.suppress(Exception):
+            try:
                 await self._channel_gone(channel.id)
+            except Exception as error:
+                # One line and no traceback, which a channel of several hundred threads would
+                # otherwise be several hundred of; but not nothing, since what is missed here is
+                # never repaired. Letting go is two writes, the pointer and then the transcript,
+                # and either can be the one that failed. `%r` because a bare TimeoutError says
+                # nothing through str().
+                logger.warning(
+                    "could not finish letting go of the threads in deleted channel %s, so a "
+                    "thread pointer (a draft card mirrored nowhere) or a transcript log may "
+                    "still be held for them: %r",
+                    channel.id,
+                    error,
+                )
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
         """Let go of a thread somebody removed, before anything writes to it again.
@@ -258,5 +280,13 @@ class ShannonBot(discord.Client):
         if self._thread_gone is None:
             return
         async with self._letting_go:
-            with contextlib.suppress(Exception):
+            try:
                 await self._thread_gone(payload.thread_id)
+            except Exception as error:
+                # As in `on_guild_channel_delete`: one line, no traceback, never silence. #269.
+                logger.warning(
+                    "could not finish letting go of deleted thread %s, so its thread pointer (a "
+                    "draft card mirrored nowhere) or its transcript log may still be held: %r",
+                    payload.thread_id,
+                    error,
+                )
