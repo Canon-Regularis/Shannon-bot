@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from collections.abc import Awaitable, Callable
 from unittest.mock import MagicMock, NonCallableMagicMock, create_autospec
 
 import aiohttp
@@ -13,8 +14,10 @@ from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
     DiscordPermissionError,
+    DiscordUnreachableError,
     ThreadNotFoundError,
     ThreadStartedEmptyError,
+    ThreadStartedWithoutPermissionError,
 )
 from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
 from shannon.discord_bot.threads import (
@@ -78,6 +81,7 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
             create_public_threads=True,
             send_messages_in_threads=True,
             manage_threads=True,
+            read_message_history=True,
         )
 
         assert why_threads_will_not_open(channel) is None
@@ -97,7 +101,13 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
         refusal = why_threads_will_not_open(channel)
 
         assert refusal is not None
-        for wanted in ("View Channel", "Create Public Threads", "Send Messages in Threads"):
+        for wanted in (
+            "View Channel",
+            "Create Public Threads",
+            "Send Messages in Threads",
+            "Manage Threads",
+            "Read Message History",
+        ):
             assert wanted in refusal
 
     def test_a_forum_is_judged_on_posting_rather_than_on_threads(self) -> None:
@@ -109,6 +119,7 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
             send_messages=True,
             send_messages_in_threads=True,
             manage_threads=True,
+            read_message_history=True,
         )
 
         assert why_threads_will_not_open(forum) is None
@@ -131,6 +142,31 @@ class TestWhatThisBotCanDoInTheChannelItIsGiven:
 
         assert refusal is not None
         assert "Manage Threads" in refusal
+
+    @pytest.mark.parametrize(
+        ("kind", "otherwise"),
+        [
+            (discord.TextChannel, {"create_public_threads": True}),
+            (discord.ForumChannel, {"send_messages": True}),
+        ],
+        ids=["text", "forum"],
+    )
+    def test_read_message_history_is_required(self, kind: type, otherwise: dict[str, bool]) -> None:
+        """Issue #269. Rewriting the metadata block or a mirrored comment fetches it first, and
+        Discord counts that fetch as reading history. Without it the thread appears once,
+        correctly, and every later event for the item is refused for good."""
+        channel = a_channel(
+            kind,
+            view_channel=True,
+            send_messages_in_threads=True,
+            manage_threads=True,
+            read_message_history=False,
+            **otherwise,
+        )
+
+        refusal = why_threads_will_not_open(channel)
+
+        assert refusal == "This bot has not been given Read Message History there."
 
     def test_a_guild_that_is_not_cached_yet_is_not_guessed_about(self) -> None:
         """A client still starting has no member object to ask with, and the answer would be a
@@ -899,6 +935,8 @@ class TestPartialCreation:
         assert raised.value.thread_id == 500
 
     async def test_a_missing_permission_is_not_worth_retrying(self) -> None:
+        """Issue #269. The worker gives up on a PermanentError at once and reads nothing off
+        `__cause__`, so a refusal carried only there was retried as though it might pass."""
         created = thread()
         created.send.side_effect = discord.Forbidden(MagicMock(status=403), "nope")
         gateway = DiscordThreadGateway(client_with(text_channel(created)))
@@ -906,7 +944,23 @@ class TestPartialCreation:
         with pytest.raises(ThreadStartedEmptyError) as raised:
             await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
 
-        assert isinstance(raised.value.__cause__, DiscordPermissionError)
+        assert isinstance(raised.value, PermanentError)
+        assert raised.value.thread_id == 500
+
+    async def test_any_other_failed_first_message_is_still_worth_retrying(self) -> None:
+        created = thread()
+        created.send.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
+        gateway = DiscordThreadGateway(client_with(text_channel(created)))
+
+        with pytest.raises(ThreadStartedEmptyError) as raised:
+            await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
+
+        assert not isinstance(raised.value, PermanentError)
+
+    def test_a_refused_first_message_is_a_permission_and_an_empty_thread(self) -> None:
+        """Both, so the sync still attaches the thread it opened and the worker still gives up."""
+        assert issubclass(ThreadStartedWithoutPermissionError, DiscordPermissionError)
+        assert issubclass(ThreadStartedWithoutPermissionError, ThreadStartedEmptyError)
 
     async def test_being_refused_the_thread_itself_is_a_permission_error(self) -> None:
         channel = stub_for(discord.TextChannel)
@@ -1027,6 +1081,98 @@ class TestDiscordFailingOnTheLookupItself:
 
         with pytest.raises(DiscordPermissionError):
             await gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
+
+
+def _update_thread(gateway: DiscordThreadGateway) -> Awaitable[object]:
+    return gateway.update(thread_id=500, message_id=None, name="x", panel=Panel.of_text("y"))
+
+
+def _create_in_channel(gateway: DiscordThreadGateway) -> Awaitable[object]:
+    return gateway.create(channel_id=10, name="x", panel=Panel.of_text("y"))
+
+
+class TestDiscordCannotBeReached:
+    """Issue #269. discord.py retries a reset connection itself and then re-raises the transport
+    error raw: an `OSError`, which a `TimeoutError` is, or an aiohttp error that is not one, such
+    as a server disconnecting. Neither is a `discord.HTTPException`, so each walked past the
+    translation and past every caller that steps over this project's gateway error."""
+
+    def _client_unreachable(self, error: Exception) -> MagicMock:
+        stub = stub_for(discord.Client)
+        stub.is_ready.return_value = True
+        stub.get_channel.return_value = None
+        stub.fetch_channel.side_effect = error
+        return stub
+
+    async def test_a_first_message_lost_to_the_network_still_reports_the_thread_id(self) -> None:
+        """Without the id the retry opens a second thread beside the empty one."""
+        created = thread()
+        created.send.side_effect = aiohttp.ServerDisconnectedError()
+        gateway = DiscordThreadGateway(client_with(text_channel(created)))
+
+        with pytest.raises(ThreadStartedEmptyError) as raised:
+            await gateway.create(channel_id=10, name="#7 Title", panel=Panel.of_text("metadata"))
+
+        assert raised.value.thread_id == 500
+        assert not isinstance(raised.value, PermanentError)
+
+    async def test_a_write_says_it_could_not_reach_discord(self) -> None:
+        """Not "refused": Discord said nothing at all."""
+        existing = thread()
+        existing.edit.side_effect = aiohttp.ClientConnectionError("connection reset")
+        gateway = DiscordThreadGateway(client_with(existing))
+
+        with pytest.raises(DiscordGatewayError) as raised:
+            await gateway.set_shut(thread_id=500, shut=True)
+
+        assert type(raised.value) is DiscordUnreachableError
+        assert str(raised.value) == (
+            "could not reach Discord to close the thread: ClientConnectionError connection reset"
+        )
+        assert isinstance(raised.value.__cause__, aiohttp.ClientConnectionError)
+
+    @pytest.mark.parametrize(
+        ("call", "looked_up"),
+        [(_update_thread, "thread 500"), (_create_in_channel, "channel 10")],
+        ids=["thread", "channel"],
+    )
+    async def test_a_lookup_that_cannot_reach_discord_is_a_gateway_error(
+        self, call: Callable[[DiscordThreadGateway], Awaitable[object]], looked_up: str
+    ) -> None:
+        error = aiohttp.ClientConnectionError("connection reset")
+
+        with pytest.raises(DiscordGatewayError) as raised:
+            await call(DiscordThreadGateway(self._client_unreachable(error)))
+
+        assert type(raised.value) is DiscordUnreachableError
+        assert str(raised.value) == (
+            f"could not reach Discord to look up {looked_up}: "
+            "ClientConnectionError connection reset"
+        )
+        assert raised.value.__cause__ is error
+
+    async def test_a_timeout_is_one_of_them(self) -> None:
+        """A `TimeoutError` is an `OSError`, which is why naming the one covers the other."""
+        existing = thread()
+        existing.send.side_effect = TimeoutError()
+
+        with pytest.raises(DiscordGatewayError, match="could not reach Discord to post"):
+            await DiscordThreadGateway(client_with(existing)).post(
+                thread_id=500, panel=Panel.of_text("x")
+            )
+
+    async def test_tidying_up_only_logs_it(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`delete` promises not to raise, and a network blip is the likeliest reason it fails."""
+        existing = thread()
+        existing.delete.side_effect = OSError("network unreachable")
+
+        with caplog.at_level("WARNING", logger="shannon.discord_bot.threads"):
+            await DiscordThreadGateway(client_with(existing)).delete(thread_id=500)
+
+        assert caplog.messages == [
+            "could not remove the stranded thread 500: "
+            "could not reach Discord to delete the thread: OSError network unreachable"
+        ]
 
 
 class TestRefusedIsNotGone:

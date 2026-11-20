@@ -883,7 +883,7 @@ class TestTheLockSurvivingAnOrdinaryDelivery:
 class _RefusesThePost(FakeThreadGateway):
     """Discord having the ordinary bad moment the whole retry mechanism exists for."""
 
-    async def post(self, **kwargs) -> int | None:
+    async def post(self, **kwargs) -> int:
         raise DiscordGatewayError("Discord refused the post")
 
 

@@ -368,7 +368,7 @@ class _RefusingToPost(FakeThreadGateway):
         super().__init__()
         self.refusing = True
 
-    async def post(self, **kwargs) -> int | None:
+    async def post(self, **kwargs) -> int:
         if self.refusing:
             raise DiscordGatewayError("Discord refused to post to the thread")
         return await super().post(**kwargs)
@@ -751,7 +751,7 @@ class _HangingOnPost(FakeThreadGateway):
         self.hanging = True
         self.posting = asyncio.Event()
 
-    async def post(self, **kwargs) -> int | None:
+    async def post(self, **kwargs) -> int:
         self.posting.set()
         if self.hanging:
             await asyncio.sleep(60)

@@ -6,7 +6,7 @@ import re
 
 import discord
 
-from shannon.domain.text import ZERO_WIDTH_SPACE, code_span, lines_within
+from shannon.domain.text import ZERO_WIDTH_SPACE, lines_within
 
 EMPTY = "None"
 
@@ -78,10 +78,7 @@ def clipped_path(path: str) -> str:
     This goes inside a code span, where an escape is shown rather than applied, so a backslash in
     a path would arrive doubled and visible. The FRONT goes: a reader wants the file name.
     """
-    path = path.strip()
-    if len(path) <= REVIEW_PATH_LIMIT:
-        return path
-    return "…" + path[-(REVIEW_PATH_LIMIT - 1) :]
+    return _front_cut(path, limit=REVIEW_PATH_LIMIT)
 
 
 def clipped_job(name: str, *, limit: int) -> str:
@@ -90,10 +87,16 @@ def clipped_job(name: str, *, limit: int) -> str:
     The FRONT goes: a matrix names its jobs `Tests (Python 3.12)` and `Tests (Python 3.13)`, so
     the end is all that tells them apart.
     """
-    name = name.strip()
-    if len(name) <= limit:
-        return name
-    return "…" + name[-(limit - 1) :]
+    return _front_cut(name, limit=limit)
+
+
+def _front_cut(text: str, *, limit: int) -> str:
+    # One body for a path and a job name, issue #269, because both keep their END: it is the part
+    # that tells one apart from its neighbours. The mark counts against the limit.
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return "…" + text[-(limit - 1) :]
 
 
 _MENTION = re.compile(r"<(@[!&]?|#)(\d+)>")
@@ -108,10 +111,24 @@ def defuse_mentions(text: str) -> str:
     return _MENTION.sub("<" + ZERO_WIDTH_SPACE + "\\1\\2>", text)
 
 
-# `escape_markdown` has one alternative that matches a whole span, `[text](url)`, and it is
-# greedy: on a line carrying a link it runs to the last closing parenthesis, backslashes the lot,
-# and ships everything between unescaped. Breaking `](` apart stops it matching.
-LINK_JOIN = re.compile(r"\]\(")
+_LINK_JOIN = re.compile(r"\]\(")
+
+
+def unlinked(text: str) -> str:
+    """Every `](` in `text` broken apart with a zero-width space, so no masked link survives.
+
+    One rule with two callers, written once since issue #269 so the plain path and the rich path
+    cannot come to disagree about what is inert:
+
+    - `as_plain_text`: `escape_markdown` has one alternative that matches a whole span,
+      `[text](url)`, and it is greedy. On a line carrying a link it runs to the last closing
+      parenthesis, backslashes the lot, and ships everything between unescaped. Breaking `](`
+      apart stops it matching.
+    - `rich_text._inert`: a masked link is the one piece of markdown where what a reader sees and
+      where they are taken are different strings, so a link the author wrote is broken, and only
+      the ones `rich_text` writes itself, after judging the host, get out whole.
+    """
+    return _LINK_JOIN.sub("]" + ZERO_WIDTH_SPACE + "(", text)
 
 
 def as_plain_text(text: str) -> str:
@@ -122,8 +139,8 @@ def as_plain_text(text: str) -> str:
     pattern out to the next space, so a comment ending `https://example.com/**` keeps its markers;
     the cost is an escaped, unclickable underscore inside a URL.
     """
-    unlinked = LINK_JOIN.sub("]" + ZERO_WIDTH_SPACE + "(", discord.utils.escape_mentions(text))
-    return defuse_mentions(discord.utils.escape_markdown(unlinked, ignore_links=False))
+    broken = unlinked(discord.utils.escape_mentions(text))
+    return defuse_mentions(discord.utils.escape_markdown(broken, ignore_links=False))
 
 
 def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
@@ -145,6 +162,11 @@ def fit(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
     return "\n".join(kept) + TRUNCATED
 
 
-# Re-exported rather than defined here: quoting a name somebody typed is text arithmetic with no
-# Discord in it, and `github/` needs it too without taking a dependency on discord.py (#147).
-__all__ = ["code_span"]
+def fit_characters(message: str, *, limit: int = MESSAGE_LIMIT) -> str:
+    """Trim to a limit at any character, the last place given to the mark. Issue #269.
+
+    Not `fit`, which drops whole lines: this is for a message that is one line, a heading or a
+    reply, where there is no boundary to cut on and only the end of the text goes. The result is
+    never longer than `limit`, and a message already inside it comes back as it was.
+    """
+    return message[: limit - 1] + "…" if len(message) > limit else message

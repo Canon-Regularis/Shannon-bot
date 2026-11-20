@@ -1,8 +1,8 @@
 """What a panel is, before anything decides how it looks. Issues #116 and #113.
 
-A panel is the value every renderer answers with now. It has no discord.py behind it, which is the
-whole point: the wording is the most-tested thing in this project and none of it should need a UI
-library to check.
+A panel is the value every renderer answers with now. It holds no `discord.ui` component, which is
+the whole point: the wording is the most-tested thing in this project and none of it should need a
+view built to check. `layout` is the only module that turns a panel into Discord components.
 """
 
 from __future__ import annotations

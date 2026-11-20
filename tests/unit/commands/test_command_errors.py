@@ -13,6 +13,8 @@ from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
     DiscordPermissionError,
+    DiscordUnreachableError,
+    ThreadStartedWithoutPermissionError,
 )
 from shannon.discord_bot.panels import Accent
 from shannon.discord_bot.responses import OWED, REFUSED, done, refused, reply
@@ -123,6 +125,20 @@ class TestReadingAnError:
         assert "admin" in answer
         assert "50013" not in answer, "a Discord error code is no use to a person in Discord"
 
+    def test_a_thread_refused_its_first_message_says_it_is_a_permission(self) -> None:
+        """Issue #269. It is an empty thread as well, and so a gateway error too, so the order of
+        the rows is what keeps discord.py's 403 text out of the reply."""
+        answer = words_for(
+            ThreadStartedWithoutPermissionError(
+                "Discord will not let the bot post the first message: 403 Forbidden "
+                "(error code: 50001): Missing Access",
+                thread_id=500,
+            )
+        )
+
+        assert answer.startswith("Discord will not let this bot do that here.")
+        assert "50001" not in answer
+
     def test_a_channel_that_has_gone_names_the_command_that_fixes_it(self) -> None:
         answer = words_for(ChannelNotFoundError("Channel 12345 is not there"), noun="issue")
 
@@ -134,6 +150,20 @@ class TestReadingAnError:
         answer = words_for(DiscordGatewayError("Discord refused to update the thread: 503"))
 
         assert answer == "Discord refused the update. Discord refused to update the thread: 503"
+
+    def test_discord_not_reached_is_not_called_a_refusal(self) -> None:
+        """Issue #269. A dropped connection used to escape as the catch-all; mapped to a gateway
+        error, it would read "Discord refused the update. could not reach Discord ...", which
+        says two contradictory things and ends in an aiohttp class name."""
+        answer = words_for(
+            DiscordUnreachableError(
+                "could not reach Discord to update the thread: ServerDisconnectedError "
+                "Server disconnected"
+            )
+        )
+
+        assert answer == "Discord could not be reached."
+        assert reply_for(DiscordUnreachableError("x")).accent == Accent.FAILED
 
     def test_a_wrapped_unknown_still_gets_the_catch_all(self) -> None:
         assert words_for(wrapped(RuntimeError("boom"))) == UNEXPECTED

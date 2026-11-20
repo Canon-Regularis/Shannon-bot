@@ -8,9 +8,11 @@ from shannon.discord_bot.errors import (
     ThreadNotFoundError,
     ThreadStartedEmptyError,
 )
-from shannon.discord_bot.layout import as_message, parts_in, words
+from shannon.discord_bot.layout import as_message
 from shannon.discord_bot.panels import PANEL_BUDGET, Panel
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT
 from shannon.discord_bot.threads import Notify, ThreadHandle, truncate_thread_name
+from tests.support.views import parts_in, words
 
 
 @dataclass
@@ -165,8 +167,13 @@ class FakeThreadGateway:
                 "the view and the panel disagree about what was said"
             )
             content = panel.trimmed().text
+        else:
+            # Issue #269. Content is held to its own, smaller limit, which no test checked.
+            # Measured before `as_message` cuts it: a plain panel that only fits once cut is a
+            # message somebody reads the end of, so a test that sends one should fail here.
+            assert content is not None
+            assert len(panel.trimmed().text) <= MESSAGE_LIMIT, "plain text too long for a message"
         self.panels.append(panel)
-        assert content is not None
         return content
 
     def _allocate(self) -> int:
@@ -302,7 +309,7 @@ class FakeThreadGateway:
         thread.archived = True
         self.archived_again.append(thread_id)
 
-    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int | None:
+    async def post(self, *, thread_id: int, panel: Panel, notify: Notify = None) -> int:
         content = self._drawn(panel)
         if self.post_error is not None:
             raise self.post_error

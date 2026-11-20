@@ -12,6 +12,7 @@ from shannon.discord_bot.errors import (
     ChannelNotFoundError,
     DiscordGatewayError,
     DiscordPermissionError,
+    DiscordUnreachableError,
 )
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.responses import owed, refused
@@ -86,6 +87,10 @@ _REPLIES: tuple[tuple[type[ShannonError], str], ...] = (
         "The channel {noun} threads go in has gone, or is a kind that cannot hold threads. "
         "Run /set_channel to point them somewhere else.",
     ),
+    # Above the refusal row too: Discord was never reached, so "Discord refused" would be untrue,
+    # and the transport error's own text means nothing to the person who ran the command. Red,
+    # as GitHub not being reached is. #269.
+    (DiscordUnreachableError, "Discord could not be reached."),
     (DiscordGatewayError, "Discord refused the update. {message}"),
     (ItemNotReadyError, "That {noun} is still being set up here. Try again in a moment."),
     # Somebody else's write, not a fault: a delivery for the same item is in flight and did

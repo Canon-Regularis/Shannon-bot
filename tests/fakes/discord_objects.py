@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 import discord
 from discord import Message, MessageType, app_commands, ui
 
-from shannon.discord_bot import layout
 from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
+from tests.support.views import words
 
 
 def _said(content: str | None, view: object) -> str:
@@ -27,7 +27,7 @@ def _said(content: str | None, view: object) -> str:
     if view is None:
         return content or ""
     assert content is None, "a message cannot carry both components and content"
-    return "\n".join(layout.words(cast(ui.LayoutView, view)))
+    return "\n".join(words(cast(ui.LayoutView, view)))
 
 
 class FakeResponse:

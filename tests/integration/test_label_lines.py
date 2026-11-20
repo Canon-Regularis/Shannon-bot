@@ -257,11 +257,11 @@ class _RefusesTheFirstPost(FakeThreadGateway):
         super().__init__()
         self._refusals = 1
 
-    async def post(self, **kwargs) -> None:
+    async def post(self, **kwargs) -> int:
         if self._refusals:
             self._refusals -= 1
             raise DiscordGatewayError("Discord refused to post the line")
-        await super().post(**kwargs)
+        return await super().post(**kwargs)
 
 
 class _FailsToGiveItBack:

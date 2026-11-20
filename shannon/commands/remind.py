@@ -33,10 +33,10 @@ from shannon.commands._guards import NOT_IN_A_SERVER, holds_the_tier
 from shannon.commands._permissions import REGISTER_ROLES
 from shannon.commands._replies import reply_for
 from shannon.db.models import REMINDER_MESSAGE_WIDTH
-from shannon.discord_bot.formatting import as_relative_time, as_timestamp
 from shannon.discord_bot.permissions import PermissionGate
 from shannon.discord_bot.responses import defer, done, refused, reply, reply_then_delete
 from shannon.discord_bot.slash import SlashCommand
+from shannon.discord_bot.timestamps import as_relative_time, as_timestamp
 from shannon.domain.errors import ShannonError
 from shannon.domain.text import listed
 

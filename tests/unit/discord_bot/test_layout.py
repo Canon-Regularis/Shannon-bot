@@ -17,7 +17,7 @@ from discord import ui
 from hypothesis import given
 from hypothesis import strategies as st
 
-from shannon.discord_bot.layout import as_message, as_view, parts_in, words
+from shannon.discord_bot.layout import as_message, as_view
 from shannon.discord_bot.panels import (
     PANEL_BUDGET,
     Accent,
@@ -27,6 +27,8 @@ from shannon.discord_bot.panels import (
     PanelImage,
     PanelLink,
 )
+from shannon.discord_bot.safe_text import MESSAGE_LIMIT, fit_characters
+from tests.support.views import parts_in, words
 
 pytestmark = pytest.mark.unit
 
@@ -124,6 +126,24 @@ class TestWhatGoesOnTheWire:
 
         assert view is not None
         assert view.content_length() <= PANEL_BUDGET
+
+    def test_a_plain_panel_over_a_messages_limit_comes_back_within_it(self) -> None:
+        """Issue #269. Plain text goes out as content, where Discord takes two thousand, not the
+        four a view may carry; every sender shares this cut, so none of them is refused for it."""
+        text, _ = as_message(Panel.of_text("x" * (MESSAGE_LIMIT + 500)))
+
+        assert text is not None
+        assert len(text) <= MESSAGE_LIMIT
+
+    def test_a_plain_panel_of_several_lines_is_cut_the_way_a_reply_always_was(self) -> None:
+        """At a character, as `responses` cut it before #269 moved the cut here, so no reply
+        changes by a byte."""
+        said = Panel.of_text("\n".join(["y" * 100] * 30))
+
+        text, _ = as_message(said)
+
+        assert text == fit_characters(said.text)
+        assert len(fit_characters(said.text)) == MESSAGE_LIMIT
 
 
 class TestTheShape:

@@ -94,6 +94,52 @@ def test_denial_message_uses_configured_names() -> None:
     assert "Leads" in gate.denial("register", REGISTER_ROLES)
 
 
+def test_the_sync_denial_reads_word_for_word_with_the_default_names(gate: PermissionGate) -> None:
+    assert gate.denial("pr", SYNC_ROLES) == (
+        "You need one of these roles to use /pr: Developer, Project Manager."
+    )
+
+
+def test_the_register_denial_reads_word_for_word_with_the_default_names(
+    gate: PermissionGate,
+) -> None:
+    assert gate.denial("register", REGISTER_ROLES) == (
+        "You need one of these roles to use /register: Admin, Project Manager."
+    )
+
+
+def test_a_denial_lists_several_names_for_one_tier_in_the_order_they_were_typed() -> None:
+    gate = PermissionGate(
+        ConfiguredRoles.from_settings(Settings(role_project_manager="Leads, Organisers"))
+    )
+
+    assert gate.denial("register", REGISTER_ROLES) == (
+        "You need one of these roles to use /register: Admin, Leads, Organisers."
+    )
+
+
+def test_a_role_two_tiers_share_is_named_once_as_the_first_tier_spells_it() -> None:
+    """Issue #269. A member's roles are matched ignoring case, so "Leads" and "leads" are one
+    role, and a sentence offering it twice reads as two roles that are not there."""
+    gate = PermissionGate(
+        ConfiguredRoles.from_settings(Settings(role_admin="Leads", role_project_manager="leads"))
+    )
+
+    assert gate.denial("register", REGISTER_ROLES) == (
+        "You need one of these roles to use /register: Leads."
+    )
+
+
+def test_a_role_typed_twice_in_one_setting_is_named_once() -> None:
+    gate = PermissionGate(
+        ConfiguredRoles.from_settings(Settings(role_developer="Coders, coders , Developer"))
+    )
+
+    assert gate.denial("pr", SYNC_ROLES) == (
+        "You need one of these roles to use /pr: Coders, Developer, Project Manager."
+    )
+
+
 def test_denial_message_with_every_tier_blanked_names_nothing() -> None:
     """Emptying a role setting is how a server turns a tier off, and it leaves nothing to list.
 

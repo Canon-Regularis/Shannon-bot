@@ -8676,3 +8676,54 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Tests.** Characterisation tests for the stores' guards and the partial index; a test that
   fails on the old code for each of the three fixes; a unit test that the lock key spaces stay
   apart.
+
+## The discord_bot module, held to the checklist
+
+- **`shannon/discord_bot/` was checked against the same checklist** (#269). An audit kept about
+  thirty findings and dropped thirteen. Most were repetition, comments that had stopped being true
+  and behaviour no test pinned; the rest were real defects, listed below.
+- **What the renderers and the gateway keep is pinned first.** The exact text of a card change,
+  that every code span defuses its mentions, linked mentions, the front cuts, how a panel is
+  trimmed, and which Discord error becomes which of this project's errors, with its message.
+- **`formatting.py` stays whole** (#210). Its renderers share one private vocabulary and one set
+  of escaping rules, and the tests are already split by family; the module docstring and
+  ARCHITECTURE.md say so. The three `<t:…>` time helpers, the one real seam, are in
+  `discord_bot/timestamps.py` now.
+- **Smaller and clearer.** One helper builds who a line is addressed to, where four did. One helper
+  fences untrusted text, defusing it first, where seven call sites wrote it out; the one that
+  skipped the defusing, a commit's short SHA when it has no title, now has it, which changes nothing
+  for a real hex SHA. One rule breaks a masked link for both text pipelines. A plain panel is cut to
+  Discord's message limit in `layout.as_message`, which every sender shares, not only for slash
+  replies. The channel and thread lookups share one body. `PostsToThread.post` returns an `int`, as
+  every production implementation already did; the one test stand-in that dropped it now returns it.
+  The unused `thread_gone=` keyword and the `**_` catch-all on `format_ticket` are gone. A role name
+  is matched by one rule on both sides.
+- **An HTML comment never closed costs linear time.** Stripping comments from a GitHub body went
+  quadratic on an unclosed `<!--`. The output is the same for every input.
+- **Board values and unlinked teams are escaped.** Priority, Story Point, Iteration and Area went
+  into a ticket's block raw, so an option named `<@&id>` pinged that role, and `**x**` or a
+  masked link rendered. A team nobody linked was written as received. Both are escaped like every
+  other piece of GitHub text.
+- **A card change stays one line per field.** A multi-line description split the
+  `-# Field: was → now` line, and a whitespace-only value showed nothing instead of `None`.
+- **Network errors are Discord errors.** A connection reset or timeout went past the error
+  mapping raw. After a thread was opened, that lost its id, and the retry opened a second thread.
+  It now arrives as a Discord error, and an opened thread keeps its id. A command that meets one
+  says Discord could not be reached, where it used to fall to "Something went wrong here."
+- **A refused first message is not retried.** A thread whose first message Discord refused was
+  retried once, and a command showed Discord's raw 403 text. It now gives up at once, and a
+  command answers with the missing-permission reply.
+- **Read Message History is checked at the door.** `/register` and `/set_channel` accepted a
+  channel without it, and every later edit of the thread then failed. They now refuse it, as they
+  do for the other permissions. Channels already registered are not checked again.
+- **A refusal names each role once.** Two tiers configured with the same role name listed it
+  twice.
+- **What used to vanish is one line in the log.** A failure to let go of a deleted thread or
+  channel was swallowed silently, and an error reply lost to a dropped connection surfaced only as
+  a stray-task traceback. Each is now a one-line warning.
+- **For whoever deploys it.** Nothing to change: no setting, no migration. A new `/register` or
+  `/set_channel` needs Read Message History in the channel, which the invite already asks for.
+  A network failure on a thread or channel call now logs as `could not reach Discord to …`; a
+  member lookup still logs as `Discord would not say whether …`.
+- **Tests.** Characterisation tests for the renderers and the gateway; a test that fails on the
+  old code for each fix; a test that the comment strip matches the old one on edge inputs.
