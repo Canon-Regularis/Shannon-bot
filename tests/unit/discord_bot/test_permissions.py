@@ -44,6 +44,12 @@ def test_role_matching_ignores_case_and_padding(gate: PermissionGate) -> None:
     assert gate.roles_of(member("  pROJECT manager  ")) == {CommandRole.PROJECT_MANAGER}
 
 
+def test_a_configured_name_matches_however_either_side_is_cased_or_padded() -> None:
+    gate = PermissionGate(ConfiguredRoles.from_settings(Settings(role_reviewer=" CODE owners ")))
+
+    assert gate.roles_of(member("  code OWNERS")) == {CommandRole.REVIEWER}
+
+
 def test_unrelated_roles_grant_nothing(gate: PermissionGate) -> None:
     assert gate.roles_of(member("Bots", "Gamers")) == frozenset()
 

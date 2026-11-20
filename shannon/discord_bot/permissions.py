@@ -15,9 +15,14 @@ class RoleNames(Protocol):
     The whole of Settings would hand it a database URL and a bot token as well.
     """
 
-    def role_names(self, role: CommandRole) -> frozenset[str]: ...
-
     def role_display_names(self, role: CommandRole) -> tuple[str, ...]: ...
+
+
+def _matching(name: str) -> str:
+    """A role name as it is compared, on both sides: configured and held. Issue #269."""
+    # Discord shows the name as somebody typed it and a setting holds it as somebody else did, so
+    # one role is one name only once case and padding are gone, and one rule has to say so.
+    return name.strip().lower()
 
 
 class GrantsTiers(Protocol):
@@ -74,8 +79,8 @@ class PermissionGate:
     exactly as it did before there was a route.
     """
 
-    def __init__(self, settings: RoleNames, grants: GrantsTiers | None = None) -> None:
-        self._settings = settings
+    def __init__(self, roles: RoleNames, grants: GrantsTiers | None = None) -> None:
+        self._roles = roles
         self._grants = grants
 
     def roles_of(self, member: object) -> frozenset[CommandRole]:
@@ -86,12 +91,12 @@ class PermissionGate:
             held.add(CommandRole.ADMIN)
 
         names = {
-            role.name.strip().lower()
+            _matching(role.name)
             for role in getattr(member, "roles", ())
             if isinstance(getattr(role, "name", None), str)
         }
         for role in CommandRole:
-            if names & self._settings.role_names(role):
+            if names & {_matching(name) for name in self._roles.role_display_names(role)}:
                 held.add(role)
 
         return frozenset(held)
@@ -104,12 +109,21 @@ class PermissionGate:
         return bool(held & set(allowed))
 
     def denial(self, command: str, allowed: Collection[CommandRole]) -> str:
-        names = [
-            name for role in sorted(allowed) for name in self._settings.role_display_names(role)
-        ]
+        """The refusal naming every role that would have let a member in, each once.
+
+        Tiers sorted by the tier's own value (ADMIN, DEVELOPER, PROJECT_MANAGER, REVIEWER),
+        because `allowed` is usually a frozenset whose iteration order follows str hashes, which
+        change from one process to the next. Within a tier, names in the order they were typed.
+        """
+        # Issue #269. Two settings naming one role, as `_matching` reads names, mean one role, so
+        # it is listed once, spelt as it was first met; a dict keeps that first spelling in order.
+        names: dict[str, str] = {}
+        for role in sorted(allowed):
+            for name in self._roles.role_display_names(role):
+                names.setdefault(_matching(name), name)
         if not names:
             return f"You are not allowed to use /{command}."
-        return f"You need one of these roles to use /{command}: {', '.join(names)}."
+        return f"You need one of these roles to use /{command}: {', '.join(names.values())}."
 
     def github_route(self, allowed: Collection[CommandRole]) -> GitHubRoute | None:
         """What GitHub would have to vouch for to let a member in whom `allows` turned away.
@@ -131,7 +145,7 @@ class PermissionGate:
             (
                 level
                 for tier, level in _STANDS_IN
-                if tier in allowed and self._settings.role_names(tier)
+                if tier in allowed and self._roles.role_display_names(tier)
             ),
             None,
         )

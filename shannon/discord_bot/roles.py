@@ -47,7 +47,3 @@ class ConfiguredRoles:
             CommandRole.DEVELOPER: self.developer,
         }[role]
         return tuple(part.strip() for part in raw.split(",") if part.strip())
-
-    def role_names(self, role: CommandRole) -> frozenset[str]:
-        """The same names lowercased, for matching against a member's roles."""
-        return frozenset(name.lower() for name in self.role_display_names(role))
