@@ -183,10 +183,15 @@ where each step lives in the code.
      ([services/notes.py](shannon/services/notes.py),
      [announcements.py](shannon/services/sync/announcements.py)).
 8. **Draw it.** A renderer in [formatting.py](shannon/discord_bot/formatting.py) returns a `Panel`
-   ([panels.py](shannon/discord_bot/panels.py)), which knows nothing about discord.py.
-   [layout.py](shannon/discord_bot/layout.py) turns it into Discord components. Text from GitHub is
-   made safe first ([safe_text.py](shannon/discord_bot/safe_text.py),
-   [rich_text.py](shannon/discord_bot/rich_text.py)), so it cannot ping anybody or hide a link.
+   ([panels.py](shannon/discord_bot/panels.py)), which carries no `discord.ui` object.
+   - `formatting.py` holds all the renderers and stays one module by decision (#210): they share
+     one private vocabulary and one set of escaping rules.
+   - The `<t:…>` time helpers live in [timestamps.py](shannon/discord_bot/timestamps.py).
+   - [layout.py](shannon/discord_bot/layout.py) is the only module that builds Discord
+     components. It turns the panel into them.
+   - Text from GitHub is made safe first ([safe_text.py](shannon/discord_bot/safe_text.py),
+     [rich_text.py](shannon/discord_bot/rich_text.py)), so it cannot ping anybody or hide a link.
+     That escaping leans on `discord.utils`.
 
 A failure anywhere sends the whole delivery back to be tried again. So every step must be safe to
 repeat.
