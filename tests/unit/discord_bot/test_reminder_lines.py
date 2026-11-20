@@ -12,8 +12,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from shannon.discord_bot.formatting import as_relative_time, format_reminder
+from shannon.discord_bot.formatting import format_reminder
 from shannon.discord_bot.panels import PANEL_BUDGET, Accent, BlockKind, Panel
+from shannon.discord_bot.timestamps import as_relative_time
 
 pytestmark = pytest.mark.unit
 

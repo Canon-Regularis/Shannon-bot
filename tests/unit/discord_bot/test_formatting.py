@@ -7,17 +7,19 @@ import pytest
 
 from shannon.discord_bot.formatting import (
     OPEN_ON_GITHUB,
-    as_date,
     format_card_archived,
+    format_card_changed,
     format_card_converted,
     format_card_deleted,
     format_card_restored,
     format_pull_request,
+    format_team_ping,
     format_thread_moved,
     format_thread_moving,
 )
 from shannon.discord_bot.panels import PANEL_BUDGET, Accent, BlockKind, Panel
 from shannon.discord_bot.safe_text import as_plain_text
+from shannon.discord_bot.timestamps import as_date
 from shannon.domain.enums import Priority, Status
 from shannon.domain.models import Actor, Label, PullRequestSnapshot, RepositorySnapshot
 
@@ -687,3 +689,56 @@ class TestADay:
 
     def test_a_time_with_no_zone_is_read_as_utc_rather_than_the_hosts(self) -> None:
         assert as_date(UPDATED.replace(tzinfo=None)) == f"<t:{int(UPDATED.timestamp())}:D>"
+
+
+class TestATeamNobodyLinked:
+    """Issue #269. An unlinked team is named as plain text, escaped like an unlinked login.
+
+    A slug may hold `_` (GitHub keeps it from the team's name), so `a-_b_` drew its tail in italics
+    while every login beside it was escaped. The lookup is still made on the slug as GitHub wrote
+    it, since that is what /link_team stored.
+    """
+
+    def test_a_ping_shows_the_slug_as_written(self) -> None:
+        said = format_team_ping(["a-_b_"]).text
+
+        assert said == "Review requested from a-\\_b\\_."
+
+    def test_the_reviewers_row_shows_the_slug_as_written(self) -> None:
+        asked = replace(SNAPSHOT, reviewers=(), reviewer_teams=(Actor("a-_b_"),))
+
+        fields = lines(format_pull_request(asked, status=Status.NOT_REVIEWED))
+
+        assert fields["Reviewers"] == "a-\\_b\\_"
+
+    def test_a_linked_one_is_still_found_by_its_slug(self) -> None:
+        said = format_team_ping(["A-_b_"], {"a-_b_": 5}).text
+
+        assert said == "Review requested from <@&5>."
+
+
+class TestACardChangeLine:
+    """Issue #269. One subtext line per field, whatever the value holds."""
+
+    def test_a_description_over_several_lines_stays_on_its_own_line(self) -> None:
+        """A `-#` covers one line only, so a body's second line used to be drawn full size, as a
+        list, and the arrow landed lines below the label it belonged to."""
+        said = format_card_changed(
+            [("Description", "a", "Steps\n1. a\n2. b"), ("Priority", "HIGH", "LOW")]
+        )
+
+        assert said.blocks[1].text.splitlines() == [
+            "-# Description: a → Steps 1. a 2. b",
+            "-# Priority: HIGH → LOW",
+        ]
+
+    def test_only_line_breaks_are_flattened(self) -> None:
+        """Spaces inside a line are somebody's own, and stay as they were written."""
+        said = format_card_changed([("Title", "a  b", "c\n  \n d")])
+
+        assert said.blocks[1].text == "-# Title: a  b → c d"
+
+    def test_a_value_of_nothing_but_a_line_break_reads_as_none(self) -> None:
+        said = format_card_changed([("Description", "\n", "a")])
+
+        assert said.blocks[1].text == "-# Description: None → a"

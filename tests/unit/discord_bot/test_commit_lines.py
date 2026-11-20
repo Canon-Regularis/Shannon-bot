@@ -126,6 +126,14 @@ class TestWhatOneCommitLineSays:
 
         assert said.splitlines()[0] == "📝 **octocat** has committed `abc1234`"
 
+    def test_the_short_sha_it_falls_back_to_rings_nobody(self) -> None:
+        """Issue #269. Fenced the way every other payload value in a code span is, defused first:
+        a code span does not stop a ping, and only the mapping layer stands between a forged SHA
+        and this line."""
+        said = formatting.format_commit(commit("", sha="<@1234>" + "0" * 33)).text
+
+        assert not _ACCOUNT_MENTION.search(said)
+
     def test_only_the_first_line_is_the_subject(self) -> None:
         """git's own split, and the reason `description` exists. A subject line put next to a
         five-paragraph body would be the whole message on one line."""

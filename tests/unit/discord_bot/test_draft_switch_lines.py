@@ -88,6 +88,12 @@ class TestWhoIsRung:
 
         assert said.text == f"{HEADING}\nbackend {MARKED_IT}"
 
+    def test_an_unlinked_team_cannot_style_the_line(self) -> None:
+        """Issue #269. A slug may hold `_`, and was the one name here not escaped."""
+        said = format_ready_for_review(OCTOCAT, teams=(Actor("a-_b_"),))
+
+        assert said.text == f"{HEADING}\na-\\_b\\_ {MARKED_IT}"
+
     def test_everybody_comes_before_the_sentence(self) -> None:
         """People first, then teams, then what happened. The order is what a reader scans."""
         said = format_ready_for_review(

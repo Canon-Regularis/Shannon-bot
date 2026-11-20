@@ -20,8 +20,9 @@ from datetime import UTC, datetime
 
 from shannon.discord_bot.formatting import format_ticket
 from shannon.discord_bot.panels import Accent, BlockKind
-from shannon.domain.enums import Priority, Status
+from shannon.domain.enums import Status
 from shannon.domain.models import Actor, Label, RepositorySnapshot, TicketSnapshot
+from shannon.domain.text import ZERO_WIDTH_SPACE
 
 REPO = RepositorySnapshot(
     github_repo_id=1,
@@ -251,11 +252,33 @@ class TestTheCardItIsDrawnOn:
 
         assert link is not None and link.url == BOARD
 
-    def test_priority_and_mentions_are_accepted_and_ignored(self) -> None:
-        """The policies all render through one signature, and a ticket has nobody to mention."""
-        card = format_ticket(
-            TICKET, status=Status.IN_REVIEW, priority=Priority.HIGH, mentions={"octocat": 7}
-        )
 
-        assert "Priority" not in card.text
-        assert "<@7>" not in card.text
+# The four rows the board writes itself, read off a card whose every one of them holds `value`.
+BOARD_ROWS = ("Priority", "Story Point", "Iteration", "Area")
+
+
+def board_rows(value: str) -> list[str]:
+    said = rows(
+        snapshot=replace(
+            TICKET, priority_name=value, story_point=value, iteration=value, area=value
+        )
+    )
+    return [said[row] for row in BOARD_ROWS]
+
+
+class TestWhatTheBoardWrites:
+    """Issue #269. The board's own values are untrusted text like every other field in the block.
+
+    An option name is free text whoever runs the board chose, and these four rows put it into the
+    block raw while the change line for the very same fields escaped it. A role mention there was
+    live: the block is sent with role mentions allowed, so an Area option named `<@&1>` rang the
+    role every time the block was written.
+    """
+
+    def test_a_mention_in_a_board_value_rings_nobody(self) -> None:
+        for said in board_rows("<@&1>"):
+            assert "<@&1>" not in said
+            assert ZERO_WIDTH_SPACE in said
+
+    def test_markup_in_a_board_value_is_shown_rather_than_drawn(self) -> None:
+        assert board_rows("**DB**") == ["\\*\\*DB\\*\\*"] * len(BOARD_ROWS)

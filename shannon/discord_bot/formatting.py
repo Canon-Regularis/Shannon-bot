@@ -2,10 +2,23 @@
 
 Everything that makes the text itself safe or short lives in `safe_text`; this module decides
 what a reader sees and in what order.
+
+**Kept whole, and that is a decision rather than a backlog item.** Issue #210 asked for this file
+to be split where a seam exists, or for the reason it stays one to be written down; issue #269
+wrote it down. The seam #210 named - panels apart from their layout - is already cut, into
+`panels` and `layout`, and the `<t:...>` time markup has gone to `timestamps`. What is left is one
+family of renderers sharing one private vocabulary (`_person`, `_role`, `_tags`, `_fenced`,
+`_headed`, `_line`, `_note`, `_addressed`) and one set of rules: GitHub-authored text is escaped or
+defused wherever it lands, a value is defused before it is fenced, and the names that ring
+somebody sit above anything a panel over budget can drop. Splitting the renderers by family would
+make that vocabulary public across modules for no caller's benefit - each imports single renderer
+names already - and would scatter the rules it exists to keep in one place. The tests are already
+split per family, in the `test_*_lines.py` files.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 
@@ -30,10 +43,10 @@ from shannon.discord_bot.safe_text import (
     clipped,
     clipped_job,
     clipped_path,
-    code_span,
     defuse_mentions,
     fit,
 )
+from shannon.discord_bot.timestamps import UNKNOWN, as_relative_time, as_timestamp
 from shannon.domain.enums import Priority, StateChange, Status, spoken
 from shannon.domain.models import (
     Actor,
@@ -55,11 +68,9 @@ from shannon.domain.models import (
     TicketSnapshot,
     TrackedSnapshot,
 )
-from shannon.domain.time import as_utc
+from shannon.domain.text import code_span
 from shannon.github.mentions import rewrite_a_note
 from shannon.github.urls import commit_url
-
-UNKNOWN = "Unknown"
 
 _VERDICTS = {
     "approved": "approved this pull request",
@@ -187,7 +198,6 @@ def format_ticket(
     *,
     status: Status,
     mentions: Mapping[str, int] | None = None,
-    **_: object,
 ) -> Panel:
     """Render the block at the top of a ticket's thread.
 
@@ -216,10 +226,16 @@ def format_ticket(
     and found it there. It is shown now, through the same `_the_description` every other block uses,
     so it arrives with the formatting it was written with.
 
-    `mentions` is read now and `priority` still is not, which is a split worth naming. A card
-    carries a creator and assignees since issue #182, so the map has somebody to resolve; a card's
-    priority is the board's single-select rather than the row's label-derived enum, and it arrives
-    on the snapshot - reading the parameter would show whatever the row happened to hold.
+    `mentions` is a parameter and `priority` is not one at all, which is a split worth naming. A
+    card carries a creator and assignees since issue #182, so the map has somebody to resolve; a
+    card's priority is the board's single-select rather than the row's label-derived enum, and it
+    arrives on the snapshot - a parameter would show whatever the row happened to hold. It used to
+    be swallowed by a catch-all keyword, which issue #269 removed: that let a misspelt `mention=`
+    type-check and render nobody.
+
+    The four board values are escaped like every other field here, issue #269. An option name is
+    free text whoever runs the board chose, and these rows were the one place it went in raw - a
+    role mention in an Area option was live, while the change line for the same field escaped it.
     """
     # Grey, because a draft on a board has no state of its own to colour by.
     return Panel(
@@ -236,10 +252,12 @@ def format_ticket(
                     _people(snapshot.assignees, mentions) if snapshot.assignees else None,
                 ),
                 ("Status", spoken(status)),
-                *_if_set("Priority", snapshot.priority_name),
-                *_if_set("Story Point", snapshot.story_point),
-                *_if_set("Iteration", snapshot.iteration),
-                *_if_set("Area", snapshot.area),
+                # Escaped here rather than in `_if_set` or `_rows`, which stay layout and nothing
+                # else. `or ""` because None has nothing to escape, and "" is a row left out.
+                *_if_set("Priority", as_plain_text(snapshot.priority_name or "")),
+                *_if_set("Story Point", as_plain_text(snapshot.story_point or "")),
+                *_if_set("Iteration", as_plain_text(snapshot.iteration or "")),
+                *_if_set("Area", as_plain_text(snapshot.area or "")),
                 *_if_set("Tags", _tags(snapshot.label_names) if snapshot.label_names else None),
                 *_if_set(
                     "Created", as_timestamp(snapshot.created_at) if snapshot.created_at else None
@@ -296,9 +314,12 @@ def _role(team: str, mentions: Mapping[str, int] | None) -> str:
 
     The same bargain the people renderer makes: somebody nobody has linked is still named, so the
     thread records who GitHub asked for even when the server has not run /link_team for them.
+
+    And escaped on the way out, for the reason `_person` gives, issue #269. A slug is less tidy
+    than a login - GitHub keeps a `_` from the team's name - so `a-_b_` drew in italics while
+    every login beside it was escaped. Looked up on the slug as written, which is what was linked.
     """
-    discord_role_id = (mentions or {}).get(team.lower())
-    return f"<@&{discord_role_id}>" if discord_role_id else team
+    return _mention(team, mentions, "<@&{}>") or as_plain_text(team)
 
 
 def format_assignee_ping(logins: Iterable[str], mentions: Mapping[str, int] | None = None) -> Panel:
@@ -355,7 +376,7 @@ def format_label_change(move: LabelMove) -> Panel:
     something else. The line reports what somebody did to the labels, which is what every line
     here reports, and the two are both true.
     """
-    named = code_span(defuse_mentions(move.name))
+    named = _fenced(move.name)
 
     if move.priority is not Priority.UNSET:
         if not move.added:
@@ -525,11 +546,11 @@ _CARD_CHANGED_HEADING = "### 📋 Ticket updated"
 
 
 def format_card_changed(moved: Sequence[tuple[str, str, str]]) -> Panel:
-    """One line for everything that moved on a card since the last poll.
+    """One message for everything that moved on a card since the last poll, one line per field.
 
-    ONE line rather than one per field, which is the shape the poll gives it: a board read sees a
+    ONE message rather than one per field, which is the shape the poll gives it: a board read sees a
     card's fields together, so somebody dragging a card and setting its points in the same minute
-    did one thing and hears about it once. Per-field lines would ring three times for one action,
+    did one thing and hears about it once. Per-field messages would ring three times for one action,
     and the webhook-driven announcers only look granular because a webhook arrives per change.
 
     Every value here is board-authored - an option somebody named, a login, a label, a title, a
@@ -546,11 +567,29 @@ def format_card_changed(moved: Sequence[tuple[str, str, str]]) -> Panel:
     "None to HIGH" is what setting a priority for the first time actually did.
     """
     said = "\n".join(
-        f"-# {label}: {clipped(was, limit=CARD_FIELD_LIMIT) if was else EMPTY} → "
-        f"{clipped(now, limit=CARD_FIELD_LIMIT) if now else EMPTY}"
-        for label, was, now in moved
+        f"-# {label}: {_one_line(was)} → {_one_line(now)}" for label, was, now in moved
     )
     return _headed(_CARD_CHANGED_HEADING, said, Accent.SAID)
+
+
+# A line break and the blank space either side of it. Only breaks: spaces inside a line are
+# somebody's own and are left as written.
+_LINE_BREAK = re.compile(r"\s*\n\s*")
+
+
+def _one_line(value: str) -> str:
+    """One side of a change line, on one line, cut and defused - or `None` for nothing at all.
+
+    Flattened because `-#` makes subtext of one line only, issue #269. A description's second line
+    was drawn full size, as a list where it was numbered, and the arrow landed lines below the
+    label it belonged to. The block above carries the value with its breaks, so this loses
+    nothing a reader cannot scroll up for.
+
+    Judged empty AFTER cutting, so a value of nothing but a line break reads as `None` rather than
+    as nothing. A value that changed only in its breaks or blanks therefore reads the same both
+    sides of the arrow, which is true of what a reader could see of it.
+    """
+    return clipped(_LINE_BREAK.sub(" ", value), limit=CARD_FIELD_LIMIT) or EMPTY
 
 
 def format_thread_moved(thread_id: int) -> str:
@@ -644,21 +683,15 @@ def format_ready_for_review(
     at more length: a panel over budget drops blocks from the end, and an allow-list only PERMITS
     a notification while the `<@id>` text is what delivers one.
 
-    The sentence is said whether or not anybody is named, the same bargain the check line makes.
-    A pull request with nobody on it still left draft, and a line reading only that is what that
-    looks like.
+    The sentence is said whether or not anybody is named, which `_addressed` explains for every
+    line that shares it. A pull request with nobody on it still left draft.
 
-    The initiator is the only untrusted text here and goes through `as_plain_text` like every
-    other login; the rest is this module's own words.
+    The untrusted text here is the names: the initiator through `_account`, the people through
+    `_person` and the teams through `_role`, each escaped where it is not a mention. The rest is
+    this module's own words.
     """
-    named = " ".join(
-        [
-            *(_person(person, mentions) for person in people),
-            *(_role(team.login, roles) for team in teams),
-        ]
-    )
     said = f"**{_account(initiator)}** marked this pull request ready for review."
-    return _headed(_READY_HEADING, f"{named} {said}".strip(), Accent.OPEN)
+    return _headed(_READY_HEADING, _addressed(said, people, teams, mentions, roles), Accent.OPEN)
 
 
 # Issue #140. The other half of the switch, which issue #132 decided to keep quiet. Grey for the
@@ -696,14 +729,10 @@ def format_back_to_draft(
     That it takes the argument at all is what lets both halves share one `Renderer`, and one
     protocol is what lets one announcer class serve both.
     """
-    named = " ".join(
-        [
-            *(_person(person, mentions) for person in people),
-            *(_role(team.login, None) for team in teams),
-        ]
-    )
     said = f"**{_account(initiator)}** converted this pull request to draft."
-    return _headed(_DRAFTED_HEADING, f"{named} {said}".strip(), Accent.DRAFT)
+    # `roles=None` written here, at the call, so the one guarantee this line makes is read where
+    # it is kept rather than inside the helper.
+    return _headed(_DRAFTED_HEADING, _addressed(said, people, teams, mentions, None), Accent.DRAFT)
 
 
 # Issue #155. A heading, like the state changes and the two draft lines above, and for the same
@@ -744,10 +773,38 @@ def format_everyone_approved(
     matches the shape the other two audience-taking renderers use. The caller hands an empty
     sequence, because the audience is people.
 
-    The sentence is said whether or not anybody is named, the bargain the check line and the
-    ready line both make. A pull request whose author's account is gone and which nobody was
-    assigned still stopped waiting on its reviewers, and a line reading only that is what that
-    looks like.
+    The sentence is said whether or not anybody is named, which `_addressed` explains. A pull
+    request whose author's account is gone and which nobody was assigned still stopped waiting on
+    its reviewers.
+    """
+    reviews = "review" if approvals == 1 else "reviews"
+    said = f"{approvals} {reviews}, all of them approving, and nobody is still being waited on."
+    return _headed(
+        _APPROVED_HEADING, _addressed(said, people, teams, mentions, roles), Accent.PASSED
+    )
+
+
+def _addressed(
+    said: str,
+    people: Sequence[Actor],
+    teams: Sequence[Actor],
+    mentions: Mapping[str, int] | None,
+    roles: Mapping[str, int] | None,
+) -> str:
+    """A sentence, with whoever it is said to in front of it. Issue #269.
+
+    One helper for the four lines that address an audience - ready for review, back to draft,
+    everyone approved, and the CI results - because it is one rule, and the four copies it
+    replaces had taken to citing each other's "bargain" for it.
+
+    The sentence is said whether or not anybody is named. A draft pull request reports its results
+    and rings nobody, and one nobody is assigned still leaves draft; a line reading only what
+    happened is what that looks like, and silence would be a thread missing the one moment it has
+    something to say.
+
+    People before teams, and both before the sentence, so the `<@id>` text that delivers a
+    notification leads the line. What keeps it from being trimmed is where each caller puts the
+    line - the block straight under the heading - rather than anything here.
     """
     named = " ".join(
         [
@@ -755,9 +812,7 @@ def format_everyone_approved(
             *(_role(team.login, roles) for team in teams),
         ]
     )
-    reviews = "review" if approvals == 1 else "reviews"
-    said = f"{approvals} {reviews}, all of them approving, and nobody is still being waited on."
-    return _headed(_APPROVED_HEADING, f"{named} {said}".strip(), Accent.PASSED)
+    return f"{named} {said}".strip()
 
 
 def format_comment(
@@ -841,7 +896,7 @@ def _file_made_by(file: FileAuthors, person: Callable[[Actor], str]) -> str:
     the same as there being no author. One whose names all went to the count says the count, so
     it never reads as unknown when GitHub said exactly who it was.
     """
-    named = code_span(defuse_mentions(clipped_path(file.path)))
+    named = _fenced(clipped_path(file.path))
     count = len(file.authors) + file.more
     if not count:
         return f"{named} made by {UNKNOWN}"
@@ -896,8 +951,7 @@ def _replied(snapshot: ReviewCommentSnapshot, mentions: Mapping[str, int] | None
 def _where(snapshot: ReviewCommentSnapshot) -> str:
     """Which file and line, as the comment itself reports them.
 
-    Defused before fencing, for the reason `_tags` gives below: a code span stops markdown reading
-    a name, not Discord reading a mention, and a path is repository content that may be called
+    Through `_fenced`, for the reason it gives: a path is repository content that may be called
     anything somebody can commit.
 
     `line` is asked before `start_line`, which is not a matter of taste. GitHub never sends a
@@ -906,7 +960,7 @@ def _where(snapshot: ReviewCommentSnapshot) -> str:
     if not snapshot.path:
         return ""
 
-    named = code_span(defuse_mentions(clipped_path(snapshot.path)))
+    named = _fenced(clipped_path(snapshot.path))
     if snapshot.line is None:
         if snapshot.original_line is None:
             # A comment on the file rather than on any line in it.
@@ -970,8 +1024,12 @@ def _metadata(
     if reviewers is not None:
         # Teams named plainly and never looked up in `mentions`, which maps logins to accounts.
         # A slug that happens to match a login is not that person, and rendering one as the other
-        # would put somebody's name against a team they have nothing to do with.
-        asked = [*(_person(person, mentions) for person in reviewers), *(t.login for t in teams)]
+        # would put somebody's name against a team they have nothing to do with. Escaped, as
+        # `_role` escapes an unlinked one, issue #269.
+        asked = [
+            *(_person(person, mentions) for person in reviewers),
+            *(as_plain_text(team.login) for team in teams),
+        ]
         rows.append(("Reviewers", ", ".join(asked) if asked else EMPTY))
     rows += [
         ("Status", spoken(status)),
@@ -1041,6 +1099,11 @@ def _the_description(described: str) -> list[Block]:
     if not described:
         return []
     return [Block(BlockKind.BODY, f"{_DESCRIPTION_LABEL}{described}")]
+
+
+# This project's own words rather than GitHub's. A button label is one of the few
+# places untrusted text could not be escaped into being safe, so none goes there.
+OPEN_ON_GITHUB = "Open on GitHub"
 
 
 def _opens_github(url: str) -> PanelLink | None:
@@ -1170,47 +1233,30 @@ def _person(actor: Actor, mentions: Mapping[str, int] | None) -> str:
     was an assumption about GitHub rather than a rule of this bot's, and the rule is cheaper to
     keep than the assumption is to re-check.
     """
-    discord_user_id = (mentions or {}).get(actor.login.lower())
-    return f"<@{discord_user_id}>" if discord_user_id else as_plain_text(actor.login)
+    return _mention(actor.login, mentions, "<@{}>") or as_plain_text(actor.login)
 
 
 def _tags(names: Iterable[str]) -> str:
     """Label names, which are GitHub-authored text like any other.
 
-    Defused before fencing, not left to the code span. Every other untrusted field in this
-    module goes through `as_plain_text`; this was the one that did not, and a label is named by
-    anybody with triage rights on the repository.
+    Through `_fenced`, not left to the code span alone. Every other untrusted field in this module
+    goes through `as_plain_text`; this was the one that did not, and a label is named by anybody
+    with triage rights on the repository.
     """
-    rendered = [code_span(defuse_mentions(name)) for name in names]
+    rendered = [_fenced(name) for name in names]
     return ", ".join(rendered) if rendered else EMPTY
 
 
-def as_timestamp(value: datetime | None) -> str:
-    if value is None:
-        return UNKNOWN
-    # Discord renders this in each reader's own timezone. as_utc because `timestamp()` reads a
-    # naive datetime as local time, which would shift every rendered time by the host's offset.
-    return f"<t:{int(as_utc(value).timestamp())}:f>"
+def _fenced(text: str) -> str:
+    """Untrusted text in a code span, defused first. Issue #269.
 
-
-def as_relative_time(value: datetime) -> str:
-    """When, counted from whoever is reading: "in 3 hours", "2 days ago". Issue #229.
-
-    Discord keeps it current while somebody looks, so a reminder read a week after it went off
-    still says how long ago it was asked for, where a time of day would leave the reader to work
-    it out.
+    The one recipe for fencing anything this module did not write, and the order is the point: a
+    code span does not stop a ping. It stops markdown reading a name, but `allowed_mentions` gates
+    delivery off the raw content, so a `<@id>` inside the backticks rings whoever it names while
+    showing as text. `defuse_mentions` is the only guard. Written out by hand at eight sites before
+    this, one of which - a commit's short SHA - had dropped the defusing.
     """
-    return f"<t:{int(as_utc(value).timestamp())}:R>"
-
-
-def as_date(value: datetime) -> str:
-    """The day alone, as each reader's own calendar writes it. Issue #232.
-
-    "4 March 2026" or "March 4, 2026", for a fact that lasts months, such as the day somebody
-    linked their account: the minute `as_timestamp` adds is noise there, and a relative "3 months
-    ago" reads wrong after "since".
-    """
-    return f"<t:{int(as_utc(value).timestamp())}:D>"
+    return code_span(defuse_mentions(text))
 
 
 # Issue #229. A heading, like every other line this bot says on its own account, so a reminder can
@@ -1272,13 +1318,9 @@ _CHECKS_PASSED = "### ✅"
 _CHECKS_FAILED = "### ❌"
 
 # How many failures are listed one per line, and how many names are joined onto the success line.
-# Both exist because `fit` decides what to drop when a message is too long, and what it drops is
-# whatever sorted last. A matrix build of fifty jobs would otherwise let that decide which
+# Both exist because `Panel.trimmed` decides what to drop when a message is too long, and what it
+# drops is whatever sorted last. A matrix build of fifty jobs would otherwise let that decide which
 # failures a reader gets to see.
-# This project's own words rather than GitHub's. A button label is one of the few
-# places untrusted text could not be escaped into being safe, so none goes there.
-OPEN_ON_GITHUB = "Open on GitHub"
-
 JOBS_LISTED = 8
 JOBS_NAMED = 15
 
@@ -1299,8 +1341,8 @@ def format_check_results(
     heading must still ring the people it was sent to ring.
 
     Failures carry their link and successes do not. A link line runs about a hundred and eighty
-    characters, so thirty successes would be five thousand against a budget of two thousand, and
-    the thing `fit` threw away to make room would be the failures.
+    characters, so thirty successes would be five thousand against a budget of 3,900
+    (`PANEL_BUDGET`), and the thing `Panel.trimmed` threw away to make room would be the failures.
     """
     broken, succeeded, other = report.broken, report.succeeded, report.other
     mark = _CHECKS_FAILED if broken else _CHECKS_PASSED
@@ -1328,19 +1370,9 @@ def _told(
     mentions: Mapping[str, int] | None,
     roles: Mapping[str, int] | None,
 ) -> str:
-    """Who is being rung, and what about.
-
-    The sentence is said whether or not anybody is named, because a draft pull request reports its
-    results and rings nobody, and a line reading only the verdict is what that looks like.
-    """
-    named = " ".join(
-        [
-            *(_person(person, mentions) for person in people),
-            *(_role(team.login, roles) for team in teams),
-        ]
-    )
+    """Who is being rung, and what about: the verdict, addressed as `_addressed` explains."""
     said = "One or more jobs did not pass." if broken else "Everything that ran passed."
-    return f"{named} {said}".strip()
+    return _addressed(said, people, teams, mentions, roles)
 
 
 def _broken_jobs(broken: Sequence[CheckRun]) -> str:
@@ -1362,17 +1394,16 @@ def _job_line(run: CheckRun) -> str:
     cannot build a link, and a job name carrying a `]` would close the label early and leave the
     rest of the line rendering as whatever came next.
     """
-    named = code_span(defuse_mentions(clipped_job(run.name, limit=JOB_NAME_LIMIT)))
+    named = _fenced(clipped_job(run.name, limit=JOB_NAME_LIMIT))
     return f"- {named} <{run.html_url}>" if run.html_url else f"- {named}"
 
 
 def _named_jobs(lead: str, runs: Sequence[CheckRun]) -> str:
-    """A list of job names on one line, which either survives `fit` whole or goes whole."""
+    """A list of job names on one line, which `Panel.trimmed` either keeps whole or drops whole."""
     if not runs:
         return ""
     named = ", ".join(
-        code_span(defuse_mentions(clipped_job(run.name, limit=JOB_NAME_LIMIT_JOINED)))
-        for run in runs[:JOBS_NAMED]
+        _fenced(clipped_job(run.name, limit=JOB_NAME_LIMIT_JOINED)) for run in runs[:JOBS_NAMED]
     )
     left = len(runs) - JOBS_NAMED
     return f"**{lead}:** {named}" + (f", and {left} more" if left > 0 else "")
@@ -1381,8 +1412,8 @@ def _named_jobs(lead: str, runs: Sequence[CheckRun]) -> str:
 def _sat_out(other: Sequence[CheckRun]) -> str:
     """The jobs that neither worked nor broke, counted rather than named.
 
-    Subtext, and last, so it is the first thing `fit` sheds. Mostly it is a job a path filter
-    skipped, which is worth knowing the shape of and not worth a line each.
+    Subtext, and last, so it is the first thing `Panel.trimmed` sheds. Mostly it is a job a path
+    filter skipped, which is worth knowing the shape of and not worth a line each.
     """
     if not other:
         return ""
@@ -1393,11 +1424,11 @@ def _sat_out(other: Sequence[CheckRun]) -> str:
 def format_commit(commit: Commit) -> Panel:
     """One commit that landed on a pull request, as its own message in the thread.
 
-    **No mentions argument, and that is the requirement rather than an oversight.** `_person` is
-    the only thing in this module that builds a `<@id>`, and it needs a mapping to look an account
-    up in, so a renderer holding nothing to look one up in cannot ping anybody however it is
-    called. A push of ten commits would otherwise be ten notifications about work whoever cares is
-    already watching, which is what issue #67 asked not to happen.
+    **No mentions argument, and that is the requirement rather than an oversight.** Every `<@id>`
+    this module writes comes from a mapping or an id the caller passes in - `_person`, `_role` and
+    `_named_in` look one up, `format_reminder` is handed one - and this takes neither, so it cannot
+    ping anybody however it is called. A push of ten commits would otherwise be ten notifications
+    about work whoever cares is already watching, which is what issue #67 asked not to happen.
 
     The name is the GitHub account and never `commit.author.name`. That field is free text out of
     `git config user.name`, so anybody who can push could put a colleague's name against their own
@@ -1484,7 +1515,8 @@ def _subject(commit: Commit) -> str:
     the SHA is the part that had to be there. Without the fallback the line would end on the word
     "committed" and read as the bot having broken rather than as a commit nobody described.
     """
-    return clipped(commit.title, limit=COMMIT_TITLE_LIMIT) or code_span(commit.sha[:7])
+    # `_fenced` like the footnote's own fallback, issue #269: the SHA came off a payload.
+    return clipped(commit.title, limit=COMMIT_TITLE_LIMIT) or _fenced(commit.sha[:7])
 
 
 def _which_commit(repository: RepositorySnapshot, sha: str) -> str:
@@ -1497,7 +1529,7 @@ def _which_commit(repository: RepositorySnapshot, sha: str) -> str:
     """
     url = commit_url(repository.owner, repository.name, sha)
     if url is None:
-        return code_span(defuse_mentions(sha[:7]))
+        return _fenced(sha[:7])
     return f"[{sha[:7]}]({url})"
 
 

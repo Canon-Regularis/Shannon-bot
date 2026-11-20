@@ -98,7 +98,6 @@ from shannon.db.stores.thread_pointers import ThreadPointerStore
 from shannon.db.stores.tracked_items import BoardRow, TicketThread, TrackedItemStore
 from shannon.discord_bot.errors import DiscordGatewayError, ThreadNotFoundError
 from shannon.discord_bot.formatting import (
-    as_timestamp,
     format_card_archived,
     format_card_changed,
     format_card_converted,
@@ -107,6 +106,7 @@ from shannon.discord_bot.formatting import (
 )
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, ShutsThread
+from shannon.discord_bot.timestamps import as_timestamp
 from shannon.domain.board import board_owner as owner_of_board
 from shannon.domain.board import is_board_page, normalise, status_from_column
 from shannon.domain.enums import CardState, ObjectType, Status

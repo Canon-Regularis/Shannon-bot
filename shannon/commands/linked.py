@@ -31,10 +31,10 @@ import discord
 from discord import app_commands
 
 from shannon.commands._guards import server_of
-from shannon.discord_bot.formatting import as_date
 from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.responses import defer, reply
 from shannon.discord_bot.slash import SlashCommand
+from shannon.discord_bot.timestamps import as_date
 from shannon.services.linking import LinkStanding
 
 
