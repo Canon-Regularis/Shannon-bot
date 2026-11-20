@@ -1,8 +1,10 @@
 """What a message says, before anything decides how it looks.
 
-Renderers in `formatting` build panels and must stay importable without discord.py; `layout` is
-the only module that turns one into Discord components. One block becomes one `TextDisplay`,
-never one per line, which keeps a view under Discord's ceiling of forty components.
+Renderers in `formatting` build panels and never a `discord.ui` component; `layout` is the only
+module that turns a panel into Discord components. Not a promise that discord.py stays unimported:
+the escaping in `safe_text` leans on `discord.utils`, and both this module and `formatting` reach
+it. One block becomes one `TextDisplay`, never one per line, which keeps a view under Discord's
+ceiling of forty components.
 """
 
 from __future__ import annotations
@@ -154,7 +156,7 @@ class Panel:
         return sum(len(block.text) for block in self.blocks)
 
     def trimmed(self) -> Panel:
-        """Cut to the budget by dropping whole blocks from the end, then trimming the survivor.
+        """Cut to the budget by dropping whole blocks from the end; only a lone survivor is cut.
 
         Whole blocks rather than characters, as in `fit`: a cut at an arbitrary character can land
         inside a pair of asterisks and restyle everything after it. Panels are ordered so the
@@ -167,7 +169,6 @@ class Panel:
         while len(kept) > 1 and sum(len(block.text) for block in kept) > PANEL_BUDGET:
             kept.pop()
 
-        last = kept[-1]
-        room = PANEL_BUDGET - sum(len(block.text) for block in kept[:-1])
-        kept[-1] = replace(last, text=fit(last.text, limit=room))
+        # Only a lone survivor can still be over budget, so `fit` hands any other back as it was.
+        kept[-1] = replace(kept[-1], text=fit(kept[-1].text, limit=PANEL_BUDGET))
         return replace(self, blocks=tuple(kept))

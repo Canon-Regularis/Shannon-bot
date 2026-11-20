@@ -10,7 +10,7 @@ from discord import ui
 
 from shannon.discord_bot.layout import as_message
 from shannon.discord_bot.panels import Accent, Block, BlockKind, Panel
-from shannon.discord_bot.safe_text import MESSAGE_LIMIT
+from shannon.discord_bot.safe_text import fit_characters
 
 # Command replies stay ephemeral: thread traffic is the signal, an acknowledgement is not.
 EPHEMERAL = True
@@ -105,7 +105,7 @@ async def in_the_channel(interaction: discord.Interaction, message: str) -> None
     No `is_done` branch, unlike `reply`: its one caller neither defers nor answers first, because
     a public message can only ever be an interaction's first response.
     """
-    await interaction.response.send_message(_fitted(message), ephemeral=False)
+    await interaction.response.send_message(fit_characters(message), ephemeral=False)
 
 
 def done(message: str) -> Panel:
@@ -136,20 +136,14 @@ def _marked(mark: str, message: str, accent: Accent) -> Panel:
     what the person typed back at them, a slash command argument can be far longer than a message
     may be, and an over-long one would make the refusal itself fail.
     """
-    return Panel(blocks=(Block(BlockKind.HEADING, _fitted(f"{mark} {message}")),), accent=accent)
-
-
-def _fitted(message: str) -> str:
-    return message[: MESSAGE_LIMIT - 1] + "…" if len(message) > MESSAGE_LIMIT else message
+    return Panel(
+        blocks=(Block(BlockKind.HEADING, fit_characters(f"{mark} {message}")),), accent=accent
+    )
 
 
 async def _as_text(
     interaction: discord.Interaction, content: str, *, delete_after: float | None
 ) -> None:
-    # Cut again, because a panel with no accent reaches here without having been: `Panel.trimmed`
-    # measures against the four thousand a view may carry and this goes out as content, which may
-    # carry two. Idempotent for everything the constructors above built.
-    content = _fitted(content)
     if interaction.response.is_done():
         # `wait=True` asks Discord for nothing more: discord.py forces it for an interaction's
         # followups anyway. Said here so the call is typed as handing back the message it sent.

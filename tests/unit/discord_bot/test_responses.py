@@ -94,7 +94,9 @@ async def test_an_over_long_reply_is_cut_rather_than_refused() -> None:
     await reply(interaction, Panel.of_text("x" * (MESSAGE_LIMIT + 500)))
 
     sent = interaction.response.messages[0]
-    assert len(sent) == MESSAGE_LIMIT, "a panel with no accent is cut against the panel budget"
+    assert len(sent) == MESSAGE_LIMIT, (
+        "a panel with no accent is cut to MESSAGE_LIMIT, what content may carry"
+    )
     assert sent.endswith("…")
 
 
