@@ -12,6 +12,7 @@ claim about text nobody thought of, so it is asserted over text nobody thought o
 from __future__ import annotations
 
 import re
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -26,6 +27,8 @@ from shannon.discord_bot.rich_text import (
     Images,
     _host_of,
     _is_github,
+    _left_behind,
+    _without_comments,
     as_description,
     as_note_text,
     as_rich_text,
@@ -520,6 +523,80 @@ class TestWhatIsStillRefused:
     def test_a_body_that_says_nothing_comes_to_nothing(self, body: str) -> None:
         """What the block reads to decide there is no description to show."""
         assert said(body) == ""
+
+
+# What took the comments out before issue #269, spelled out here rather than imported, so the
+# comparison below stays a comparison with the old code whatever the module keeps.
+_QUADRATIC_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# GitHub's ceiling on a body, and every character of it an opening that never closes.
+_UNCLOSED_FLOOD = "<!--" * (65_536 // 4)
+
+
+def _as_the_regex_took_them(written: str) -> str:
+    return _QUADRATIC_COMMENT.sub(_left_behind, written)
+
+
+class TestTakingCommentsOutInLinearTime:
+    """The comments a body holds come out as they always did, in time linear in the body. #269.
+
+    The lazy match took them out in quadratic time when a `<!--` never closed: it ran to the end
+    of the body from that one and again from every one after it, and a comment of nothing else
+    held the event loop for tens of seconds, three times over.
+    """
+
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "",
+            "no comment at all",
+            "<!---->",
+            "<!--->",
+            "<!-->",
+            "<!--",
+            "-->",
+            "--><!--",
+            "<!-- a -->",
+            "<!-- a --><!-- b -->",
+            "x<!-- a -->y<!-- b -->z",
+            "<!-- outer <!-- inner --> after -->",
+            "<!-- never closed\nand the rest",
+            "<!-- closed --> then <!-- not",
+            "<!-- <!-- <!-- -->",
+            "<!--<!---->-->",
+            "<!------>",
+            "<!-- a\nb\nc -->",
+            "#<!-- --> words",
+            "<!-- --># words",
+            "-<!-- --> words\n1.<!-- -->\twords",
+            "**Reviewer:**<!-- tag -->@bob",
+            "<<!--!---->-->>",
+            _UNCLOSED_FLOOD[:4096],
+            _UNCLOSED_FLOOD[:4096] + "-->",
+        ],
+    )
+    def test_the_output_is_what_the_regex_wrote(self, written: str) -> None:
+        assert _without_comments(written) == _as_the_regex_took_them(written)
+
+    @settings(max_examples=500, deadline=None)
+    @given(
+        st.lists(
+            st.sampled_from(["<!--", "-->", "<!", "--", "-", "<", "!", ">", "\n", "#", " ", "a"]),
+            max_size=30,
+        ).map("".join)
+    )
+    def test_the_output_is_what_the_regex_wrote_for_any_mix(self, written: str) -> None:
+        assert _without_comments(written) == _as_the_regex_took_them(written)
+
+    def test_a_body_of_nothing_but_unclosed_comments_finishes_at_once(self) -> None:
+        """Over ten seconds on the old code, and well under a millisecond on this one; the bound
+        is a second so a slow machine cannot make it flaky, and the old code cannot meet it."""
+        started = time.perf_counter()
+
+        left = _without_comments(_UNCLOSED_FLOOD)
+
+        assert time.perf_counter() - started < 1.0
+        assert left == _UNCLOSED_FLOOD
 
 
 class TestWhereALinkGoes:

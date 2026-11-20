@@ -25,9 +25,9 @@ from shannon.discord_bot.panels import PanelImage
 from shannon.discord_bot.safe_text import (
     COMMENT_PREVIEW_LIMIT,
     DESCRIPTION_PREVIEW_LIMIT,
-    LINK_JOIN,
     cut,
     defuse_mentions,
+    unlinked,
 )
 from shannon.domain.models import RepositoryRef, RepositorySnapshot
 from shannon.domain.text import LINK, ZERO_WIDTH_SPACE
@@ -58,7 +58,10 @@ _BYTE_ORDER_MARK = "\N{ZERO WIDTH NO-BREAK SPACE}"
 # Invisible on GitHub and not here: a pull request template is mostly these, so without this the
 # preview of a templated repository is the instructions to the author. Non-greedy, so two comments
 # do not merge and swallow the text between them; an unterminated `<!--` is left as written.
+# Only ever matched where `_without_comments` has already found the close, issue #269.
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_COMMENT_OPEN = "<!--"
+_COMMENT_CLOSE = "-->"
 
 # What a comment or a picture was taken out from in front of, behind nothing but spaces and tabs,
 # that could open a mark once it is gone: a hash, a quote mark, a list mark, a number. Issue #245.
@@ -70,9 +73,10 @@ _MARK_ENDS = ("#", "-", "*", "+", ".", ")")
 
 _BLANK_RUN = re.compile(r"\n{3,}")
 
-# Discord renders markdown images nowhere. `LINK` is the same shape without the bang, and lives in
-# `domain.text` since issue #186, because the commit finder steps over the same links.
-_IMAGE = re.compile(r"!\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
+# Discord renders markdown images nowhere. Built from `LINK` since issue #269, rather than copied
+# from it, so a picture's address obeys the same rule as a link's - no bracket, parenthesis, space
+# or `<>` - and what `_as_links` rewrites one into is a link `LINK` matches again.
+_IMAGE = re.compile("!" + LINK.pattern)
 
 # An image pasted into an issue is uploaded under `user-images.githubusercontent.com` or
 # `github.com/user-attachments/`, and a file read out of a repository comes from
@@ -135,7 +139,7 @@ def as_rich_text(
     passes seven hundred or less.
     """
     written = _LINE_ENDINGS.sub("\n", (body or "").removeprefix(_BYTE_ORDER_MARK))
-    text = _HTML_COMMENT.sub(_left_behind, written)
+    text = _without_comments(written)
     if images is Images.LIFT:
         text, lifted = _shown(text)
     else:
@@ -217,9 +221,8 @@ def _defused(text: str) -> str:
 
 
 def _inert(text: str) -> str:
-    # A masked link is the one piece of markdown where what a reader sees and where they are taken
-    # are different strings.
-    return LINK_JOIN.sub("]" + ZERO_WIDTH_SPACE + "(", _defused(text))
+    # `unlinked` says why a link the author wrote is broken here.
+    return unlinked(_defused(text))
 
 
 def _linked(text: str) -> str:
@@ -314,6 +317,31 @@ def _shown(body: str) -> tuple[str, tuple[PanelImage, ...]]:
             lifted.setdefault(url, PanelImage(url=url, alt=_alt(image.group(1))))
     shown = _IMAGE.sub(lambda image: as_words(image.group(1)) or _left_behind(image), body)
     return shown, tuple(lifted.values())
+
+
+def _without_comments(written: str) -> str:
+    """Every HTML comment GitHub hides taken out, each replaced by what `_left_behind` leaves.
+
+    Not `_HTML_COMMENT.sub`, which is the same output in quadratic time, issue #269: from an
+    unclosed `<!--` the lazy match scans to the end of the body, and again from every `<!--` after
+    it, so a body of nothing but `<!--` at GitHub's 65,536 characters held the event loop for over
+    ten seconds - three times over for a comment, which the renderer, the notes reader and the
+    reviews check each read. Finding the close first makes each search one that succeeds, and
+    once one `<!--` has no close, no later one can have one either, so the rest is left as written.
+    """
+    pieces: list[str] = []
+    typed_from = 0
+    while (opened := written.find(_COMMENT_OPEN, typed_from)) != -1:
+        closed = written.find(_COMMENT_CLOSE, opened + len(_COMMENT_OPEN))
+        if closed == -1:
+            break
+        gone = _HTML_COMMENT.match(written, opened)
+        # Never None: the open is at `opened` and a close is known to follow it.
+        assert gone is not None
+        pieces += [written[typed_from:opened], _left_behind(gone)]
+        typed_from = gone.end()
+    pieces.append(written[typed_from:])
+    return "".join(pieces)
 
 
 def _left_behind(gone: re.Match[str]) -> str:

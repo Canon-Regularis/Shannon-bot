@@ -27,10 +27,12 @@ from shannon.discord_bot.safe_text import (
     MESSAGE_LIMIT,
     as_plain_text,
     clipped,
-    code_span,
     cut,
     fit,
+    fit_characters,
+    unlinked,
 )
+from shannon.domain.text import code_span
 
 # Discord's own limit on the content of a message, from its documentation rather than from the
 # module under test. One over and the API refuses the message outright.
@@ -39,6 +41,7 @@ DISCORD_MESSAGE_LIMIT = 2000
 # Spelled out rather than imported, for the same reason the limit above is.
 NEWLINE = "\n"
 TRUNCATED = NEWLINE + "…"
+ZWSP = "\N{ZERO WIDTH SPACE}"
 
 
 def test_the_message_limit_is_the_one_discord_enforces() -> None:
@@ -175,6 +178,64 @@ class TestFittingAMessage:
         a marker is a message one over the limit."""
         for length in (MESSAGE_LIMIT + 1, MESSAGE_LIMIT + 2, MESSAGE_LIMIT * 3):
             assert len(fit("\n".join("w" * 40 for _ in range(length // 41)))) <= MESSAGE_LIMIT
+
+
+class TestFittingAMessageAtAnyCharacter:
+    """`fit_characters`, for a message that is one line and so has no boundary to cut on. #269.
+
+    Pinned against the numbers, for the reason the module docstring gives: the length it returns
+    is compared with the very limit that decides it everywhere else.
+    """
+
+    def test_a_message_exactly_at_the_limit_is_left_alone(self) -> None:
+        message = "x" * DISCORD_MESSAGE_LIMIT
+
+        assert fit_characters(message) == message
+
+    def test_one_character_over_keeps_all_but_one_and_the_mark(self) -> None:
+        """The mark takes the last place, so the message is exactly the limit and not one over."""
+        fitted = fit_characters("x" * (DISCORD_MESSAGE_LIMIT + 1))
+
+        assert fitted == "x" * (DISCORD_MESSAGE_LIMIT - 1) + "…"
+        assert len(fitted) == DISCORD_MESSAGE_LIMIT
+
+    def test_it_cuts_inside_a_line_rather_than_dropping_it(self) -> None:
+        """The difference from `fit`, which would drop the whole line and keep only its mark."""
+        assert fit_characters("abcdefghij", limit=5) == "abcd…"
+
+    def test_lines_are_cut_as_characters_too(self) -> None:
+        """No mark on a line of its own, which is what `fit` writes: one mark, wherever it lands."""
+        assert fit_characters("ab\ncd\nef", limit=4) == "ab\n…"
+
+    def test_a_short_message_under_a_smaller_limit_is_left_alone(self) -> None:
+        assert fit_characters("abc", limit=3) == "abc"
+
+
+class TestBreakingLinks:
+    """`unlinked`, the one rule the plain and the rich renderers share for a masked link. #269."""
+
+    def test_every_link_join_is_broken_with_a_zero_width_space(self) -> None:
+        written = "[a](https://evil.example) and [b](https://github.com)"
+
+        assert unlinked(written) == (
+            f"[a]{ZWSP}(https://evil.example) and [b]{ZWSP}(https://github.com)"
+        )
+
+    def test_text_with_no_link_join_is_left_as_written(self) -> None:
+        """Only `](` is touched: a bracket or a parenthesis alone is no link."""
+        written = "[a] (b) ] ( ** <@1> )["
+
+        assert unlinked(written) == written
+
+    def test_breaking_twice_breaks_nothing_more(self) -> None:
+        """What it writes has no `](` left in it, so a second pass finds nothing to do."""
+        once = unlinked("[a](b)")
+
+        assert unlinked(once) == once
+
+    def test_the_plain_renderer_breaks_links_the_same_way(self) -> None:
+        """Escaping leaves a zero-width space alone, so `as_plain_text` ships this same break."""
+        assert f"]{ZWSP}(" in as_plain_text("[a](https://evil.example)")
 
 
 class TestCuttingABody:
