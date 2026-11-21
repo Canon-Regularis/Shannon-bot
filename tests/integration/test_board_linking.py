@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.models import Repository, TrackedItem
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.domain.enums import ObjectType
-from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
+from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubUnavailableError, NoStatusFieldError
 from shannon.github.projects import BoardColumn, ProjectListing
 from shannon.services.board_credentials import BoardCredentials
@@ -36,6 +36,7 @@ from shannon.services.boards import (
     BoardColumns,
     BoardLinkingService,
     BoardMovedError,
+    BoardNotAuthorisedError,
     BoardTakenError,
     BoardUnreadableError,
     OwnerBoards,

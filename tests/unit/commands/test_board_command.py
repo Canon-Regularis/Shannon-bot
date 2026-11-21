@@ -35,12 +35,13 @@ from shannon.discord_bot.responses import OWED, REFUSED, SUCCEEDED
 from shannon.discord_bot.roles import CommandRole
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
-from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError
+from shannon.domain.errors import NotRegisteredError
 from shannon.github.errors import GitHubRateLimitError, GitHubUnavailableError
 from shannon.github.projects import ProjectListing
 from shannon.services.boards import (
     BoardLink,
     BoardMovedError,
+    BoardNotAuthorisedError,
     BoardStanding,
     BoardTakenError,
     BoardUnlinked,
@@ -369,6 +370,20 @@ class TestWhatArrivesInTheBoardField:
         # The number AFTER /projects/, not off the end: a board opens on /projects/6/views/1,
         # and the number off the end of that is a view, which can name somebody else's board.
         assert "after /projects/" in interaction.said
+        assert built.boards.calls == []
+
+    @pytest.mark.parametrize("typed", ["", "   "])
+    async def test_nothing_typed_is_not_quoted_as_an_empty_code_span(self, typed: str) -> None:
+        """Two backticks with nothing between them are shown as two backticks, so this is pinned
+        to the same shape `/status` gives the same blank, and the same red mark. Issue #270."""
+        built = Built()
+        interaction = FakeInteraction(user=administrator())
+
+        await fire(built.sub("link"), interaction, typed)
+
+        assert interaction.said.startswith("That is not a board. Pick one from the list")
+        assert "``" not in interaction.said
+        assert interaction.mark == REFUSED
         assert built.boards.calls == []
 
     async def test_the_pickers_own_label_is_accepted(self) -> None:

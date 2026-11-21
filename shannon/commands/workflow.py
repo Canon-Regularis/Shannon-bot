@@ -302,8 +302,8 @@ def _not_a_status(typed: str) -> str:
     What was typed goes in a code span, never through `!r`, by the #147 rule. It is cut at the
     longest name the picker offers, since anything longer was typed rather than picked: Discord
     takes six thousand characters in a text option and a reply carries two thousand, so a long
-    paste echoed whole pushed the four names off the end. Nothing typed gets a sentence without a
-    code span, because an empty one shows as two bare backticks. Issue #267.
+    paste echoed whole pushed the four names off the end. Nothing typed gets a sentence of its own,
+    by `code_span`'s rule. Issue #267.
     """
     if not typed:
         opening = "That is not a status this bot knows."

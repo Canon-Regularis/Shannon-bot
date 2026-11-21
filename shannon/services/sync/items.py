@@ -27,7 +27,7 @@ from shannon.discord_bot.threads import (
     ShutsThread,
 )
 from shannon.domain.enums import ActorRole, ObjectType, Status
-from shannon.domain.errors import PermanentError, WrongPolicyError
+from shannon.domain.errors import PermanentError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import Actor, TrackedSnapshot
 from shannon.domain.tracking import TrackedEvent, Tracking
@@ -55,6 +55,14 @@ class SyncOutcome(StrEnum):
     SYNCED = "synced"
     NOT_TRACKED = "not_tracked"
     STALE = "stale"
+
+
+class WrongPolicyError(PermanentError):
+    """A sync policy was handed a snapshot of a kind it does not handle.
+
+    A wiring mistake rather than anything a GitHub payload can cause, so retrying it for two hours
+    would only delay the traceback that explains it.
+    """
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,11 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shannon.db.stores.repositories import RepositoryStore
 from shannon.db.stores.tracked_items import TrackedItemStore
 from shannon.domain.board import board_owner, named_column
-from shannon.domain.errors import (
-    BoardNotAuthorisedError,
-    NotRegisteredError,
-    ShannonError,
-)
+from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.github.errors import NoStatusFieldError
 from shannon.github.projects import BoardColumn, ProjectListing
 
@@ -40,6 +36,20 @@ LIFETIME = timedelta(minutes=2)
 
 class BoardUnreadableError(ShannonError):
     """The board cannot be opened with the credential this deployment has."""
+
+
+class BoardNotAuthorisedError(ShannonError):
+    """Nobody has given this bot a GitHub authorisation it could use to reach the board.
+
+    Issue #170. Three refusals about a board read almost alike and send somebody to three
+    different places, so they are three types:
+
+    - `shannon.domain.errors.NotProvenError`: GitHub has not said this account is yours.
+    - `BoardUnreadableError`: there is an authorisation, and GitHub will not open that board with
+      it - a wrong number, a wrong owner, or a grant that does not cover it.
+    - this one: there is no authorisation at all, which is the only one of the three the person
+      reading the message can fix in one command, by themselves.
+    """
 
 
 class BoardNotLinkedError(ShannonError):

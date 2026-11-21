@@ -46,11 +46,12 @@ from shannon.discord_bot.roles import CommandRole
 from shannon.discord_bot.slash import SlashGroup
 from shannon.domain.board import ChosenBoard
 from shannon.domain.enums import VerificationPurpose
-from shannon.domain.errors import BoardNotAuthorisedError, NotRegisteredError, ShannonError
+from shannon.domain.errors import NotRegisteredError, ShannonError
 from shannon.domain.text import code_span
 from shannon.github.projects import ProjectListing
 from shannon.services.boards import (
     BoardLink,
+    BoardNotAuthorisedError,
     BoardStanding,
     BoardUnlinked,
     BoardUnreadableError,
@@ -148,10 +149,16 @@ WILL_NOT_OPEN = (
     "Third-party access - and then /board link works as it is."
 )
 
-NOT_A_BOARD = (
-    "{board} is not a board. Pick one from the list, paste the board's URL, or type its number - "
+_A_WAY_IN = (
+    "Pick one from the list, paste the board's URL, or type its number - "
     "the one after /projects/ in that URL."
 )
+
+NOT_A_BOARD = "{board} is not a board. " + _A_WAY_IN
+
+# Its own sentence rather than NOT_A_BOARD around an empty quote: `code_span` needs something to
+# quote. The same shape `/status` gives the same blank. Issue #270.
+NOTHING_TYPED = "That is not a board. " + _A_WAY_IN
 
 NOT_AN_ACCOUNT = (
     "{owner} is not a GitHub account name. Leave the owner out where the board belongs to this "
@@ -254,6 +261,9 @@ def build_board_command(
 
         chosen = _wanted(board)
         if chosen is None:
+            if not board.strip():
+                await reply(interaction, refused(NOTHING_TYPED))
+                return
             # Cut before it is quoted, so the closing fence and the sentence after it survive:
             # Discord allows six thousand characters here and a reply two thousand, so an uncut
             # paste was quoted back whole and the part that said what to do instead never arrived.
