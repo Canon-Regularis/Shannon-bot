@@ -8,7 +8,7 @@ everything after that is checked.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import TypeGuard
 
 # One level deep on purpose: nested objects are read back through this same guard, and a
@@ -26,17 +26,10 @@ def is_json_object(value: object) -> TypeGuard[JsonObject]:
     return isinstance(value, Mapping)
 
 
-def is_json_array(value: object) -> TypeGuard[Iterable[object]]:
-    """Whether a decoded value is a list of things rather than one thing.
-
-    Strings, bytes and mappings are iterable and none of them is an array.
-    """
-    return isinstance(value, Iterable) and not isinstance(value, str | bytes | Mapping)
-
-
 def is_json_list(value: object) -> TypeGuard[list[object]]:
-    """The same, for the places that also need to count what they were given.
+    """Whether a decoded value is an array.
 
-    `Iterable` cannot be measured, and a decoded JSON array is always a `list`.
+    A decoded JSON array is always a `list`, so nothing wider is asked for, and narrowing to `list`
+    rather than `Iterable` lets a caller count what it was given as well as walk it.
     """
     return isinstance(value, list)
