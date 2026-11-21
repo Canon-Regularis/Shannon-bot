@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.models import TITLE_WIDTH, URL_WIDTH
 from shannon.db.stores.tracked_items import TrackedItemStore
-from shannon.domain.enums import ObjectType
+from shannon.domain.enums import CardState, ObjectType
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
 from shannon.github.projects import BoardItem
 
@@ -72,7 +72,9 @@ def snapshot_of(
         # whole poll rather than that one card.
         title=item.title[:TITLE_WIDTH],
         html_url=item.html_url[:URL_WIDTH],
-        state="open",
+        # Issue #270. The poller's own word for a card on the board, named rather than spelled
+        # again: a card the listing shows is on it, and the column holds the same "open" either way.
+        state=CardState.OPEN,
         updated_at=item.updated_at,
         action=action,
         column=item.column,
