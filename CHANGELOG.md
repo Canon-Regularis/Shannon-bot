@@ -8727,3 +8727,39 @@ feature end to end rather than assuming a predecessor the file never recorded.
   member lookup still logs as `Discord would not say whether …`.
 - **Tests.** Characterisation tests for the renderers and the gateway; a test that fails on the
   old code for each fix; a test that the comment strip matches the old one on edge inputs.
+
+## The domain module, held to the checklist
+
+- **`shannon/domain/` was checked against the same checklist** (#270). An audit kept about
+  sixteen findings and dropped twelve. The layer was already sound, importing nothing but the
+  standard library and itself; most findings were a docstring that said something untrue, a rule
+  written twice, or behaviour no test of its own pinned. One reached a reply.
+- **What the domain promises is pinned first.** Exact code spans (an inner backtick, padding, a
+  run of backticks), `lines_within` at its budget, the shapes `LINK` refuses, and whose board a
+  repository's is, including the empty owner that once sent a board write with no credential.
+- **The domain rule has a guard.** A test reads every module in `domain/` and fails on an import
+  from anything but the standard library and `shannon.domain`, or on a relative one that could
+  climb out, as `config.py` already had one.
+  ARCHITECTURE.md links it; the checker for the other layers is still #203.
+- **A blank board gets a sentence.** `/board link` with nothing typed answered "`` is not a
+  board", two bare backticks. It now says the board is missing in words, as `/status` does, and
+  `code_span` says it needs something to quote.
+- **One rule, written once.** The separator rule that splits a column name and a label name into
+  words lives in `domain/text.py`, used by both. What one label stands for is the public
+  `label_priority`, which three places rebuilt from a one-item list. `column_for` answers no
+  column for no priority itself, rather than relying on every caller never to ask.
+- **Errors live with the one service that raises them.** `BoardNotAuthorisedError` is in
+  `services/boards.py` beside its siblings, and `WrongPolicyError` in `services/sync/items.py`.
+  The names, messages and bases are unchanged; only the import path moved.
+- **Contracts that say what the code does.** A review's `state` is GitHub's own spelling, read
+  through `verdict`; the docstring said it was lowercased on the way in. Two protocols lose a
+  `runtime_checkable` nothing checked. The tracking tables are read-only to the type checker.
+  `is_json_array` is gone, since a decoded JSON array is always a list.
+- **Small things beside it.** A draft card's state is written as `CardState.OPEN`, as the poller
+  writes it. A transcript's times are converted to UTC before "UTC" is printed after them, rather
+  than relying on the driver always handing back UTC. `test_state_changes.py` passes both type
+  checkers at the standard every other test is held to, and leaves both "not clean yet" lists.
+- **For whoever deploys it.** Nothing to change: no setting, no migration.
+- **Tests.** Characterisation tests for the text helpers and board owners; the import guard; a
+  test that fails on the old code for the blank board, for no priority's column, and for a
+  transcript time with another offset.
