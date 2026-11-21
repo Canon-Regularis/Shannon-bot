@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 
 from shannon.domain.enums import Priority
+from shannon.domain.text import normalise
 
-# Teams label priority in whatever style their repository already uses, so all are accepted.
-_SEPARATORS = re.compile(r"[\s_\-:/]+")
+# Teams label priority in whatever style their repository already uses, so all are accepted: any
+# separator `normalise` knows, and the level before or after any of these words.
 _PREFIXES = ("priority", "prio", "p")
 _SUFFIX = "priority"
 
@@ -31,13 +31,19 @@ _RANK = {Priority.HIGH: 3, Priority.MEDIUM: 2, Priority.LOW: 1, Priority.UNSET: 
 
 def parse_priority(label_names: Iterable[str]) -> Priority:
     """Work out an item's priority from its GitHub labels."""
-    found = [priority for name in label_names if (priority := _from_label(name)) is not None]
+    found = [priority for name in label_names if (priority := label_priority(name)) is not None]
     if not found:
         return Priority.UNSET
     return max(found, key=lambda priority: _RANK[priority])
 
 
-def _from_label(name: str) -> Priority | None:
+def label_priority(name: str) -> Priority | None:
+    """The priority one label name stands for, or None where it stands for none.
+
+    None rather than UNSET, which is an item's answer, not a label's. Public since #270, because
+    three callers classifying one name each wrapped it in a list for `parse_priority` and folded
+    UNSET back to None by hand.
+    """
     # A status label is never a priority, whatever its column is called. Issue #246: a board's
     # column becomes `status: <column>`, and one named "High priority" would otherwise turn
     # every item moved into it urgent. The prefix exactly, as `labels.is_status_label` reads it,
@@ -45,7 +51,7 @@ def _from_label(name: str) -> Priority | None:
     if name.strip().casefold().startswith(STATUS_PREFIX):
         return None
 
-    parts = [part for part in _SEPARATORS.split(name.strip().lower()) if part]
+    parts = normalise(name).split()
     if not parts:
         return None
 

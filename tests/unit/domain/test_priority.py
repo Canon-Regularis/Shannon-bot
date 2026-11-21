@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.enums import Priority
-from shannon.domain.priority import parse_priority
+from shannon.domain.priority import label_priority, parse_priority
 
 
 @pytest.mark.parametrize("label", ["HIGH", "high", "High", "  high  "])
@@ -102,3 +102,22 @@ def test_the_labels_this_bot_writes_are_read() -> None:
     assert parse_priority(["priority: High"]) is Priority.HIGH
     assert parse_priority(["priority: Medium"]) is Priority.MEDIUM
     assert parse_priority(["priority: Low"]) is Priority.LOW
+
+
+class TestWhatOneLabelStandsFor:
+    """`label_priority`, public since #270: one name classified without a list around it."""
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [("urgent", Priority.HIGH), ("p-med", Priority.MEDIUM), ("LOW_PRIORITY", Priority.LOW)],
+    )
+    def test_a_priority_label_names_its_priority(self, label: str, expected: Priority) -> None:
+        assert label_priority(label) is expected
+
+    @pytest.mark.parametrize(
+        "label", ["status: High priority", "whenever", "priority: whenever", "", "   ", "_-:/"]
+    )
+    def test_anything_else_is_none_rather_than_unset(self, label: str) -> None:
+        """A status label, an unknown word, and a name with no words in it. UNSET is what an
+        ITEM with no priority label has; a single label that is not one is simply not one."""
+        assert label_priority(label) is None

@@ -14,9 +14,10 @@ from __future__ import annotations
 import pytest
 
 from shannon.discord_bot.safe_text import EMPTY
-from shannon.domain.board import _COLUMNS, columns_for, normalise
+from shannon.domain.board import _COLUMNS, columns_for
 from shannon.domain.enums import Priority, Status, spoken
 from shannon.domain.priority import parse_priority
+from shannon.domain.text import normalise
 from shannon.github.labels import PRIORITY_LABELS, own_column, status_label, status_of
 
 STATES: list[Status | Priority] = [*Status, *Priority]

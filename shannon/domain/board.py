@@ -18,9 +18,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from shannon.domain.enums import Priority, Status, spoken
-from shannon.domain.priority import parse_priority
-
-_SEPARATORS = re.compile(r"[\s_\-:/]+")
+from shannon.domain.priority import label_priority
+from shannon.domain.text import normalise
 
 # Normalised keys: lowercased, with runs of punctuation and space collapsed to one space.
 _COLUMNS: dict[str, Status] = {
@@ -66,10 +65,6 @@ def columns_for(status: Status) -> tuple[str, ...]:
     return tuple(column for column, reads_as in _COLUMNS.items() if reads_as is status)
 
 
-def normalise(column: str) -> str:
-    return _SEPARATORS.sub(" ", column.strip().lower()).strip()
-
-
 def status_from_column(column: str | None) -> Status | None:
     """The status a board column stands for, or None for one nobody has taught us.
 
@@ -94,14 +89,11 @@ def reads_as(column: str, state: Status | Priority) -> bool:
     """Whether a column name is a SYNONYM for this state.
 
     Both tables are many-to-one and both are already the single source for their half:
-    `status_from_column` for a column, `parse_priority` for a label. The second answers UNSET
-    where the first answers None, so it is folded to None here the way `labels.reserved_as`
-    already folds it.
+    `status_from_column` for a column, `label_priority` for a label.
     """
     if isinstance(state, Status):
         return status_from_column(column) is state
-    found = parse_priority([column])
-    return found is not Priority.UNSET and found is state
+    return label_priority(column) is state
 
 
 def column_for(columns: Sequence[str], state: Status | Priority) -> int | None:
@@ -121,6 +113,10 @@ def column_for(columns: Sequence[str], state: Status | Priority) -> int | None:
     The fallback keeps board order, which is left to right. It only decides between synonyms,
     where neither is the state's own name and there is nothing better to go on.
     """
+    # #270: UNSET is the absence of a priority, so it has no column. It is spoken "None", which is
+    # an ordinary name for a Priority option, and `reads_as` already gives it none.
+    if state is Priority.UNSET:
+        return None
     exact = named_column(columns, spoken(state))
     if exact is not None:
         return exact

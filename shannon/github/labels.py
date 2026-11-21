@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 
 from shannon.domain.board import landing_column, named_column, status_from_column
 from shannon.domain.enums import Priority, Status, spoken
-from shannon.domain.priority import STATUS_PREFIX, parse_priority
+from shannon.domain.priority import STATUS_PREFIX, label_priority
 from shannon.github.projects import BoardColumn
 
 # GitHub's ceiling on a label name. A board column may be longer: the column this bot stores is a
@@ -247,8 +247,7 @@ def reserved_as(name: str) -> Priority | str | None:
             return own_column(legacy)
         # A bare `status:` names no column, and is still not a label to set by hand.
         return name.strip()[len(STATUS_PREFIX) :].strip() or "a column"
-    priority = parse_priority([name])
-    return priority if priority is not Priority.UNSET else None
+    return label_priority(name)
 
 
 def label_change(current: Iterable[str], name: str, *, adding: bool) -> LabelChange:
@@ -273,4 +272,4 @@ def _status_named(name: str) -> Status | None:
 
 
 def _is_priority(name: str) -> bool:
-    return parse_priority([name]) is not Priority.UNSET
+    return label_priority(name) is not None
