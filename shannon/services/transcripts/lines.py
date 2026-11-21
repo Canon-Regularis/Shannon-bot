@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from shannon.domain.enums import ObjectType
@@ -136,7 +136,10 @@ def _said_by(line: TranscriptLine) -> str:
     here either: the participants row carries those once rather than on every line somebody
     spoke, which on a long thread is the same link forty times.
     """
-    return f"**{as_inline_text(line.author_display_name)}** · `{as_utc(line.said_at):%H:%M UTC}`"
+    # Issue #270. Converted, not just labelled: `as_utc` leaves an aware value's offset alone, and
+    # the stamp prints the word UTC whatever hours it is given.
+    said_at = as_utc(line.said_at).astimezone(UTC)
+    return f"**{as_inline_text(line.author_display_name)}** · `{said_at:%H:%M UTC}`"
 
 
 def _profile(line: TranscriptLine) -> str:
@@ -172,7 +175,8 @@ def _header(relay: Relay, lines: Sequence[TranscriptLine]) -> str:
     the conversation happened, and the two are minutes apart anyway because a transcript goes out
     once the thread has been quiet for a while.
     """
-    last = as_utc(lines[-1].said_at)
+    # Converted for the reason `_said_by` gives (issue #270).
+    last = as_utc(lines[-1].said_at).astimezone(UTC)
     return "\n\n".join(
         [
             f"{MARKER}\n{TITLE}",

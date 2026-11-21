@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TypedDict
 
 from shannon.domain.enums import ObjectType
-from shannon.domain.json import JsonObject, is_json_array, is_json_list, is_json_object
+from shannon.domain.json import JsonObject, is_json_list, is_json_object
 from shannon.domain.models import (
     Actor,
     CheckRun,
@@ -87,7 +87,7 @@ def _avatar(value: object) -> str | None:
 
 
 def actors(payloads: object) -> tuple[Actor, ...]:
-    if not is_json_array(payloads):
+    if not is_json_list(payloads):
         return ()
     parsed = (actor(item) for item in payloads)
     return tuple(item for item in parsed if item is not None)
@@ -108,14 +108,14 @@ def team(payload: object) -> Actor | None:
 
 
 def teams(payloads: object) -> tuple[Actor, ...]:
-    if not is_json_array(payloads):
+    if not is_json_list(payloads):
         return ()
     parsed = (team(item) for item in payloads)
     return tuple(item for item in parsed if item is not None)
 
 
 def labels(payloads: object) -> tuple[Label, ...]:
-    if not is_json_array(payloads):
+    if not is_json_list(payloads):
         return ()
 
     result: list[Label] = []

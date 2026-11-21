@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Protocol, Self, runtime_checkable
+from typing import Protocol, Self
 
 from shannon.domain.enums import ObjectType, Priority
 from shannon.domain.priority import parse_priority
@@ -290,7 +290,8 @@ class ChangesAsked:
 class ReviewSnapshot:
     """A submitted pull request review.
 
-    `state` is lowercased on the way in: webhooks send `approved`, the REST API `APPROVED`.
+    `state` is GitHub's own spelling, which differs by route: webhooks send `approved`, the REST
+    API `APPROVED`. Read it through `verdict`, which lowercases it. Issue #270.
     """
 
     repository: RepositorySnapshot
@@ -525,7 +526,6 @@ class CheckReport:
         return f"checks:{len(self.runs)}:{max((run.check_run_id for run in self.runs), default=0)}"
 
 
-@runtime_checkable
 class ItemNote(Protocol):
     """Something posted into a tracked item's thread that is not its metadata.
 
@@ -567,7 +567,6 @@ class ItemNote(Protocol):
         ...
 
 
-@runtime_checkable
 class TrackedSnapshot(Protocol):
     """What the sync path needs from any GitHub object it mirrors.
 

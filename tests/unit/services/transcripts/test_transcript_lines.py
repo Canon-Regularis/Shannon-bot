@@ -9,7 +9,7 @@ thread it came from or silences comments real people wrote.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -143,6 +143,18 @@ class TestTheComment:
         A transcript is one sitting, so repeating the date on every line of it says nothing.
         """
         said = render([line()])
+
+        assert "18 Sep 2026 · 14:02 UTC" in said
+        assert "`14:02 UTC`" in said
+
+    def test_a_time_with_another_offset_is_stamped_in_utc_too(self) -> None:
+        """Issue #270. Both stamps print the word UTC, so the hours beside it have to be UTC's.
+
+        Every time that reaches here today is UTC already, because the driver decodes the column
+        that way. The label should not rest on that: 19:02 at +05:00 is 14:02 UTC, not 19:02 UTC.
+        """
+        karachi = timezone(timedelta(hours=5))
+        said = render([line(said_at=datetime(2026, 9, 18, 19, 2, tzinfo=karachi))])
 
         assert "18 Sep 2026 · 14:02 UTC" in said
         assert "`14:02 UTC`" in said

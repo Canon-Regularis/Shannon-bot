@@ -454,9 +454,8 @@ class HttpProjectBoards:
         person will open the board and find the card where it was.
 
         UNSET never arrives. The picker offers three priorities and `priority_change` raises
-        on a fourth long before this, so a guard here would be an arm no caller can take -
-        which matters more than it sounds, since `spoken(Priority.UNSET)` is "None" and
-        would match a board column literally called None.
+        on a fourth long before this, so a guard here would be an arm no caller can take.
+        Were it to, `column_for` answers None for it.
 
         `column` is the board's own column name where somebody picked one, and it wins over the
         state's own mapping. It is what makes a board with two columns for one status usable:

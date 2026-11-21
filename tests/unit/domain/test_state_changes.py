@@ -30,18 +30,30 @@ REPO = RepositorySnapshot(
     name="Shannon-bot",
     html_url="https://github.com/Canon-Regularis/Shannon-bot",
 )
-COMMON = {
-    "repository": REPO,
-    "github_object_id": 100,
-    "number": 7,
-    "title": "Add the webhook endpoint",
-    "html_url": "https://github.com/Canon-Regularis/Shannon-bot/pull/7",
-    "state": "open",
-    "author": Actor("octocat"),
-    "updated_at": datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
-}
-PULL_REQUEST = PullRequestSnapshot(**COMMON)
-ISSUE = IssueSnapshot(**COMMON)
+WHEN = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+
+# Issue #270. Written out rather than splatted from one shared dict: a dict of mixed values is a
+# `dict[str, object]` to a type checker, so a misspelled or mistyped field went unchecked.
+PULL_REQUEST = PullRequestSnapshot(
+    repository=REPO,
+    github_object_id=100,
+    number=7,
+    title="Add the webhook endpoint",
+    html_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+    state="open",
+    author=Actor("octocat"),
+    updated_at=WHEN,
+)
+ISSUE = IssueSnapshot(
+    repository=REPO,
+    github_object_id=100,
+    number=7,
+    title="Add the webhook endpoint",
+    html_url="https://github.com/Canon-Regularis/Shannon-bot/pull/7",
+    state="open",
+    author=Actor("octocat"),
+    updated_at=WHEN,
+)
 
 
 def test_a_closed_issue_is_a_close() -> None:

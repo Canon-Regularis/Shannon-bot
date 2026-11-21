@@ -10,7 +10,7 @@ import pytest
 from shannon.discord_bot.panels import BlockKind
 from shannon.discord_bot.safe_text import DESCRIPTION_PREVIEW_LIMIT
 from shannon.domain.enums import ActorRole, ObjectType, Priority, Status
-from shannon.domain.errors import PermanentError, WrongPolicyError
+from shannon.domain.errors import PermanentError
 from shannon.domain.models import (
     Actor,
     IssueSnapshot,
@@ -19,7 +19,7 @@ from shannon.domain.models import (
     TicketSnapshot,
 )
 from shannon.github.mentions import MENTION_LIMIT
-from shannon.services.sync.items import build_item_sync
+from shannon.services.sync.items import WrongPolicyError, build_item_sync
 from shannon.services.sync.policies import IssuePolicy, PullRequestPolicy, TicketPolicy
 
 REPO = RepositorySnapshot(

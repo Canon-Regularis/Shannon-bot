@@ -17,8 +17,10 @@ something in Discord, and none of them is a change to the item that the thread c
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 
 from shannon.domain.enums import ObjectType
 from shannon.domain.json import is_json_object
@@ -44,7 +46,9 @@ class TrackedEvent(StrEnum):
 # What a thread is told when nobody there has said. Off for the two that ring nobody and arrive by
 # the dozen - every tag moved and every commit pushed - and on for everything else: a line that
 # rings somebody is a line somebody is owed, and the closing header says what became of the thread.
-DEFAULTS: dict[TrackedEvent, bool] = {
+# Read-only to the checker, because every thread that never chose shares this one table: a write
+# from any importer would change what all of them are told. Issue #270.
+DEFAULTS: Final[Mapping[TrackedEvent, bool]] = {
     TrackedEvent.COMMENTS: True,
     TrackedEvent.LABELS: False,
     TrackedEvent.COMMITS: False,
@@ -58,7 +62,8 @@ DEFAULTS: dict[TrackedEvent, bool] = {
 # Which kinds can happen to each kind of item at all, in the order they are listed. An issue has
 # no commits, CI, reviews to approve or draft switch; a board card has neither comments nor people,
 # only fields that move and a card that is archived, restored, deleted or converted.
-HAPPENS_TO: dict[ObjectType, tuple[TrackedEvent, ...]] = {
+# Read-only to the checker for the same reason as `DEFAULTS`. Issue #270.
+HAPPENS_TO: Final[Mapping[ObjectType, tuple[TrackedEvent, ...]]] = {
     ObjectType.PR: tuple(TrackedEvent),
     ObjectType.ISSUE: (
         TrackedEvent.COMMENTS,

@@ -108,11 +108,12 @@ from shannon.discord_bot.panels import Panel
 from shannon.discord_bot.threads import KnowsItsServers, PostsToThread, ShutsThread
 from shannon.discord_bot.timestamps import as_timestamp
 from shannon.domain.board import board_owner as owner_of_board
-from shannon.domain.board import is_board_page, normalise, status_from_column
+from shannon.domain.board import is_board_page, status_from_column
 from shannon.domain.enums import CardState, ObjectType, Status
 from shannon.domain.errors import PermanentError, ShannonError
 from shannon.domain.json import JsonObject
 from shannon.domain.models import RepositorySnapshot, TicketSnapshot
+from shannon.domain.text import normalise
 from shannon.domain.time import as_utc
 from shannon.domain.tracking import TrackedEvent, Tracking
 from shannon.github.errors import GitHubAuthError, GitHubRateLimitError

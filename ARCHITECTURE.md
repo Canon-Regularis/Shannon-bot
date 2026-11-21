@@ -86,11 +86,12 @@ an adapter.
 
 ### The import rule
 
-The rule is kept by hand. No tool checks it today. #203 is a draft issue that proposes one. These
-things hold it:
+The rule is mostly kept by hand. Two tests check the bottom two layers, `config.py` and
+`domain/`, and nothing checks the layers above them. #203 is a draft issue that proposes a checker for all of them. These things hold it:
 
-- `domain/` imports nothing outside itself. This lets the unit tests run with no database and no
-  network.
+- `domain/` imports nothing but the standard library and itself. This lets the unit tests run with
+  no database and no network. A test checks it
+  ([test_domain_imports_nothing_else.py](tests/unit/domain/test_domain_imports_nothing_else.py)).
 - A test checks that `config.py` imports nothing from the project
   ([test_config_is_only_configuration.py](tests/unit/test_config_is_only_configuration.py)).
 - Libraries stay in their layer:

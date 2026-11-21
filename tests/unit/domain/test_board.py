@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from shannon.domain.board import (
+    column_for,
     is_board_page,
     landing_column,
     must_pass_through,
@@ -104,6 +105,11 @@ class TestWhereACardLands:
     def test_a_column_is_found_by_name_or_not_at_all(self) -> None:
         assert named_column(MERGE_BOARD, " READY to merge ") == 4
         assert named_column(MERGE_BOARD, "Shipped") is None
+
+    def test_no_priority_has_no_column_even_one_called_none(self) -> None:
+        """#270. UNSET is spoken "None", which is an ordinary name for a Priority option, and
+        the synonym pass already gives UNSET no column. Both passes now agree."""
+        assert column_for(["None", "High"], Priority.UNSET) is None
 
 
 class TestWhatAMoveHasToPassThrough:

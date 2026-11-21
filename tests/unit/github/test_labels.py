@@ -434,8 +434,8 @@ class TestWhatThisBotAlreadyOwns:
         assert labels.reserved_as(name) is None
 
     def test_unset_is_not_a_reservation(self) -> None:
-        """`parse_priority` answers UNSET for everything it does not recognise, and UNSET is the
-        absence of a priority rather than one of them."""
+        """A name `label_priority` does not recognise is no priority at all, never UNSET, which
+        is the absence of a priority rather than one of them."""
         assert labels.reserved_as("wontfix") is None
 
 

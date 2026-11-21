@@ -56,14 +56,29 @@ def code_span(text: str) -> str:
     parse is quoted back by `github/urls.py`, and the parser has no business depending on the
     gateway. Nothing in this is Discord-specific except the fence, and GitHub spells that the
     same way.
+
+    Needs non-empty text: an empty span shows as two bare backticks, so a caller with nothing to
+    show writes a sentence without one.
     """
     text = _BACKTICK_RUN.sub(lambda run: ZERO_WIDTH_SPACE.join(run.group(0)), text)
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * (longest + 1)
+    # #270: after the split no two backticks touch, so the longest run is 0 or 1 and two always
+    # closes past it. Written as the cap it is, because three would open a code block.
+    fence = "``" if "`" in text else "`"
     # A space keeps a leading or trailing backtick from merging with the fence. Markdown strips
     # one space from each end when rendering.
     padding = " " if text.startswith("`") or text.endswith("`") else ""
     return f"{fence}{padding}{text}{padding}{fence}"
+
+
+# Every run of space and punctuation a team might put between the words of a name. One copy since
+# #270: `board` and `priority` each held one, and nothing kept the two alike.
+_SEPARATORS = re.compile(r"[\s_\-:/]+")
+
+
+def normalise(name: str) -> str:
+    """Lowercased, each run of separators one space: shared because column names and label names
+    are typed by the same people in the same styles, and since #246 a column becomes a label."""
+    return _SEPARATORS.sub(" ", name.strip().lower()).strip()
 
 
 def listed(names: Sequence[str], *, last: str = "and") -> str:
