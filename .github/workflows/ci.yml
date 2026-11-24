@@ -427,7 +427,7 @@ jobs:
       # A commit rather than a tag, for the reason the duplicate check gives: somebody else's
       # code, which configures Nix with `github.token` so fetching nixpkgs is not on the shared
       # anonymous rate limit.
-      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086  # v31.11.5
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9  # v32.0.0
 
       # Evaluating is pure and the lock is the same on every leg, so one runner speaks for all
       # three systems, the fastest one. `--no-update-lock-file` because CI checks the lock that
