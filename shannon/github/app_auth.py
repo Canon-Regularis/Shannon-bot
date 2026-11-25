@@ -11,6 +11,7 @@ import base64
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
@@ -31,10 +32,24 @@ CLOCK_DRIFT = timedelta(seconds=60)
 LIFETIME = timedelta(minutes=9)
 
 
+def app_configured(*, client_id: str, private_key_pem: str) -> bool:
+    """Whether there is an App to sign as, refusing a key that is there and cannot be used.
+
+    The check without the signature, for a caller that may not need one. Issue #271: every GitHub
+    request asks for a token and nearly all of them are answered from a cache, so signing first
+    put an RSA signature on the event loop in front of each. Checked all the same, because a key
+    nobody can sign with has to say so on the first call rather than on the first cache miss.
+    """
+    if not client_id or not private_key_pem:
+        return False
+    _key(private_key_pem)
+    return True
+
+
 def app_jwt(*, client_id: str, private_key_pem: str, now: datetime) -> str:
     """The App's own bearer token, or the empty string when no App is configured.
 
-    Empty rather than an exception, because no App configured is a running state: `_headers`
+    Empty rather than an exception, because no App configured is a running state: the transport
     sends no `Authorization` for an empty token. A key present but unusable raises instead.
     """
     if not client_id or not private_key_pem:
@@ -55,7 +70,16 @@ def app_jwt(*, client_id: str, private_key_pem: str, now: datetime) -> str:
 
 
 def _sign(signing_input: bytes, private_key_pem: str) -> bytes:
-    """RS256 over the signing input, with a usable message for every way the key can be wrong.
+    return _key(private_key_pem).sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+
+
+@lru_cache(maxsize=1)
+def _key(private_key_pem: str) -> rsa.RSAPrivateKey:
+    """The App's key, read once, with a usable message for every way it can be wrong.
+
+    Kept because reading it validates it, which costs milliseconds on the event loop (#271). One
+    entry, because a process has one App. A key that cannot be used is not kept: `lru_cache` holds
+    answers and not exceptions, so it is refused again on every call, as it always was.
 
     `load_pem_private_key` reads both the PKCS#1 PEM GitHub issues and the PKCS#8 some tooling
     converts it to, so neither is worth branching on. Every way a pasted key fails is permanent.
@@ -76,7 +100,7 @@ def _sign(signing_input: bytes, private_key_pem: str) -> bytes:
             "RS256. Download the .pem from the App's settings page again."
         )
 
-    return key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    return key
 
 
 def _segment(payload: Mapping[str, object]) -> str:

@@ -21,7 +21,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 
-from shannon.github.app_auth import CLOCK_DRIFT, LIFETIME, app_jwt
+from shannon.github import app_auth
+from shannon.github.app_auth import CLOCK_DRIFT, LIFETIME, app_configured, app_jwt
 from shannon.github.errors import GitHubAuthError
 
 pytestmark = pytest.mark.unit
@@ -213,3 +214,42 @@ def test_the_lifetime_and_drift_are_the_numbers_github_documents() -> None:
     ahead = LIFETIME - CLOCK_DRIFT
     assert ahead.total_seconds() == 480
     assert ahead < timedelta(minutes=10), "GitHub refuses a JWT expiring more than ten ahead"
+
+
+class TestReadingTheKeyOnce:
+    """Issue #271. Reading the key validates it, which costs milliseconds on the event loop, and it
+    was read again for every JWT."""
+
+    @pytest.fixture(autouse=True)
+    def nothing_held(self) -> None:
+        app_auth._key.cache_clear()
+
+    def test_signing_twice_reads_it_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        read: list[bytes] = []
+        real = serialization.load_pem_private_key
+
+        def counting(data: bytes, password: bytes | None) -> object:
+            read.append(data)
+            return real(data, password=password)
+
+        monkeypatch.setattr(serialization, "load_pem_private_key", counting)
+
+        app_jwt(client_id=CLIENT_ID, private_key_pem=PEM, now=NOW)
+        app_jwt(client_id=CLIENT_ID, private_key_pem=PEM, now=NOW)
+
+        assert len(read) == 1
+
+    def test_a_key_that_cannot_be_used_is_refused_every_time(self) -> None:
+        """What is kept is a key, never the refusal of one."""
+        for _ in range(2):
+            with pytest.raises(GitHubAuthError, match="could not be read"):
+                app_configured(client_id=CLIENT_ID, private_key_pem="not a key")
+
+    @pytest.mark.parametrize(
+        ("client_id", "pem", "configured"),
+        [(CLIENT_ID, PEM, True), ("", PEM, False), (CLIENT_ID, "", False)],
+    )
+    def test_both_halves_are_what_an_app_is(
+        self, client_id: str, pem: str, configured: bool
+    ) -> None:
+        assert app_configured(client_id=client_id, private_key_pem=pem) is configured

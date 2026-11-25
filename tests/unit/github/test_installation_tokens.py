@@ -23,6 +23,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from shannon.github import installations as installations_module
+from shannon.github.client import HttpGitHubClient
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubRateLimitError,
@@ -36,6 +38,7 @@ from shannon.github.installations import (
     Knows,
     MapSays,
 )
+from shannon.github.transport import GitHubTransport
 
 pytestmark = pytest.mark.unit
 
@@ -1225,9 +1228,9 @@ class TestTheAppsOwnSlug:
 
         assert len(seen) == 1
 
-    async def test_a_failure_is_not_retried_on_every_register(self) -> None:
-        """Empty and never-asked are different states on purpose. Without that, a GitHub outage
-        would put an extra request in front of every `/register` for as long as it lasted."""
+    async def test_an_answer_with_no_slug_is_not_asked_again(self) -> None:
+        """GitHub answered, and the answer had no slug in it. Asking again would get the same
+        answer, so empty is kept, as a state of its own apart from never having asked."""
         seen: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -1239,6 +1242,24 @@ class TestTheAppsOwnSlug:
             assert await tokens.app_slug() == ""
 
         assert len(seen) == 1
+
+    async def test_a_refusal_is_asked_again(self) -> None:
+        """Not kept, unlike an answer with no slug. Issue #271: keeping it would drop the install
+        link for the life of the process over one bad minute, and asking again costs one request
+        per `/register`."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if len(seen) == 1:
+                return httpx.Response(500)
+            return httpx.Response(200, content=json.dumps({"slug": "shannon-bot"}))
+
+        async with minting(handler) as tokens:
+            assert await tokens.app_slug() == ""
+            assert await tokens.app_slug() == "shannon-bot"
+
+        assert len(seen) == 2
 
     async def test_a_refusal_does_not_fail_the_command_behind_it(self) -> None:
         """The slug only makes a message more helpful. Failing `/register` because the link could
@@ -1256,3 +1277,224 @@ class TestTheAppsOwnSlug:
 
         async with minting(handler, client_id="") as tokens:
             assert await tokens.app_slug() == ""
+
+    async def test_not_reaching_github_does_not_fail_the_command_either(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue #271. The raw httpx error came out of here and failed the `/register` it was only
+        there to word. Not kept, so the link comes back as soon as GitHub does."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if len(seen) == 1:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(200, content=json.dumps({"slug": "shannon-bot"}))
+
+        async with minting(handler) as tokens:
+            with caplog.at_level(logging.WARNING):
+                assert await tokens.app_slug() == ""
+            assert await tokens.app_slug() == "shannon-bot"
+
+        assert "could not read the app's own slug: Could not reach GitHub: timed out" in caplog.text
+
+
+def unreachable(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+class TestNotReachingGitHubAtAll:
+    """Issue #271. An outage, filed as one. The raw httpx error used to come out, which no caller
+    that catches `GitHubError` sees and which `/register` answered "Something went wrong here"."""
+
+    @pytest.mark.parametrize(
+        "ask",
+        [
+            pytest.param(lambda t: t.token_for("octocat"), id="mint"),
+            pytest.param(lambda t: t.token_for("hubot"), id="discovery"),
+            pytest.param(lambda t: t.installed_on("octocat", "hello"), id="installed_on"),
+        ],
+    )
+    async def test_it_is_an_outage(self, ask: Callable[[InstallationTokens], object]) -> None:
+        async with minting(unreachable) as tokens:
+            with pytest.raises(GitHubUnavailableError) as caught:
+                await ask(tokens)
+
+        assert str(caught.value) == "Could not reach GitHub: connection refused"
+        assert isinstance(caught.value.__cause__, httpx.ConnectError)
+
+    async def test_a_read_behind_the_mint_says_the_same_words(self) -> None:
+        """Filed once and not wrapped again by the read that wanted the token."""
+        async with (
+            minting(unreachable) as tokens,
+            httpx.AsyncClient(base_url="https://api.github.com") as http,
+        ):
+            client = HttpGitHubClient(transport=GitHubTransport(tokens=tokens, http_client=http))
+            with pytest.raises(GitHubUnavailableError) as caught:
+                await client.list_commits_on_path("octocat", "hello", sha="a" * 40, file_path="x")
+
+        assert str(caught.value) == "Could not reach GitHub: connection refused"
+
+
+class TestWhatARefusalOfTheAppIsFiledAs:
+    """Issue #271. `installed_on` filed every refusal as the App's key being wrong, so a GitHub
+    outage told an admin to check it, and the mint read only a 429 as a rate limit."""
+
+    @pytest.mark.parametrize("status", [500, 502, 503])
+    async def test_a_server_error_is_an_outage(self, status: int) -> None:
+        async with minting(lambda request: httpx.Response(status)) as tokens:
+            with pytest.raises(
+                GitHubUnavailableError, match=f"installed on octocat/hello.*{status}"
+            ):
+                await tokens.installed_on("octocat", "hello")
+
+    @pytest.mark.parametrize(
+        ("status", "headers", "body", "wait"),
+        [
+            pytest.param(429, {"retry-after": "30"}, "", 30, id="429"),
+            pytest.param(403, {"retry-after": "30"}, "", 30, id="a 403 asking for a wait"),
+            pytest.param(
+                403,
+                {
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": str(int(NOW.timestamp()) + 90),
+                    "date": "Thu, 17 Sep 2026 12:00:00 GMT",
+                },
+                "",
+                90,
+                id="a spent budget",
+            ),
+            pytest.param(
+                403,
+                {},
+                json.dumps({"message": "You have exceeded a secondary rate limit."}),
+                60,
+                id="a secondary limit named in the body",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("ask", "about"),
+        [
+            pytest.param(
+                lambda t: t.installed_on("octocat", "hello"),
+                "the installation lookup for octocat/hello",
+                id="installed_on",
+            ),
+            pytest.param(
+                lambda t: t.token_for("octocat"), "installation tokens for octocat", id="mint"
+            ),
+        ],
+    )
+    async def test_a_rate_limit_says_when_to_come_back(
+        self,
+        ask: Callable[[InstallationTokens], object],
+        about: str,
+        status: int,
+        headers: dict[str, str],
+        body: str,
+        wait: int,
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, headers=headers, content=body)
+
+        async with minting(handler) as tokens:
+            with pytest.raises(GitHubRateLimitError) as caught:
+                await ask(tokens)
+
+        assert str(caught.value) == f"GitHub is rate limiting {about}"
+        assert caught.value.retry_after == wait
+
+
+class TestWhatTheAppsOwnRequestsCarry:
+    """Issue #271. The headers every other request to GitHub's API carries, beside the JWT. They
+    went out with neither the API version this bot is written against nor its name."""
+
+    @pytest.mark.parametrize(
+        "ask",
+        [
+            pytest.param(lambda t: t.token_for("octocat"), id="mint"),
+            pytest.param(lambda t: t.token_for("hubot"), id="discovery"),
+            pytest.param(lambda t: t.installed_on("octocat", "hello"), id="installed_on"),
+            pytest.param(lambda t: t.app_slug(), id="app_slug"),
+        ],
+    )
+    async def test_they_carry_what_every_request_does(
+        self, ask: Callable[[InstallationTokens], object]
+    ) -> None:
+        handler, seen = lists(installed("hubot"))
+
+        async with minting(handler) as tokens:
+            await ask(tokens)
+
+        assert seen
+        for request in seen:
+            assert request.headers["Accept"] == "application/vnd.github+json"
+            assert request.headers["X-GitHub-Api-Version"] == "2022-11-28"
+            assert request.headers["User-Agent"] == "shannon-bot"
+            assert request.headers["Authorization"].count(".") == 2, "that is not a JWT"
+
+
+class TestSigningOnlyWhatIsSent:
+    """Issue #271. Every GitHub request asks for a token and nearly all are answered from the
+    cache, so signing a JWT first put an RSA signature on the event loop in front of each."""
+
+    @pytest.fixture
+    def signed(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Every JWT signed while the test runs."""
+        made: list[str] = []
+        real = installations_module.app_jwt
+
+        def counting(*, client_id: str, private_key_pem: str, now: datetime) -> str:
+            made.append(real(client_id=client_id, private_key_pem=private_key_pem, now=now))
+            return made[-1]
+
+        monkeypatch.setattr(installations_module, "app_jwt", counting)
+        return made
+
+    async def test_a_held_token_signs_nothing(self, signed: list[str]) -> None:
+        handler, _ = answers()
+
+        async with minting(handler) as tokens:
+            await tokens.token_for("octocat")
+            await tokens.token_for("octocat")
+
+        assert len(signed) == 1, "the second call was answered from the cache and signed anyway"
+
+    async def test_the_map_is_still_read_every_time(self) -> None:
+        """Kept on purpose, so a suspend or an uninstall is honoured by the next call."""
+        directory = FakeDirectory(octocat=42)
+        handler, _ = answers()
+
+        async with minting(handler, directory=directory) as tokens:
+            await tokens.token_for("octocat")
+            await tokens.token_for("octocat")
+
+        assert directory.calls == ["octocat", "octocat"]
+
+    @pytest.mark.parametrize(
+        "ask",
+        [
+            pytest.param(lambda t: t.installed_on("octocat", "hello"), id="installed_on"),
+            pytest.param(lambda t: t.app_slug(), id="app_slug"),
+        ],
+    )
+    async def test_one_question_signs_once(
+        self, signed: list[str], ask: Callable[[InstallationTokens], object]
+    ) -> None:
+        async with minting(lambda request: httpx.Response(404)) as tokens:
+            await ask(tokens)
+
+        assert len(signed) == 1
+
+    async def test_a_key_that_cannot_be_used_is_refused_before_the_map_is_read(self) -> None:
+        """Where it always was, so a bad key says so on the first call, a paused App included."""
+        directory = FakeDirectory().suspend("octocat")
+
+        async with minting(
+            lambda request: httpx.Response(500), directory=directory, private_key_pem="not a key"
+        ) as tokens:
+            with pytest.raises(GitHubAuthError, match="could not be read"):
+                await tokens.token_for("octocat")
+
+        assert directory.calls == []

@@ -8,26 +8,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shannon.db.stores.installations import InstallationStore
 from shannon.domain.json import is_json_list, is_json_object
-from shannon.github.app_auth import app_jwt
+from shannon.github.app_auth import app_configured, app_jwt
 from shannon.github.errors import (
     GitHubAuthError,
+    GitHubError,
     GitHubRateLimitError,
     GitHubUnavailableError,
 )
 from shannon.github.mapping import parse_timestamp
 from shannon.github.responses import json_object
+from shannon.github.transport import github_headers, is_rate_limited, retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -102,62 +102,6 @@ class ResolvesInstallations(Protocol):
     async def forget(self, installation_id: int) -> None: ...
 
 
-class InstallationDirectory:
-    """Owner to installation, out of the database.
-
-    No in-process cache: the token cache in front absorbs the hot path, leaving one query an hour.
-    """
-
-    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
-        self._sessionmaker = sessionmaker
-
-    async def installation_for(self, owner: str) -> MapSays:
-        async with self._sessionmaker() as session:
-            found = await InstallationStore(session).for_owner(owner)
-        if found is None:
-            return MapSays(Knows.NOTHING)
-        if found.suspended:
-            # Suspended is not uninstalled, and minting against a suspended installation
-            # fails, so there is nothing to be gained by trying.
-            logger.info("the installation for %s is suspended, so nothing can be read", owner)
-            return MapSays(Knows.A_SUSPENSION)
-        return MapSays(Knows.AN_INSTALLATION, found.installation_id)
-
-    async def remember(
-        self,
-        *,
-        installation_id: int,
-        account_login: str,
-        account_id: int | None,
-        suspended: bool,
-    ) -> None:
-        """Write down an installation this bot had not been told about.
-
-        `for_owner` has said since it was written that None means "ask GitHub" rather than
-        "not installed". Nothing asked, and nothing could keep the answer if it had. This is
-        the keeping half.
-        """
-        async with self._sessionmaker() as session, session.begin():
-            await InstallationStore(session).remember(
-                installation_id=installation_id,
-                account_login=account_login,
-                account_id=account_id,
-                suspended=suspended,
-            )
-
-    async def forget(self, installation_id: int) -> None:
-        """Drop a row GitHub will not honour, so the next call can learn what replaced it.
-
-        A reinstall keeps the login and issues a NEW installation id, so a row holding the old one
-        is worse than no row: it answers `AN_INSTALLATION`, the asking never happens, and every
-        call posts a mint GitHub answers 404 - which caches nothing, because there is no token to
-        cache. Forgetting it turns the next call into a question, and a question is the one thing
-        this module can now answer.
-        """
-        async with self._sessionmaker() as session, session.begin():
-            await InstallationStore(session).forget(installation_id)
-
-
 class InstallationTokens:
     """Mints installation tokens and keeps each one until it is nearly stale.
 
@@ -189,8 +133,9 @@ class InstallationTokens:
         # different uncached owners queue behind each other, which costs one HTTP call of
         # waiting on a path that only runs when the map has nothing.
         self._discovery = asyncio.Lock()
-        # None until asked for, "" once asked and not answered: the second stops a failing
-        # read being retried on every `/register`.
+        # None until GitHub has answered, "" once it answered with no usable slug. A refusal is
+        # not kept: that would drop the install link for the life of the process, and asking again
+        # costs one request per `/register`.
         self._slug: str | None = None
 
     def app_token(self) -> str:
@@ -200,11 +145,10 @@ class InstallationTokens:
         )
 
     async def token_for(self, owner: str) -> str:
-        # Signed once and carried down, rather than signed again by everything below. Each call
-        # re-parses the PEM and performs an RSA signature on the event loop, and `_authorization`
-        # asks for a token once per page of a paged read.
-        jwt = self.app_token()
-        if not jwt:
+        # The key checked here and the JWT signed only where one is sent (#271). Every GitHub
+        # request asks for a token, once per page of a paged read, and nearly all of them are
+        # answered from the cache below without needing one.
+        if not app_configured(client_id=self._client_id, private_key_pem=self._private_key_pem):
             return ""
 
         says = await self._directory.installation_for(owner)
@@ -224,7 +168,7 @@ class InstallationTokens:
             # install - waited on some other installation event happening to arrive, or on
             # somebody running `/register` again. Neither is something an operator can summon,
             # and neither happens at all on a quiet App.
-            installation = await self._discover(owner, jwt)
+            installation = await self._discover(owner)
         if installation is None:
             return ""
 
@@ -239,9 +183,9 @@ class InstallationTokens:
             held = self._minted.get(installation)
             if held is not None and held[1] - REFRESH_MARGIN > self._now():
                 return held[0]
-            return await self._mint(installation, owner, jwt)
+            return await self._mint(installation, owner)
 
-    async def _discover(self, owner: str, jwt: str) -> int | None:
+    async def _discover(self, owner: str) -> int | None:
         """Ask GitHub which of its installations covers this account, and keep the answer.
 
         Under the discovery lock, and the map is re-read inside it for the reason the mint gives:
@@ -263,7 +207,7 @@ class InstallationTokens:
             if says.knows is Knows.A_SUSPENSION:
                 return None
 
-            found = await self._covering_installation(owner, jwt)
+            found = await self._covering_installation(owner)
             if found is None:
                 logger.info("GitHub lists no installation of this app covering %s", owner)
                 return None
@@ -298,7 +242,7 @@ class InstallationTokens:
             )
             return found.installation_id
 
-    async def _covering_installation(self, owner: str, jwt: str) -> _Covering | None:
+    async def _covering_installation(self, owner: str) -> _Covering | None:
         """Walk this App's own installations until the account turns up, or the list runs out.
 
         The whole list rather than one owner, because the per-owner endpoints are split by kind -
@@ -311,19 +255,19 @@ class InstallationTokens:
         trust, and it says so when it stops, because a truncation that logs like an answer is how
         an operator ends up looking for the wrong thing.
         """
+        jwt = self.app_token()
         url: str | None = "/app/installations"
         params: dict[str, int] = {"per_page": 100}
         for _ in range(MAX_INSTALLATION_PAGES):
             if url is None:
                 return None
 
-            response = await self._http.get(
-                url, params=params or None, headers={"Authorization": f"Bearer {jwt}"}
-            )
+            response = await self._request("GET", url, jwt, params=params or None)
             if response.status_code >= 400:
                 # Logged rather than raised, unlike `installed_on`: nobody asked this question, it
                 # is a repair attempted on the way past, and failing it should leave the caller
                 # with the anonymous request it would have made anyway rather than an exception.
+                # Not reaching GitHub at all does raise, because that request would fail too.
                 logger.warning(
                     "GitHub would not list this app's installations (%s), so nothing can be read "
                     "as %s. Check the GitHub App's id and private key",
@@ -361,19 +305,21 @@ class InstallationTokens:
         this down would otherwise have to guess: answering with the id alone is how `/register`
         came to clear a suspension the map had been told about (#268).
         """
-        if not self.app_token():
+        jwt = self.app_token()
+        if not jwt:
             return None
 
-        response = await self._http.get(
-            f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/installation",
-            headers={"Authorization": f"Bearer {self.app_token()}"},
+        response = await self._request(
+            "GET", f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/installation", jwt
         )
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            raise GitHubAuthError(
-                f"GitHub refused to say whether the app is installed on {owner}/{name} "
-                f"({response.status_code}). Check the GitHub App's id and private key."
+            raise _app_refusal(
+                response,
+                asking=f"the installation lookup for {owner}/{name}",
+                do=f"say whether the app is installed on {owner}/{name}",
+                refused=f"to say whether the app is installed on {owner}/{name}",
             )
 
         payload = json_object(response)
@@ -392,15 +338,18 @@ class InstallationTokens:
         """
         if self._slug is not None:
             return self._slug
-        if not self.app_token():
+        jwt = self.app_token()
+        if not jwt:
             return ""
 
-        response = await self._http.get(
-            "/app", headers={"Authorization": f"Bearer {self.app_token()}"}
-        )
+        # Neither failure is raised: the slug only makes a message more helpful, and `/register`
+        # should not fail because the link could not be prettified.
+        try:
+            response = await self._request("GET", "/app", jwt)
+        except GitHubUnavailableError as error:
+            logger.warning("could not read the app's own slug: %s", error)
+            return ""
         if response.status_code >= 400:
-            # Not raised: the slug only makes a message more helpful, and `/register` should
-            # not fail because the link could not be prettified.
             logger.warning("could not read the app's own slug (%s)", response.status_code)
             return ""
 
@@ -408,21 +357,17 @@ class InstallationTokens:
         self._slug = slug if isinstance(slug, str) else ""
         return self._slug
 
-    async def _mint(self, installation: int, owner: str, jwt: str) -> str:
+    async def _mint(self, installation: int, owner: str) -> str:
         """Ask GitHub for a token, or answer "" for an installation that has gone.
 
         A 404 means the installation was removed between the directory read and this call, which
         is permanent and the same outcome as never having been installed. Everything else raises:
         a 401 is a key GitHub will not accept, and calling that "no installation" misdirects.
 
-        Raised as what it is, which a server error and a 429 are not: neither is GitHub refusing
-        the key. Filed as a refusal they read as final to every caller that tells the two apart -
-        a reply on a diff that waits out an unreachable GitHub went out at once instead, ringing
-        nobody, whenever its token happened to fall due during the outage (found reviewing #231).
+        Raised as what it is, by `_app_refusal`.
         """
-        response = await self._http.post(
-            f"/app/installations/{installation}/access_tokens",
-            headers={"Authorization": f"Bearer {jwt}"},
+        response = await self._request(
+            "POST", f"/app/installations/{installation}/access_tokens", self.app_token()
         )
         if response.status_code == 404:
             logger.info("GitHub has no installation %s for %s any more", installation, owner)
@@ -434,25 +379,56 @@ class InstallationTokens:
             # reinstall's new id is exactly the sort of answer discovery can now find.
             await self._directory.forget(installation)
             return ""
-        if response.status_code == 429:
-            delay = response.headers.get("retry-after", "")
-            raise GitHubRateLimitError(
-                f"GitHub is rate limiting installation tokens for {owner}",
-                retry_after=int(delay) if delay.isdigit() else None,
-            )
-        if response.status_code >= 500:
-            raise GitHubUnavailableError(
-                f"GitHub could not mint an installation token for {owner} ({response.status_code})"
-            )
         if response.status_code >= 400:
-            raise GitHubAuthError(
-                f"GitHub refused an installation token for {owner} "
-                f"({response.status_code}). Check the GitHub App's id and private key."
+            raise _app_refusal(
+                response,
+                asking=f"installation tokens for {owner}",
+                do=f"mint an installation token for {owner}",
+                refused=f"an installation token for {owner}",
             )
 
         token, expires_at = _minted(response)
         self._minted[installation] = (token, expires_at)
         return token
+
+    async def _request(
+        self, method: str, url: str, jwt: str, *, params: Mapping[str, int] | None = None
+    ) -> httpx.Response:
+        """One request made as the App, with a failure to reach GitHub filed as one.
+
+        Issue #271. The raw httpx error used to come out of here. Most reads caught it, because
+        the token is asked for inside the `try` that sends them, but `/register` asks these
+        questions directly and answered "Something went wrong here" to an ordinary outage.
+
+        The headers every other request carries, set here because the HTTP client this is handed
+        is shared with services that talk to somebody other than GitHub's API.
+        """
+        headers = {**github_headers(), "Authorization": f"Bearer {jwt}"}
+        try:
+            return await self._http.request(method, url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
+
+
+def _app_refusal(response: httpx.Response, *, asking: str, do: str, refused: str) -> GitHubError:
+    """What an answer to one of the App's own requests is, when it is not a yes.
+
+    A rate limit and a server error are not GitHub refusing the key. Filed as a refusal they read
+    as final to every caller that tells the two apart - a reply on a diff that waits out an
+    unreachable GitHub went out at once instead, ringing nobody, whenever its token happened to
+    fall due during the outage (found reviewing #231) - and `/register` told an admin to check the
+    App's key while GitHub was down (#271).
+    """
+    status = response.status_code
+    if status == 429 or is_rate_limited(response):
+        return GitHubRateLimitError(
+            f"GitHub is rate limiting {asking}", retry_after=retry_after(response)
+        )
+    if status >= 500:
+        return GitHubUnavailableError(f"GitHub could not {do} ({status})")
+    return GitHubAuthError(
+        f"GitHub refused {refused} ({status}). Check the GitHub App's id and private key."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,12 +495,14 @@ def _minted(response: httpx.Response) -> tuple[str, datetime]:
     assumed expiry of now mints on every request. A body this shape means GitHub changed something.
     """
     try:
-        payload: Any = response.json()
+        payload: object = response.json()
     except ValueError as exc:
         raise GitHubAuthError("GitHub returned a non-JSON installation token") from exc
 
-    token = payload.get("token") if is_json_object(payload) else None
-    expires_at = parse_timestamp(payload.get("expires_at")) if is_json_object(payload) else None
+    if not is_json_object(payload):
+        raise GitHubAuthError("GitHub returned an installation token with no token or no expiry")
+    token = payload.get("token")
+    expires_at = parse_timestamp(payload.get("expires_at"))
     if not isinstance(token, str) or not token or expires_at is None:
         raise GitHubAuthError("GitHub returned an installation token with no token or no expiry")
     return token, expires_at
