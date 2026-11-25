@@ -9,7 +9,8 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from shannon.domain.text import ZERO_WIDTH_SPACE, lines_within
+from shannon.domain.text import TAGGED, ZERO_WIDTH_SPACE, lines_within
+from shannon.github.urls import OWNER, REPOSITORY
 
 # GitHub refuses a comment body over this with a 422.
 GITHUB_BODY_LIMIT = 65536
@@ -38,11 +39,30 @@ CLOSING_FENCE = "\n```"
 _MENTION = re.compile(r"(?<![A-Za-z0-9_/])@(?=[A-Za-z0-9])")
 
 # `#123` is a cross-reference: it links the two items and puts a line in the other one's
-# timeline. Digits required, so `# Heading` and a bare `#` are left alone.
-_REFERENCE = re.compile(r"(?<![\w&])#(?=\d)")
+# timeline. Digits required, so `# Heading` and a bare `#` are left alone, and `&` before it is
+# a character reference such as `&#123;`, which is markup. The lookbehind is ASCII for the reason
+# `_MENTION` gives: until #271 it was `\w`, so an `e`-acute before the `#` left the reference live.
+_REFERENCE = re.compile(r"(?<![A-Za-z0-9_&])#(?=\d)")
 
-# The other spelling of the same thing, which GitHub resolves just as happily.
-_SHORTHAND = re.compile(r"\bGH-(?=\d)", re.IGNORECASE)
+# `owner/repo#123`, the same reference into another repository. A word character stands before
+# its `#`, so `_REFERENCE` steps over it, and until #271 it went out live. The README promises
+# that everything that would touch another item is "neutralised on the way", a full GitHub URL
+# being the one exception. Its own pattern rather than a looser `_REFERENCE`, which would break
+# `word#1` too; GitHub reads that as nothing.
+#
+# The first half is that exception: a URL is matched whole and put back, because the path in one
+# can look like `owner/repo` after a port, a `=` or a comma. It takes only what GitHub is certain
+# to link - a host with something after it, and no character that could end the link or a code
+# span - since anything it swallows goes out as written. The rest is broken, which costs a pasted
+# link at worst.
+_REPOSITORY_REFERENCE = re.compile(
+    r"(?P<url>(?<![A-Za-z0-9])https?://[A-Za-z0-9.-]+(?::\d+)?[/?#][A-Za-z0-9._~:/?#@!$&+,;=%-]*)"
+    rf"|(?<![A-Za-z0-9/])(?P<repository>{OWNER}/{REPOSITORY})#(?=\d)"
+)
+
+# The other spelling of the same thing, which GitHub resolves just as happily. Only `GH` ignores
+# case: under a whole-pattern IGNORECASE `[A-Za-z]` would also match the Kelvin sign.
+_SHORTHAND = re.compile(r"(?<![A-Za-z0-9_])(?i:GH)-(?=\d)")
 
 # An unterminated HTML comment hides the rest of the body on GitHub, so one message containing
 # `<!--` would swallow everyone else's.
@@ -74,6 +94,9 @@ def defuse(text: str) -> str:
     GitHub cross-references it too: breaking shared links would cost more than the reference.
     """
     text = _MENTION.sub("@" + ZERO_WIDTH_SPACE, text)
+    text = _REPOSITORY_REFERENCE.sub(
+        lambda found: found["url"] or f"{found['repository']}#{ZERO_WIDTH_SPACE}", text
+    )
     text = _REFERENCE.sub("#" + ZERO_WIDTH_SPACE, text)
     text = _SHORTHAND.sub("GH-" + ZERO_WIDTH_SPACE, text)
     text = _COMMENT_OPEN.sub("<" + ZERO_WIDTH_SPACE + "!", text)
@@ -115,11 +138,6 @@ def as_a_tag(name: str) -> str:
     return "@" + ZERO_WIDTH_SPACE + as_inline_text(name)
 
 
-# The token `discord_bot.capture` leaves where somebody tagged a person, and the only thing in a
-# captured message allowed to become a live mention: the id came off `message.mentions` rather
-# than out of the text, so Discord had already decided it was a mention.
-_TAGGED = re.compile(r"<@([0-9]{15,20})>")
-
 # What GitHub reads as a continuation of the mention before it. Hyphens count, because a login may
 # contain them, so a mention this bot built followed by a typed `-two` addresses `@someone-two`.
 #
@@ -130,7 +148,7 @@ _TAGGED = re.compile(r"<@([0-9]{15,20})>")
 # this bot was handed is destroyed, which is the half that needs no unusual data to reach.
 #
 # The set is the one `mentions._MENTION`'s user branch already refuses with
-# `(?![A-Za-z0-9/...-])`, and the comment on CLOSING_FENCE above states the invariant it comes
+# `(?![A-Za-z0-9/...-])`, and the comment on `_MENTION` above states the invariant it comes
 # from: `@login` and `@org/team` both notify on GitHub.
 _EXTENDS_A_LOGIN = re.compile(r"[A-Za-z0-9/-]")
 
@@ -150,7 +168,10 @@ def one_message(content: str, tagged: Mapping[int, str] | None = None) -> str:
     spelled = tagged or {}
     pieces: list[str] = []
     typed_from = 0
-    for token in _TAGGED.finditer(text):
+    # `TAGGED` is the token `discord_bot.capture` leaves where somebody tagged a person, and the
+    # only thing in a captured message allowed to become a live mention: the id came off
+    # `message.mentions` rather than out of the text, so Discord had already decided it was one.
+    for token in TAGGED.finditer(text):
         mention = spelled.get(int(token.group(1)))
         if mention is None:
             continue
@@ -193,8 +214,9 @@ def fit_body(body: str, *, limit: int = GITHUB_BODY_LIMIT) -> str:
     budget = limit - len(TRUNCATED) - len(CLOSING_FENCE)
     kept = lines_within(body, budget)
 
-    # Not passed through `balanced`, unlike the line cut below: a prefix of one over-long line
-    # can still leave a fence open.
+    # Both cuts close a fence they leave open, and the budget already holds room for
+    # CLOSING_FENCE. Until #271 this one did not, so one over-long first line opening a fence
+    # left it open over whatever the caller put after the body.
     if not kept:
-        return body[:budget] + TRUNCATED
+        return balanced(body[:budget] + TRUNCATED)
     return balanced("\n".join(kept) + TRUNCATED)

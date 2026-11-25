@@ -14,14 +14,15 @@ from datetime import datetime
 import discord
 
 from shannon.db.models import DISPLAY_NAME_WIDTH, TRANSCRIPT_LINE_WIDTH
+from shannon.domain.text import SNOWFLAKE, tag
 
 # The two kinds that are somebody talking. Every other Discord message type is the system
 # narrating: "X started a thread", a pin, a channel rename, a join.
 SAID_BY_A_PERSON = frozenset({discord.MessageType.default, discord.MessageType.reply})
 
-# Discord's mention syntax, the pattern `clean_content` reads in discord.py's `message.py`.
-# Fifteen to twenty digits is a snowflake.
-_POINTS_AT = re.compile(r"<(@[!&]?|#)([0-9]{15,20})>")
+# Discord's mention syntax, the pattern `clean_content` reads in discord.py's `message.py`. The
+# id bound is the one the stored token is read back with, so nothing captured falls outside it.
+_POINTS_AT = re.compile(rf"<(@[!&]?|#)({SNOWFLAKE})>")
 
 # What discord.py writes for something it cannot resolve, kept word for word.
 DELETED_USER = "@deleted-user"
@@ -97,7 +98,7 @@ def _said(message: discord.Message) -> tuple[str, dict[int, str]]:
                 return DELETED_USER
             named[found] = member.display_name[:DISPLAY_NAME_WIDTH]
             # Normalised to one shape, so the render has one token to look for rather than two.
-            return f"<@{found}>"
+            return tag(found)
         # A thread being logged is always in a server; the type says otherwise, and a
         # transcript is not worth raising over in the handler that runs for every message.
         if guild is None:

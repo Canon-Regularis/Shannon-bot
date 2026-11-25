@@ -58,6 +58,63 @@ class TestWhatWouldTouchAnotherItem:
     def test_the_other_spelling_is_broken_too(self, text: str) -> None:
         assert "-" + ZWSP in defuse(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "acme/widget#12",
+            "(acme/widget#12)",
+            "see acme/other#5.",
+            "_acme/widget#12_",
+            "Fixed.acme/widget#12",
+            # Each of these sits beside a URL, and GitHub would not read it as part of one.
+            "https://example.com/ acme/widget#12",
+            "`https://example.com/`acme/widget#12",
+            "[a](https://example.com/)acme/widget#12",
+            "xhttps://example.com/,acme/widget#12",
+            "https://,acme/widget#12",
+            "https://a_,acme/widget#12",
+        ],
+    )
+    def test_a_reference_into_another_repository_is_broken(self, text: str) -> None:
+        """Issue #271. The `t` before the `#` read as the end of a word, so `#12` was left live,
+        and GitHub reads `owner/repo#N` as a reference into that repository's item."""
+        assert "#" + ZWSP in defuse(text)
+
+    def test_only_the_hash_of_a_cross_repository_reference_is_touched(self) -> None:
+        assert defuse("see acme/widget#12") == f"see acme/widget#{ZWSP}12"
+
+    @pytest.mark.parametrize(
+        ("typed", "published"),
+        [("é#12", f"é#{ZWSP}12"), ("éGH-12", f"éGH-{ZWSP}12")],
+    )
+    def test_a_reference_after_a_non_ascii_letter_is_broken(
+        self, typed: str, published: str
+    ) -> None:
+        r"""The same rule as for a mention: `\w` and `\b` are Unicode-aware, so an accented
+        letter looked like part of a longer word. A writer may neutralise more than GitHub reads,
+        never less."""
+        assert defuse(typed) == published
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "&#123;",
+            "https://github.com/acme/widget#12",
+            "https://github.com/acme/widget/issues/40",
+            "https://example.com/acme/widget#12",
+            "http://localhost:8080/docs#12",
+            "https://example.com/?n=acme/widget#12",
+            "https://example.com/~mona/notes#1",
+            "https://example.com/a%20b/c,d/e#1",
+            "https://example.com/foo_bar/baz#1",
+            "https://www.npmjs.com/package/@types/node#1-x",
+        ],
+    )
+    def test_markup_and_a_full_url_are_left_as_written(self, text: str) -> None:
+        """A character reference is markup, and a pasted URL is the exception the `defuse`
+        docstring makes on purpose: a repository path inside one is not a shorthand reference."""
+        assert defuse(text) == text
+
 
 class TestWhatWouldHideTheRest:
     def test_an_html_comment_is_broken(self) -> None:
@@ -150,6 +207,14 @@ class TestFittingTheWholeBody:
 
         assert len(fitted) <= GITHUB_BODY_LIMIT
         assert fitted.endswith("[...]")
+
+    def test_a_single_line_too_long_that_opens_a_fence_is_still_closed(self) -> None:
+        """Issue #271. The character cut used to skip `balanced`, so the fence was left open and
+        swallowed whatever the caller put after the body. The budget already holds the closer."""
+        fitted = fit_body("```" + "x" * GITHUB_BODY_LIMIT)
+
+        assert fitted.endswith("[...]\n```")
+        assert len(fitted) <= GITHUB_BODY_LIMIT
 
     def test_a_cut_that_lands_inside_a_code_block_still_closes_it(self) -> None:
         body = "```\n" + "\n".join("x" * 100 for _ in range(1000))
