@@ -8763,3 +8763,52 @@ feature end to end rather than assuming a predecessor the file never recorded.
 - **Tests.** Characterisation tests for the text helpers and board owners; the import guard; a
   test that fails on the old code for the blank board, for no priority's column, and for a
   transcript time with another offset.
+
+## The github module, held to the checklist
+
+- **`shannon/github/` was checked against the same checklist** (#271). An audit kept about thirty
+  findings and dropped twelve. Most were repetition and comments that had stopped being true; the
+  rest were real defects, most of them in what an error was filed as.
+- **What the client, the mapping, the labels and the text helpers keep is pinned first.** The exact
+  requests and headers, how each status is filed, what a payload's odd values read as, which labels
+  a status change moves, and that the tag `capture` writes is the one `safe_text` reads.
+- **The transport is its own module** (#210). `github/transport.py` holds how a request goes out and
+  how its answer is filed. The typed client and the board reader share one, where the container used
+  to build a second whole client for one PATCH, and the raw reads are off the protocol the services
+  hold. `projects.py` stays whole. ARCHITECTURE.md says both, and why.
+- **`github/` never imports the database.** `InstallationDirectory` and the installation webhook's
+  handler are in `services/installations.py`, beside every other handler, with a test that keeps it.
+- **Smaller and clearer.** One read and one body check, where four or five spelled each out. Every
+  read escapes a repository's name as the writes did. One label rule behind `status_change` and
+  `priority_change`. The tag a transcript stores is written and read by one pattern, in
+  `domain/text.py`. A card move with no credential is refused before it is sent, and listing or
+  opening a board takes one rather than defaulting it. Two protocols nothing consumed are gone,
+  `test_mapping.py` leaves both "not clean yet" lists, and the conformance table has the rows it was
+  missing.
+- **A credential is not signed unless it is sent.** Every request asks for a token, and each one
+  re-read the App's key and signed with it even when the answer came from the cache. The key is read
+  once, and only a request that carries a signature makes one.
+- **Not reaching GitHub is an outage wherever it happens.** A network error while minting a token,
+  or while asking whether the App is installed, came out raw. `/register` answered "Something went
+  wrong here" to an ordinary outage, and a reply on a diff could skip naming everybody. An install
+  link that cannot be read no longer fails `/register` either.
+- **A secondary rate limit waits.** A 403 that names one only in its message was filed as a refused
+  credential, so the poller wrote the card move off for good, and a 429 that did waited out the
+  hourly budget, which is another limit. Either now waits the minute GitHub asks.
+- **`/register` no longer blames the App's key for an outage.** A server error or a rate limit while
+  asking whether the App is installed told an admin to check the key. Each is now filed as what it
+  is, and a rate-limited mint is recognised by the same rule as every other request.
+- **An installation webhook no longer clears a suspension.** Only `suspend` and `unsuspend` say
+  anything about one. Adding a repository to a paused App, or accepting its new permissions, marked
+  it running, which is the bug #268 fixed for `/register`.
+- **Text sent to GitHub.** `owner/repo#12` in a transcript wrote "mentioned this" into that item; it
+  is defused like the other references. A name of up to 77 characters with hyphens in it was read as
+  a login; GitHub's limit is 39. A transcript whose first line did not fit could leave a code fence
+  open and swallow the end of the comment.
+- **The App's own requests say who they are.** They went out without the API version, the media type
+  and the name every other request carries.
+- **For whoever deploys it.** Nothing to change: no setting, no migration. Two log lines moved with
+  their code: "stopped following pages" logs under `shannon.github.transport`, and the installation
+  lines under `shannon.services.installations`.
+- **Tests.** A test that fails on the old code for each fix, and the guard on what `github/`
+  imports.
