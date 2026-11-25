@@ -63,7 +63,8 @@ shannon/
   domain/       enums, snapshots, errors, time and board rules. Imports nothing but the standard library
   db/           SQLAlchemy models, the engine and session, and stores/: the queries, mostly one
                 store per table
-  github/       the REST client, App sign-in and installation tokens, project boards, link parsing
+  github/       the HTTP transport, the REST client and the project boards over it, App sign-in and
+                installation tokens, link parsing. Never imports db/
     webhooks/   signature check, a parser per event, and the router that picks a handler
   discord_bot/  the bot client, the thread gateway, the permission gate, turning a message into
                 Discord components, and capturing messages for a logged conversation
@@ -86,14 +87,19 @@ an adapter.
 
 ### The import rule
 
-The rule is mostly kept by hand. Two tests check the bottom two layers, `config.py` and
-`domain/`, and nothing checks the layers above them. #203 is a draft issue that proposes a checker for all of them. These things hold it:
+The rule is mostly kept by hand. Three tests check `config.py`, `domain/` and `github/`, and nothing
+checks the other layers. #203 is a draft issue that proposes a checker for all of them. These things
+hold it:
 
 - `domain/` imports nothing but the standard library and itself. This lets the unit tests run with
   no database and no network. A test checks it
   ([test_domain_imports_nothing_else.py](tests/unit/domain/test_domain_imports_nothing_else.py)).
 - A test checks that `config.py` imports nothing from the project
   ([test_config_is_only_configuration.py](tests/unit/test_config_is_only_configuration.py)).
+- `github/` imports only `config.py`, `domain/` and itself from this project, and never the
+  database. It reads what GitHub says, and a service writes it down: the account-to-installation
+  map is kept by [services/installations.py](shannon/services/installations.py). A test checks it
+  ([test_github_imports_no_database.py](tests/unit/github/test_github_imports_no_database.py)).
 - Libraries stay in their layer:
   - FastAPI is only used by `api/`, `runtime/` and `main.py`.
   - discord.py is only imported by `discord_bot/` and `commands/`.
@@ -126,6 +132,13 @@ methods a caller may use). The two big ones are declared next to the real adapte
 Each is built from narrow roles. A caller names only the roles it uses. So a caller that only posts
 to a thread cannot also rename one. A service that needs something smaller often declares its own
 small protocol in its own module.
+
+The GitHub side is split where it already had a seam (#210).
+[github/transport.py](shannon/github/transport.py) is how a request goes out and how its answer is
+filed: credentials, pages, redirects, rate limits and status codes. The typed calls in
+[github/client.py](shannon/github/client.py) and the boards in
+[github/projects.py](shannon/github/projects.py) share one transport, and no service is handed it.
+`projects.py` stays one module: it is one board client and the parsing only that client does.
 
 Tests replace the real classes with stand-ins: hand-written fake classes in
 [tests/fakes/](tests/fakes/), not mocks. `IMPLEMENTATIONS` in
