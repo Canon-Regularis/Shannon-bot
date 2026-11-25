@@ -158,8 +158,14 @@ class TestWhereANameStops:
 
     @pytest.mark.parametrize(
         "written",
-        ["@john-", "@jo--hn", "@-john", "@" + "a" * 40],
-        ids=["trailing hyphen", "doubled hyphen", "leading hyphen", "too long"],
+        ["@john-", "@jo--hn", "@-john", "@" + "a" * 40, "@" + "a" + "-a" * 20],
+        ids=[
+            "trailing hyphen",
+            "doubled hyphen",
+            "leading hyphen",
+            "too long",
+            "too long with hyphens",
+        ],
     )
     def test_a_shape_github_cannot_issue_is_refused_outright(self, written: str) -> None:
         """Refused whole rather than trimmed to the part that is legal, which is the safer of the
@@ -171,6 +177,12 @@ class TestWhereANameStops:
 
     def test_a_login_of_the_longest_length_github_issues_is_matched_whole(self) -> None:
         longest = "a" * 39
+
+        assert names_in(f"@{longest}").people == (longest,)
+
+    def test_a_hyphenated_login_of_the_longest_length_is_matched_whole_too(self) -> None:
+        """Issue #271: the cap is on the whole name, hyphens counted, so 39 still reads."""
+        longest = "a" + "-a" * 19
 
         assert names_in(f"@{longest}").people == (longest,)
 
@@ -479,13 +491,29 @@ class TestAHeadingMovesNoName:
 
 
 class TestTheShapesThisAlsoOwns:
-    """`/link` and `/link_team` validate what somebody types against the same rules."""
+    """`/link_team` validates a typed slug, and the transcript checks a login, against the same
+    rules."""
 
-    @pytest.mark.parametrize("name", ["monalisa", "mona-lisa", "a", "a" * 39, "1"])
+    @pytest.mark.parametrize("name", ["monalisa", "mona-lisa", "a", "a" * 39, "a" + "-a" * 19, "1"])
     def test_a_login_github_could_issue_is_accepted(self, name: str) -> None:
         assert mentions.is_login(name)
 
-    @pytest.mark.parametrize("name", ["-mona", "mona-", "mona--lisa", "a" * 40, "mona_lisa", ""])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "-mona",
+            "mona-",
+            "mona--lisa",
+            "a" * 40,
+            # Issue #271: forty and forty-one with hyphens, and the seventy-seven the old repeat
+            # allowed, because it capped the letters and digits rather than the name.
+            "aa" + "-a" * 19,
+            "a" + "-a" * 20,
+            "a" + "-a" * 38,
+            "mona_lisa",
+            "",
+        ],
+    )
     def test_a_login_github_could_not_issue_is_refused(self, name: str) -> None:
         assert not mentions.is_login(name)
 

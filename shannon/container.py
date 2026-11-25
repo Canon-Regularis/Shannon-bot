@@ -63,11 +63,11 @@ from shannon.discord_bot.threads import ThreadGateway
 from shannon.domain.enums import ActorRole, ObjectType
 from shannon.domain.models import ItemNote
 from shannon.github.client import GitHubClient, HttpGitHubClient
-from shannon.github.installations import InstallationDirectory, InstallationTokens
-from shannon.github.projects import HttpProjectBoards
+from shannon.github.installations import InstallationTokens
+from shannon.github.projects import HttpProjectBoards, ReadsJson, WritesJson
+from shannon.github.transport import GitHubTransport
 from shannon.github.webhooks.checks import heads_a_pull_request, parse_check_suite_event
 from shannon.github.webhooks.comments import parse_comment_event
-from shannon.github.webhooks.installations import build_installation_handler
 from shannon.github.webhooks.issues import parse_issue_event
 from shannon.github.webhooks.pull_request import parse_pull_request_event
 from shannon.github.webhooks.review_comments import parse_review_comment_event
@@ -81,6 +81,10 @@ from shannon.services.channels import ChannelMappingService
 from shannon.services.checks import CheckSuiteAnnouncer, build_check_suite_handler
 from shannon.services.delivery.queue import WebhookDeliveryQueue
 from shannon.services.delivery.worker import DeliveryWorker, WorkerSettings
+from shannon.services.installations import (
+    InstallationDirectory,
+    build_installation_handler,
+)
 from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, build_note_handler
@@ -143,6 +147,15 @@ class Closes(Protocol):
     async def aclose(self) -> None: ...
 
 
+class BoardTransport(ReadsJson, WritesJson, Protocol):
+    """What a test hands the board reader in place of GitHub: its reads and its one write.
+
+    Issue #271. In production the reads go through the transport the App's own client shares and
+    the write through that transport's token-less view, two objects over one connection. A stand-in
+    answers both, and this is where the two halves are asked of one object, so it is declared here.
+    """
+
+
 @dataclass(slots=True)
 class Container:
     """What the running process holds on to.
@@ -170,8 +183,8 @@ class Container:
     reminders: ReminderSender
     commands: tuple[Installable, ...]
     # Opened in `build_container` and reachable from nowhere else, so this is the only
-    # thing that can close them: the App's own HTTP client, and the board's write client,
-    # which is built whether or not card writes are on and carries no credential of its own.
+    # thing that can close them: the App's own HTTP client, and the transport the API client
+    # and the board reader share, which is built whether or not card writes are on. Issue #271.
     # Kept apart from `github` because that one may be a fake with nothing to close.
     also_opened: tuple[Closes, ...]
     # Held so the three OAuth routes can reach it. They are the one place in this project that is
@@ -825,11 +838,16 @@ def build_container(
     settings: Settings | None = None,
     engine: AsyncEngine | None = None,
     github: GitHubClient | None = None,
+    board_transport: BoardTransport | None = None,
 ) -> Container:
     """Wire the application.
 
     `threads` is a required argument because the real gateway needs a live Discord client, which
     has to be constructed before anything that talks through it.
+
+    `board_transport` is for the test stack, issue #271. The board reader used to be built over
+    `github`, so a fake client answered its reads too; it is built over the transport now, and a
+    test handing in a fake client hands in a fake transport beside it.
     """
     settings = settings or get_settings()
     engine = engine or build_engine(settings.database_url.get_secret_value())
@@ -856,11 +874,15 @@ def build_container(
             "Set SHANNON_GITHUB_APP_CLIENT_ID and SHANNON_GITHUB_APP_PRIVATE_KEY."
         )
 
-    github = github or HttpGitHubClient(
+    # One transport, shared by the API client and the board reader. Issue #271: the board reader
+    # was handed the whole client for three raw reads, and the writer was a second whole client
+    # built for one PATCH.
+    transport = GitHubTransport(
         tokens=tokens,
         base_url=settings.github_api_url,
         timeout=settings.github_timeout_seconds,
     )
+    github = github or HttpGitHubClient(transport=transport)
     # Built here rather than in `_commands`, where it used to be constructed twice, because
     # the verification service needs it too: following a one-time link is what writes a link
     # row now, so the thing that spends the link is the thing that has to be able to write one.
@@ -874,8 +896,8 @@ def build_container(
     )
     # A board needs no client of its own any more. Issue #170: every board call now carries the
     # authorisation of a particular person - the linker's for a read, the mover's for a write - and
-    # an explicit credential wins over whatever the client would have attached. So the ordinary App
-    # client is just the transport, and the credential that used to live in a second client built
+    # an explicit credential wins over whatever the transport would have attached. So the boards
+    # share the API's transport, and the credential that used to live in a second client built
     # around one shared token is gone with the token.
     #
     # What was here before, and why it is worth not reinventing: one classic personal access token
@@ -925,20 +947,18 @@ def build_container(
     # issue #179: one flag, two failures, and only one of them was the flag's business.
     # The write half, and it carries NO credential of its own. Every board write now passes an
     # explicit authorisation - the member who asked for it - and an explicit credential wins over
-    # whatever a client would otherwise attach. With no tokens here, a write with nobody behind it
-    # goes out anonymous and GitHub answers 401: the new rule is a fact of the wiring rather than a
-    # check somebody could forget.
+    # whatever the transport would otherwise attach. With no tokens here, a write with nobody behind
+    # it goes out anonymous and GitHub answers 401: the new rule is a fact of the wiring rather than
+    # a check somebody could forget. Issue #271: the same connection as the reads rather than a
+    # second whole client built for one PATCH, so there is nothing more to close.
     #
-    # Its own object rather than the App client because `GitHubClient` deliberately does not carry
-    # `patch_json` - see `WritesJson` - and putting it there would hand every service in this
-    # project the ability to write to any path with an installation token.
-    board_writer = HttpGitHubClient(
-        base_url=settings.github_api_url,
-        timeout=settings.github_timeout_seconds,
-    )
+    # Not the App client, because `GitHubClient` deliberately does not carry `patch_json` - see
+    # `WritesJson` - and putting it there would hand every service in this project the ability to
+    # write to any path with an installation token.
+    board_writer = board_transport or transport.without_tokens()
 
     boards = HttpProjectBoards(
-        github,
+        board_transport or transport,
         # Whose authorisation each board's own reads are made under. Issue #170: resolved per
         # board rather than per owner, because two servers may link two different boards owned by
         # the same account and an owner-keyed lookup would cross between them.
@@ -1114,5 +1134,5 @@ def build_container(
             GitHubAccess(sessionmaker, github, verification, settings.require_proved_links),
             capturing=settings.capture_discord_messages,
         ),
-        also_opened=(app_http, board_writer),
+        also_opened=(app_http, transport),
     )

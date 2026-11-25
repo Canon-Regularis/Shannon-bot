@@ -11,6 +11,7 @@ from discord import MessageType
 
 from shannon.db.models import DISPLAY_NAME_WIDTH, TRANSCRIPT_LINE_WIDTH
 from shannon.discord_bot.capture import captured, from_a_person, has_words
+from shannon.domain.text import TAGGED
 from tests.fakes.discord_objects import (
     FakeAuthor,
     FakeGuild,
@@ -168,6 +169,17 @@ class TestWhatSomebodyTagged:
         )
 
         assert len(said.mentions[ALICE]) == DISPLAY_NAME_WIDTH
+
+    @pytest.mark.parametrize("member", [10**14, 2**64 - 1], ids=["shortest", "longest"])
+    def test_the_token_it_writes_is_the_one_the_transcript_reads(self, member: int) -> None:
+        """Issue #271. The token is stored in a transcript row and read back by `github`, so both
+        ends of the snowflake range have to come out as the shape `TAGGED` finds."""
+        said = captured(a_message(content=f"<@{member}>", mentions=[FakeMentioned(id=member)]))
+
+        found = TAGGED.fullmatch(said.content)
+
+        assert found is not None
+        assert int(found.group(1)) == member
 
 
 class TestWhatIsNotAboutPeople:

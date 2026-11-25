@@ -1,7 +1,8 @@
-"""Text arithmetic that belongs to neither dialect.
+"""Text arithmetic that belongs to neither dialect, and the shapes both sides of a seam must share.
 
 Discord's markdown and GitHub's are different languages, and `discord_bot.safe_text` and
-`github.safe_text` keep their rules apart on purpose. What lives here is the counting both need.
+`github.safe_text` keep their rules apart on purpose. What lives here is the counting both need,
+and the few spellings one package writes and another reads, such as the stored tag token.
 """
 
 from __future__ import annotations
@@ -20,6 +21,20 @@ ZERO_WIDTH_SPACE = "\u200b"
 # matches, since issue #186: the commit finder in `github/` steps over the same links, and has no
 # business importing the gateway to do it.
 LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()<>\s]*)\)")
+
+# A Discord id. Fifteen to twenty digits is a snowflake: twenty holds 2**64 - 1.
+SNOWFLAKE = r"[0-9]{15,20}"
+
+# The token a transcript stores where somebody tagged a person: `discord_bot.capture` WRITES it
+# into the row and `github.safe_text` READS it back when the transcript is rendered. One
+# definition since #271, because each side had its own copy and its own tests against a literal,
+# so either could change shape with every test green while every tagged person went quiet.
+TAGGED = re.compile(rf"<@({SNOWFLAKE})>")
+
+
+def tag(member_id: int) -> str:
+    """The stored token for a tag of `member_id`, the one shape `TAGGED` reads back."""
+    return f"<@{member_id}>"
 
 
 def lines_within(text: str, budget: int) -> list[str]:

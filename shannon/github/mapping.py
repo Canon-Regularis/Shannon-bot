@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import TypedDict
 
@@ -20,8 +21,6 @@ from shannon.domain.models import (
     ReviewSnapshot,
 )
 from shannon.domain.time import as_utc
-
-Payload = JsonObject
 
 
 class _SharedFields(TypedDict):
@@ -87,10 +86,7 @@ def _avatar(value: object) -> str | None:
 
 
 def actors(payloads: object) -> tuple[Actor, ...]:
-    if not is_json_list(payloads):
-        return ()
-    parsed = (actor(item) for item in payloads)
-    return tuple(item for item in parsed if item is not None)
+    return _each(payloads, actor)
 
 
 def team(payload: object) -> Actor | None:
@@ -108,10 +104,7 @@ def team(payload: object) -> Actor | None:
 
 
 def teams(payloads: object) -> tuple[Actor, ...]:
-    if not is_json_list(payloads):
-        return ()
-    parsed = (team(item) for item in payloads)
-    return tuple(item for item in parsed if item is not None)
+    return _each(payloads, team)
 
 
 def labels(payloads: object) -> tuple[Label, ...]:
@@ -160,7 +153,7 @@ def repository(payload: object) -> RepositorySnapshot | None:
     )
 
 
-def _owner(payload: Payload) -> tuple[str, int | None] | None:
+def _owner(payload: JsonObject) -> tuple[str, int | None] | None:
     """The owner's login, and its account id where the owner block carries one."""
     owner = actor(payload.get("owner"))
     if owner is not None:
@@ -228,15 +221,14 @@ def pull_request(
     )
 
 
-def _head_sha(payload: Payload) -> str:
+def _head_sha(payload: JsonObject) -> str:
     """The issues shape of a pull request carries no head, so this can come back empty."""
     head = payload.get("head")
-    sha = head.get("sha") if is_json_object(head) else None
-    return sha if isinstance(sha, str) else ""
+    return _str_or_empty(head.get("sha") if is_json_object(head) else None)
 
 
 def _shared_fields(
-    payload: Payload, repo: RepositorySnapshot, *, path: str, action: str | None
+    payload: JsonObject, repo: RepositorySnapshot, *, path: str, action: str | None
 ) -> _SharedFields | None:
     object_id = payload.get("id")
     number = payload.get("number")
@@ -247,15 +239,12 @@ def _shared_fields(
     if not isinstance(html_url, str) or not html_url:
         html_url = f"{repo.html_url}/{path}/{number}"
 
-    title = payload.get("title")
     state = payload.get("state")
-    # GitHub sends a null body for an item opened with no description.
-    body = payload.get("body")
     return {
         "repository": repo,
         "github_object_id": object_id,
         "number": number,
-        "title": title if isinstance(title, str) else "",
+        "title": _str_or_empty(payload.get("title")),
         "html_url": html_url,
         "state": state if isinstance(state, str) else "open",
         "author": actor(payload.get("user")),
@@ -263,7 +252,8 @@ def _shared_fields(
         "labels": labels(payload.get("labels")),
         "updated_at": parse_timestamp(payload.get("updated_at")),
         "action": action,
-        "body": body if isinstance(body, str) else "",
+        # GitHub sends a null body for an item opened with no description.
+        "body": _str_or_empty(payload.get("body")),
         # Issue #259: the names a description writes ring only while the item is new.
         "created_at": parse_timestamp(payload.get("created_at")),
     }
@@ -297,16 +287,14 @@ def review(payload: object, repo: RepositorySnapshot, *, item_number: int) -> Re
     if not isinstance(review_id, int):
         return None
 
-    state = payload.get("state")
-    commit_id = payload.get("commit_id")
     return ReviewSnapshot(
         repository=repo,
         item_number=item_number,
         review_id=review_id,
-        state=state if isinstance(state, str) else "",
+        state=_str_or_empty(payload.get("state")),
         # Issue #263 reads a file's history from the commit the review was made on. The webhook
         # and the REST list both carry it, so both readers get it from here.
-        commit_id=commit_id if isinstance(commit_id, str) else "",
+        commit_id=_str_or_empty(payload.get("commit_id")),
         **_note_fields(payload, created="submitted_at"),
     )
 
@@ -326,12 +314,11 @@ def review_comment(
     if not isinstance(comment_id, int):
         return None
 
-    path = payload.get("path")
     return ReviewCommentSnapshot(
         repository=repo,
         item_number=item_number,
         comment_id=comment_id,
-        path=path if isinstance(path, str) else "",
+        path=_str_or_empty(payload.get("path")),
         line=_optional_int(payload.get("line")),
         start_line=_optional_int(payload.get("start_line")),
         original_line=_optional_int(payload.get("original_line")),
@@ -347,12 +334,27 @@ def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _note_fields(payload: Payload, *, created: str) -> _NoteFields:
-    html_url = payload.get("html_url")
-    body = payload.get("body")
+def _str_or_empty(value: object) -> str:
+    """A text field, or empty where GitHub sent none.
+
+    The partner of `_optional_int`, for the fields a snapshot carries as a string either way.
+    Not called `_text`, because `projects._text` already means a string or None.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _each[T](rows: object, read: Callable[[object], T | None]) -> tuple[T, ...]:
+    """Every row of a list `read` can make sense of; one it cannot is dropped, not the list."""
+    if not is_json_list(rows):
+        return ()
+    parsed = (read(row) for row in rows)
+    return tuple(found for found in parsed if found is not None)
+
+
+def _note_fields(payload: JsonObject, *, created: str) -> _NoteFields:
     return {
-        "html_url": html_url if isinstance(html_url, str) else "",
-        "body": body if isinstance(body, str) else "",
+        "html_url": _str_or_empty(payload.get("html_url")),
+        "body": _str_or_empty(payload.get("body")),
         "author": actor(payload.get("user")),
         "created_at": parse_timestamp(payload.get(created)),
     }
@@ -367,11 +369,10 @@ def commit_ref(payload: object) -> CommitRef | None:
         return None
 
     inner = payload.get("commit")
-    message = inner.get("message") if is_json_object(inner) else None
     parents = payload.get("parents")
     return CommitRef(
         sha=sha,
-        message=message if isinstance(message, str) else "",
+        message=_str_or_empty(inner.get("message") if is_json_object(inner) else None),
         # `author` and not `commit.author`. The first is the GitHub account, resolved from the
         # email address; the second is whatever the committer typed into their git config.
         author=actor(payload.get("author")),
@@ -387,10 +388,7 @@ def commit_range(payload: object) -> CommitRange | None:
     if not isinstance(status, str) or not status:
         return None
 
-    rows = payload.get("commits")
-    rows = rows if is_json_list(rows) else []
-    parsed = (commit_ref(row) for row in rows)
-    commits = tuple(found for found in parsed if found is not None)
+    commits = _each(payload.get("commits"), commit_ref)
     total = payload.get("total_commits")
     return CommitRange(
         status=status,
@@ -442,17 +440,14 @@ def check_run(payload: object) -> CheckRun | None:
     if not isinstance(check_run_id, int):
         return None
 
-    status = payload.get("status")
-    conclusion = payload.get("conclusion")
-    html_url = payload.get("html_url")
     return CheckRun(
         check_run_id=check_run_id,
         name=name,
         # Empty where GitHub did not say, which reads downstream as "not completed" and holds
         # the announcement back.
-        status=status if isinstance(status, str) else "",
-        conclusion=conclusion if isinstance(conclusion, str) else "",
-        html_url=html_url if isinstance(html_url, str) else "",
+        status=_str_or_empty(payload.get("status")),
+        conclusion=_str_or_empty(payload.get("conclusion")),
+        html_url=_str_or_empty(payload.get("html_url")),
     )
 
 
@@ -464,7 +459,4 @@ def check_runs(payload: object) -> list[CheckRun]:
     """
     if not is_json_object(payload):
         return []
-    rows = payload.get("check_runs")
-    if not is_json_list(rows):
-        return []
-    return [found for found in (check_run(row) for row in rows) if found is not None]
+    return list(_each(payload.get("check_runs"), check_run))

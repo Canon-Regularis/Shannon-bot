@@ -18,7 +18,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.installations import InstallationStore
-from shannon.github.installations import InstallationDirectory, Knows, MapSays
+from shannon.github.installations import Knows, MapSays
+from shannon.services.installations import InstallationDirectory
 
 pytestmark = pytest.mark.integration
 

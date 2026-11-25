@@ -25,6 +25,11 @@ class GitHubAuthError(GitHubError):
 
 
 class GitHubRateLimitError(GitHubError):
+    """GitHub answered, and asked for a wait before it will answer again.
+
+    `retry_after` is that wait in whole seconds, or None where GitHub gave none that could be read.
+    """
+
     def __init__(self, message: str, *, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after

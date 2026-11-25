@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-# A cell holds one line. A newline inside one ends the row, and every later cell shifts up a
-# column, so a name with a line break in it would rewrite the table rather than sit in it.
+# What an empty cell shows: a bare `|  |` reads as a value somebody forgot to fill in, where a
+# dash reads as a deliberate blank.
 _NOTHING = "—"
 
 
@@ -31,8 +31,15 @@ def table(rows: Sequence[tuple[str, str]]) -> str:
     cannot reach.
     """
     for name, value in rows:
-        if "\n" in name or "\n" in value:
-            raise ValueError(f"a table cell cannot hold a line break: {name!r}")
+        # Issue #271: the cell that holds the break is named, not only the row. The one caller
+        # passes constant names, so a message naming only the name pointed at a cell with
+        # nothing wrong in it.
+        if "\n" in name:
+            raise ValueError(f"a table cell cannot hold a line break: the name {name!r}")
+        if "\n" in value:
+            raise ValueError(
+                f"a table cell cannot hold a line break: the value {value!r} in row {name!r}"
+            )
 
     lines = ["|  |  |", "|---|---|"]
     lines.extend(f"| **{name}** | {value or _NOTHING} |" for name, value in rows)

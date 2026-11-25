@@ -1,10 +1,10 @@
 """The names a GitHub body writes, and putting something else in their place.
 
 Reading and swapping live together because they must agree about what counts as a name. Text may
-have been through `safe_text.as_plain_text`, which backslash-escapes an underscore and puts a
-zero-width space inside anything that already looked like a mention, so the pattern below has to
-accommodate both shapes - and since issue #166 a note's body may instead arrive with its markdown
-intact, which is what `skipping_code` is for.
+have been through `discord_bot.safe_text.as_plain_text`, which backslash-escapes an underscore and
+puts a zero-width space inside anything that already looked like a mention, so the pattern below
+has to accommodate both shapes - and since issue #166 a note's body may instead arrive with its
+markdown intact, which is what `skipping_code` is for.
 """
 
 from __future__ import annotations
@@ -28,16 +28,17 @@ MENTION_LIMIT = 10
 
 # GitHub's own rule, narrower than "letters, digits and hyphens": a login may not begin or end
 # with a hyphen or carry two in a row, so the loose version accepts `mona--lisa` and `monalisa-`,
-# names GitHub cannot issue.
-LOGIN = r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}"
+# names GitHub cannot issue. The lookahead caps the whole name at 39, hyphens counted (#271): the
+# repeat alone caps only the letters and digits, so it let a hyphenated name run to 77.
+LOGIN = r"(?![A-Za-z0-9-]{40})[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}"
 
 # GitHub builds a team slug from the display name, so it takes underscores and full stops that an
 # account name never would, and it can be longer.
 TEAM_SLUG = r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})"
 
 # `\A` and `\Z` rather than `^` and `$`: `$` also matches before a trailing newline, so `^...$`
-# called `alice\n` a login. These validate what somebody types at `/link`, and what the transcript
-# checks before putting a name in a URL.
+# called `alice\n` a login. These validate a slug somebody types at `/link_team`, and a login the
+# transcript checks before it goes into a URL or a live `@`.
 _IS_LOGIN = re.compile(rf"\A{LOGIN}\Z")
 _IS_TEAM_SLUG = re.compile(rf"\A{TEAM_SLUG}\Z")
 

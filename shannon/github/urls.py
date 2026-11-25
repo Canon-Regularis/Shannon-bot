@@ -119,9 +119,11 @@ def _split_repository_path(link: str) -> tuple[str, str, list[str]]:
         raise UnparseableLinkError(f"{code_span(link)} does not contain an owner and repository")
 
     owner, repo = segments[0], segments[1].removesuffix(".git")
-    if not _OWNER.match(owner):
+    # `fullmatch` for the reason `commit_url` gives. urlsplit drops newlines today, but these
+    # names go into API paths signed with the bot's token, so the check stands on its own. #271.
+    if not _OWNER.fullmatch(owner):
         raise UnparseableLinkError(f"{code_span(owner)} is not a valid GitHub owner")
-    if not _REPO.match(repo) or repo in _NOT_REPOSITORIES:
+    if not _REPO.fullmatch(repo) or repo in _NOT_REPOSITORIES:
         raise UnparseableLinkError(f"{code_span(repo)} is not a valid GitHub repository name")
 
     return owner, repo, segments

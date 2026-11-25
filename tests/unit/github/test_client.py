@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from typing import Any
 
 import httpx
 import pytest
 
 from shannon.domain.models import RepositorySnapshot
-from shannon.github.client import MAX_PAGES, HttpGitHubClient
+from shannon.github.client import HttpGitHubClient
 from shannon.github.errors import (
     GitHubAuthError,
     GitHubError,
@@ -20,6 +22,7 @@ from shannon.github.errors import (
     GitHubUnavailableError,
 )
 from shannon.github.people import Standing
+from shannon.github.transport import MAX_PAGES, GitHubTransport, github_headers
 from tests.support import github_payloads as payloads
 
 
@@ -37,6 +40,20 @@ def client_with(
         tokens=tokens,
         http_client=httpx.AsyncClient(
             transport=transport, base_url="https://api.github.com", follow_redirects=True
+        ),
+    )
+
+
+def transport_with(
+    handler: Callable[[httpx.Request], httpx.Response], *, tokens: object | None = None
+) -> GitHubTransport:
+    """The transport alone, wired the way `client_with` wires the client over it."""
+    return GitHubTransport(
+        tokens=tokens,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.github.com",
+            follow_redirects=True,
         ),
     )
 
@@ -172,6 +189,60 @@ async def test_forbidden_without_rate_limit_header_is_an_auth_error() -> None:
             await client.get_repository("owner", "repo")
 
 
+SERVED_AT = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+        "YOU HAVE EXCEEDED A SECONDARY RATE LIMIT",
+        "You have triggered an abuse detection mechanism. Please wait a few minutes.",
+    ],
+    ids=["as GitHub says it", "in any case", "in the older words"],
+)
+@pytest.mark.parametrize("status", [403, 429])
+async def test_a_secondary_limit_named_only_in_the_body_waits_a_minute(
+    said: str, status: int
+) -> None:
+    """Issue #271. GitHub's documentation says a secondary limit can come back as a 403 or a 429
+    whose only mark is its message, and that with no `retry-after` the wait is at least a minute.
+
+    Filed as a refused credential, the poller wrote the card move off for good and carried on
+    writing inside the limit. Sixty seconds rather than `x-ratelimit-reset`, which counts down the
+    PRIMARY hourly window: here it is fifty minutes away, and waiting for it would stop the poller
+    for most of an hour over a limit that clears in one minute.
+    """
+    headers = {
+        "x-ratelimit-remaining": "4987",
+        "x-ratelimit-reset": str(int(SERVED_AT.timestamp()) + 3000),
+        "date": format_datetime(SERVED_AT, usegmt=True),
+    }
+    async with client_with(responds(status, {"message": said}, headers)) as client:
+        with pytest.raises(GitHubRateLimitError) as caught:
+            await client.get_repository("owner", "repo")
+
+    assert caught.value.retry_after == 60, "the wait came from the primary window's reset"
+
+
+async def test_a_forbidden_with_no_json_body_and_no_headers_is_still_a_refusal() -> None:
+    """The body is read to look for the secondary limit's words, and a body that is not JSON
+    has none: it stays the refusal it always was rather than failing on the parse."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, content=b"<html>Forbidden</html>")
+
+    async with client_with(handler) as client:
+        with pytest.raises(GitHubAuthError):
+            await client.get_repository("owner", "repo")
+
+
+async def test_a_forbidden_whose_message_is_not_text_is_still_a_refusal() -> None:
+    async with client_with(responds(403, {"message": ["secondary rate limit"]})) as client:
+        with pytest.raises(GitHubAuthError):
+            await client.get_repository("owner", "repo")
+
+
 async def test_server_error_raises_unavailable() -> None:
     async with client_with(responds(502, {"message": "Bad gateway"})) as client:
         with pytest.raises(GitHubUnavailableError):
@@ -224,7 +295,89 @@ async def test_the_client_it_builds_itself_is_the_one_it_closes() -> None:
 
     await client.aclose()
 
-    assert client._client.is_closed is True
+    assert client._transport._client.is_closed is True
+
+
+async def test_a_transport_handed_in_is_left_open_for_the_wiring_to_close() -> None:
+    """Issue #271. The container shares one transport between this client and the board reader,
+    so closing the client must not close the board reader's reads under it."""
+    transport = GitHubTransport()
+    client = HttpGitHubClient(transport=transport)
+
+    await client.aclose()
+
+    assert transport._client.is_closed is False
+    await transport.aclose()
+    assert transport._client.is_closed is True
+
+
+async def test_a_client_over_a_shared_transport_reads_through_it() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(200, content=json.dumps(payloads.repository()))
+
+    async with transport_with(handler, tokens=FakeTokens(acme="ghs_acme")) as transport:
+        await HttpGitHubClient(transport=transport).get_repository("acme", "widget")
+
+    assert seen == ["Bearer ghs_acme"]
+
+
+# The seven reads that used to build `/repos/{owner}/{name}` by hand, and what each is asked.
+UNESCAPED_BEFORE_271: list[tuple[str, Callable[[HttpGitHubClient, str], Any], str]] = [
+    ("get_repository", lambda c, name: c.get_repository("acme", name), ""),
+    (
+        "compare_commits",
+        lambda c, name: c.compare_commits("acme", name, "a" * 40, "b" * 40),
+        f"/compare/{'a' * 40}...{'b' * 40}",
+    ),
+    (
+        "commit_stats",
+        lambda c, name: c.commit_stats("acme", name, "a" * 40),
+        f"/commits/{'a' * 40}",
+    ),
+    ("get_pull_request", lambda c, name: c.get_pull_request("acme", name, 7), "/pulls/7"),
+    ("get_issue", lambda c, name: c.get_issue("acme", name, 7), "/issues/7"),
+    (
+        "list_open_pull_requests",
+        lambda c, name: c.list_open_pull_requests(
+            RepositorySnapshot(github_repo_id=1, owner="acme", name=name, html_url="https://x")
+        ),
+        "/pulls",
+    ),
+    (
+        "list_open_issues",
+        lambda c, name: c.list_open_issues(
+            RepositorySnapshot(github_repo_id=1, owner="acme", name=name, html_url="https://x")
+        ),
+        "/issues",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("call", "rest"),
+    [pytest.param(call, rest, id=name) for name, call, rest in UNESCAPED_BEFORE_271],
+)
+async def test_a_slash_in_a_name_stays_inside_its_segment_on_every_read(
+    call: Callable[[HttpGitHubClient, str], Any], rest: str
+) -> None:
+    """Issue #271. Every write and the newer reads already went through `_repository`, whose
+    reason holds for a read too: a slash read as a separator asks about somebody else's
+    repository. `raw_path`, because `url.path` decodes the escape back into the slash."""
+    seen: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path)
+        return httpx.Response(404, content=json.dumps({"message": "Not Found"}))
+
+    async with client_with(handler) as client:
+        # Some of these answer a 404 with None and some raise it; only the path is under test.
+        with contextlib.suppress(GitHubNotFoundError):
+            await call(client, "widget/evil")
+
+    assert seen[0].split(b"?")[0] == f"/repos/acme/widget%2Fevil{rest}".encode()
 
 
 class TestWritingLabels:
@@ -413,8 +566,8 @@ class TestPagingThroughAList:
     async def test_it_follows_the_link_header_to_the_end(self) -> None:
         _, handler = self._pages([{"id": 1}], [{"id": 2}], [{"id": 3}])
 
-        async with client_with(handler) as client:
-            pages = [page async for page in client.get_pages("/items", per_page=100)]
+        async with transport_with(handler) as transport:
+            pages = [page async for page in transport.get_pages("/items", per_page=100)]
 
         assert pages == [[{"id": 1}], [{"id": 2}], [{"id": 3}]]
 
@@ -423,8 +576,8 @@ class TestPagingThroughAList:
         beside it is how a caller ends up asking for the same page again."""
         seen, handler = self._pages([{"id": 1}], [{"id": 2}])
 
-        async with client_with(handler) as client:
-            [page async for page in client.get_pages("/items", per_page=100)]
+        async with transport_with(handler) as transport:
+            [page async for page in transport.get_pages("/items", per_page=100)]
 
         assert seen[0] == {"per_page": "100"}
         assert "per_page" not in seen[1]
@@ -432,8 +585,8 @@ class TestPagingThroughAList:
     async def test_one_page_is_one_request(self) -> None:
         seen, handler = self._pages([{"id": 1}])
 
-        async with client_with(handler) as client:
-            pages = [page async for page in client.get_pages("/items")]
+        async with transport_with(handler) as transport:
+            pages = [page async for page in transport.get_pages("/items")]
 
         assert len(pages) == 1
         assert len(seen) == 1
@@ -442,22 +595,22 @@ class TestPagingThroughAList:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"<html>maintenance</html>")
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="non-JSON"):
-                [page async for page in client.get_pages("/items")]
+                [page async for page in transport.get_pages("/items")]
 
     async def test_a_refused_page_is_reported(self) -> None:
-        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+        async with transport_with(responds(403, {"message": "Forbidden"})) as transport:
             with pytest.raises(GitHubAuthError):
-                [page async for page in client.get_pages("/items")]
+                [page async for page in transport.get_pages("/items")]
 
     async def test_a_page_that_never_arrives_is_reported(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused", request=request)
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
-                [page async for page in client.get_pages("/items")]
+                [page async for page in transport.get_pages("/items")]
 
     async def test_a_cursor_that_points_at_itself_does_not_read_for_ever(self) -> None:
         """The cursor is opaque, so there is nothing to inspect that would tell a real next page
@@ -472,8 +625,8 @@ class TestPagingThroughAList:
                 headers={"Link": '<https://api.github.com/items?after=same>; rel="next"'},
             )
 
-        async with client_with(handler) as client:
-            pages = [page async for page in client.get_pages("/items")]
+        async with transport_with(handler) as transport:
+            pages = [page async for page in transport.get_pages("/items")]
 
         assert len(pages) == MAX_PAGES
         assert len(seen) == MAX_PAGES
@@ -503,9 +656,9 @@ class TestPagingThroughAList:
         reads the log to skip the line, and the one time it means a board is being cut off looks
         exactly like the times it does not.
         """
-        async with client_with(self._of_length(MAX_PAGES)) as client:
+        async with transport_with(self._of_length(MAX_PAGES)) as transport:
             with caplog.at_level("WARNING"):
-                pages = [page async for page in client.get_pages("/items", page=1)]
+                pages = [page async for page in transport.get_pages("/items", page=1)]
 
         assert len(pages) == MAX_PAGES, "it did not read the whole list"
         assert "stopped following" not in caplog.text
@@ -513,9 +666,9 @@ class TestPagingThroughAList:
     async def test_a_list_one_page_longer_is_reported_as_cut_short(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        async with client_with(self._of_length(MAX_PAGES + 1)) as client:
+        async with transport_with(self._of_length(MAX_PAGES + 1)) as transport:
             with caplog.at_level("WARNING"):
-                pages = [page async for page in client.get_pages("/items", page=1)]
+                pages = [page async for page in transport.get_pages("/items", page=1)]
 
         assert len(pages) == MAX_PAGES
         assert "stopped following" in caplog.text
@@ -523,9 +676,9 @@ class TestPagingThroughAList:
     async def test_a_list_shorter_than_the_limit_says_nothing_either(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        async with client_with(self._of_length(3)) as client:
+        async with transport_with(self._of_length(3)) as transport:
             with caplog.at_level("WARNING"):
-                pages = [page async for page in client.get_pages("/items", page=1)]
+                pages = [page async for page in transport.get_pages("/items", page=1)]
 
         assert len(pages) == 3
         assert caplog.text == ""
@@ -557,8 +710,8 @@ class TestAskingWhetherAListChanged:
     async def test_no_validator_is_sent_when_none_is_held(self) -> None:
         seen, handler = self._answers(200, [{"id": 1}], {"ETag": '"abc"'})
 
-        async with client_with(handler) as client:
-            await client.get_pages_since("/items", per_page=100)
+        async with transport_with(handler) as transport:
+            await transport.get_pages_since("/items", per_page=100)
 
         assert "If-None-Match" not in seen[0].headers
 
@@ -566,8 +719,8 @@ class TestAskingWhetherAListChanged:
         """The saving does not happen unless the question is asked."""
         seen, handler = self._answers(200, [{"id": 1}], {"ETag": '"new"'})
 
-        async with client_with(handler) as client:
-            await client.get_pages_since("/items", etag='"held"', per_page=100)
+        async with transport_with(handler) as transport:
+            await transport.get_pages_since("/items", etag='"held"', per_page=100)
 
         assert seen[0].headers["If-None-Match"] == '"held"'
 
@@ -578,8 +731,8 @@ class TestAskingWhetherAListChanged:
         """
         _, handler = self._answers(304)
 
-        async with client_with(handler) as client:
-            read = await client.get_pages_since("/items", etag='"held"')
+        async with transport_with(handler) as transport:
+            read = await transport.get_pages_since("/items", etag='"held"')
 
         assert read.pages is None
         assert read.etag == '"held"', "the validator it answered to is still the one to send"
@@ -591,8 +744,8 @@ class TestAskingWhetherAListChanged:
         """
         seen, handler = self._answers(304)
 
-        async with client_with(handler) as client:
-            read = await client.get_pages_since("/items", etag='"held"')
+        async with transport_with(handler) as transport:
+            read = await transport.get_pages_since("/items", etag='"held"')
 
         assert read.pages is None
         assert len(seen) == 1, "it followed the 304 somewhere"
@@ -605,10 +758,10 @@ class TestAskingWhetherAListChanged:
         _, unchanged = self._answers(304)
         _, empty = self._answers(200, [], {"ETag": '"e"'})
 
-        async with client_with(unchanged) as client:
-            nothing_changed = await client.get_pages_since("/items", etag='"held"')
-        async with client_with(empty) as client:
-            nothing_there = await client.get_pages_since("/items", etag='"held"')
+        async with transport_with(unchanged) as transport:
+            nothing_changed = await transport.get_pages_since("/items", etag='"held"')
+        async with transport_with(empty) as transport:
+            nothing_there = await transport.get_pages_since("/items", etag='"held"')
 
         assert nothing_changed.pages is None
         assert nothing_there.pages == ([],)
@@ -616,8 +769,8 @@ class TestAskingWhetherAListChanged:
     async def test_a_changed_list_carries_its_new_validator(self) -> None:
         _, handler = self._answers(200, [{"id": 1}], {"ETag": '"fresh"'})
 
-        async with client_with(handler) as client:
-            read = await client.get_pages_since("/items", etag='"stale"')
+        async with transport_with(handler) as transport:
+            read = await transport.get_pages_since("/items", etag='"stale"')
 
         assert read.pages == ([{"id": 1}],)
         assert read.etag == '"fresh"'
@@ -626,8 +779,8 @@ class TestAskingWhetherAListChanged:
         """Nothing to ask with next time, which the board reader reads as do not keep this."""
         _, handler = self._answers(200, [{"id": 1}])
 
-        async with client_with(handler) as client:
-            read = await client.get_pages_since("/items")
+        async with transport_with(handler) as transport:
+            read = await transport.get_pages_since("/items")
 
         assert read.etag is None
 
@@ -647,8 +800,8 @@ class TestAskingWhetherAListChanged:
                 headers["Link"] = f'<https://api.github.com/items?after=c{index}>; rel="next"'
             return httpx.Response(200, content=json.dumps(pages[index]), headers=headers)
 
-        async with client_with(handler) as client:
-            read = await client.get_pages_since("/items", per_page=100)
+        async with transport_with(handler) as transport:
+            read = await transport.get_pages_since("/items", per_page=100)
 
         assert read.pages == tuple(pages), "it did not read the whole list"
         assert read.etag is None, "it kept a validator covering one page of three"
@@ -669,8 +822,8 @@ class TestAskingWhetherAListChanged:
             )
             return httpx.Response(200, content=json.dumps([index]), headers=links)
 
-        async with client_with(handler) as client:
-            await client.get_pages_since("/items", per_page=100)
+        async with transport_with(handler) as transport:
+            await transport.get_pages_since("/items", per_page=100)
 
         assert seen[0].url.params.get("per_page") == "100"
         assert "per_page" not in seen[1].url.params
@@ -679,9 +832,9 @@ class TestAskingWhetherAListChanged:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"<html>maintenance</html>")
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="non-JSON"):
-                await client.get_pages_since("/items")
+                await transport.get_pages_since("/items")
 
     async def test_a_later_page_that_will_not_parse_is_reported(self) -> None:
         """The second read has its own decode, so it needs its own test: a first page that parsed
@@ -699,14 +852,14 @@ class TestAskingWhetherAListChanged:
                 )
             return httpx.Response(200, content=b"<html>maintenance</html>")
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="non-JSON"):
-                await client.get_pages_since("/items")
+                await transport.get_pages_since("/items")
 
     async def test_a_refusal_is_reported(self) -> None:
-        async with client_with(responds(403, {"message": "Forbidden"})) as client:
+        async with transport_with(responds(403, {"message": "Forbidden"})) as transport:
             with pytest.raises(GitHubAuthError):
-                await client.get_pages_since("/items")
+                await transport.get_pages_since("/items")
 
     async def test_a_refusal_on_a_later_page_is_reported(self) -> None:
         calls = {"n": 0}
@@ -721,17 +874,17 @@ class TestAskingWhetherAListChanged:
                 )
             return httpx.Response(403, content=json.dumps({"message": "Forbidden"}))
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubAuthError):
-                await client.get_pages_since("/items")
+                await transport.get_pages_since("/items")
 
     async def test_a_list_that_never_arrives_is_reported(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused", request=request)
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
-                await client.get_pages_since("/items")
+                await transport.get_pages_since("/items")
 
     async def test_a_cursor_that_points_at_itself_does_not_read_for_ever(
         self, caplog: pytest.LogCaptureFixture
@@ -747,9 +900,9 @@ class TestAskingWhetherAListChanged:
                 headers={"Link": '<https://api.github.com/items?after=same>; rel="next"'},
             )
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with caplog.at_level("WARNING"):
-                read = await client.get_pages_since("/items")
+                read = await transport.get_pages_since("/items")
 
         assert read.pages is not None
         assert len(read.pages) == MAX_PAGES
@@ -770,9 +923,9 @@ class TestAskingWhetherAListChanged:
             )
             return httpx.Response(200, content=json.dumps([calls["n"]]), headers=links)
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with caplog.at_level("WARNING"):
-                read = await client.get_pages_since("/items")
+                read = await transport.get_pages_since("/items")
 
         assert read.pages is not None
         assert len(read.pages) == MAX_PAGES, "it did not read the whole list"
@@ -783,8 +936,8 @@ class TestFetchingAnyJson:
     """`get_json` hands the body over as it came, for endpoints that answer with arrays."""
 
     async def test_a_list_body_comes_back_as_a_list(self) -> None:
-        async with client_with(responds(200, [{"id": 1}, {"id": 2}])) as client:
-            assert await client.get_json("/fields") == [{"id": 1}, {"id": 2}]
+        async with transport_with(responds(200, [{"id": 1}, {"id": 2}])) as transport:
+            assert await transport.get_json("/fields") == [{"id": 1}, {"id": 2}]
 
     async def test_parameters_are_sent(self) -> None:
         seen: list[dict[str, str]] = []
@@ -793,8 +946,8 @@ class TestFetchingAnyJson:
             seen.append(dict(request.url.params))
             return httpx.Response(200, content="[]")
 
-        async with client_with(handler) as client:
-            await client.get_json("/items", per_page=100, fields="1,2")
+        async with transport_with(handler) as transport:
+            await transport.get_json("/items", per_page=100, fields="1,2")
 
         assert seen == [{"per_page": "100", "fields": "1,2"}]
 
@@ -802,22 +955,22 @@ class TestFetchingAnyJson:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"<html>nope</html>")
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="non-JSON"):
-                await client.get_json("/fields")
+                await transport.get_json("/fields")
 
     async def test_a_refusal_is_reported(self) -> None:
-        async with client_with(responds(404, {"message": "Not Found"})) as client:
+        async with transport_with(responds(404, {"message": "Not Found"})) as transport:
             with pytest.raises(GitHubNotFoundError):
-                await client.get_json("/fields")
+                await transport.get_json("/fields")
 
     async def test_a_body_that_never_arrives_is_reported(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused", request=request)
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubUnavailableError, match="Could not reach GitHub"):
-                await client.get_json("/fields")
+                await transport.get_json("/fields")
 
 
 class FakeTokens:
@@ -832,6 +985,47 @@ class FakeTokens:
         return self.owners.get(owner, "")
 
 
+class UnreachableTokens:
+    """An installation token that cannot be minted, because GitHub cannot be reached to mint it."""
+
+    async def token_for(self, owner: str) -> str:
+        raise httpx.ConnectError("connection refused")
+
+
+class TestATokenThatCannotBeMinted:
+    """Issue #271. Minting the credential is a request to GitHub as well, and failing to reach
+    GitHub for it is the same outage as failing to reach it for the read.
+
+    Every read now builds its headers inside the one `try` that files a transport error. Two of
+    them used to build theirs outside it, so the raw httpx error escaped past every caller that
+    catches `GitHubError` - while `get_json` beside them filed the same failure as an outage.
+    """
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            pytest.param(lambda t: t.get_json("/items", owner="acme"), id="get_json"),
+            pytest.param(lambda t: t.get_pages_since("/items", owner="acme"), id="get_pages_since"),
+            pytest.param(
+                lambda t: HttpGitHubClient(transport=t).list_commits_on_path(
+                    "acme", "widget", sha="a" * 40, file_path="x.py"
+                ),
+                id="list_commits_on_path",
+            ),
+        ],
+    )
+    async def test_it_is_github_unreachable(self, read: Callable[[GitHubTransport], Any]) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("a request went out with no credential built for it")
+
+        async with transport_with(handler, tokens=UnreachableTokens()) as transport:
+            with pytest.raises(GitHubUnavailableError) as caught:
+                await read(transport)
+
+        assert str(caught.value) == "Could not reach GitHub: connection refused"
+        assert isinstance(caught.value.__cause__, httpx.ConnectError)
+
+
 class TestWhichCredentialACallCarries:
     """The change issue #98 turns on. There is no longer one token: each call carries one minted
     for the account it is about, so a server can only ever read what it was granted."""
@@ -839,9 +1033,7 @@ class TestWhichCredentialACallCarries:
     def test_the_static_headers_carry_no_credential(self) -> None:
         """`Authorization` used to be baked in here, because there was one token for everything.
         Leaving it would mean one credential on every request again."""
-        from shannon.github.client import _headers
-
-        assert "Authorization" not in _headers()
+        assert "Authorization" not in github_headers()
 
     async def test_a_read_is_authorised_as_the_account_it_is_about(self) -> None:
         seen: list[str | None] = []
@@ -869,8 +1061,8 @@ class TestWhichCredentialACallCarries:
             seen.append(request.headers.get("Authorization"))
             return httpx.Response(200, content=json.dumps([]))
 
-        async with client_with(handler) as client:
-            await client.get_json("/items", owner="acme", token="gho_a_person")
+        async with transport_with(handler) as transport:
+            await transport.get_json("/items", owner="acme", token="gho_a_person")
 
         assert seen == ["Bearer gho_a_person"]
 
@@ -883,8 +1075,8 @@ class TestWhichCredentialACallCarries:
             seen.append(request.headers.get("Authorization"))
             return httpx.Response(200, content=json.dumps([]))
 
-        async with client_with(handler, tokens=FakeTokens(acme="ghs_installation")) as client:
-            await client.get_json("/items", owner="acme", token="gho_a_person")
+        async with transport_with(handler, tokens=FakeTokens(acme="ghs_installation")) as transport:
+            await transport.get_json("/items", owner="acme", token="gho_a_person")
 
         assert seen == ["Bearer gho_a_person"], "the installation token won, so a board would 403"
 
@@ -911,8 +1103,11 @@ class TestWhichCredentialACallCarries:
             return httpx.Response(200, content=json.dumps([]), headers=more)
 
         tokens = FakeTokens(acme="ghs_installation")
-        async with client_with(handler, tokens=tokens) as client:
-            [page async for page in client.get_pages("/items", owner="acme", token="gho_chooser")]
+        async with transport_with(handler, tokens=tokens) as transport:
+            [
+                page
+                async for page in transport.get_pages("/items", owner="acme", token="gho_chooser")
+            ]
 
         assert seen == ["Bearer gho_chooser", "Bearer gho_chooser"]
         assert tokens.asked == [], "the installation was asked, so a page could go out as the App"
@@ -925,8 +1120,8 @@ class TestWhichCredentialACallCarries:
             seen.append(request.headers.get("Authorization"))
             return httpx.Response(200, content=json.dumps([]))
 
-        async with client_with(handler, tokens=FakeTokens(acme="ghs_installation")) as client:
-            await client.get_json("/items", owner="acme")
+        async with transport_with(handler, tokens=FakeTokens(acme="ghs_installation")) as transport:
+            await transport.get_json("/items", owner="acme")
 
         assert seen == ["Bearer ghs_installation"]
 
@@ -939,12 +1134,43 @@ class TestWhichCredentialACallCarries:
             seen.append(request.headers.get("Authorization"))
             return httpx.Response(200, content=json.dumps({}))
 
-        async with client_with(handler) as client:
-            await client.patch_json(
+        async with transport_with(handler) as transport:
+            await transport.patch_json(
                 "/items/1", owner="acme", token="gho_the_mover", json={"fields": []}
             )
 
         assert seen == ["Bearer gho_the_mover"]
+
+    async def test_the_board_writer_never_carries_the_installations_token(self) -> None:
+        """Issue #271. The board writer is a token-less view of the transport the App's reads go
+        through, rather than a second client built with no tokens. A write with nobody behind it
+        still goes out anonymous, and GitHub answers 401 to it."""
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization"))
+            return httpx.Response(401, content=json.dumps({"message": "Requires authentication"}))
+
+        tokens = FakeTokens(acme="ghs_installation")
+        async with transport_with(handler, tokens=tokens) as transport:
+            with pytest.raises(GitHubAuthError):
+                await transport.without_tokens().patch_json(
+                    "/items/1", owner="acme", json={"fields": []}
+                )
+
+        assert seen == [None], "a board write went out as the App installation"
+        assert tokens.asked == []
+
+    async def test_the_board_writer_shares_the_connection_and_leaves_it_open(self) -> None:
+        """One pool for the reads and the write, and the reads' to close."""
+        transport = GitHubTransport()
+        writer = transport.without_tokens()
+
+        await writer.aclose()
+
+        assert writer._client is transport._client
+        assert transport._client.is_closed is False
+        await transport.aclose()
 
     async def test_two_accounts_are_authorised_differently(self) -> None:
         """One token for both would be the shared credential this replaced."""
@@ -1373,7 +1599,7 @@ class TestARepositoryThatMoved:
         """Pinned separately because every other test here injects its own client."""
         client = HttpGitHubClient()
 
-        assert client._client.follow_redirects is True
+        assert client._transport._client.follow_redirects is True
 
     async def test_a_renamed_repository_resolves_to_its_new_name(self) -> None:
         # full_name is built from the owner and the name rather than read, so those are what
@@ -2650,10 +2876,9 @@ class TestWhichKindOfAccountAnOwnerIs:
 class TestWritingToAProjectBoard:
     """`patch_json`, the one write that does not go to a repository.
 
-    Deliberately absent from the `GitHubClient` Protocol: that one carries the JSON readers only
-    because the wiring hands the same object to the board reader, which sends each read with a
-    person's authorisation, and a PATCH there would give every service the ability to write to
-    any path.
+    Deliberately absent from the `GitHubClient` Protocol: a PATCH there would give every service
+    the ability to write to any path. Since issue #271 it is the transport's, which is what the
+    board reader is handed, and not the client's.
     """
 
     async def test_it_sends_the_body_with_patch(self) -> None:
@@ -2663,8 +2888,8 @@ class TestWritingToAProjectBoard:
             seen.append((request.method, request.url.path, request.content))
             return httpx.Response(200, content=json.dumps({}))
 
-        async with client_with(handler) as client:
-            await client.patch_json(
+        async with transport_with(handler) as transport:
+            await transport.patch_json(
                 "/users/monalisa/projectsV2/6/items/99",
                 owner="monalisa",
                 json={"fields": [{"id": 39518, "value": "opt-done"}]},
@@ -2684,8 +2909,8 @@ class TestWritingToAProjectBoard:
                 422, content=json.dumps({"message": "Could not resolve to a node"})
             )
 
-        async with client_with(handler) as client:
+        async with transport_with(handler) as transport:
             with pytest.raises(GitHubRefusedError, match="Could not resolve to a node"):
-                await client.patch_json(
+                await transport.patch_json(
                     "/users/monalisa/projectsV2/6/items/99", owner="monalisa", json={}
                 )

@@ -58,8 +58,13 @@ class TestATeam:
 
     def test_the_name_is_read_only_when_there_is_no_slug(self) -> None:
         """A slug is stable; a name is a display string somebody can change."""
-        assert mapping.team({"slug": "backend", "name": "Backend Team"}).login == "backend"
-        assert mapping.team({"name": "Backend Team"}).login == "Backend Team"
+        by_slug = mapping.team({"slug": "backend", "name": "Backend Team"})
+        by_name = mapping.team({"name": "Backend Team"})
+
+        assert by_slug is not None
+        assert by_slug.login == "backend"
+        assert by_name is not None
+        assert by_name.login == "Backend Team"
 
 
 class TestARepository:
@@ -182,7 +187,7 @@ class TestADescription:
 # two author blocks are both real and they disagree, which is the point: `commit.author.name` is
 # whatever the pusher typed into their git config and nothing here may render it.
 def commit_row(**overrides: object) -> dict[str, object]:
-    row = {
+    row: dict[str, object] = {
         "sha": "a" * 40,
         "commit": {"message": "Add the endpoint\n\nAnswers the check.", "author": {"name": "Ada"}},
         "author": {"login": "octocat", "id": 583231},

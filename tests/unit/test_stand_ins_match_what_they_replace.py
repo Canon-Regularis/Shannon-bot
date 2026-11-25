@@ -38,7 +38,7 @@ from shannon.commands.sync_link import SyncsByLink
 from shannon.commands.track import ChoosesWhatAThreadIsTold
 from shannon.commands.unregister import UnregistersRepositories, VerifiesIdentity
 from shannon.commands.workflow import MovesItems, OffersColumns
-from shannon.container import Container
+from shannon.container import BoardTransport, Container
 from shannon.db.stores.muted_members import MutedMemberStore
 from shannon.db.stores.team_links import TeamLinkStore
 from shannon.db.stores.user_links import UserLinkStore
@@ -61,19 +61,19 @@ from shannon.github.client import (
     HttpGitHubClient,
     ListsOpenItems,
     LooksUpUsers,
-    ReadsChecks,
     ReadsCommits,
     ReadsFileHistory,
     ReadsReviewComments,
     ReadsWhoWroteIt,
-    SuppliesTokens,
 )
-from shannon.github.installations import (
-    InstallationDirectory,
-    InstallationTokens,
-    ResolvesInstallations,
+from shannon.github.installations import InstallationTokens, ResolvesInstallations
+from shannon.github.projects import (
+    HttpProjectBoards,
+    ReadsJson,
+    WhoTheBoardIsReadAs,
+    WritesJson,
 )
-from shannon.github.projects import HttpProjectBoards, ReadsJson, WhoTheBoardIsReadAs
+from shannon.github.transport import GitHubTransport, SuppliesTokens
 from shannon.github.webhooks.events import EventHandler
 from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import (
@@ -87,14 +87,21 @@ from shannon.runtime.lifespan import (
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.services.access import GitHubAccess
 from shannon.services.board_credentials import BoardCredentials
-from shannon.services.boards import BoardColumns, BoardLinkingService
+from shannon.services.boards import (
+    BoardColumns,
+    BoardLinkingService,
+    ReadsColumns,
+    ReadsProjects,
+)
 from shannon.services.channels import ChannelMappingService
+from shannon.services.checks import ReadsChecksAndItems
 from shannon.services.delivery.queue import (
     DeliveryInbox,
     DeliveryQueue,
     WebhookDeliveryQueue,
 )
 from shannon.services.delivery.worker import DeliveryWorker
+from shannon.services.installations import InstallationDirectory
 from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
@@ -103,6 +110,7 @@ from shannon.services.projects import ReadsBoardsAndCards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.reminders.book import ReminderBook
 from shannon.services.reminders.send import ReminderSender, ShutsWhereItPosted
+from shannon.services.reviews import ReadsAPullRequestAndItsReviews
 from shannon.services.sync.announcements import AnnouncesInThread
 from shannon.services.sync.draft_cards import ReadsBoards
 from shannon.services.sync.draft_lines import DraftSwitchLine
@@ -148,11 +156,16 @@ from shannon.services.verification import (
     KeepsBoardAuthorisations,
     LinksTheBoardChosen,
 )
-from shannon.services.workflow import ItemWorkflow, LabelsItems, WhoIsMovingTheCard
+from shannon.services.workflow import (
+    ItemWorkflow,
+    LabelsItems,
+    MovesCards,
+    WhoIsMovingTheCard,
+)
 from tests.fakes.board_credentials import FakeBoardCredentials
 from tests.fakes.board_links import NoBoardLinks
 from tests.fakes.boards import FakeBoard
-from tests.fakes.github import FakeGitHubClient
+from tests.fakes.github import FakeGitHubClient, FakeGitHubTransport
 from tests.fakes.grants import FakeGrants
 from tests.fakes.handlers import RecordingHandler
 from tests.fakes.liveness import FakeLiveness
@@ -190,8 +203,13 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ListsOpenItems, HttpGitHubClient),
     (ReadsCommits, FakeGitHubClient),
     (ReadsCommits, HttpGitHubClient),
-    (ReadsChecks, FakeGitHubClient),
-    (ReadsChecks, HttpGitHubClient),
+    # Issue #271: `ReadsChecks` and `ReadsReviews` are gone, never consumed. These are the roles
+    # their consumers declare instead, against both clients the check announcer and the approval
+    # round-up are handed.
+    (ReadsChecksAndItems, FakeGitHubClient),
+    (ReadsChecksAndItems, HttpGitHubClient),
+    (ReadsAPullRequestAndItsReviews, FakeGitHubClient),
+    (ReadsAPullRequestAndItsReviews, HttpGitHubClient),
     (ReadsWhoWroteIt, FakeGitHubClient),
     (ReadsWhoWroteIt, HttpGitHubClient),
     (ReadsReviewComments, FakeGitHubClient),
@@ -200,8 +218,14 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (ReadsFileHistory, HttpGitHubClient),
     # `ReadsJson` was missing from this table all along, and `get_json` and `get_pages` have just
     # grown a parameter in three places at once. This is exactly the drift the file exists for.
-    (ReadsJson, FakeGitHubClient),
-    (ReadsJson, HttpGitHubClient),
+    # Since issue #271 it is the transport that the board reader is built over, and its write half
+    # with it; the fake is what the container under test is handed instead.
+    (ReadsJson, GitHubTransport),
+    (ReadsJson, FakeGitHubTransport),
+    (WritesJson, GitHubTransport),
+    (WritesJson, FakeGitHubTransport),
+    (BoardTransport, GitHubTransport),
+    (BoardTransport, FakeGitHubTransport),
     (SuppliesTokens, InstallationTokens),
     (ResolvesInstallations, InstallationDirectory),
     (ReadsPermissions, FakeGitHubClient),
@@ -274,6 +298,12 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     # out, read on its own - and the fake it is tested against has to answer that too.
     (ReadsBoardsAndCards, HttpProjectBoards),
     (ReadsBoardsAndCards, FakeBoard),
+    # Missing until #271: the three other protocols the board client is wired behind. Real side
+    # only, because their stand-ins live in the test modules that use them, where pyright already
+    # checks them at the point they are handed over.
+    (MovesCards, HttpProjectBoards),
+    (ReadsProjects, HttpProjectBoards),
+    (ReadsColumns, HttpProjectBoards),
     (RoleNames, ConfiguredRoles),
     (MirrorsNotes, ItemNoteMirror),
     (Liveness, FakeLiveness),

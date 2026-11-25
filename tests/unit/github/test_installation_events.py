@@ -3,10 +3,10 @@
 Issue #98. Not about an item, unlike every other event this bot handles: these say what it is
 ABLE to read rather than what happened inside a repository.
 
-The parser is written against the `installation` block rather than against a particular event,
-because every App delivery carries that block. That is deliberate and is what lets a directory
-which missed a webhook repair itself from ordinary traffic, so it is tested against an `issues`
-payload as well as an `installation` one.
+The parser is written against the `installation` block rather than against a particular event, so
+`installation` and `installation_repositories` share it, and it is tested against a payload that is
+neither to show the block is all it reads. A delivery this bot misses costs a lookup, which
+`InstallationTokens` makes.
 """
 
 from __future__ import annotations
@@ -39,9 +39,8 @@ class TestReadingTheInstallation:
             583231,
         )
 
-    def test_an_ordinary_item_delivery_carries_one_too(self) -> None:
-        """Every App delivery does, which is the cheapest repair there is for a directory that
-        missed the webhook that would have told it."""
+    def test_the_block_is_read_whatever_event_it_came_on(self) -> None:
+        """The parser keys on the block rather than the event."""
         found = parse_installation_event(
             {
                 "action": "opened",
