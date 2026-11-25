@@ -19,7 +19,7 @@ including ones a repository made itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 
 from shannon.domain.board import landing_column, named_column, status_from_column
@@ -198,15 +198,7 @@ def status_change(current: Iterable[str], wanted: LabelDefinition) -> LabelChang
 
     Compared case-folded, because GitHub matches a label name without regard to case.
     """
-    names = list(current)
-    target = wanted.name.casefold()
-    stale = tuple(
-        name for name in names if is_status_label(name) and name.strip().casefold() != target
-    )
-    on_it = any(name.strip().casefold() == target for name in names)
-    return LabelChange(
-        remove=stale, add="" if on_it else wanted.name, define=None if on_it else wanted
-    )
+    return _single_valued(current, wanted, is_status_label)
 
 
 def priority_change(current: Iterable[str], wanted: Priority) -> LabelChange:
@@ -219,12 +211,21 @@ def priority_change(current: Iterable[str], wanted: Priority) -> LabelChange:
     two were the same word, and with `priority: High` every run would have taken the label off and
     put it straight back.
     """
+    return _single_valued(current, PRIORITY_LABELS[wanted], _is_priority)
+
+
+def _single_valued(
+    current: Iterable[str], definition: LabelDefinition, belongs: Callable[[str], bool]
+) -> LabelChange:
+    """Swap whichever label of one kind an item holds for `definition`.
+
+    One copy for status and priority since issue #271. While there were two they drifted: the
+    priority copy compared without case-folding after the status copy folded, and a priority
+    already set was taken off and put back on every run until 50af51e.
+    """
     names = list(current)
-    definition = PRIORITY_LABELS[wanted]
     target = definition.name.casefold()
-    stale = tuple(
-        name for name in names if _is_priority(name) and name.strip().casefold() != target
-    )
+    stale = tuple(name for name in names if belongs(name) and name.strip().casefold() != target)
     on_it = any(name.strip().casefold() == target for name in names)
     return LabelChange(
         remove=stale, add="" if on_it else definition.name, define=None if on_it else definition
