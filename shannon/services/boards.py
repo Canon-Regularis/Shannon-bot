@@ -74,8 +74,8 @@ class BoardMovedError(ShannonError):
 class ReadsProjects(Protocol):
     """Listing an owner's boards and opening one, which is all this needs of GitHub.
 
-    Both as somebody in particular, and the credential is REQUIRED here although the reader
-    underneath defaults it. Issue #201: with nothing passed, the client fills the credential in
+    Both as somebody in particular, and the credential is REQUIRED, here and by the reader
+    underneath (#271). Issue #201: with nothing passed, the transport fills the credential in
     with the App installation's token - and the App holds no Projects permission, so the picker
     and the check that a board exists both ran as something that cannot see a private board, while
     the refusal blamed the person's own authorisation. Required at the seam, nothing can forget it.

@@ -276,12 +276,11 @@ class BoardItem:
 class WritesJson(Protocol):
     """Sending JSON at a path, which is all a board write needs.
 
-    Its own Protocol beside the reader rather than a method on `GitHubClient`. That one carries
-    `get_json` only because the wiring hands the same object to the board reader as its
-    transport, every read carrying a person's authorisation; putting a PATCH there would hand
-    every service in this project the ability to write to any path with an installation token,
-    which is strictly wider than anything else on it and is exactly what the module docstring
-    says a handle must not be.
+    Its own Protocol beside the reader rather than a method on `GitHubClient`: a PATCH there would
+    hand every service in this project the ability to write to any path with an installation
+    token, which is strictly wider than anything else on it and is exactly what that module's
+    docstring says a handle must not be. Since issue #271 it is the transport under the client
+    that answers this, and not the client.
     """
 
     async def patch_json(
@@ -290,7 +289,11 @@ class WritesJson(Protocol):
 
 
 class ReadsJson(Protocol):
-    """Fetching JSON, one body or a page at a time."""
+    """Fetching JSON, one body or a page at a time.
+
+    The transport the App's own client reads through, since issue #271. It used to be that whole
+    client, which is why `GitHubClient` carried these three reads for every service holding one.
+    """
 
     async def get_json(
         self, path: str, *, owner: str = "", token: str = "", **params: str | int
@@ -331,7 +334,8 @@ class WhoTheBoardIsReadAs(Protocol):
 
 
 class HttpProjectBoards:
-    """`ReadsBoards` on top of GitHub's REST API for project boards."""
+    """The board client: what `ReadsBoardsAndCards`, `ReadsProjects`, `ReadsColumns` and
+    `MovesCards` ask of GitHub's REST API for project boards."""
 
     def __init__(
         self,
@@ -375,7 +379,7 @@ class HttpProjectBoards:
         # warning - so the log fell silent, which reads as fixed, and the card still never moved.
         self._warned: set[tuple[str, int, str]] = set()
 
-    async def list_boards(self, owner: str, *, token: str = "") -> Sequence[ProjectListing]:
+    async def list_boards(self, owner: str, *, token: str) -> Sequence[ProjectListing]:
         """Every board this owner has, for somebody choosing one.
 
         Over the same prefix the reads use, so the organisation-or-person decision is made once
@@ -399,7 +403,7 @@ class HttpProjectBoards:
         return listings
 
     async def get_board(
-        self, owner: str, project_number: int, *, token: str = ""
+        self, owner: str, project_number: int, *, token: str
     ) -> ProjectListing | None:
         """One board, or None where this token cannot open it.
 
@@ -463,9 +467,20 @@ class HttpProjectBoards:
         so without a name to go on the exact-name pass takes `In review` every time and nothing
         could ever put a card in `In progress`. Empty for `/priority`, which has one field and
         no such ambiguity, and for anything that has only a status to go on.
+
+        An empty `as_` is refused before any request, with the GitHubAuthError `_read_as` raises
+        for a board read with nobody behind it and for the same reason. Issue #271: with a cold
+        cache this read the account's kind and the board's fields as the App installation on
+        nobody's behalf, and only the write itself went out with nothing. After NO_WRITER, which
+        is the deployment's answer whoever asks.
         """
         if self._writer is None:
             return CardMoved(CardMove.NO_WRITER)
+        if not as_:
+            raise GitHubAuthError(
+                f"nobody's authorisation stands behind moving card {card_id} on board "
+                f"{project_number} belonging to {owner}"
+            )
 
         board = await self._board_path(owner, project_number, as_)
         fields = await self._board_fields(board, owner, project_number, as_)
@@ -685,7 +700,7 @@ class HttpProjectBoards:
         """
         return (owner, project_number) in self._listed
 
-    async def _board_path(self, owner: str, project_number: int, token: str = "") -> str:
+    async def _board_path(self, owner: str, project_number: int, token: str) -> str:
         """Where this board lives, which the kind of account owning it decides.
 
         Worked out once per read and handed down, rather than rebuilt by each caller that wants
@@ -695,7 +710,7 @@ class HttpProjectBoards:
         kind = await self._owner_kind(owner, token)
         return f"/{kind}/{quote(owner, safe='')}/projectsV2/{project_number}"
 
-    async def _owner_kind(self, owner: str, token: str = "") -> str:
+    async def _owner_kind(self, owner: str, token: str) -> str:
         """`orgs` or `users`, asked of GitHub once per account and then kept.
 
         Asked rather than configured because an operator can get it wrong and GitHub cannot,
@@ -799,7 +814,7 @@ class HttpProjectBoards:
         )
 
     async def _board_fields(
-        self, board: str, owner: str, project_number: int, token: str = ""
+        self, board: str, owner: str, project_number: int, token: str
     ) -> BoardFields | None:
         """The Title and Status fields, and the Status field's choices, once per board.
 
@@ -822,12 +837,16 @@ class HttpProjectBoards:
 
         body = await self._client.get_json(f"{board}/fields", owner=owner, token=token)
         rows = body if is_json_list(body) else []
-        named = {
-            row.get("name"): row
+        # Each field's id beside its row, narrowed here once: every reader below takes it from
+        # this rather than proving again that it is an int, issue #271. Last row wins for a
+        # repeated name.
+        named: dict[str, tuple[int, JsonObject]] = {
+            name: (field_id, row)
             for row in rows
             if is_json_object(row)
-            and row.get("name") in READ_FIELDS
-            and isinstance(row.get("id"), int)
+            and isinstance(name := row.get("name"), str)
+            and name in READ_FIELDS
+            and isinstance(field_id := row.get("id"), int)
         }
         status = named.get(STATUS_FIELD)
         if status is None:
@@ -853,16 +872,10 @@ class HttpProjectBoards:
         # Found after all, so the next board to lose it is a new complaint rather than a repeat.
         self._fieldless.discard(key)
 
-        status_id = status["id"]
-        assert isinstance(status_id, int)
+        status_id, status_row = status
         found = BoardFields(
-            wanted=tuple(
-                field_id
-                for name in READ_FIELDS
-                if (row := named.get(name)) is not None
-                and isinstance(field_id := row.get("id"), int)
-            ),
-            status=BoardSelect(field_id=status_id, options=_options_of(status)),
+            wanted=tuple(named[name][0] for name in READ_FIELDS if name in named),
+            status=BoardSelect(field_id=status_id, options=_options_of(status_row)),
             priority=_select_of(named.get(PRIORITY_FIELD)),
         )
         self._fields[key] = found
@@ -893,19 +906,19 @@ def _at(options: Sequence[BoardOption], at: int | None) -> BoardOption | None:
     return options[at] if at is not None else None
 
 
-def _select_of(field: JsonObject | None) -> BoardSelect | None:
+def _select_of(field: tuple[int, JsonObject] | None) -> BoardSelect | None:
     """One optional single-select, or None where the board has nothing usable.
 
-    A field with no readable options folds to None rather than to an empty select, so
-    "nothing to write here" is one shape instead of two. Status does not take this route:
-    its id is read for every poll whether or not its options parse, because it is what the
-    request asks for by id.
+    Handed the id already narrowed, by `_board_fields`. A field with no readable options folds
+    to None rather than to an empty select, so "nothing to write here" is one shape instead of
+    two. Status does not take this route: its id is read for every poll whether or not its
+    options parse, because it is what the request asks for by id.
     """
     if field is None:
         return None
-    field_id = field.get("id")
-    options = _options_of(field)
-    if not isinstance(field_id, int) or not options:
+    field_id, row = field
+    options = _options_of(row)
+    if not options:
         return None
     return BoardSelect(field_id=field_id, options=options)
 

@@ -41,7 +41,7 @@ from tests.fakes.discord_objects import (
     FakeInteraction,
     FakeMember,
 )
-from tests.fakes.github import FakeGitHubClient
+from tests.fakes.github import FakeGitHubClient, FakeGitHubTransport
 from tests.fakes.threads import FakeThreadGateway
 from tests.support import github_payloads as payloads
 from tests.support.credentials import BOARD_KEY
@@ -696,20 +696,24 @@ class TestTheWireFromTheContainer:
     """
 
     def a_board_github(self, pr_event) -> FakeGitHubClient:
-        """The file's own fake, plus the two reads the BOARD half makes.
-
-        The pull request has to be stocked as well: this goes through the whole command, so the
-        workflow reads the item from GitHub before it ever asks the board anything.
+        """The file's own fake, with the pull request stocked: this goes through the whole
+        command, so the workflow reads the item from GitHub before it ever asks the board anything.
         """
-        github = FakeGitHubClient(pull_requests={REPO_KEY: pr_event("opened")})
-        # What the board reader asks for, in the order it asks: the kind of account, then the
-        # board's fields. A person's board, so the path prefix is `users`.
-        github.bodies[f"/users/{payloads.OWNER}"] = {"type": "User"}
-        github.bodies[f"/users/{payloads.OWNER}/projectsV2/{BOARD}/fields"] = [
-            {"id": 39516, "name": "Title"},
-            STATUS_FIELD,
-        ]
-        return github
+        return FakeGitHubClient(pull_requests={REPO_KEY: pr_event("opened")})
+
+    def a_board(self) -> FakeGitHubTransport:
+        """The two reads the BOARD half makes, through the transport it is built over since issue
+        #271: the kind of account, then the board's fields. A person's board, so the path prefix
+        is `users`."""
+        return FakeGitHubTransport(
+            {
+                f"/users/{payloads.OWNER}": {"type": "User"},
+                f"/users/{payloads.OWNER}/projectsV2/{BOARD}/fields": [
+                    {"id": 39516, "name": "Title"},
+                    STATUS_FIELD,
+                ],
+            }
+        )
 
     async def run_status(self, container: object, to: str, thread_id: int) -> FakeInteraction:
         command = next(c for c in container.commands if c.name == "status")  # type: ignore[attr-defined]
@@ -759,6 +763,7 @@ class TestTheWireFromTheContainer:
             db_engine,
             threads=threads,
             github=github,
+            board_transport=self.a_board(),
             # The board reads through the FAKE, as somebody who authorised it: since issue #201
             # a board nobody's authorisation stands behind is refused before any request goes
             # out, so the key and the linker's grant are what make it readable at all - which
@@ -793,6 +798,7 @@ class TestTheWireFromTheContainer:
             db_engine,
             threads=threads,
             github=github,
+            board_transport=self.a_board(),
             # The board reads through the FAKE, as somebody who authorised it: since issue #201
             # a board nobody's authorisation stands behind is refused before any request goes
             # out, so the key and the linker's grant are what make it readable at all - which

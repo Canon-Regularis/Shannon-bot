@@ -816,14 +816,18 @@ class TestListingTheBoardsAnOwnerHas:
             ]
         )
 
-        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa")
+        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards(
+            "monalisa", token="gho_chooser"
+        )
 
         assert [(one.number, one.title) for one in listed] == [(3, "Roadmap"), (7, "Bugs")]
 
     async def test_an_organisation_is_listed_under_orgs(self) -> None:
         client = FakeJson(account={"type": "Organization"}, boards=[{"number": 3, "title": "R"}])
 
-        await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("acme")
+        await HttpProjectBoards(client, FakeBoardCredentials()).list_boards(
+            "acme", token="gho_chooser"
+        )
 
         assert any(path == "/orgs/acme/projectsV2" for path, _ in client.calls)
 
@@ -845,14 +849,20 @@ class TestListingTheBoardsAnOwnerHas:
         can make."""
         client = FakeJson(boards=[row, {"number": 9, "title": "Real"}])
 
-        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa")
+        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards(
+            "monalisa", token="gho_chooser"
+        )
 
         assert [one.number for one in listed] == [9]
 
     async def test_an_answer_that_is_not_a_list_is_no_boards(self) -> None:
         client = FakeJson(boards={"message": "Not Found"})
 
-        assert await HttpProjectBoards(client, FakeBoardCredentials()).list_boards("monalisa") == []
+        listed = await HttpProjectBoards(client, FakeBoardCredentials()).list_boards(
+            "monalisa", token="gho_chooser"
+        )
+
+        assert listed == []
 
     async def test_both_requests_carry_the_choosers_own_credential(self) -> None:
         """Issue #201: the account lookup AND the listing. The listing went out with none, which
@@ -878,7 +888,7 @@ class TestOpeningOneBoard:
         client = FakeJson(one_board={"number": 3, "title": "Roadmap"})
 
         found = await HttpProjectBoards(client, FakeBoardCredentials()).get_board(
-            "monalisa", PROJECT
+            "monalisa", PROJECT, token="gho_linker"
         )
 
         assert found is not None
@@ -887,17 +897,20 @@ class TestOpeningOneBoard:
     async def test_it_asks_under_the_owners_own_kind(self) -> None:
         client = FakeJson(account={"type": "Organization"}, one_board={"number": 3, "title": "R"})
 
-        await HttpProjectBoards(client, FakeBoardCredentials()).get_board("acme", PROJECT)
+        await HttpProjectBoards(client, FakeBoardCredentials()).get_board(
+            "acme", PROJECT, token="gho_linker"
+        )
 
         assert any(path == f"/orgs/acme/projectsV2/{PROJECT}" for path, _ in client.calls)
 
     async def test_a_body_it_cannot_read_is_no_board(self) -> None:
         client = FakeJson(one_board={"message": "Not Found"})
 
-        assert (
-            await HttpProjectBoards(client, FakeBoardCredentials()).get_board("monalisa", PROJECT)
-            is None
+        found = await HttpProjectBoards(client, FakeBoardCredentials()).get_board(
+            "monalisa", PROJECT, token="gho_linker"
         )
+
+        assert found is None
 
     async def test_both_requests_carry_the_openers_own_credential(self) -> None:
         """Issue #201: linking a board opens it to prove it exists, and that check went out with
@@ -1942,7 +1955,7 @@ class TestOpeningABoardThatRefuses:
     )
     async def test_it_answers_no_board_rather_than_raising(self, error: Exception) -> None:
         found = await HttpProjectBoards(self.Refusing(error), FakeBoardCredentials()).get_board(
-            "monalisa", PROJECT
+            "monalisa", PROJECT, token="gho_linker"
         )
 
         assert found is None
@@ -1963,7 +1976,7 @@ class TestOpeningABoardThatRefuses:
         is thrown away at the moment somebody most needs it."""
         with caplog.at_level("WARNING", logger="shannon.github.projects"):
             await HttpProjectBoards(self.Refusing(error), FakeBoardCredentials()).get_board(
-                "monalisa", PROJECT
+                "monalisa", PROJECT, token="gho_linker"
             )
 
         assert "could not open board" in caplog.text
@@ -1978,7 +1991,7 @@ class TestOpeningABoardThatRefuses:
         )
 
         with pytest.raises(GitHubRateLimitError):
-            await boards.get_board("monalisa", PROJECT)
+            await boards.get_board("monalisa", PROJECT, token="gho_linker")
 
     @pytest.mark.parametrize(
         "error",
@@ -2296,12 +2309,38 @@ class TestWhoseAuthorisationTheWriteCarries:
             "the write went out as whoever linked the board rather than as whoever moved the card"
         )
 
-    async def test_a_write_with_nobody_behind_it_carries_nothing(self) -> None:
-        """Which GitHub answers 401 to, and that is the point: the board's write client holds no
-        credential of its own, so a card cannot be moved by nobody."""
-        writer = FakeWriter()
+    async def test_a_move_with_nobody_behind_it_is_refused_before_any_request(self) -> None:
+        """Issue #271, for the reason `_read_as` gives under #201: an empty credential is not
+        anonymous on its way through the transport, it is filled in with the App installation's.
 
-        await self.boards(writer, board_token="gho_the_board").move_card(
+        With a cold cache the move used to read the account's kind and the board's fields that way
+        before the write went out with nothing - so the reads are what this checks, as well as the
+        write. A card cannot be moved by nobody, and nobody's move asks GitHub nothing either.
+        """
+        client = FakeJson(fields=[{"id": 39516, "name": "Title"}, a_board()])
+        writer = FakeWriter()
+        boards = HttpProjectBoards(
+            client, FakeBoardCredentials(reads="gho_the_board"), writer=writer
+        )
+
+        with pytest.raises(GitHubAuthError, match="nobody's authorisation"):
+            await boards.move_card(
+                owner="monalisa",
+                project_number=PROJECT,
+                card_id=99,
+                state=Status.IN_REVIEW,
+                as_="",
+            )
+
+        assert client.calls == [], "the board was read as the App on behalf of nobody"
+        assert writer.sent_as == []
+
+    async def test_with_no_writer_nobodys_move_is_still_no_writer(self) -> None:
+        """Writes turned off is the first answer, whoever asked: it is what the deployment chose,
+        and it holds for everybody."""
+        client = FakeJson(fields=[{"id": 39516, "name": "Title"}, a_board()])
+
+        moved = await HttpProjectBoards(client, FakeBoardCredentials()).move_card(
             owner="monalisa",
             project_number=PROJECT,
             card_id=99,
@@ -2309,7 +2348,7 @@ class TestWhoseAuthorisationTheWriteCarries:
             as_="",
         )
 
-        assert writer.sent_as == [""]
+        assert moved.outcome is CardMove.NO_WRITER
 
 
 class TestABoardNobodysAuthorisationStandsBehind:

@@ -4,8 +4,9 @@ import asyncio
 import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
-from typing import Any, TypeVar
+from typing import TypeVar
 
+from shannon.domain.json import JsonObject
 from shannon.domain.models import (
     CheckRun,
     CommitRange,
@@ -98,14 +99,6 @@ class FakeGitHubClient:
             for key, snapshot in store.items()
         }
         self.label_calls: list[tuple[str, tuple[str, int], str]] = []
-        # Bodies for the untyped endpoints, keyed by path, and what was asked of them.
-        self.bodies: dict[str, Any] = {}
-        self.json_calls: list[tuple[str, dict[str, Any]]] = []
-        # Which account each untyped read was authorised as. Separate from the calls above so the
-        # existing assertions on paths and parameters do not have to change shape, and worth
-        # recording at all because an empty owner is an anonymous request: on a private
-        # repository that is the difference between reading it and being told it does not exist.
-        self.json_owners: list[str] = []
         # What each login may do, read by `permission_for` (registration, the access gate,
         # `/unregister`, putting people on items) and by assignability. Anything not named
         # here is an admin.
@@ -545,28 +538,44 @@ class FakeGitHubClient:
             raise self.error
         return self.standings.get(login.lower(), Standing(NO_ACCESS, None))
 
+    def _restate(self, key: tuple[str, int]) -> None:
+        """Put the labels back on the stored snapshot, so a later fetch agrees with the writes.
+
+        Without this the fake would answer every read with the labels it was built with, and a
+        test could set a status twice and see the second call believe the first never happened.
+        """
+        held = tuple(Label(name=name) for name in self.labels.get(key, []))
+        for store in (self.pull_requests, self.issues):
+            if key in store:
+                store[key] = replace(store[key], labels=held)
+
+
+class FakeGitHubTransport:
+    """The board reader's transport backed by a dictionary of bodies, for a container under test.
+
+    Issue #271. The board reader used to be built over `github`, so `FakeGitHubClient` answered
+    these three reads for it; it is built over the transport now, and this is what stands in for
+    that. `TestTheWireFromTheContainer` stocks it with the account and the board's fields. Every
+    other container under test reads no board, and an unstocked path answers an empty list.
+    """
+
+    def __init__(self, bodies: Mapping[str, object] | None = None) -> None:
+        # Bodies keyed by path, and what was asked of them: the path, the query and whose
+        # authorisation it carried, which since issue #170 is a person's rather than the App's.
+        self.bodies: dict[str, object] = dict(bodies or {})
+        self.reads: list[tuple[str, dict[str, str | int], str]] = []
+        self.patches: list[tuple[str, str, JsonObject]] = []
+
     async def get_json(
         self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> object:
-        """Whatever this fake was told to answer with at a path, or an empty list.
-
-        Here because the protocol declares it, which is the point of the conformance table: the
-        wiring hands this same object to the project board reader, so a fake without these
-        builds a container that dies on the first poll rather than failing at the seam.
-        """
-        self.json_calls.append((path, params))
-        self.json_owners.append(owner)
-        if self.error is not None:
-            raise self.error
+        self.reads.append((path, params, token))
         return self.bodies.get(path, [])
 
     async def get_pages(
         self, path: str, *, owner: str = "", token: str = "", **params: str | int
     ) -> AsyncIterator[object]:
-        self.json_calls.append((path, params))
-        self.json_owners.append(owner)
-        if self.error is not None:
-            raise self.error
+        self.reads.append((path, params, token))
         yield self.bodies.get(path, [])
 
     async def get_pages_since(
@@ -582,29 +591,14 @@ class FakeGitHubClient:
 
         Answering `pages=None` would need this fake to model what it last handed out, and nothing
         asking it for a container wants that: the board reader's conditional path has its own
-        stand-in beside its own tests. Here the honest answer is "changed, here it is", which is
-        what every caller of this fake already expects.
-
-        No validator either, which keeps the reader from caching against a fake that cannot
-        validate. One page with nothing in it is also not a full one, so this stays truthful about
-        the one thing the reader checks.
+        stand-in beside its own tests. No validator either, which keeps the reader from caching
+        against a fake that cannot validate.
         """
-        self.json_calls.append((path, params))
-        self.json_owners.append(owner)
-        if self.error is not None:
-            raise self.error
+        self.reads.append((path, params, token))
         return PagedRead(etag=None, pages=(self.bodies.get(path, []),))
 
-    def _restate(self, key: tuple[str, int]) -> None:
-        """Put the labels back on the stored snapshot, so a later fetch agrees with the writes.
-
-        Without this the fake would answer every read with the labels it was built with, and a
-        test could set a status twice and see the second call believe the first never happened.
-        """
-        held = tuple(Label(name=name) for name in self.labels.get(key, []))
-        for store in (self.pull_requests, self.issues):
-            if key in store:
-                store[key] = replace(store[key], labels=held)
+    async def patch_json(self, path: str, *, owner: str, token: str = "", json: JsonObject) -> None:
+        self.patches.append((path, token, json))
 
 
 class ClosingGitHub(FakeGitHubClient):

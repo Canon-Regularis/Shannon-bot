@@ -1,18 +1,20 @@
 """The GitHub calls this project makes, and the narrow handles it makes them through.
 
 Each protocol below names only what one caller needs, so a handle that can put a reviewer on a
-pull request cannot also read a commit or write a label. They are declared here rather than
-beside their implementations, which reach the database and would drag storage in behind HTTP.
+pull request cannot also read a commit or write a label. They are declared here, beside the
+implementation, rather than beside the services that consume them, which reach the database and
+would drag storage in behind HTTP.
+
+How a request reaches GitHub - credentials, pages, redirects, and how an answer is filed - is
+`transport.py`, issue #271. What is here is what each endpoint means.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import time
-from collections.abc import AsyncIterator, Callable, Sequence
-from email.utils import parsedate_to_datetime
-from typing import Any, Protocol, TypeVar
+from collections.abc import Callable, Sequence
+from typing import Protocol, TypeVar
 from urllib.parse import quote
 
 import httpx
@@ -30,30 +32,11 @@ from shannon.domain.models import (
     ReviewSnapshot,
 )
 from shannon.github import mapping
-from shannon.github.errors import (
-    GitHubAuthError,
-    GitHubNotFoundError,
-    GitHubRateLimitError,
-    GitHubRefusedError,
-    GitHubUnavailableError,
-)
-from shannon.github.paging import PagedRead
+from shannon.github.errors import GitHubNotFoundError, GitHubUnavailableError
 from shannon.github.people import NO_ACCESS, Standing
+from shannon.github.transport import DEFAULT_BASE_URL, GitHubTransport, SuppliesTokens
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_BASE_URL = "https://api.github.com"
-API_VERSION = "2022-11-28"
-
-# How far a paged read will follow the Link header. At a hundred rows a page this is more
-# than any board or list this bot reads, and it is the only thing standing between a
-# self-referential cursor and a loop that never ends.
-MAX_PAGES = 50
-
-# How far a write will follow a redirect. GitHub answers a renamed repository with the current
-# name in one hop rather than a chain, so this is a bound on something that should not happen
-# rather than room to work in.
-MAX_WRITE_REDIRECTS = 3
 
 # GitHub's maximum, and the right end of the range to be at. A backlog is read whole, so round
 # trips are the thing to spend the fewest of; there is no partial answer worth asking for.
@@ -65,22 +48,11 @@ LIST_PAGE_SIZE = 100
 _Item = TypeVar("_Item", PullRequestSnapshot, IssueSnapshot)
 
 
-def _an_issue(payload: Any, repository: RepositorySnapshot) -> IssueSnapshot | None:
+def _an_issue(payload: object, repository: RepositorySnapshot) -> IssueSnapshot | None:
     """An issue row, or None for the pull requests GitHub mixes into the issues endpoint."""
     if mapping.is_pull_request(payload):
         return None
     return mapping.issue(payload, repository)
-
-
-class SuppliesTokens(Protocol):
-    """A bearer token for calls about one GitHub account, or the empty string for none.
-
-    Empty rather than an exception: it is the state an unset token already produced, so a
-    deployment with no App configured answers on public endpoints rather than failing on the
-    first command anybody runs.
-    """
-
-    async def token_for(self, owner: str) -> str: ...
 
 
 class LooksUpRepository(Protocol):
@@ -147,32 +119,6 @@ class ReadsWhoWroteIt(Protocol):
     ) -> Sequence[CommitRef] | None: ...
 
 
-class ReadsChecks(Protocol):
-    """Every CI job on one commit, which is all the check announcer needs.
-
-    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
-    """
-
-    async def list_check_runs(
-        self, owner: str, name: str, sha: str
-    ) -> Sequence[CheckRun] | None: ...
-
-
-class ReadsReviews(Protocol):
-    """Every review on one pull request, which is all the approval round-up needs.
-
-    Asked of GitHub rather than remembered, because nothing here can remember it correctly: a
-    review is rewritten in place when it is dismissed, and `pull_request_review.dismissed` is not
-    an action this bot subscribes to. A stored verdict would go stale with nothing saying so.
-
-    None rather than raising when GitHub has nothing, for the reason `ReadsCommits` gives.
-    """
-
-    async def list_reviews(
-        self, repository: RepositorySnapshot, number: int
-    ) -> Sequence[ReviewSnapshot] | None: ...
-
-
 class ReadsReviewComments(Protocol):
     """Every inline comment on one pull request, which is how a reply finds whoever it answers.
 
@@ -208,11 +154,9 @@ class ReadsFileHistory(Protocol):
 class GitHubClient(
     ListsOpenItems,
     LooksUpUsers,
-    ReadsChecks,
     ReadsCommits,
     ReadsFileHistory,
     ReadsReviewComments,
-    ReadsReviews,
     ReadsWhoWroteIt,
     Protocol,
 ):
@@ -222,27 +166,11 @@ class GitHubClient(
     knows GitHub is reached over HTTP.
     """
 
-    async def get_repository(self, owner: str, name: str) -> RepositorySnapshot: ...
-
-    async def user_id(self, login: str) -> int | None: ...
-
     async def user_login(self, account_id: int) -> str | None: ...
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot: ...
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot: ...
-
-    async def compare_commits(
-        self, owner: str, name: str, base: str, head: str
-    ) -> CommitRange | None: ...
-
-    async def commit_stats(self, owner: str, name: str, sha: str) -> CommitStats | None: ...
-
-    async def list_open_pull_requests(
-        self, repository: RepositorySnapshot
-    ) -> Sequence[PullRequestSnapshot]: ...
-
-    async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]: ...
 
     async def permission_for(self, owner: str, name: str, login: str) -> str: ...
 
@@ -260,9 +188,17 @@ class GitHubClient(
         self, owner: str, name: str, label: str, *, new_name: str, colour: str
     ) -> None: ...
 
+    # Declared here rather than through a role of their own, because their consumers declare
+    # their own: the check announcer's `ReadsChecksAndItems` and the approval round-up's
+    # `ReadsAPullRequestAndItsReviews`. Each answers None rather than raising when GitHub has
+    # nothing, for the reason `ReadsCommits` gives.
     async def list_check_runs(
         self, owner: str, name: str, sha: str
     ) -> Sequence[CheckRun] | None: ...
+
+    async def list_reviews(
+        self, repository: RepositorySnapshot, number: int
+    ) -> Sequence[ReviewSnapshot] | None: ...
 
     async def add_comment(self, owner: str, name: str, number: int, body: str) -> None: ...
 
@@ -288,29 +224,18 @@ class GitHubClient(
 
     async def can_be_assigned(self, owner: str, name: str, login: str) -> bool: ...
 
-    # Untyped bodies, for the project endpoints, which answer with arrays and are parsed by a
-    # module that checks every field it touches. Declared here because the wiring hands this same
-    # object to the board reader, and a stand-in without them would fail on the first poll.
-    async def get_json(
-        self, path: str, *, owner: str = "", token: str = "", **params: str | int
-    ) -> object: ...
-
-    def get_pages(
-        self, path: str, *, owner: str = "", token: str = "", **params: str | int
-    ) -> AsyncIterator[object]: ...
-
-    async def get_pages_since(
-        self,
-        path: str,
-        *,
-        etag: str | None = None,
-        owner: str = "",
-        token: str = "",
-        **params: str | int,
-    ) -> PagedRead: ...
-
 
 class HttpGitHubClient:
+    """The typed GitHub operations, each one a path, a mapping and a policy for 404.
+
+    Over a `GitHubTransport`, which the container shares with the board reader. Issue #271: the
+    board reader used to be handed this whole client for its raw reads, which is why
+    `GitHubClient` carried them and every service holding one could GET any path.
+
+    `transport` is that shared one. Without it the client builds its own out of the rest, and
+    closes it with itself; one handed in is the wiring's to close.
+    """
+
     def __init__(
         self,
         *,
@@ -318,26 +243,16 @@ class HttpGitHubClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 10.0,
         http_client: httpx.AsyncClient | None = None,
+        transport: GitHubTransport | None = None,
     ) -> None:
-        # A supplier rather than a token: each call carries a credential minted for the account
-        # it is about, so the header is decided per request. None means no App is configured and
-        # every request goes out unauthenticated, which is what an empty token already did.
-        self._tokens = tokens
-        self._owns_client = http_client is None
-        self._client = http_client or httpx.AsyncClient(
-            base_url=base_url,
-            timeout=timeout,
-            headers=_headers(),
-            # Renaming a repository or its owner turns every lookup of the old name into a 301,
-            # as does moving an issue between repositories. httpx does not follow redirects
-            # unless told to, and an unfollowed one surfaces as "GitHub could not be reached".
-            # Safe with a token: httpx drops Authorization on a cross-origin redirect.
-            follow_redirects=True,
+        self._owns_transport = transport is None
+        self._transport = transport or GitHubTransport(
+            tokens=tokens, base_url=base_url, timeout=timeout, http_client=http_client
         )
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        if self._owns_transport:
+            await self._transport.aclose()
 
     async def __aenter__(self) -> HttpGitHubClient:
         return self
@@ -346,7 +261,7 @@ class HttpGitHubClient:
         await self.aclose()
 
     async def get_repository(self, owner: str, name: str) -> RepositorySnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}", owner)
+        payload = await self._get(_repository(owner, name), owner)
         snapshot = mapping.repository(payload)
         if snapshot is None:
             raise GitHubUnavailableError(
@@ -403,7 +318,7 @@ class HttpGitHubClient:
         so a push of more than 250 commits has its list cut while `total_commits` stays right,
         which is what the announcer subtracts from to report the overflow. A 404 is permanent.
         """
-        path = f"/repos/{owner}/{name}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
+        path = f"{_repository(owner, name)}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
         try:
             payload = await self._get(path, owner)
         except GitHubNotFoundError:
@@ -417,8 +332,9 @@ class HttpGitHubClient:
         A call each, because the commit rows inside a compare carry no `stats` block, and the
         compare's own totals cover the whole range rather than any one commit.
         """
+        path = f"{_repository(owner, name)}/commits/{quote(sha, safe='')}"
         try:
-            payload = await self._get(f"/repos/{owner}/{name}/commits/{quote(sha, safe='')}", owner)
+            payload = await self._get(path, owner)
         except GitHubNotFoundError:
             logger.info("GitHub has no commit %s on %s/%s", sha, owner, name)
             return None
@@ -435,7 +351,7 @@ class HttpGitHubClient:
         found: list[CheckRun] = []
         path = f"{_repository(owner, name)}/commits/{quote(sha, safe='')}/check-runs"
         try:
-            async for body in self.get_pages(
+            async for body in self._transport.get_pages(
                 path, owner=owner, filter="latest", per_page=LIST_PAGE_SIZE
             ):
                 found.extend(mapping.check_runs(body))
@@ -469,7 +385,7 @@ class HttpGitHubClient:
         found: list[CommitRef] = []
         path = f"{_repository(owner, name)}/pulls/{number}/commits"
         try:
-            async for body in self.get_pages(path, owner=owner, per_page=LIST_PAGE_SIZE):
+            async for body in self._transport.get_pages(path, owner=owner, per_page=LIST_PAGE_SIZE):
                 for row in body if is_json_list(body) else []:
                     commit = mapping.commit_ref(row)
                     if commit is not None:
@@ -492,31 +408,29 @@ class HttpGitHubClient:
         a name that is, at worst, missing from one line - and a review asking for changes reads
         this once per file it commented on.
 
-        Sent through `_fetch` with the query as a mapping rather than through `get_json` or
+        Sent through `read_json` with the query as a mapping rather than through `get_json` or
         `get_pages`. Both of those take the endpoint as `path` and the query as keywords, so a
         query parameter that is itself called `path` cannot be passed to either; httpx encodes it
-        here, a space, a `#` and anything outside ASCII included.
+        there, a space, a `#` and anything outside ASCII included.
 
         None for a 404, which is a commit or a repository GitHub does not have: final, for the
         reason `ReadsCommits` gives. A refusal or an outage is raised for the caller to judge.
         """
         endpoint = f"{_repository(owner, name)}/commits"
-        response = await self._fetch(
-            endpoint,
-            params={"sha": sha, "path": file_path, "per_page": LIST_PAGE_SIZE},
-            headers=await self._authorization(owner),
-        )
         try:
-            _raise_for_status(response, endpoint)
+            body = await self._transport.read_json(
+                endpoint,
+                query={"sha": sha, "path": file_path, "per_page": LIST_PAGE_SIZE},
+                owner=owner,
+            )
         except GitHubNotFoundError:
             logger.info("GitHub has no history of %s at %s on %s/%s", file_path, sha, owner, name)
             return None
-        body = self._body(response, endpoint)
         parsed = (mapping.commit_ref(row) for row in (body if is_json_list(body) else []))
         return [commit for commit in parsed if commit is not None]
 
     async def get_pull_request(self, owner: str, name: str, number: int) -> PullRequestSnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}/pulls/{number}", owner)
+        payload = await self._get(f"{_repository(owner, name)}/pulls/{number}", owner)
 
         # The PR response embeds its own repository under base.repo, which saves a second call.
         base = payload.get("base")
@@ -532,7 +446,7 @@ class HttpGitHubClient:
         return snapshot
 
     async def get_issue(self, owner: str, name: str, number: int) -> IssueSnapshot:
-        payload = await self._get(f"/repos/{owner}/{name}/issues/{number}", owner)
+        payload = await self._get(f"{_repository(owner, name)}/issues/{number}", owner)
 
         # GitHub serves pull requests from this endpoint as well, so a number that turns out to
         # be a pull request is reported as no such issue rather than tracked as one.
@@ -561,20 +475,22 @@ class HttpGitHubClient:
         those would open every thread saying nobody had been asked to review.
         """
         return await self._open_items(
-            f"/repos/{repository.owner}/{repository.name}/pulls", repository, mapping.pull_request
+            f"{_repository(repository.owner, repository.name)}/pulls",
+            repository,
+            mapping.pull_request,
         )
 
     async def list_open_issues(self, repository: RepositorySnapshot) -> Sequence[IssueSnapshot]:
         """Every open issue, with the pull requests GitHub mixes in dropped."""
         return await self._open_items(
-            f"/repos/{repository.owner}/{repository.name}/issues", repository, _an_issue
+            f"{_repository(repository.owner, repository.name)}/issues", repository, _an_issue
         )
 
     async def _open_items(
         self,
         path: str,
         repository: RepositorySnapshot,
-        parse: Callable[[Any, RepositorySnapshot], _Item | None],
+        parse: Callable[[object, RepositorySnapshot], _Item | None],
     ) -> list[_Item]:
         """Read a list endpoint whole, once each.
 
@@ -588,7 +504,7 @@ class HttpGitHubClient:
         one item and be counted twice on the way out.
         """
         found: dict[int, _Item] = {}
-        async for body in self.get_pages(
+        async for body in self._transport.get_pages(
             path,
             owner=repository.owner,
             state="open",
@@ -626,10 +542,7 @@ class HttpGitHubClient:
         A 404 is no access and no account rather than an error. A body that leaves either half
         out answers none for that half: no permission refuses, and no account matches nobody.
         """
-        path = (
-            f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
-            f"/collaborators/{quote(login, safe='')}/permission"
-        )
+        path = f"{_repository(owner, name)}/collaborators/{quote(login, safe='')}/permission"
         try:
             payload = await self._get(path, owner)
         except GitHubNotFoundError:
@@ -642,20 +555,6 @@ class HttpGitHubClient:
             permission if isinstance(permission, str) else NO_ACCESS,
             account_id if isinstance(account_id, int) else None,
         )
-
-    async def patch_json(self, path: str, *, owner: str, token: str = "", json: JsonObject) -> None:
-        """Send JSON at a path with PATCH, for the one caller that writes to a board.
-
-        Over `_send` like every other write here, which is what gets the three things a
-        naive `client.patch()` does not: redirects re-issued by hand, because httpx turns a
-        redirected write into a bodyless GET; the credential for this owner; and
-        `_raise_for_status`, which turns a 422 into a refusal carrying GitHub's own words.
-        That last one is the whole diagnosis for a body shape this project has never been
-        able to check against a live board.
-
-        Deliberately absent from the `GitHubClient` Protocol. See `WritesJson`.
-        """
-        await self._send("PATCH", path, owner, token=token, json=json)
 
     async def is_organisation(self, owner: str) -> bool:
         """Whether this account is an organisation rather than a person.
@@ -683,7 +582,7 @@ class HttpGitHubClient:
         Nothing is read back: GitHub sends this straight back as an `issue_comment` delivery,
         and what recognises the echo is a marker in the body rather than the comment's id.
         """
-        await self._send(
+        await self._transport.send(
             "POST",
             f"{_repository(owner, name)}/issues/{number}/comments",
             owner,
@@ -698,7 +597,7 @@ class HttpGitHubClient:
         their colours first (`LabelDefinitions.ensure`, issue #246), because a label created here
         comes out grey.
         """
-        await self._send(
+        await self._transport.send(
             "POST",
             f"{_repository(owner, name)}/issues/{number}/labels",
             owner,
@@ -716,7 +615,7 @@ class HttpGitHubClient:
         """
         path = f"{_repository(owner, name)}/issues/{number}/labels/{quote(label, safe='')}"
         with contextlib.suppress(GitHubNotFoundError):
-            await self._send("DELETE", path, owner)
+            await self._transport.send("DELETE", path, owner)
 
     async def request_reviewers(
         self, owner: str, name: str, number: int, logins: Sequence[str]
@@ -727,7 +626,7 @@ class HttpGitHubClient:
         that is not a collaborator, for the author, and for somebody already asked, which is why
         `_raise_for_status` tells a refusal from an outage.
         """
-        await self._send(
+        await self._transport.send(
             "POST",
             f"{_repository(owner, name)}/pulls/{number}/requested_reviewers",
             owner,
@@ -739,7 +638,7 @@ class HttpGitHubClient:
     ) -> None:
         """Withdraw a review request, treating one that was never made as done."""
         with contextlib.suppress(GitHubNotFoundError):
-            await self._send(
+            await self._transport.send(
                 "DELETE",
                 f"{_repository(owner, name)}/pulls/{number}/requested_reviewers",
                 owner,
@@ -754,7 +653,7 @@ class HttpGitHubClient:
         GitHub does not refuse somebody who cannot be assigned: it drops them and answers 201 as
         though it had not. `can_be_assigned` is asked first for that reason.
         """
-        await self._send(
+        await self._transport.send(
             "POST",
             f"{_repository(owner, name)}/issues/{number}/assignees",
             owner,
@@ -766,7 +665,7 @@ class HttpGitHubClient:
     ) -> None:
         """Take the named accounts off an issue, treating one not on it as done."""
         with contextlib.suppress(GitHubNotFoundError):
-            await self._send(
+            await self._transport.send(
                 "DELETE",
                 f"{_repository(owner, name)}/issues/{number}/assignees",
                 owner,
@@ -781,7 +680,7 @@ class HttpGitHubClient:
         """
         path = f"{_repository(owner, name)}/assignees/{quote(login, safe='')}"
         try:
-            await self._send("GET", path, owner)
+            await self._transport.send("GET", path, owner)
         except GitHubNotFoundError:
             return False
         return True
@@ -794,7 +693,7 @@ class HttpGitHubClient:
         half-read list would refuse a label that exists.
         """
         found: list[str] = []
-        async for body in self.get_pages(
+        async for body in self._transport.get_pages(
             f"{_repository(owner, name)}/labels", owner=owner, per_page=LIST_PAGE_SIZE
         ):
             for row in body if is_json_list(body) else []:
@@ -811,7 +710,7 @@ class HttpGitHubClient:
         colour where every other caller wants the name alone.
         """
         found: dict[str, str] = {}
-        async for body in self.get_pages(
+        async for body in self._transport.get_pages(
             f"{_repository(owner, name)}/labels", owner=owner, per_page=LIST_PAGE_SIZE
         ):
             for row in body if is_json_list(body) else []:
@@ -828,7 +727,7 @@ class HttpGitHubClient:
         GitHub answers 422 for a name the repository already has, which arrives here as
         `GitHubRefusedError` and is the caller's to read as "it is there already".
         """
-        await self._send(
+        await self._transport.send(
             "POST",
             f"{_repository(owner, name)}/labels",
             owner,
@@ -843,7 +742,7 @@ class HttpGitHubClient:
         A rename moves the label on every item carrying it at once, which is what lets an old
         label become a new one without touching a single issue.
         """
-        await self._send(
+        await self._transport.send(
             "PATCH",
             f"{_repository(owner, name)}/labels/{quote(label, safe='')}",
             owner,
@@ -870,7 +769,9 @@ class HttpGitHubClient:
         found: list[ReviewSnapshot] = []
         path = f"{_repository(repository.owner, repository.name)}/pulls/{number}/reviews"
         try:
-            async for body in self.get_pages(path, owner=repository.owner, per_page=LIST_PAGE_SIZE):
+            async for body in self._transport.get_pages(
+                path, owner=repository.owner, per_page=LIST_PAGE_SIZE
+            ):
                 for row in body if is_json_list(body) else []:
                     review = mapping.review(row, repository, item_number=number)
                     if review is not None:
@@ -900,7 +801,9 @@ class HttpGitHubClient:
         found: list[ReviewCommentSnapshot] = []
         path = f"{_repository(repository.owner, repository.name)}/pulls/{number}/comments"
         try:
-            async for body in self.get_pages(path, owner=repository.owner, per_page=LIST_PAGE_SIZE):
+            async for body in self._transport.get_pages(
+                path, owner=repository.owner, per_page=LIST_PAGE_SIZE
+            ):
                 for row in body if is_json_list(body) else []:
                     comment = mapping.review_comment(row, repository, item_number=number)
                     if comment is not None:
@@ -911,220 +814,9 @@ class HttpGitHubClient:
             return None
         return found
 
-    async def _send(
-        self, method: str, path: str, owner: str = "", token: str = "", **kwargs: Any
-    ) -> None:
-        """A write, whose answer is only ever whether it worked.
-
-        Redirects are followed here rather than by the transport. GitHub answers 301 after a
-        rename, and httpx re-issues a redirected POST as a bodyless GET, so a label write
-        against a renamed repository fetched the label list, was answered 200, and wrote nothing
-        that anything downstream could tell from success. A stale name is ordinary: nothing
-        corrects `repositories.repo_name` until an item webhook arrives.
-        """
-        try:
-            headers = await self._authorization(owner, token)
-            response = await self._client.request(
-                method, path, follow_redirects=False, headers=headers, **kwargs
-            )
-            for _ in range(MAX_WRITE_REDIRECTS):
-                if not response.is_redirect:
-                    break
-                path = _redirect_target(response, path)
-                response = await self._client.request(
-                    method, path, follow_redirects=False, headers=headers, **kwargs
-                )
-        except httpx.HTTPError as exc:
-            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
-
-        # A redirect still standing after that lands in the catch-all as "GitHub returned 301",
-        # which is retryable and loud, and for a chain that never resolves is the right answer.
-        _raise_for_status(response, path)
-
-    async def get_pages(
-        self, path: str, *, owner: str = "", token: str = "", **params: str | int
-    ) -> AsyncIterator[object]:
-        """Every page of a list endpoint, following GitHub's own Link header.
-
-        The project endpoints paginate by cursor: there is no `page` parameter, and asking for
-        page two by number silently returns the first page again, so a caller that counted pages
-        would mirror every card twice. The cursor is opaque, so the header is followed as given.
-
-        `token` is the same explicit credential `get_json` takes, and goes on every page rather
-        than the first. Issue #201: listing somebody's boards is a board read like any other, and
-        without it the list went out as the App installation, which cannot see a private board.
-        """
-        url: str | None = path
-        for _ in range(MAX_PAGES):
-            if url is None:
-                return
-            try:
-                response = await self._client.get(
-                    url, params=params or None, headers=await self._authorization(owner, token)
-                )
-            except httpx.HTTPError as exc:
-                raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
-
-            _raise_for_status(response, path)
-            try:
-                yield response.json()
-            except ValueError as exc:
-                raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
-
-            # The next URL carries the cursor already, so the original parameters must not be
-            # sent again beside it.
-            url = response.links.get("next", {}).get("url")
-            params = {}
-
-        # A Link header that points at itself, or a list that never ends, would otherwise keep
-        # this reading for as long as the process lives. Bounded rather than trusted: the cursor
-        # is opaque, so there is nothing to inspect to tell the two apart.
-        #
-        # Only when something was actually left. This used to hang off the loop's `else`, which
-        # runs whenever the range is exhausted, so a list of exactly `MAX_PAGES` pages was read
-        # whole and reported as cut short. A warning that fires when nothing is wrong is worse
-        # than no warning: it teaches whoever reads the log to skip the line, and the one time
-        # it means a board is being truncated looks exactly like the times it does not.
-        if url is not None:
-            logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
-
-    async def get_pages_since(
-        self,
-        path: str,
-        *,
-        etag: str | None = None,
-        owner: str = "",
-        token: str = "",
-        **params: str | int,
-    ) -> PagedRead:
-        """Every page of a list endpoint, unless GitHub says none of it changed.
-
-        The conditional sibling of `get_pages`, and a separate method rather than a parameter on
-        it. That one is an async generator, and a generator has nowhere to put an answer that is
-        not a page; six callers read it as a stream of bodies and none of them wants to learn
-        about validators.
-
-        `If-None-Match` goes on the FIRST request only. A 304 to it costs **no rate-limit budget
-        at all** - GitHub's counter does not move - and carries no body, which is the whole reason
-        a board can now be read every couple of seconds for less than it used to cost to read it
-        every minute.
-
-        Pages are collected rather than yielded, because the answer "or nothing changed" is not a
-        page and a generator cannot say it. Nothing is held that was not held before: the one
-        caller accumulated every item into a list anyway.
-        """
-        headers = await self._authorization(owner, token)
-        if etag:
-            headers = {**headers, "If-None-Match": etag}
-
-        response = await self._fetch(path, params=params or None, headers=headers)
-
-        # Checked BEFORE `_raise_for_status`, which reads anything outside the 2xx range as a
-        # failure. A 304 is the opposite of a failure: it is GitHub confirming the copy already
-        # held, and the validator sent is still the right one to send again.
-        if response.status_code == 304:
-            return PagedRead(etag=etag, pages=None)
-
-        _raise_for_status(response, path)
-        validator = response.headers.get("etag")
-        pages: list[object] = [self._body(response, path)]
-
-        # The next URL carries the cursor already, so the original parameters must not be sent
-        # again beside it.
-        url: str | None = response.links.get("next", {}).get("url")
-        paged = url is not None
-
-        for _ in range(MAX_PAGES - 1):
-            if url is None:
-                break
-            response = await self._fetch(
-                url, params=None, headers=await self._authorization(owner, token)
-            )
-            _raise_for_status(response, path)
-            pages.append(self._body(response, path))
-            url = response.links.get("next", {}).get("url")
-
-        # The same bound `get_pages` keeps, for the same reason: the cursor is opaque, so a Link
-        # header pointing at itself cannot be told from a real next page by inspection.
-        if url is not None:
-            logger.warning("stopped following pages of %s after %s of them", path, MAX_PAGES)
-
-        # A one-line conditional on purpose. Written as an `if` it would be a branch whose arms
-        # the coverage floor counts separately, and the reason for it is one sentence either way:
-        # a validator that covers one page of several covers nothing. See `PagedRead`.
-        return PagedRead(etag=None if paged else validator, pages=tuple(pages))
-
-    async def _fetch(
-        self, url: str, *, params: dict[str, str | int] | None, headers: dict[str, str]
-    ) -> httpx.Response:
-        """One GET, with a failure to reach GitHub told apart from a GitHub that answered."""
-        try:
-            return await self._client.get(url, params=params, headers=headers)
-        except httpx.HTTPError as exc:
-            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
-
-    def _body(self, response: httpx.Response, path: str) -> object:
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
-
-    async def get_json(
-        self, path: str, *, owner: str = "", token: str = "", **params: str | int
-    ) -> object:
-        """Whatever GitHub answers at a path, list or object alike.
-
-        The project endpoints are parsed by a module that checks every field it touches, so
-        this hands the body over as it came.
-        """
-        try:
-            response = await self._client.get(
-                path, params=params or None, headers=await self._authorization(owner, token)
-            )
-        except httpx.HTTPError as exc:
-            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
-
-        _raise_for_status(response, path)
-
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
-
-    async def _authorization(self, owner: str, token: str = "") -> dict[str, str]:
-        """The credential for calls about one account, or nothing at all.
-
-        Nothing rather than an empty bearer: `Bearer ` is malformed and GitHub answers 401,
-        where no header at all is anonymous and public endpoints answer. An empty owner means
-        a call that is not about a repository, and those endpoints are public.
-
-        An explicit `token` wins, and exists for one caller. Issue #170: a project board is read
-        and written under the authorisation of a particular PERSON, which the owner cannot
-        identify - two servers may link two different boards owned by the same account, so a
-        credential chosen by owner alone would be one server's board read under another server's
-        member's grant. The board reader resolves whose it is and says so here; everything else
-        still asks `token_for`, which answers with an installation and knows nothing about people.
-        """
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-        if self._tokens is None or not owner:
-            return {}
-        resolved = await self._tokens.token_for(owner)
-        return {"Authorization": f"Bearer {resolved}"} if resolved else {}
-
     async def _get(self, path: str, owner: str = "") -> JsonObject:
-        try:
-            response = await self._client.get(path, headers=await self._authorization(owner))
-        except httpx.HTTPError as exc:
-            raise GitHubUnavailableError(f"Could not reach GitHub: {exc}") from exc
-
-        _raise_for_status(response, path)
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise GitHubUnavailableError(f"GitHub returned a non-JSON body for {path}") from exc
-
+        """`get_json` for an endpoint that answers with one object, refusing any other shape."""
+        payload = await self._transport.get_json(path, owner=owner)
         if not is_json_object(payload):
             raise GitHubUnavailableError(f"GitHub returned an unexpected body for {path}")
         return payload
@@ -1134,114 +826,7 @@ def _repository(owner: str, name: str) -> str:
     """The path segment naming one repository, with both halves escaped.
 
     A repository name is GitHub's to shape, and a stray slash in one would read as another path
-    segment and send the write somewhere else.
+    segment and send the request somewhere else - a read as well as a write, issue #271: a read
+    sent elsewhere answers about a repository nobody asked for.
     """
     return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
-
-
-def _headers() -> dict[str, str]:
-    """The headers every request carries whoever it is about.
-
-    `Authorization` is not among them: it depends on which account the request concerns, so
-    `_authorization` below builds it per request.
-    """
-    return {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": API_VERSION,
-        "User-Agent": "shannon-bot",
-    }
-
-
-def _redirect_target(response: httpx.Response, path: str) -> str:
-    """Where a redirected write goes instead, if it can go anywhere at all.
-
-    Following one by hand means deciding who the Authorization header is handed to. GitHub
-    answers a rename with the same host and a new path, so anything else is refused.
-    """
-    location = response.headers.get("location")
-    if not location:
-        raise GitHubUnavailableError(f"GitHub redirected {path} without saying where")
-
-    target = response.url.join(location)
-    here = response.url
-    if (target.scheme, target.host, target.port) != (here.scheme, here.host, here.port):
-        raise GitHubUnavailableError(f"GitHub redirected {path} to another host, {target.host}")
-    return str(target)
-
-
-def _raise_for_status(response: httpx.Response, path: str) -> None:
-    if response.is_success:
-        return
-
-    status = response.status_code
-    if status == 404:
-        raise GitHubNotFoundError(f"GitHub has nothing at {path}")
-    if status == 429 or _is_rate_limited(response):
-        raise GitHubRateLimitError("GitHub rate limit reached", retry_after=_retry_after(response))
-    if status in {401, 403}:
-        raise GitHubAuthError(f"GitHub refused the request for {path} ({status})")
-    # Above the catch-all, because a 422 is the opposite of what the catch-all means. GitHub read
-    # the request and declined it, so retrying sends the same refusal back, and it is nearly always
-    # the caller's to fix: a reviewer who is not a collaborator, the item's own author, somebody
-    # already asked. Under the catch-all all of those read as "GitHub could not be reached".
-    if status == 422:
-        raise GitHubRefusedError(_refusal(response, path))
-    raise GitHubUnavailableError(f"GitHub returned {status} for {path}")
-
-
-def _refusal(response: httpx.Response, path: str) -> str:
-    """GitHub's own words for why it would not do something.
-
-    Read rather than replaced: the reasons are specific, numerous and GitHub's to change. A body
-    that is not the expected shape falls back to naming the path.
-    """
-    try:
-        payload = response.json()
-    except ValueError:
-        return f"GitHub refused the request for {path}"
-
-    said = payload.get("message") if is_json_object(payload) else None
-    return said if isinstance(said, str) and said else f"GitHub refused the request for {path}"
-
-
-def _is_rate_limited(response: httpx.Response) -> bool:
-    """Whether a 403 is GitHub asking for a wait rather than refusing outright.
-
-    Two limits, answering differently. The primary one is the hourly budget and says so in the
-    counter. The secondary one is about how fast requests arrive, spends no budget, and marks
-    itself only by asking for a wait, with the counter beside it often nowhere near zero. So
-    reading the counter alone misses the limit this bot actually trips, which is the poller
-    moving cards: filed as a refusal it loses the wait, and carrying on at the ordinary
-    interval is how GitHub's documentation says an integration gets banned. A 429 is already a
-    rate limit whatever else it carries, and the caller handles it.
-    """
-    if response.status_code != 403:
-        return False
-    if response.headers.get("x-ratelimit-remaining") == "0":
-        return True
-    return "retry-after" in response.headers
-
-
-def _retry_after(response: httpx.Response) -> int | None:
-    """Seconds to wait before trying again.
-
-    The two headers are different kinds of number. `retry-after` is already a delay;
-    `x-ratelimit-reset` is the epoch second the window reopens, so it is turned into a delay
-    against GitHub's own `date` header, which is the clock it was measured on.
-    """
-    delay = response.headers.get("retry-after")
-    if delay and delay.isdigit():
-        return int(delay)
-
-    reset = response.headers.get("x-ratelimit-reset")
-    if reset and reset.isdigit():
-        return max(0, int(reset) - _served_at(response))
-    return None
-
-
-def _served_at(response: httpx.Response) -> int:
-    served = response.headers.get("date")
-    if served:
-        with contextlib.suppress(TypeError, ValueError):
-            return int(parsedate_to_datetime(served).timestamp())
-    return int(time.time())

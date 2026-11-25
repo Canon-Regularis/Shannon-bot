@@ -5,12 +5,14 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any, ClassVar
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
 from shannon.config import Settings
 from shannon.container import build_container
 from shannon.discord_bot.permissions import MemberTiers
+from shannon.github.transport import GitHubTransport
 from shannon.services.sync.shutting import KeepsThreadsShut
 from shannon.services.tier_grants import GitHubTierGrants
 from shannon.services.verification import OAuthClient
@@ -81,9 +83,9 @@ class TestClosingTheContainer:
 
     async def test_everything_else_opened_here_is_closed_too(self) -> None:
         """Not just `github`. The App's own client signs with a JWT rather than an installation
-        token, so it is a second client, and the board's writer is a third, built in every
-        deployment whether or not card writes are on. Both were built in the wiring, reachable
-        from nowhere else, and closed by nothing."""
+        token, so it is a second client, and the transport the API and the boards share is built
+        whether or not `github` is. Both are built in the wiring and reachable from nowhere
+        else."""
         container = container_with(DisposableEngine(), FakeGitHubClient())
         opened = _Closeable()
         container.also_opened = (*container.also_opened, opened)
@@ -93,16 +95,21 @@ class TestClosingTheContainer:
         assert opened.closed is True
 
     async def test_both_clients_it_owns_are_held_so_they_can_be(self) -> None:
-        """Two, in every deployment. The App's own JWT client, and the board's writer.
+        """Two, in every deployment. The App's own JWT client, and the transport the API client and
+        the board reader share.
 
-        The writer is unconditional now, where it used to appear only when a project token was
-        set: it carries no credential at all, because every board write passes the authorisation of
-        whoever asked for it. So there is nothing for a deployment to turn on, and nothing to
-        branch on here either.
+        The board's writer is that transport's token-less view (#271), over the same connection, so
+        it opens nothing of its own and there is nothing more here to close.
         """
         container = container_with(DisposableEngine(), FakeGitHubClient())
+        app_http, transport = container.also_opened
+        assert isinstance(app_http, httpx.AsyncClient)
+        assert isinstance(transport, GitHubTransport)
 
-        assert len(container.also_opened) == 2
+        await container.aclose()
+
+        # The connection itself, since the token-less view closes nothing and would pass for it.
+        assert (app_http.is_closed, transport._client.is_closed) == (True, True)
 
 
 class TestWhatItWiresUp:

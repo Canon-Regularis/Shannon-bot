@@ -717,8 +717,8 @@ class ItemWorkflow:
 
         # Whoever asked. Somebody with no authorisation only gets this far where there is
         # nothing to write - board writes are off, or the board has no field for this state -
-        # and then nothing is sent at all. Never an empty credential: on its way through the
-        # client that is filled in with the App installation's token. Issue #201.
+        # and then nothing is sent at all. Never an empty credential: a card moves as somebody or
+        # not at all, and `move_card` refuses one too. Issue #201.
         mover = await self._authorisations.moving(guild_id=found.guild_id, discord_user_id=acting)
         if not mover:
             return False

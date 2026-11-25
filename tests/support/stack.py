@@ -15,7 +15,7 @@ from shannon.db.models import WebhookEvent
 from shannon.domain.enums import DeliveryStatus, ObjectType
 from shannon.github.client import GitHubClient
 from shannon.services.delivery.worker import DeliveryWorker
-from tests.fakes.github import FakeGitHubClient
+from tests.fakes.github import FakeGitHubClient, FakeGitHubTransport
 from tests.fakes.threads import FakeThreadGateway
 from tests.support.db import map_channel, register_repository
 from tests.support.signing import SECRET, post
@@ -39,6 +39,7 @@ def build_stack(
     threads: FakeThreadGateway | None = None,
     github: GitHubClient | None = None,
     settings: Settings | None = None,
+    board_transport: FakeGitHubTransport | None = None,
 ) -> Container:
     """The real container with Discord and GitHub swapped for fakes.
 
@@ -48,12 +49,16 @@ def build_stack(
     `settings` for a test about WIRING rather than about behaviour - what the container builds
     out of a setting is not reachable any other way, and a test that has to assemble its own
     container to vary one field is a test that stops using the production assembly.
+
+    `board_transport` is what the board reader reads through, issue #271: it used to read through
+    `github`, and a fake one stands beside the fake client so no board read reaches the network.
     """
     return build_container(
         threads=threads or FakeThreadGateway(),
         settings=settings or Settings(github_webhook_secret=SECRET),
         engine=engine,
         github=github or FakeGitHubClient(),
+        board_transport=board_transport or FakeGitHubTransport(),
     )
 
 
