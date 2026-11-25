@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shannon.db.stores.installations import InstallationStore
 from shannon.github.webhooks.events import WebhookOutcome
-from shannon.github.webhooks.installations import build_installation_handler
+from shannon.services.installations import build_installation_handler
 
 pytestmark = pytest.mark.integration
 
@@ -144,6 +144,26 @@ class TestPausing:
         found = await stored(db_session)
         assert found is not None
         assert found.suspended is False
+
+    @pytest.mark.parametrize("action", ["created", "new_permissions_accepted", "added", "removed"])
+    async def test_an_event_with_no_word_on_it_leaves_the_suspension_alone(
+        self,
+        db_sessionmaker: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        action: str,
+    ) -> None:
+        """Issue #271, the #268 bug from the webhook's side. Every action but `suspend` wrote that
+        the App was running, so an owner changing which repositories a paused App covers unpaused
+        it here, and every call after that minted against an installation GitHub refuses."""
+        handle = build_installation_handler(db_sessionmaker)
+        await handle("created", delivery())
+        await handle("suspend", delivery())
+
+        await handle(action, delivery())
+
+        found = await stored(db_session)
+        assert found is not None
+        assert found.suspended is True
 
     async def test_a_suspend_for_an_account_never_seen_still_leaves_a_row(
         self, db_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
