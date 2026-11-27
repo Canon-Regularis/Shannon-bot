@@ -8812,3 +8812,75 @@ feature end to end rather than assuming a predecessor the file never recorded.
   lines under `shannon.services.installations`.
 - **Tests.** A test that fails on the old code for each fix, and the guard on what `github/`
   imports.
+
+## The runtime module, held to the checklist
+
+- **`shannon/runtime/` was checked against the same checklist** (#272). An audit kept about twenty
+  findings once duplicates were merged, and dropped ten. Most were names and comments that had
+  stopped being true. Four were defects in how the process stops, and each is fixed below.
+- **The order things start and stop in is pinned first.** Conversations load before the bot starts.
+  Every loop is asked to stop before any is waited for, and the bot closes only after them. A
+  `bot.close()` that fails still closes the container. A halt reaches a real uvicorn and runs its
+  shutdown.
+- **A stop no longer waits for ever on an open request.** Uvicorn waits for open requests with no
+  limit by default. So one client that sent half a webhook body and went quiet held the whole
+  shutdown open: no loop was asked to stop, and a process that halted itself never ended. It now
+  waits ten seconds, which is as long as GitHub waits for an answer. A request cut off there gets a
+  500, and uvicorn logs "Cancel 1 running task(s), timeout graceful shutdown exceeded".
+- **Every shutdown step has a deadline.** Each loop still gets its grace for the work in hand.
+  Then every loop still running is cancelled at the same time, and all of them get twelve seconds
+  in total to unwind. That is above the ten seconds a thread being opened waits for its row. The
+  Discord client, the bot's task and the container then get five seconds each. Before, a loop that
+  would not unwind, or a database gone quiet under `aclose`, held the stop until Docker killed it.
+  A step that ended in a cancel also skipped every step after it. The steps run as tasks that are
+  watched and then left, because `asyncio.timeout` did not end a close that was stuck.
+- **A process that stops itself now ends.** After its shutdown, uvicorn raises SIGTERM a second
+  time to exit. As PID 1 in its container, the process does not die of that signal, and waits with
+  no limit for any task the shutdown had to leave behind. It was left with its port closed and its
+  state "running", so nothing restarted it. Both compose files now give the app an init. This was
+  measured in a container, both ways.
+- **An idle worker stops at once.** Between batches it slept out its poll interval, whatever the
+  stop said. An interval longer than the grace got it cancelled and reported as a loop that would
+  not stop. It now waits on the stop, as the poller, the flusher and the sender already did.
+- **Loading the logged conversations has a deadline.** Startup waited on that query with no limit.
+  It now has the fifteen seconds the database check has, and its own error line, "could not load
+  which conversations are being logged".
+- **Smaller and clearer.** There is now one list of the running tasks, `ProcessTasks`, which the
+  shutdown and `/health` both read. It replaces five task fields that were copied by hand into a
+  half-built liveness object. One `watch` call starts a task and reports how it ends.
+  `Gateway.is_ready` had no callers and is gone. `gateway_is_ready` is now `gateway_is_up`, which is
+  what it holds. The wait for the gateway reads its own result, so a failure in it is not taken for
+  a connection. The liveness probe takes its clock as a parameter, so no test sleeps, and
+  `test_liveness.py` leaves both "not clean yet" lists. The fixed sleeps in `test_lifespan.py` are
+  waits on a condition now.
+- **What `/health` and the docs say is true.** A worker or poller "running" means its task has not
+  ended. It does not mean the task is getting anywhere. ARCHITECTURE.md lists every shutdown step
+  with its limit, and says what still has none: code that blocks the event loop.
+- **What it costs.** The longest a stop can take goes from about 40 seconds to 57. All four loops
+  now share twelve seconds to unwind after a cancel, where each one used to have as long as it took.
+  So a flusher or sender cut off while Discord rate-limits it can get up to about twenty seconds
+  less than before. Under the init, nothing runs after the shutdown. A batch hand-back still on its
+  way to the database at that point is lost, and those rows wait out their lease.
+- **For whoever deploys it.**
+  - Both compose files change. `stop_grace_period` is now 70s, and the app service has `init: true`.
+    Anywhere else, give the container the same two things: at least 70 seconds before it is
+    killed, and an init (`docker run --init`, or tini).
+  - A clean stop now exits with code 143, not 0. `unless-stopped` restarts on either. A monitor that
+    treats any non-zero code as a crash will now count every ordinary stop.
+  - Raising `SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS` means raising `stop_grace_period` by four
+    times as much.
+  - No migration. These log lines changed:
+    - "a background task did not stop within 5.0s, cancelling it" is now "the delivery worker did
+      not stop when asked, cancelling it", which names the loop.
+    - New: "the delivery worker is still running 12.0s after being cancelled, leaving it".
+    - New: "could not close the container while shutting down: still not done after 5.0s".
+- **Left for later.** The webhook route reads its body before it checks the signature, with no
+  read deadline, and the database has no `command_timeout`. Both are follow-ups. A halt asked for
+  during shutdown was looked at again, and is still the no-op recorded above.
+- **Tests.**
+  - Each fix has a test that fails on the old code. One is a real uvicorn server held open by a
+    stalled request body.
+  - A shutdown with everything stuck runs on a clock that skips its waits. It has to take the sum
+    the budget test holds below `stop_grace_period`, less uvicorn's ten seconds for open
+    requests, which come before it, to within half a second.
+  - The runtime tests ran twenty times in a row, all green.
