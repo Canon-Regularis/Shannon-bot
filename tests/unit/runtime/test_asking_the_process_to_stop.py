@@ -3,9 +3,11 @@
 Everything else about this is testable with a stand-in, and the one step that matters is not: the
 signal itself. `ask_the_process_to_stop` raises SIGTERM, and whether that ends up somewhere that
 runs the ordinary shutdown, rather than killing the process where it stands, is a property of the
-interpreter and the platform rather than of this code.
+interpreter, the platform and uvicorn rather than of this code.
 
-So it runs in a subprocess, which also means a mistake here cannot take the test run with it.
+So all but the last test run it in a subprocess, which also means a mistake here cannot take the
+test run with it. Two of them catch the signal with a handler of their own, and one leaves it to
+uvicorn (#272).
 """
 
 from __future__ import annotations
@@ -36,8 +38,34 @@ CHILD = textwrap.dedent(
 )
 
 
+# Port 0, so that nothing here can collide with a port already in use. What the lifespan prints is
+# read by the parent, and "shut down" is printed only once uvicorn has run the shutdown half.
+UVICORN_CHILD = textwrap.dedent(
+    """
+    import asyncio, contextlib
+
+    import uvicorn
+    from fastapi import FastAPI
+
+    from shannon.runtime.supervision import ask_the_process_to_stop
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        print("started", flush=True)
+        asyncio.get_running_loop().call_later(0.2, ask_the_process_to_stop)
+        yield
+        # Gives the loop away, as every real shutdown step does, so a process that ends as soon as
+        # the shutdown has begun never prints the line.
+        await asyncio.sleep(0.1)
+        print("shut down", flush=True)
+
+    uvicorn.run(FastAPI(lifespan=lifespan), host="127.0.0.1", port=0)
+    """
+)
+
+
 def test_the_signal_reaches_a_handler_rather_than_ending_the_process() -> None:
-    """Uvicorn installs a handler for this and shuts down on it, which is the whole point.
+    """A handler gets the signal, which is all that uvicorn's own handler needs.
 
     Killing the process outright would leave the delivery in hand half done and the rest of its
     leased batch locked for the lease, which is what shutting down properly exists to avoid.
@@ -60,6 +88,22 @@ def test_it_says_what_it_is_doing_before_it_does_it() -> None:
     )
 
     assert "stopping the process so it can be restarted" in finished.stderr
+
+
+def test_uvicorn_runs_the_lifespans_shutdown_and_then_the_process_ends() -> None:
+    """The two halves of a halt: the ordinary shutdown runs, and then there is an exit to act on.
+
+    The exit code is left alone. Uvicorn raises the signal again once it is done, so the code is
+    the platform's, and the restart policy acts on the exit whatever the code (#272).
+
+    The timeout is far above what this takes, and under the one pytest puts on every test, so a
+    process that never ends fails here by name and is killed.
+    """
+    finished = subprocess.run(
+        [sys.executable, "-c", UVICORN_CHILD], capture_output=True, text=True, timeout=45
+    )
+
+    assert finished.stdout.split("\n")[:2] == ["started", "shut down"], finished.stderr
 
 
 def test_it_raises_the_signal_in_this_process_too() -> None:
