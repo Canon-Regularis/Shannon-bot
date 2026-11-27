@@ -70,12 +70,14 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
-    # Sized against the two shutdown budgets that run one after the other, which the
-    # development file explains: about fifteen seconds end to end when discord.py is sitting
-    # out a rate limit, and a worker killed before it finishes leaves up to nine leased
-    # deliveries stuck until their fifteen minute lease lapses. Forty seconds at worst: four loops
-    # to wait out, two of which can also be waiting on a thread being opened.
-    stop_grace_period: 50s
+    # So that a process that stops itself ends, and the policy above has an exit to act on. As
+    # PID 1 it would be left waiting on any task shutdown could not end, with its port closed and
+    # its state "running". The development file has the whole of it (#272).
+    init: true
+    # Above the sum of everything shutdown waits for, which the development file adds up: 57
+    # seconds at worst. A worker killed before it finishes leaves up to nine leased deliveries
+    # stuck until their fifteen minute lease lapses.
+    stop_grace_period: 70s
 
   caddy:
     image: caddy:2-alpine
