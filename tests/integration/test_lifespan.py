@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -16,21 +17,39 @@ from shannon.runtime.lifespan import build_lifespan
 from shannon.services.delivery.worker import ReadyCheck
 from tests.fakes.github import ClosingGitHub
 from tests.fakes.threads import FakeThreadGateway
+from tests.support.waiting import until
 
 pytestmark = pytest.mark.integration
 
 
 class FakeBot:
-    """Enough of ShannonBot for the lifespan: it starts, it becomes ready, it closes."""
+    """Enough of ShannonBot for the lifespan: it starts, it becomes ready, it closes.
 
-    def __init__(self, *, connects: bool = True, reaches_the_gateway: bool = True) -> None:
+    `start` returns once it is closed, as the real client's does. `close` fails the way a test
+    says, and one that fails leaves `start` running.
+    """
+
+    def __init__(
+        self,
+        *,
+        connects: bool = True,
+        reaches_the_gateway: bool = True,
+        close_fails: type[BaseException] | None = None,
+        close_hangs: bool = False,
+    ) -> None:
+        self.close_fails = close_fails
+        self.close_hangs = close_hangs
         self.connects = connects
         # A client that keeps trying and never arrives, which is what discord.py does on its own
         # for an outage or blocked egress: `start` runs on and the connection is never made.
         self.reaches_the_gateway = reaches_the_gateway
         self.started = False
         self.closed = False
+        # How many are waiting for the gateway, so a test can tell one that has yet to be told
+        # to wait from one that is waiting.
+        self.waiting = 0
         self._ready = asyncio.Event()
+        self._over = asyncio.Event()
         # The real client keeps this from its own connect and disconnect events, and it is what
         # the health check asks. Settable here so a test can drop the connection under it.
         self.connected = False
@@ -42,24 +61,33 @@ class FakeBot:
         if self.reaches_the_gateway:
             self._ready.set()
             self.connected = True
-        await asyncio.sleep(3600)
+        await self._over.wait()
 
     async def wait_until_ready(self) -> None:
+        self.waiting += 1
         await self._ready.wait()
-
-    def is_ready(self) -> bool:
-        return self._ready.is_set()
 
     def gateway_is_up(self) -> bool:
         return self.connected and self._ready.is_set()
 
     async def close(self) -> None:
         self.closed = True
+        if self.close_hangs:
+            await asyncio.Event().wait()
+        if self.close_fails is not None:
+            raise self.close_fails
+        self._over.set()
+        # The real one gives the loop away while the websocket closes, which is what lets `start`
+        # return before its task is looked at again. Without it the task is always cancelled.
+        await asyncio.sleep(0)
 
 
 class FakeWorker:
-    def __init__(self, *, dies: bool = False) -> None:
+    def __init__(self, *, dies: bool = False, outlives_its_cancel: bool = False) -> None:
         self.dies = dies
+        self.outlives_its_cancel = outlives_its_cancel
+        self.cancels = 0
+        self.let_go = asyncio.Event()
         self.stopped = False
         self.ran = asyncio.Event()
 
@@ -72,8 +100,27 @@ class FakeWorker:
         self.ran.set()
         if self.dies:
             raise RuntimeError("the worker fell over")
+        while self.outlives_its_cancel and not self.let_go.is_set():
+            try:
+                await self.let_go.wait()
+            except asyncio.CancelledError:
+                self.cancels += 1
         while not self.stopped:
             await asyncio.sleep(0.01)
+
+
+class FakeConversations:
+    """The set of threads being captured, filled the way a test says."""
+
+    def __init__(self, *, fails: Exception | None = None, hangs: bool = False) -> None:
+        self.fails = fails
+        self.hangs = hangs
+
+    async def reload(self) -> None:
+        if self.hangs:
+            await asyncio.Event().wait()
+        if self.fails is not None:
+            raise self.fails
 
 
 def container_for(engine: AsyncEngine, worker: FakeWorker, github: ClosingGitHub) -> Container:
@@ -233,6 +280,63 @@ class TestStartingUp:
             assert app.state.liveness.worker_running() is True
             assert app.state.liveness.bot_connected() is True
 
+    async def test_the_health_probe_does_not_borrow_from_the_pool(
+        self, migrated: AsyncEngine
+    ) -> None:
+        container = container_for(migrated, FakeWorker(), ClosingGitHub())
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+
+        async with lifespan:
+            assert app.state.liveness.engine is not container.engine
+
+    @pytest.mark.parametrize(
+        ("conversations", "reason"),
+        [
+            (FakeConversations(hangs=True), "TimeoutError"),
+            (FakeConversations(fails=OSError("the server hung up")), "the server hung up"),
+        ],
+        ids=["hangs", "raises"],
+    )
+    async def test_conversations_that_will_not_load_stop_startup_before_the_bot(
+        self,
+        migrated: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        conversations: FakeConversations,
+        reason: str,
+    ) -> None:
+        """A lock on that one table passes the startup check and then parked startup behind it: no
+        port, no log line, and nothing able to stop the process (#272).
+
+        The check itself is stood in for, because the deadline shortened here is its deadline too.
+        """
+
+        async def answers(engine: AsyncEngine) -> None:
+            return None
+
+        monkeypatch.setattr(lifespan_module, "require_database", answers)
+        monkeypatch.setattr(lifespan_module, "STARTUP_CHECK_SECONDS", 0.05)
+        worker, bot = FakeWorker(), FakeBot()
+        container = container_for(migrated, worker, ClosingGitHub())
+        container.conversations = conversations
+        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
+
+        # Watched rather than bounded, since an outer deadline would raise the very same error.
+        with caplog.at_level("ERROR"):
+            entering = asyncio.ensure_future(lifespan.__aenter__())
+            await asyncio.wait({entering}, timeout=10)
+
+        assert entering.done(), "startup was parked behind the query"
+        with pytest.raises(OSError):
+            entering.result()
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "shannon.runtime.lifespan"
+        ] == [f"could not load which conversations are being logged: {reason}"]
+        assert bot.started is False
+        assert not worker.ran.is_set()
+
 
 class TestWhileRunning:
     async def test_a_gateway_still_trying_to_connect_is_not_reported_as_connected(
@@ -249,9 +353,25 @@ class TestWhileRunning:
         )
 
         async with lifespan:
-            await asyncio.sleep(0.1)
-            assert bot.started, "the bot never got as far as trying"
+            await until(lambda: bot.started)
             assert app.state.liveness.bot_connected() is False, "a bot that never arrived"
+
+    async def test_a_gateway_that_goes_after_it_came_up_is_not_reported_as_connected(
+        self, migrated: AsyncEngine
+    ) -> None:
+        """discord.py's own `is_ready` latches, so asked instead this would go on answering yes."""
+        bot, worker = FakeBot(), FakeWorker()
+        app, lifespan = await runbuild_lifespan(
+            bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
+        )
+
+        async with lifespan:
+            await asyncio.wait_for(worker.ran.wait(), timeout=5)
+            assert app.state.liveness.bot_connected() is True
+
+            bot.connected = False
+
+            assert app.state.liveness.bot_connected() is False
 
     async def test_a_gateway_that_never_connects_is_reported_unhealthy(
         self, migrated: AsyncEngine
@@ -264,9 +384,8 @@ class TestWhileRunning:
         )
 
         async with lifespan:
-            await asyncio.sleep(0.2)
+            await until(lambda: not app.state.liveness.worker_running())
             assert app.state.liveness.bot_connected() is False
-            assert app.state.liveness.worker_running() is False
 
 
 class TestShuttingDown:
@@ -279,18 +398,27 @@ class TestShuttingDown:
         loop returns when told to stop, and the Discord client's start returns once it is closed.
         Reported either way, the line meaning the process is now useless appeared on every
         deployment restart, which is the fastest way to teach everyone to ignore it.
+
+        Nothing at all from the runtime, so a loop cut off or a step that failed is seen here too.
+        The default grace, which nothing waits out: the poller, flusher and sender are the real
+        ones, and the short grace the other tests use could cut one off on a loaded machine.
         """
         worker = FakeWorker()
         bot = FakeBot()
+        settings = Settings(github_webhook_secret="x", discord_token="a-token")
         _, lifespan = await runbuild_lifespan(
-            bot, container_for(migrated, worker, ClosingGitHub()), settings_with("a-token")
+            bot, container_for(migrated, worker, ClosingGitHub()), settings
         )
 
-        with caplog.at_level("WARNING", logger="shannon.main"):
+        with caplog.at_level("WARNING", logger="shannon.runtime"):
             async with lifespan:
                 await asyncio.wait_for(worker.ran.wait(), timeout=2)
 
-        assert "stopped without an error" not in caplog.text
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("shannon.runtime") and record.levelno >= logging.WARNING
+        ] == []
 
     async def test_everything_is_closed(self, migrated: AsyncEngine) -> None:
         worker = FakeWorker()
@@ -314,14 +442,105 @@ class TestShuttingDown:
         bot = FakeBot()
         github = ClosingGitHub()
         container = container_for(migrated, worker, github)
-        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
+        app, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
 
         async with lifespan:
-            await asyncio.wait_for(worker.ran.wait(), timeout=2)
-            await asyncio.sleep(0.05)
+            await until(lambda: not app.state.liveness.worker_running())
 
         assert bot.closed is True, "the Discord client was left open"
         assert github.closed is True, "the engine and HTTP client were left open"
+
+    async def test_a_worker_that_outlives_its_cancel_does_not_stop_the_rest_closing(
+        self,
+        migrated: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Waited for with no limit, it held the Discord client, the HTTP clients and the pool open
+        for as long as it took, and nothing said what shutdown was waiting for (#272)."""
+        monkeypatch.setattr(lifespan_module, "CANCEL_GRACE_SECONDS", 0.05)
+        worker, bot, github = FakeWorker(outlives_its_cancel=True), FakeBot(), ClosingGitHub()
+        container = container_for(migrated, worker, github)
+        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
+
+        try:
+            async with asyncio.timeout(20):
+                async with lifespan:
+                    await asyncio.wait_for(worker.ran.wait(), timeout=5)
+                assert worker.cancels == 1
+        finally:
+            worker.let_go.set()
+
+        assert bot.closed is True, "the Discord client was left open"
+        assert github.closed is True, "the engine and HTTP client were left open"
+        messages = [record.getMessage() for record in caplog.records]
+        assert "the delivery worker did not stop when asked, cancelling it" in messages
+        assert (
+            "the delivery worker is still running 0.05s after being cancelled, leaving it"
+            in messages
+        )
+
+    @pytest.mark.parametrize(
+        ("how", "reason"),
+        [
+            ({"close_hangs": True}, "still not done after 0.5s"),
+            ({"close_fails": asyncio.CancelledError}, "it was cancelled"),
+            ({"close_fails": TimeoutError}, "TimeoutError"),
+        ],
+        ids=["hangs", "is cancelled", "times out"],
+    )
+    async def test_a_discord_client_that_will_not_close_does_not_stop_the_rest_closing(
+        self,
+        migrated: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        how: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """One that never returned held the process up, and one that ended in `CancelledError` had
+        every step after it skipped (#272). The bot's own task, left running by all three, is
+        cancelled without a word: the close has said what there is to say."""
+        monkeypatch.setattr(lifespan_module, "CLOSE_SECONDS", 0.5)
+        worker, bot, github = FakeWorker(), FakeBot(**how), ClosingGitHub()
+        container = container_for(migrated, worker, github)
+        app, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
+
+        async with asyncio.timeout(20):
+            async with lifespan:
+                await asyncio.wait_for(worker.ran.wait(), timeout=5)
+
+        assert github.closed is True, "the engine and HTTP client were left open"
+        assert app.state.liveness.bot_connected() is False, "the bot was left running"
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("shannon.runtime") and "Discord" in record.getMessage()
+        ] == [f"could not close the Discord client while shutting down: {reason}"]
+
+    async def test_a_container_that_will_not_close_does_not_hold_the_process(
+        self,
+        migrated: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pooled connection to a database gone quiet closes when the kernel gives up on it."""
+
+        async def never(container: Container) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(lifespan_module, "CLOSE_SECONDS", 0.05)
+        monkeypatch.setattr(Container, "aclose", never)
+        worker = FakeWorker()
+        container = container_for(migrated, worker, ClosingGitHub())
+        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+
+        async with asyncio.timeout(20):
+            async with lifespan:
+                await asyncio.wait_for(worker.ran.wait(), timeout=5)
+
+        assert "could not close the container while shutting down: still not done after 0.05s" in [
+            record.getMessage() for record in caplog.records
+        ]
 
 
 class FakePoller:
@@ -348,7 +567,7 @@ class TestATaskTheProcessCannotDoWithout:
     """A dead worker used to leave a live process, and nothing anywhere ended it.
 
     The endpoint went on answering 200 to deliveries nothing would ever work, `/health` went on
-    answering 503, and the container sat there: a restart policy watches the exit code and never
+    answering 503, and the container sat there: the restart policy acts on an exit and never on
     the health state, so an unhealthy container that has not exited is not restarted. Half of
     what kills these tasks is fixed by a restart, a rotated token first among them.
     """
@@ -363,7 +582,7 @@ class TestATaskTheProcessCannotDoWithout:
 
         async with lifespan:
             await asyncio.wait_for(worker.ran.wait(), timeout=5)
-            await asyncio.sleep(0.05)
+            await until(lambda: halt.asked > 0)
 
         assert halt.asked == 1
 
@@ -374,6 +593,8 @@ class TestATaskTheProcessCannotDoWithout:
 
         The worker only waits for the gateway once, at the start, so a connection lost after
         that leaves it leasing deliveries that every one of them fails.
+
+        Twice, because the worker was still waiting for that connection and ends with it.
         """
         halt = Halts()
         worker = FakeWorker()
@@ -383,9 +604,9 @@ class TestATaskTheProcessCannotDoWithout:
         )
 
         async with lifespan:
-            await asyncio.sleep(0.05)
+            await until(lambda: halt.asked == 2)
 
-        assert halt.asked >= 1
+        assert halt.asked == 2
 
     async def test_an_ordinary_shutdown_asks_for_nothing(self, migrated: AsyncEngine) -> None:
         """Every task ends at shutdown, and reading that as a failure would loop the container."""
@@ -406,23 +627,22 @@ class TestATaskTheProcessCannotDoWithout:
         container = container_for(migrated, worker, ClosingGitHub())
         container.poller = poller
 
-        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with(), halt)
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with(), halt)
         async with lifespan:
-            await asyncio.wait_for(poller.ran.wait(), timeout=5)
-            await asyncio.sleep(0.05)
+            await until(lambda: not app.state.liveness.poller_running())
 
+        assert poller.ran.is_set()
         assert halt.asked == 0
 
 
 class TestTheProjectPoller:
-    """Started only when a board was configured, and stopped whether it was or not.
+    """Started unless SHANNON_POLL_BOARDS is off, and stopped whether it is or not.
 
-    Zero means no board, which is the default, so most deployments never start this at all.
-    Starting a task that returned at once would have the done callback report the poller as
-    having stopped on every boot, for everybody not using one.
+    On is the default. Off, starting a task that returned at once would have the done callback
+    report the poller as having stopped on every boot.
     """
 
-    async def test_a_configured_board_is_polled(self, migrated: AsyncEngine) -> None:
+    async def test_with_polling_on_boards_are_polled(self, migrated: AsyncEngine) -> None:
         worker, poller = FakeWorker(), FakePoller(enabled=True)
         container = container_for(migrated, worker, ClosingGitHub())
         container.poller = poller
@@ -433,16 +653,17 @@ class TestTheProjectPoller:
 
         assert poller.stopped is True
 
-    async def test_no_board_means_no_task_at_all(self, migrated: AsyncEngine) -> None:
+    async def test_with_polling_off_there_is_no_task_at_all(self, migrated: AsyncEngine) -> None:
         worker, poller = FakeWorker(), FakePoller(enabled=False)
         container = container_for(migrated, worker, ClosingGitHub())
         container.poller = poller
 
-        _, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
+        app, lifespan = await runbuild_lifespan(FakeBot(), container, settings_with())
         async with lifespan:
             await asyncio.wait_for(worker.ran.wait(), timeout=5)
+            assert app.state.liveness.tasks.poller_task is None
 
-        assert not poller.ran.is_set(), "a board nobody configured was polled anyway"
+        assert not poller.ran.is_set(), "boards were polled with polling switched off"
         # Still told to stop: the flag costs nothing and means shutdown has one path, not two.
         assert poller.stopped is True
 
@@ -496,11 +717,11 @@ class TestTheReminderSender:
         sender = FakeSender()
         container, _ = container_sending(migrated, sender)
 
-        _, lifespan = await runbuild_lifespan(
-            FakeBot(reaches_the_gateway=False), container, settings_with("a-token")
-        )
+        bot = FakeBot(reaches_the_gateway=False)
+        _, lifespan = await runbuild_lifespan(bot, container, settings_with("a-token"))
         async with lifespan:
-            await asyncio.sleep(0.1)
+            # The worker and the sender both, so the sender has had its chance to run.
+            await until(lambda: bot.waiting == 2)
             assert not sender.ran.is_set(), "reminders went out before Discord was there"
 
         assert sender.stopped is True
@@ -514,7 +735,7 @@ class TestTheReminderSender:
             await asyncio.wait_for(worker.ran.wait(), timeout=5)
             # No task at all, rather than one waiting for a gateway that never comes: the second
             # would read as running here too, which is the very thing this guards against.
-            assert app.state.liveness.reminders_task is None
+            assert app.state.liveness.tasks.reminders_task is None
             assert app.state.liveness.reminders_running() is True
 
         assert not sender.ran.is_set(), "a sender ran with no gateway to send to"
@@ -531,8 +752,7 @@ class TestTheReminderSender:
             FakeBot(), container, settings_with("a-token"), halt
         )
         async with lifespan:
-            await asyncio.wait_for(sender.ran.wait(), timeout=5)
-            await asyncio.sleep(0.05)
-            assert app.state.liveness.reminders_running() is False
+            await until(lambda: not app.state.liveness.reminders_running())
 
+        assert sender.ran.is_set()
         assert halt.asked == 0

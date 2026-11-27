@@ -42,15 +42,15 @@ async def test_a_working_process_reports_healthy() -> None:
 async def test_a_dead_board_poller_is_reported_without_failing_the_check(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The one thing here that is said without being counted.
+    """The first of the three things here that are said without being counted.
 
     This process is still doing its job without the board: webhooks arrive, threads are written,
     and only board movement stops. Failing the check would have an orchestrator restart a working
     process and throw away whatever the worker had in hand.
 
-    Saying nothing is the other mistake and the one this exists to stop. The poller is the only
-    task with nothing wired to halt the process when it dies, so it goes with one line in the log
-    and everything afterwards answers that all is well.
+    Saying nothing is the other mistake and the one this exists to stop. Nothing is wired to halt
+    the process when the poller dies, so it goes with one line in the log and everything afterwards
+    answers that all is well.
     """
     with caplog.at_level(logging.WARNING, logger="shannon.api.routes.health"):
         async with client_with(FakeLiveness(poller=False)) as client:

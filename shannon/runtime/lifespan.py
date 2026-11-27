@@ -7,7 +7,6 @@ import contextlib
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
 from typing import Protocol
 
 from fastapi import FastAPI
@@ -18,11 +17,13 @@ from shannon.config import Settings
 from shannon.db.session import build_probe_engine
 from shannon.runtime.liveness import ProcessLiveness
 from shannon.runtime.supervision import (
+    ProcessTasks,
     Shutdown,
     ask_the_process_to_stop,
-    report_exit,
+    cancel,
     safely,
     stop,
+    watch,
     why,
 )
 from shannon.services.delivery.worker import ReadyCheck
@@ -33,6 +34,21 @@ logger = logging.getLogger(__name__)
 # Long enough for a cold connection and a first query on a loaded server, short enough that an
 # orchestrator sees a process that failed to start rather than one that never answers.
 STARTUP_CHECK_SECONDS = 15.0
+
+# How long the loops still running once every grace is over are given to unwind, all together
+# (#272). Above the ten seconds a cancelled loop may wait for a thread Discord has been asked for
+# (`CLAIM_GRACE_SECONDS`), and a test holds it there. A loop still running after it is named and
+# left, never cancelled again, and runs on only while the closes after it do: in a container
+# started with an init the process ends as soon as shutdown does, so a hand-back not finished by
+# then is lost and its rows wait out the lease.
+CANCEL_GRACE_SECONDS = 12.0
+
+# How long each thing is given to close: the Discord client, the bot's task, then the container
+# (#272). Each closes at once while what is at the other end answers, so this is what a peer gone
+# quiet can cost. Without it discord.py waits thirty seconds for the far end of the websocket, and
+# a pooled connection to a dead database for as long as the kernel retries. On a halt no
+# orchestrator is counting, and a close that never ends is a process that is never restarted.
+CLOSE_SECONDS = 5.0
 
 
 class ProcessParts(Protocol):
@@ -94,8 +110,8 @@ class ReloadsConversations(Protocol):
 class FlushesTranscripts(Protocol):
     """The transcript flusher as the lifespan sees it.
 
-    Unlike a board, publishing a conversation is on in every deployment, so there is no
-    `enabled` flag to branch on.
+    Unlike polling, which a replica can have switched off, publishing a conversation is on in
+    every deployment, so there is no `enabled` flag to branch on.
     """
 
     async def run_forever(self) -> None: ...
@@ -126,13 +142,11 @@ class Gateway(Protocol):
 
     async def wait_until_ready(self) -> None: ...
 
-    def is_ready(self) -> bool: ...
-
     def gateway_is_up(self) -> bool:
-        """Whether Discord can be reached right now, which is not what `is_ready` answers.
+        """Whether Discord can be reached right now, which discord.py's own `is_ready` is not.
 
-        `is_ready` reports whether the cache has ever been filled: it is set once and cleared
-        only by `close`, so a connection that came up and later died still reads as ready.
+        That reports whether the cache has ever been filled: it is set once and cleared only by
+        `close`, so a connection that came up and later died still reads as ready.
         """
         ...
 
@@ -169,32 +183,39 @@ def gateway_ready(bot: Gateway, bot_task: asyncio.Task[None]) -> ReadyCheck:
         finally:
             ready.cancel()
 
-        if not bot_task.done():
-            return
+        if bot_task.done():
+            raise RuntimeError("the Discord bot stopped before it ever connected")
 
-        raise RuntimeError("the Discord bot stopped before it ever connected")
+        # The wait can fail as well as end, and a failure nobody reads would pass for a
+        # connection (#272).
+        ready.result()
 
     return connected
 
 
-@dataclass(slots=True)
-class _Running:
-    shutdown: Shutdown
-    worker_task: asyncio.Task[None]
-    bot_task: asyncio.Task[None] | None
-    poller_task: asyncio.Task[None] | None = None
-    flusher_task: asyncio.Task[None] | None = None
-    reminders_task: asyncio.Task[None] | None = None
+async def _load_conversations(conversations: ReloadsConversations) -> None:
+    """Fill the set of threads being captured, or say that this is the step that failed.
+
+    Deadlined like `require_database`, and for its reason: a lock held on this one table passes
+    that check and then leaves a process that cannot serve or be stopped. No strict bound is meant,
+    because a session closing after the deadline can overrun it (#272).
+    """
+    try:
+        async with asyncio.timeout(STARTUP_CHECK_SECONDS):
+            await conversations.reload()
+    except Exception as error:
+        logger.error("could not load which conversations are being logged: %s", why(error))
+        raise
 
 
 async def _start(
     bot: Gateway,
     container: ProcessParts,
     settings: Settings,
-    liveness: ProcessLiveness,
+    shutdown: Shutdown,
     halt: Callable[[], None],
-) -> _Running:
-    """Bring up the gateway and the worker, in that order.
+) -> ProcessTasks:
+    """Bring up the gateway, then the worker and the loops beside it.
 
     The worker waits for the gateway rather than racing it: acting on a delivery before Discord
     is connected only wastes an attempt.
@@ -203,58 +224,40 @@ async def _start(
     died still mirrors everything the webhooks bring it, and what the flusher has not published or
     the sender not sent waits in its table until a process with a working one picks it up.
     """
-    shutdown = Shutdown()
     bot_task: asyncio.Task[None] | None = None
     ready: ReadyCheck | None = None
 
     # Before the gateway, not after: a message cannot arrive before the connection is up, so this
     # is the last moment the set can be filled without a race. A conversation left out is one
     # armed in the database and captured by nothing.
-    await container.conversations.reload()
+    await _load_conversations(container.conversations)
 
     token = settings.discord_token.get_secret_value()
     if token:
-        bot_task = asyncio.create_task(bot.start(token))
         # discord.py reconnects on its own, so this task ending at all means it gave up. The
         # worker waits for the gateway only once, at the start, so a connection lost after that
         # leaves it leasing deliveries that all fail.
-        bot_task.add_done_callback(report_exit("Discord bot", shutdown, halt))
+        bot_task = watch("Discord bot", bot.start(token), shutdown, halt)
         ready = gateway_ready(bot, bot_task)
     else:
         logger.warning("SHANNON_DISCORD_TOKEN is not set, running without the bot")
 
-    worker_task = asyncio.create_task(container.worker.run_forever(ready))
-    worker_task.add_done_callback(report_exit("delivery worker", shutdown, halt))
-
-    flusher_task = asyncio.create_task(container.flusher.run_forever())
-    flusher_task.add_done_callback(report_exit("transcript flusher", shutdown))
+    worker_task = watch("delivery worker", container.worker.run_forever(ready), shutdown, halt)
+    flusher_task = watch("transcript flusher", container.flusher.run_forever(), shutdown)
 
     # Starting a task that returns at once would have the done callback report the poller as
-    # stopped, on every boot, for everybody not using a board.
+    # stopped, on every boot, wherever SHANNON_POLL_BOARDS is off.
     poller_task: asyncio.Task[None] | None = None
     if container.poller.enabled:
-        poller_task = asyncio.create_task(container.poller.run_forever())
-        poller_task.add_done_callback(report_exit("project poller", shutdown))
+        poller_task = watch("project poller", container.poller.run_forever(), shutdown)
 
     # Only where there is a gateway: without one a sender would wait for a connection that never
     # comes, and a reminder has nowhere else to go.
     reminders_task: asyncio.Task[None] | None = None
     if ready is not None:
-        reminders_task = asyncio.create_task(container.reminders.run_forever(ready))
-        reminders_task.add_done_callback(report_exit("reminder sender", shutdown))
+        reminders_task = watch("reminder sender", container.reminders.run_forever(ready), shutdown)
 
-    # /health reads these: a dead worker leaves the endpoint answering 200 to deliveries nothing
-    # will act on.
-    liveness.worker_task = worker_task
-    liveness.bot_task = bot_task
-    liveness.poller_task = poller_task
-    liveness.flusher_task = flusher_task
-    liveness.reminders_task = reminders_task
-    # Safe at any point in a client's life: it reads a flag the client keeps from its own connect
-    # and disconnect events, and `is_ready` behind it checks the sentinel before the event.
-    liveness.gateway_is_ready = bot.gateway_is_up if bot_task is not None else None
-    return _Running(
-        shutdown=shutdown,
+    return ProcessTasks(
         worker_task=worker_task,
         bot_task=bot_task,
         poller_task=poller_task,
@@ -264,42 +267,40 @@ async def _start(
 
 
 async def _close(
-    bot: Gateway, container: ProcessParts, settings: Settings, running: _Running
+    bot: Gateway,
+    container: ProcessParts,
+    settings: Settings,
+    shutdown: Shutdown,
+    tasks: ProcessTasks,
 ) -> None:
+    """Stop everything, in the order it depends on each other, within a time that adds up.
+
+    Every wait here has a limit and `stop_grace_period` is above their sum, which a test holds. A
+    cancel of the task running this is not swallowed: it ends the shutdown where it stands.
+    """
     # Set before anything stops, so the done callbacks can tell a task that failed from one that
     # was told to finish.
-    running.shutdown.asked = True
+    shutdown.asked = True
 
-    # Asked to stop rather than cancelled, so the delivery in hand finishes and the rest of the
-    # batch goes back on the queue instead of sitting locked for the whole lease.
+    # Asked to stop rather than cancelled, and all of them before any is waited for. The delivery
+    # in hand finishes and the rest of the batch goes back on the queue instead of sitting locked
+    # for the whole lease. A comment half sent may land with nothing recording that it did, and the
+    # batch would then publish twice. A reminder cut off between Discord taking it and its row
+    # going is sent a second time once the claim lapses.
     container.worker.stop()
     container.poller.stop()
     container.flusher.stop()
     container.reminders.stop()
-    await safely(
-        "stop the worker",
-        stop(running.worker_task, grace=settings.worker_shutdown_grace_seconds),
+    # Before the gateway closes, since what they are finishing may still have to reach it.
+    await stop(
+        tasks.loops(),
+        grace=settings.worker_shutdown_grace_seconds,
+        cancel_within=CANCEL_GRACE_SECONDS,
     )
-    await safely(
-        "stop the project poller",
-        stop(running.poller_task, grace=settings.worker_shutdown_grace_seconds),
-    )
-    # Asked rather than cancelled: a comment half sent may land with nothing recording that it
-    # did, and the batch would then publish twice.
-    await safely(
-        "stop the transcript flusher",
-        stop(running.flusher_task, grace=settings.worker_shutdown_grace_seconds),
-    )
-    # Asked rather than cancelled, and before the gateway closes: a reminder cut off between
-    # Discord taking it and its row going is sent a second time once the claim lapses.
-    await safely(
-        "stop the reminder sender",
-        stop(running.reminders_task, grace=settings.worker_shutdown_grace_seconds),
-    )
-    if running.bot_task is not None:
-        await safely("close the Discord client", bot.close())
-        await safely("stop the bot", stop(running.bot_task))
-    await safely("close the container", container.aclose())
+    if tasks.bot_task is not None:
+        await safely("close the Discord client", bot.close(), within=CLOSE_SECONDS)
+        await cancel([tasks.bot_task], within=CLOSE_SECONDS)
+    await safely("close the container", container.aclose(), within=CLOSE_SECONDS)
 
 
 def build_lifespan(
@@ -321,17 +322,25 @@ def build_lifespan(
             raise
 
         probes = build_probe_engine(container.engine)
-        liveness = ProcessLiveness(probes)
-        app.state.liveness = liveness
         # The OAuth routes read this off app state: they are entered from outside the process
         # rather than called by anything inside it.
         app.state.verification = container.verification
 
-        running = await _start(bot, container, settings, liveness, halt)
+        shutdown = Shutdown()
+        tasks = await _start(bot, container, settings, shutdown, halt)
         try:
+            # /health reads this: a dead worker leaves the endpoint answering 200 to deliveries
+            # nothing will act on. `gateway_is_up` is safe at any point in a client's life: it
+            # reads a flag the client keeps from its own connect and disconnect events, and
+            # discord.py's `is_ready` behind it checks the sentinel before the event.
+            app.state.liveness = ProcessLiveness(
+                engine=probes, tasks=tasks, gateway_is_up=bot.gateway_is_up
+            )
             yield
         finally:
-            await _close(bot, container, settings, running)
-            await safely("close the health probe engine", probes.dispose())
+            await _close(bot, container, settings, shutdown, tasks)
+            # Not in the budget: this engine keeps no connections, so there is nothing to close
+            # that could take any of the time it is allowed.
+            await safely("close the health probe engine", probes.dispose(), within=CLOSE_SECONDS)
 
     return lifespan

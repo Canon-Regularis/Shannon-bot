@@ -184,9 +184,10 @@ class Settings(BaseSettings):
     worker_lease_seconds: float = Field(default=900.0, gt=0)
     worker_delivery_timeout_seconds: float = Field(default=60.0, gt=0)
     # How long shutdown waits for the work in hand, once for each loop it stops: the worker, the
-    # board poller, the transcript flusher and the reminder sender. Each wait counts toward the 50
-    # seconds both compose files give a container before SIGKILL (`stop_grace_period`), and a test
-    # holds that above the sum.
+    # board poller, the transcript flusher and the reminder sender. The four waits count toward the
+    # 70 seconds both compose files give a container before SIGKILL (`stop_grace_period`), beside
+    # the rest of what shutdown waits for. A test holds that above the sum for the default here, so
+    # a longer grace wants a longer period. At 0 the loops are cancelled at once.
     worker_shutdown_grace_seconds: float = Field(default=5.0, ge=0)
     # Payloads hold issue titles, comment bodies and author names, so finished deliveries are
     # not kept indefinitely.
