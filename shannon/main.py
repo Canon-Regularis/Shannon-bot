@@ -14,7 +14,15 @@ from shannon.discord_bot.client import ShannonBot
 from shannon.discord_bot.threads import DiscordThreadGateway
 from shannon.runtime.lifespan import build_lifespan
 
-logger = logging.getLogger(__name__)
+# How long a stop waits for the requests still open, before uvicorn cancels them and starts the
+# shutdown (#272). Uvicorn's own default is no limit at all, so one client that sent half a body
+# and went quiet held the whole shutdown open: the loops were never asked to stop, and a process
+# that halted itself never ended, so nothing restarted it.
+#
+# Ten, because GitHub waits ten seconds for an answer: past that there is nobody left to answer.
+# Above the pool's wait (`POOL_TIMEOUT_SECONDS`), so a delivery waiting out a saturated pool still
+# gets its 503. It runs before every wait of the shutdown, so it counts toward `stop_grace_period`.
+HTTP_GRACE_SECONDS = 10
 
 
 def configure_logging(settings: Settings) -> None:
@@ -53,7 +61,12 @@ def run() -> None:
     settings = get_settings()
     configure_logging(settings)
     keep_oauth_queries_out_of_the_access_log()
-    uvicorn.run(build_app(settings), host=settings.api_host, port=settings.api_port)
+    uvicorn.run(
+        build_app(settings),
+        host=settings.api_host,
+        port=settings.api_port,
+        timeout_graceful_shutdown=HTTP_GRACE_SECONDS,
+    )
 
 
 if __name__ == "__main__":

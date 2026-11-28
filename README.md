@@ -962,7 +962,7 @@ for a fixed time, so no other worker takes them.
 | `SHANNON_WORKER_MAX_BACKOFF_SECONDS` | `900.0` | Cap on the doubling delay between attempts |
 | `SHANNON_WORKER_LEASE_SECONDS` | `900.0` | How long a leased delivery is held |
 | `SHANNON_WORKER_DELIVERY_TIMEOUT_SECONDS` | `60.0` | Deadline on one delivery |
-| `SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS` | `5.0` | How long shutdown waits for the work in hand, once for each loop it stops |
+| `SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS` | `5.0` | How long shutdown waits for the work in hand, once for each loop it stops. At `0` the loops are cancelled at once. Four loops wait in turn, so if you raise it, raise `stop_grace_period` in the compose file by four times as much |
 | `SHANNON_DELIVERY_RETENTION_DAYS` | `7` | How long finished deliveries and their payloads are kept |
 
 One rule spans settings: `worker_lease_seconds` must cover
@@ -1320,7 +1320,7 @@ The web server answers these routes.
 
 | Route | Answers |
 | --- | --- |
-| `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing `X-GitHub-Event` or `X-GitHub-Delivery` header, or an unusable body. 401 for a missing or bad signature. 413 past the 25MB cap. 500 if neither webhook secret is set. 503 when no database connection is free to record the delivery |
+| `POST /webhooks/github` | 200 with `accepted`, `duplicate` or `ignored`. 400 for a missing `X-GitHub-Event` or `X-GitHub-Delivery` header, or an unusable body. 401 for a missing or bad signature. 413 past the 25MB cap. 500 if neither webhook secret is set, or if a stop cuts the request off after 10 seconds. 503 when no database connection is free to record the delivery |
 | `GET /health` | `healthy`, `database`, `worker`, `bot`, `poller`, `flusher` and `reminders` as booleans, and `version` as the commit answering. `healthy` is `database`, `worker` and `bot` together. The answer is 503 when `healthy` is false |
 | `GET /oauth/start` | Where a one-time link opens. 303 to Discord. It leaves the `__Host-shannon_round_trip` cookie, which holds the round trip to this browser, and writes nothing. 400 for a link that has expired, been used or never existed |
 | `GET /oauth/discord/callback` | 303 on to GitHub once Discord names the member the link was issued for, in the browser that opened it. 400 for anybody else, another browser, or a cancelled sign-in |
@@ -1348,11 +1348,25 @@ and which it has not. `Caddyfile` says why that is accepted.
 
 `/health` reports whether the process is doing its work, not only whether it is listening. The
 worker is the task that acts on recorded deliveries. The gateway is the bot's live connection to
-Discord. If the worker dies or the gateway drops, the endpoint still accepts deliveries, but
-nothing acts on them. That needs a restart.
+Discord. In either of these states the endpoint still accepts deliveries:
 
-The database check is cached for 5 seconds. Without the cache, anyone calling the public endpoint
-could use up the connection pool the worker runs on.
+- **The worker's task has ended.** Nothing acts on the deliveries. The process stops itself, so that
+  Docker restarts it.
+- **The gateway has dropped.** The worker tries the deliveries, and the ones that need Discord fail
+  and are tried again later. discord.py reconnects by itself. If the bot's task ends, the process
+  stops itself.
+
+What each field means:
+
+- `database`: the database answered a query within 5 seconds.
+- `worker`, `poller`, `flusher` and `reminders`: the task has not ended. That does not say it is
+  getting anywhere. A task that hangs, or fails the same way on every turn, still reads as true.
+- `bot`: the bot's task has not ended, and Discord is connected now. Also true where there is no
+  Discord token.
+
+The database check opens a connection of its own, never one from the pool the worker runs on. Only
+one check runs at a time, and its answer is kept for 5 seconds. Without that, anyone calling the
+public endpoint could keep opening connections, with every real check waiting behind them.
 
 ### `poller`, `flusher` and `reminders` are reported, not counted
 
@@ -1365,8 +1379,8 @@ webhooks arrive and threads are written. Only this stops:
 | Publishes logged conversations | `flusher` | Publishing a logged conversation |
 | Sends reminders | `reminders` | Sending a reminder |
 
-Failing the check for these would restart a working process and throw away whatever the worker
-had in hand.
+Docker does not restart a container for a failed check, but other things that run containers do.
+Failing the check for these would have them restart a working process.
 
 They are reported because nothing stops the process when one of these tasks dies. Without the
 report, the task would end with one line in the log, and every later check would say all is well.

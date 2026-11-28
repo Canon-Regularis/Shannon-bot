@@ -244,19 +244,22 @@ Take `/pr <link>` ([commands/sync_link.py](shannon/commands/sync_link.py)):
 
 ## What else runs in the process
 
-Beside the HTTP API, the process runs five long-lived tasks.
+Beside the HTTP API, the process runs up to five long-lived tasks. Without a Discord token there
+is no gateway and no reminder sender, and with `SHANNON_POLL_BOARDS` off there is no poller.
 
 | Task | What it does | How often | If it dies |
 | --- | --- | --- | --- |
-| Discord gateway | The bot's connection to Discord | Always | The process stops, so it is restarted |
-| Delivery worker | Works the webhook queue. Once an hour it also prunes (deletes) old deliveries and spent sign-in links | Every 2 s when idle | The process stops, so it is restarted |
+| Discord gateway | The bot's connection to Discord. discord.py reconnects a dropped one by itself | Always | The process stops itself, and Docker restarts it |
+| Delivery worker | Works the webhook queue. Once an hour it also prunes (deletes) old deliveries and spent sign-in links | Every 2 s when idle | The process stops itself, and Docker restarts it |
 | Board poller ([services/projects.py](shannon/services/projects.py)) | Reads every linked project board and syncs card moves | Every 2 s. A board too big for one page is read every 60 s, and the others keep 2 s | Logged, shown in `/health`, not restarted |
 | Transcript flusher ([services/transcripts/flush.py](shannon/services/transcripts/flush.py)) | Publishes logged Discord conversations to GitHub as one comment per batch | Checks every 5 s | Logged, shown in `/health`, not restarted |
 | Reminder sender ([services/reminders/send.py](shannon/services/reminders/send.py)) | Sends `/remind` reminders when they fall due | Checks every 5 s | Logged, shown in `/health`, not restarted |
 
 Only the gateway and the worker stop the process when they die
 ([runtime/supervision.py](shannon/runtime/supervision.py)). Docker restarts a container when it
-exits, not when its health check fails, so exiting is the only way to get a restart.
+exits, not when its health check fails, so exiting is the only way to get a restart. A task dies
+when it ends. A task that hangs, or fails the same way on every turn, has not ended, so it stops
+nothing and `/health` still counts it as running.
 
 The other three are reported by [`/health`](README.md#http-surface) but do not fail it. Without
 them, webhooks still arrive and threads are still written. Nothing they hold is lost:
@@ -269,24 +272,53 @@ them, webhooks still arrive and threads are still written. Nothing they hold is 
 
 Startup, in [runtime/lifespan.py](shannon/runtime/lifespan.py):
 
-1. Check that the database is reachable and has been migrated, within 15 seconds. If not, stop.
-2. Load which threads are being logged, before any message can arrive.
-3. Start the gateway, then the worker, the flusher, the poller (if enabled) and the reminder sender
-   (if there is a Discord token).
+1. Check that the database is reachable and has been migrated. If not, stop.
+2. Load which threads are being logged, before any message can arrive. If that fails, stop.
+3. Start the gateway (if there is a Discord token), then the worker, the flusher, the poller (if
+   enabled) and the reminder sender (if there is a Discord token).
+
+Steps 1 and 2 are each cancelled after 15 seconds. That is not a strict limit: closing the
+connection after the cancel can take longer. Until startup is over the process serves nothing and
+acts on no stop signal.
 
 The worker waits for the gateway before its first batch, because a delivery tried before Discord
 connects only burns an attempt. It waits 5 minutes at most, then works the queue anyway.
 
-Shutdown:
+Shutdown starts with a SIGTERM, from Docker or from the process itself. The steps run one after
+another:
 
-1. Ask all four loops (worker, poller, flusher, reminder sender) to stop.
-2. Give each up to 5 seconds to finish what it holds, then cancel it. The worker hands back the
-   deliveries it has not started.
-3. Close the Discord client, then the HTTP clients and the database pool.
+| Step | Longest wait |
+| --- | --- |
+| 1. uvicorn closes the port and waits for the requests still open. It cancels the rest | 10 s (`HTTP_GRACE_SECONDS`) |
+| 2. Ask all four loops (worker, poller, flusher, reminder sender) to stop, then wait for each in turn. The worker finishes the delivery in hand and hands back the ones it has not started | 5 s for each loop (`SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS`), so 20 s |
+| 3. Cancel the loops still running, all together. A worker cut off here still hands back the rest of its batch | 12 s in all (`CANCEL_GRACE_SECONDS`) |
+| 4. Close the Discord client, then end the bot's task, then close the HTTP clients and the database pool | 5 s for each of the three (`CLOSE_SECONDS`) |
 
-A step that fails is logged and the next one still runs. The database pool is always closed. The
-compose files give all this 50 seconds (`stop_grace_period`), and a test keeps that number above
-the worst case.
+That is 57 seconds at worst. The compose files allow 70 (`stop_grace_period`), and a test keeps
+that number above the sum. A test also runs a shutdown in which everything is stuck, and checks
+that steps 2 to 4 take exactly their share. Closing the health probe's engine comes last and is not
+in the sum, because that engine keeps no connection open.
+
+A step that fails, or is out of time, is logged and the next one still runs. One out of time is
+cancelled and left. It is not waited for again, so an HTTP client or a pool that will not close in
+its 5 seconds is left open.
+
+What has no limit:
+
+- **Code that blocks the event loop.** Every limit above is kept by that loop. On a `docker stop`,
+  Docker kills the process after 70 seconds. When the process stops itself, nothing does.
+- **The exit, when Python is process 1 of the container.** After the shutdown, uvicorn puts back
+  the default action for SIGTERM and raises the signal again. Linux ignores that for process 1, so
+  Python goes on to wait for every task the shutdown left behind, for as long as they take. The
+  port is closed, the container still reads as "running", and nothing restarts it.
+
+Both compose files set `init: true` for the second one. The init is then process 1, and the second
+SIGTERM ends Python at once. An image started by hand needs `docker run --init`. With an init:
+
+- Every clean stop exits with code 143, not 0. `restart: unless-stopped` restarts on either.
+- Nothing runs after the shutdown. What has not finished by then is cut off, so a worker still
+  handing back its batch after step 3 has until the end of step 4, and then those rows wait out
+  their lease.
 
 ## Data
 
@@ -429,8 +461,8 @@ mypy, so an error in the editor is an error in CI. The coverage number is a floo
 statement and branch coverage are both 100% today, so anything under it is a regression
 ([pyproject.toml](pyproject.toml)).
 
-**`/health` reports work, not just that the port is open.** A dead worker or a dropped gateway
-leaves the endpoint accepting deliveries that nothing will act on. That state needs a restart
+**`/health` reports work, not just that the port is open.** With a dead worker or a dropped gateway,
+the endpoint still accepts deliveries, and no work for Discord gets done
 ([README](README.md#http-surface)).
 
 ## What comes next

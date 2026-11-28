@@ -553,27 +553,6 @@ class TestWaitingForDiscord:
         await running
 
 
-async def _handed_back(
-    session: AsyncSession, delivery_ids: list[str], timeout: float = 10.0
-) -> list[int]:
-    """Wait for every named delivery to be back on the queue, and report their attempt counts.
-
-    Read out as plain numbers rather than handed back as rows: `stored` expires the session on
-    every call, so a row fetched on one pass is stale by the time the next one is fetched.
-    """
-    async with asyncio.timeout(timeout):
-        while True:
-            attempts = []
-            pending = True
-            for delivery_id in delivery_ids:
-                event = await stored(session, delivery_id)
-                pending = pending and event.status == DeliveryStatus.PENDING
-                attempts.append(event.attempts)
-            if pending:
-                return attempts
-            await asyncio.sleep(0.01)
-
-
 async def _connected() -> None:
     """A gateway that is already there, which is what an ordinary start looks like."""
     return
@@ -866,11 +845,11 @@ class TestBeingCancelledOutright:
 
         # The one in hand keeps its lease and waits it out; the untouched three come straight
         # back, rather than sitting locked while the replacement process polls an empty queue.
-        # Polled rather than slept through, because the hand-back is shielded and commits on its
-        # own schedule once the cancellation has already come back here.
-        attempts = await _handed_back(db_session, [f"delivery-{index}" for index in range(1, 4)])
-
-        assert attempts == [0, 0, 0], "a delivery nothing was tried on was charged an attempt"
+        # Read at once, because a cancelled worker waits for its hand-back to commit (#272).
+        for index in range(1, 4):
+            event = await stored(db_session, f"delivery-{index}")
+            assert event.status == DeliveryStatus.PENDING
+            assert event.attempts == 0, "a delivery nothing was tried on was charged an attempt"
 
 
 class TestWhatGetsWrittenToLastError:

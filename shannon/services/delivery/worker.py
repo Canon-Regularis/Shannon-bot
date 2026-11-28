@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -122,8 +123,8 @@ class DeliveryWorker:
         self._settings = settings or WorkerSettings()
         self._links = links
         self._stopping = False
-        # The flag alone is not enough before the loop starts: the wait for Discord reaches no
-        # check and has nothing to interrupt it, so the stop is published as something waitable.
+        # The flag alone is not enough: the wait for Discord and the wait for the next batch reach
+        # no check until they are over, so the stop is published as something waitable.
         self._stopped = asyncio.Event()
 
     def stop(self) -> None:
@@ -158,8 +159,10 @@ class DeliveryWorker:
                 raise
             except asyncio.CancelledError:
                 # Cancelled mid-delivery: hand back the rest of the batch rather than let it sit
-                # out the lease. Best effort, since an await inside a cancelled task returns at
-                # once; if the loop closes first those rows wait out the lease instead.
+                # out the lease. One cancel is delivered once, so this await is an ordinary one
+                # and the release is waited for to its end. The shield is for a second cancel,
+                # which ends the wait and leaves the release running; if the process ends before
+                # it finishes, those rows wait out the lease instead (#272).
                 await asyncio.shield(self._queue.release(deliveries[index + 1 :]))
                 raise
         return len(deliveries)
@@ -191,14 +194,25 @@ class DeliveryWorker:
                     await self._sweep()
 
                 # Straight back round while there is a backlog, so a burst drains at once.
-                if handled < self._settings.batch_size and not self._stopping:
-                    await asyncio.sleep(self._settings.poll_interval.total_seconds())
+                if handled < self._settings.batch_size:
+                    await self._wait()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # A bad batch must not kill the loop, or every later delivery waits for a restart.
                 logger.exception("the delivery worker hit an error, carrying on")
-                await asyncio.sleep(self._settings.poll_interval.total_seconds())
+                await self._wait()
+
+    async def _wait(self) -> None:
+        """Sleep until the next poll, or wake at once if a stop arrives.
+
+        Waiting on the sleep alone spends the shutdown grace on an idle worker, and an interval
+        longer than the grace has it cancelled and reported as one that would not stop (#272).
+        """
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                self._stopped.wait(), timeout=self._settings.poll_interval.total_seconds()
+            )
 
     async def _sweep(self) -> None:
         """The hourly clear-out, over every table that grows and nothing else empties."""

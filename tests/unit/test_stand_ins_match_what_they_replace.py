@@ -79,6 +79,7 @@ from shannon.github.webhooks.router import EventRouter
 from shannon.runtime.lifespan import (
     FlushesTranscripts,
     Gateway,
+    PollsABoard,
     ProcessParts,
     ReloadsConversations,
     RunsDeliveries,
@@ -106,7 +107,7 @@ from shannon.services.linking import TeamLinkingService, UserLinkingService
 from shannon.services.mentions import MentionPreferences
 from shannon.services.notes import ItemNoteMirror, MirrorsNotes
 from shannon.services.people import ItemPeople, PutsPeopleOnItems
-from shannon.services.projects import ReadsBoardsAndCards
+from shannon.services.projects import ProjectPoller, ReadsBoardsAndCards
 from shannon.services.registration import FindsInstallations, RepositoryRegistrationService
 from shannon.services.reminders.book import ReminderBook
 from shannon.services.reminders.send import ReminderSender, ShutsWhereItPosted
@@ -253,6 +254,8 @@ IMPLEMENTATIONS: list[tuple[type[Any], type[Any]]] = [
     (Gateway, ShannonBot),
     (ProcessParts, Container),
     (RunsDeliveries, DeliveryWorker),
+    # Missing until #272: the one role the lifespan declares that had no row.
+    (PollsABoard, ProjectPoller),
     # Issue #103. One object behind four protocols, which is the point of splitting them: the
     # gateway listener can capture a message and cannot start or stop logging, and the process
     # can fill the set and cannot do either.

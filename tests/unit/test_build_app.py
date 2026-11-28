@@ -25,8 +25,9 @@ import shannon.main
 from shannon.api.access_log import ACCESS_LOGGER, StripOAuthQuery
 from shannon.config import Settings
 from shannon.container import Container
+from shannon.db.session import POOL_TIMEOUT_SECONDS
 from shannon.discord_bot.client import ShannonBot
-from shannon.main import build_app, configure_logging, run
+from shannon.main import HTTP_GRACE_SECONDS, build_app, configure_logging, run
 
 SETTINGS = Settings(github_webhook_secret="x")
 
@@ -172,6 +173,29 @@ class TestStartingTheProcess:
         assert served["host"] == SETTINGS.api_host
         assert served["port"] == SETTINGS.api_port
         assert isinstance(served["app"], FastAPI)
+
+    def test_stopping_waits_only_so_long_for_an_open_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uvicorn's own default is to wait for ever, and only then to start the shutdown (#272).
+
+        What that does on a real socket is in
+        `test_a_stalled_request_does_not_hold_the_stop.py`.
+        """
+        served: dict[str, object] = {}
+        monkeypatch.setattr("shannon.main.uvicorn.run", lambda app, **kwargs: served.update(kwargs))
+        monkeypatch.setattr("shannon.main.get_settings", lambda: SETTINGS)
+        monkeypatch.setattr("shannon.main.configure_logging", lambda settings: None)
+        monkeypatch.setattr("shannon.main.build_app", lambda settings: None)
+
+        run()
+
+        assert served["timeout_graceful_shutdown"] == HTTP_GRACE_SECONDS
+
+    def test_a_delivery_waiting_for_a_connection_is_answered_before_it_is_cut(self) -> None:
+        """A saturated pool is answered 503 once its wait is over. A grace that ended first would
+        cut a delivery GitHub is still waiting on, and GitHub does not send it again (#272)."""
+        assert HTTP_GRACE_SECONDS > POOL_TIMEOUT_SECONDS
 
     def test_the_access_log_is_kept_free_of_oauth_secrets_before_serving(
         self, monkeypatch: pytest.MonkeyPatch

@@ -215,9 +215,10 @@ they do. The rest follow the convention the code already uses.
   pair to `IMPLEMENTATIONS` in `tests/unit/test_stand_ins_match_what_they_replace.py`. That test
   checks every fake still has every member of what it replaces. Nothing finds a new pair for you.
 - **An HTTP route.** Add a matching `handle` block in `Caddyfile`, or the proxy never forwards it.
-- **A loop that opens threads.** Add it to `OPENING_THREADS` in
-  `tests/unit/test_the_shutdown_budget_fits_the_container.py`, so the containers' shutdown grace
-  still covers it.
+- **A loop that runs beside the API.** Add its task to `ProcessTasks` in
+  `shannon/runtime/supervision.py`, under a name that ends in `_task`, and to `loops()` there.
+  `tests/unit/test_the_shutdown_budget_fits_the_container.py` counts it, and fails when
+  `stop_grace_period` in the compose files no longer covers the shutdown.
 - **A webhook event.**
   - Add it to `SUPPORTED_EVENTS` in `shannon/github/webhooks/events.py`.
   - Add its name to `WEBHOOK_NAMES` in `tests/unit/test_the_readme_describes_this_repository.py`.

@@ -54,23 +54,29 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
-    # Two shutdown budgets run one after the other and were each sized against Docker's ten
-    # second default without either knowing about the other. `worker_shutdown_grace_seconds`
-    # (5s) waits for the delivery in hand; cancelling the worker then unwinds into
-    # `ItemThreads._open`, which waits up to `CLAIM_GRACE_SECONDS` (10s) for a thread Discord
-    # has been asked for and not yet answered about. Measured end to end at just over fifteen
-    # seconds when discord.py is sitting out a rate limit. The first is waited out once for each
-    # loop shutdown stops - the worker, the board poller, the transcript flusher and the reminder
-    # sender - and the second once for each that opens threads, the worker and the poller, so the
-    # worst case is forty seconds. Fifty leaves the Discord client and the pool room to close, and
-    # a test holds this above whatever the code adds up to.
+    # What stops the app when it has to stop itself. The delivery worker or the bot dying sends
+    # the process a SIGTERM, uvicorn runs the whole shutdown, and then raises SIGTERM again with
+    # its default action. The kernel ignores that for PID 1, so a process that is PID 1 goes on to
+    # wait, with no limit, for any task shutdown had to leave behind: its port closed, its state
+    # "running", and no restart. Behind an init it is not PID 1 and that second signal ends it,
+    # with whatever shutdown left behind. A clean stop then reads as exit code 143 and not 0, and
+    # `unless-stopped` restarts on either. Measured both ways for #272.
+    init: true
+    # Shutdown is a list of waits, each with a limit, and this has to be above their sum. In order:
+    # ten seconds for requests still open (`HTTP_GRACE_SECONDS`); five for the work in hand
+    # (`SHANNON_WORKER_SHUTDOWN_GRACE_SECONDS`), once for each loop - the worker, the board poller,
+    # the transcript flusher and the reminder sender; twelve for whatever is then cancelled to
+    # unwind together (`CANCEL_GRACE_SECONDS`), which covers the ten a thread being opened waits
+    # for its row; and five each for the Discord client, the bot's task and the container
+    # (`CLOSE_SECONDS`). That is 57 seconds at worst, and a test holds this above whatever the
+    # code adds up to.
     #
     # Killed before that finishes, the worker never hands back the rest of its leased batch, so
     # up to nine other deliveries sit PROCESSING until their fifteen minute lease lapses. The
     # replacement process polls a queue that looks empty and those items get no thread for a
     # quarter of an hour, with nothing in either log saying why. Docker Desktop is worse than
     # the documented default: it stops containers after about one and a half seconds.
-    stop_grace_period: 50s
+    stop_grace_period: 70s
 
 volumes:
   shannon-pgdata:
